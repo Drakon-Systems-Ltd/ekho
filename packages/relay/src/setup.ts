@@ -1,24 +1,101 @@
 import fs from "node:fs";
+import net from "node:net";
 import { config } from "./config";
 import { db } from "./db";
+import { loadLicense, assertFleetCreationAllowed, getLoadedLicense } from "./license";
 
-function runDoctor() {
-  const checks = [
-    { name: "db directory", ok: fs.existsSync(config.dbPath) || fs.existsSync(config.dbPath.replace(/\/[^/]+$/, "")) },
-    { name: "operator session secret configured", ok: config.operatorSessionSecret !== "change-me" },
-    { name: "base url set", ok: Boolean(config.baseUrl) }
-  ];
+const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
-  for (const check of checks) {
-    console.log(`${check.ok ? "PASS" : "WARN"} ${check.name}`);
+function pass(label: string, msg: string) { console.log(`  ${green("✓")} ${bold(label.padEnd(12))} ${msg}`); }
+function warn(label: string, msg: string) { console.log(`  ${yellow("!")} ${bold(label.padEnd(12))} ${msg}`); }
+function fail(label: string, msg: string) { console.log(`  ${red("✗")} ${bold(label.padEnd(12))} ${msg}`); }
+
+function checkPort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.once("listening", () => { server.close(); resolve(true); });
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+async function runDoctor() {
+  console.log(`\n  ${bold("Ekho Doctor")}\n`);
+
+  // Node version
+  const nodeVersion = parseInt(process.version.slice(1), 10);
+  if (nodeVersion >= 22) {
+    pass("Node", `${process.version}`);
+  } else {
+    warn("Node", `${process.version} ${dim("(>= 22 recommended)")}`);
   }
+
+  // DB directory
+  const dbDir = config.dbPath.replace(/\/[^/]+$/, "");
+  if (fs.existsSync(dbDir)) {
+    pass("Database", config.dbPath);
+  } else {
+    warn("Database", `directory ${dbDir} does not exist`);
+  }
+
+  // Session secret
+  if (config.operatorSessionSecret !== "change-me") {
+    pass("Secret", "operator session secret configured");
+  } else {
+    warn("Secret", `using default ${dim("(set EKHO_OPERATOR_SESSION_SECRET)")}`);
+  }
+
+  // Base URL
+  if (config.baseUrl) {
+    pass("Base URL", config.baseUrl);
+  } else {
+    warn("Base URL", `not set ${dim("(set EKHO_BASE_URL)")}`);
+  }
+
+  // Port availability
+  const portAvailable = await checkPort(config.port);
+  if (portAvailable) {
+    pass("Port", `${config.port} available`);
+  } else {
+    warn("Port", `${config.port} is in use`);
+  }
+
+  // License
+  loadLicense();
+  const license = getLoadedLicense();
+  if (license.tier === "pro") {
+    pass("License", `Pro — ${license.org} (expires ${license.expires_at.split("T")[0]})`);
+  } else {
+    pass("License", `OSS ${dim("(1 fleet, basic policies)")}`);
+  }
+
+  console.log("");
 }
 
 function runSetup() {
+  console.log(`\n  ${bold("Ekho Setup")}\n`);
+
+  loadLicense();
+
   const existing = db.findFleetByName("default");
   if (existing) {
-    console.log("Ekho is already initialized for fleet 'default'.");
+    pass("Fleet", `default ${dim("(already initialized)")}`);
+    console.log("");
     return;
+  }
+
+  // Check license allows fleet creation
+  const fleetCount = (db.raw().prepare("SELECT COUNT(*) AS count FROM fleets").get() as { count: number }).count;
+  try {
+    assertFleetCreationAllowed(fleetCount);
+  } catch (err) {
+    fail("License", err instanceof Error ? err.message : String(err));
+    console.log("");
+    process.exit(1);
   }
 
   const email = process.env.EKHO_BOOTSTRAP_EMAIL ?? "admin@example.com";
@@ -26,17 +103,15 @@ function runSetup() {
   const bootstrap = db.createBootstrap("default", email, password);
   const token = db.issueEnrollmentToken(bootstrap.fleetId, bootstrap.operatorId);
 
-  console.log("Ekho setup complete.");
-  console.log(`Fleet: default (${bootstrap.fleetId})`);
-  console.log(`Operator email: ${email}`);
-  console.log(`Operator password: ${password}`);
-  console.log(`Enrollment token: ${token}`);
-  console.log(`Relay URL: ${config.baseUrl}`);
+  pass("Fleet", `default ${dim(`(${bootstrap.fleetId})`)}`);
+  pass("Operator", email);
+  pass("Token", token);
+  pass("Relay", config.baseUrl);
+
+  console.log(`\n  ${bold("Next steps:")}`);
+  console.log(`    1. ${dim("Start the relay:")}  npm start`);
+  console.log(`    2. ${dim("Open the UI:")}      ${config.baseUrl}/ui/`);
   console.log("");
-  console.log("Next steps:");
-  console.log("1. Start the relay with: npm start");
-  console.log("2. Log in via POST /v1/operator/login");
-  console.log("3. Enroll an agent via POST /v1/enroll using the token above");
 }
 
 if (process.argv.includes("--doctor")) {

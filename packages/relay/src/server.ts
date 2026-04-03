@@ -6,9 +6,13 @@ import { db } from "./db";
 import { registerAgentRoutes } from "./routes-agent";
 import { registerOperatorRoutes } from "./routes-operator";
 import { startSweepJob } from "./sweep";
+import { loadLicense } from "./license";
 
 async function buildServer() {
   const app = fastify({ logger: true });
+  const license = loadLicense();
+  app.log.info({ tier: license.tier, org: license.org }, "ekho license loaded");
+
   const uiRoot = path.join(__dirname, "..", "ui-dist");
 
   await app.register(fastifyStatic, {
@@ -22,6 +26,7 @@ async function buildServer() {
   app.get("/", async () => ({
     service: "ekho-relay",
     version: "0.1.0",
+    tier: license.tier,
     setup_required: !db.findFleetByName("default"),
     docs: {
       architecture: "/ARCHITECTURE.md",

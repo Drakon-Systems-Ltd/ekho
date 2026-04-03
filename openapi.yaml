@@ -2,40 +2,1654 @@ openapi: 3.1.0
 info:
   title: Ekho Relay API
   version: 0.1.0
-  description: v1 API for the Ekho private communication and control relay.
+  description: >
+    Multi-agent relay service providing message routing, policy enforcement,
+    approval workflows, rate limiting, and fleet management for AI agent systems.
+  contact:
+    name: Ekho
+  license:
+    name: Proprietary
+
 servers:
   - url: http://127.0.0.1:4000
+    description: Local development relay
+
+tags:
+  - name: System
+    description: Health and service metadata
+  - name: Agent
+    description: Agent enrollment, messaging, heartbeats, and action proposals
+  - name: Operator
+    description: Fleet management, approvals, policies, and observability
+
+security: []
+
+components:
+  securitySchemes:
+    AgentHMAC:
+      type: apiKey
+      in: header
+      name: x-ekho-signature
+      description: >
+        HMAC-SHA256 signature authentication for enrolled agents. Requires five
+        headers sent together: `x-ekho-agent-id` (agent UUID), `x-ekho-agent-secret`,
+        `x-ekho-timestamp` (ISO 8601), `x-ekho-nonce` (UUID v4), and
+        `x-ekho-signature` (HMAC-SHA256 of `METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body)`).
+
+    OperatorBearer:
+      type: http
+      scheme: bearer
+      description: >
+        Bearer token obtained from `POST /v1/operator/login`. Pass as
+        `Authorization: Bearer <token>`.
+
+  schemas:
+    # --- Primitives & enums ---
+
+    AgentId:
+      type: string
+      description: Unique agent identifier (UUID).
+      example: ag_01HXYZ
+
+    FleetId:
+      type: string
+      description: Unique fleet identifier.
+      example: fl_01HXYZ
+
+    ConversationId:
+      type: string
+      minLength: 1
+      description: Conversation thread identifier.
+
+    CorrelationId:
+      type: string
+      minLength: 1
+      description: Correlation identifier for distributed tracing.
+
+    MessageType:
+      type: string
+      enum: [direct, broadcast, alert, handoff, claim, complete, heartbeat, control]
+
+    Priority:
+      type: string
+      enum: [low, normal, high, urgent]
+      default: normal
+
+    RiskLevel:
+      type: string
+      enum: [low, medium, high, critical]
+
+    AgentStatus:
+      type: string
+      enum: [active, paused, quarantined, revoked]
+
+    HeartbeatStatus:
+      type: string
+      enum: [healthy, degraded, busy, idle]
+
+    AgentRuntime:
+      type: string
+      enum: [custom, openclaw, langgraph, autogen]
+
+    ActionResult:
+      type: string
+      enum: [executed, cancelled, failed]
+
+    ApprovalStatus:
+      type: string
+      enum: [pending_approval, approved, rejected, executed, cancelled, failed]
+
+    ScopeKind:
+      type: string
+      enum: [fleet, agent]
+
+    PolicyAction:
+      type: string
+      enum: [allow, deny]
+
+    AgentAction:
+      type: string
+      enum: [pause, resume, quarantine]
+
+    ApprovalDecision:
+      type: string
+      enum: [approve, reject]
+
+    # --- Request / response objects ---
+
+    Recipient:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [agent, group, broadcast]
+        id:
+          type: string
+          minLength: 1
+          description: Required unless kind is `broadcast`.
+      description: >
+        Message target. `id` is required for `agent` and `group` kinds.
+
+    EnrollRequest:
+      type: object
+      required: [fleet_id, token, display_name, runtime]
+      properties:
+        fleet_id:
+          $ref: "#/components/schemas/FleetId"
+        token:
+          type: string
+          minLength: 1
+          description: One-time enrollment token issued by an operator.
+        display_name:
+          type: string
+          minLength: 1
+        runtime:
+          $ref: "#/components/schemas/AgentRuntime"
+        hostname:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+          default: []
+
+    EnrollResponse:
+      type: object
+      required: [agent_id, secret, relay_base_url, heartbeat_interval_seconds, poll_interval_seconds, policy_profile]
+      properties:
+        agent_id:
+          $ref: "#/components/schemas/AgentId"
+        secret:
+          type: string
+          description: HMAC secret. Store securely — shown only once.
+        relay_base_url:
+          type: string
+          format: uri
+        heartbeat_interval_seconds:
+          type: integer
+        poll_interval_seconds:
+          type: integer
+        policy_profile:
+          type: string
+
+    SendMessageRequest:
+      type: object
+      required: [recipient, message_type, body, conversation_id, correlation_id]
+      properties:
+        recipient:
+          $ref: "#/components/schemas/Recipient"
+        message_type:
+          $ref: "#/components/schemas/MessageType"
+        priority:
+          $ref: "#/components/schemas/Priority"
+        ttl_seconds:
+          type: integer
+          minimum: 1
+          maximum: 86400
+          default: 900
+        requires_approval:
+          type: boolean
+          default: false
+        body:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        correlation_id:
+          $ref: "#/components/schemas/CorrelationId"
+
+    SendMessageResponse:
+      type: object
+      required: [message_id, status, queued_at]
+      properties:
+        message_id:
+          type: string
+        status:
+          type: string
+          example: queued
+        queued_at:
+          type: string
+          format: date-time
+
+    InboxMessage:
+      type: object
+      properties:
+        message_id:
+          type: string
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        correlation_id:
+          $ref: "#/components/schemas/CorrelationId"
+        sender_agent_id:
+          $ref: "#/components/schemas/AgentId"
+        message_type:
+          $ref: "#/components/schemas/MessageType"
+        priority:
+          $ref: "#/components/schemas/Priority"
+        body:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        deadline_at:
+          type: string
+          format: date-time
+
+    ControlAction:
+      type: object
+      properties:
+        control_id:
+          type: string
+        action:
+          type: string
+        reason:
+          type: string
+
+    InboxResponse:
+      type: object
+      required: [messages, controls]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxMessage"
+        controls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlAction"
+
+    AckItem:
+      type: object
+      required: [message_id, status, received_at]
+      properties:
+        message_id:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [received]
+        received_at:
+          type: string
+          format: date-time
+
+    AckRequest:
+      type: object
+      required: [acks]
+      properties:
+        acks:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/AckItem"
+
+    AckResponse:
+      type: object
+      required: [updated]
+      properties:
+        updated:
+          type: integer
+
+    HeartbeatRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: "#/components/schemas/HeartbeatStatus"
+        active_conversation_ids:
+          type: array
+          items:
+            type: string
+          default: []
+        metrics:
+          type: object
+          additionalProperties: true
+          default: {}
+
+    HeartbeatResponse:
+      type: object
+      required: [ok, next_heartbeat_due_seconds]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        next_heartbeat_due_seconds:
+          type: integer
+
+    ProposeActionRequest:
+      type: object
+      required: [conversation_id, action_type, summary, risk_level, payload]
+      properties:
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        action_type:
+          type: string
+          minLength: 1
+        summary:
+          type: string
+          minLength: 1
+        risk_level:
+          $ref: "#/components/schemas/RiskLevel"
+        payload:
+          type: object
+          additionalProperties: true
+
+    ProposeActionResponseAllow:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          const: allow
+
+    ProposeActionResponseDeny:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          const: deny
+
+    ProposeActionResponsePending:
+      type: object
+      required: [decision, approval_id]
+      properties:
+        decision:
+          type: string
+          const: pending_approval
+        approval_id:
+          type: string
+
+    ActionResultRequest:
+      type: object
+      required: [approval_id, result, completed_at]
+      properties:
+        approval_id:
+          type: string
+          minLength: 1
+        result:
+          $ref: "#/components/schemas/ActionResult"
+        completed_at:
+          type: string
+          format: date-time
+        output:
+          type: object
+          additionalProperties: true
+          default: {}
+
+    ApprovalDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ApprovalStatus"
+        action_type:
+          type: string
+        risk_level:
+          $ref: "#/components/schemas/RiskLevel"
+        summary:
+          type: string
+        requested_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    OperatorLoginRequest:
+      type: object
+      required: [fleet_name, email, password]
+      properties:
+        fleet_name:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+
+    OperatorLoginResponse:
+      type: object
+      required: [token, fleet_id]
+      properties:
+        token:
+          type: string
+        fleet_id:
+          $ref: "#/components/schemas/FleetId"
+
+    FleetOverview:
+      type: object
+      properties:
+        agents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        pendingApprovals:
+          type: integer
+        queuedMessages:
+          type: integer
+        deadLetterCount:
+          type: integer
+        quarantinedAgentCount:
+          type: integer
+        rateLimitViolationsLast24h:
+          type: integer
+        recentEvents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    AgentSummary:
+      type: object
+      properties:
+        id:
+          $ref: "#/components/schemas/AgentId"
+        fleet_id:
+          $ref: "#/components/schemas/FleetId"
+        display_name:
+          type: string
+        runtime:
+          $ref: "#/components/schemas/AgentRuntime"
+        status:
+          $ref: "#/components/schemas/AgentStatus"
+        hostname:
+          type: string
+          nullable: true
+        policy_profile:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    AgentListResponse:
+      type: object
+      required: [agents, total, page, limit]
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentSummary"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    AgentDetail:
+      type: object
+      properties:
+        agent:
+          $ref: "#/components/schemas/AgentSummary"
+        recentEvents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        controls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ControlAction"
+        recentMessages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    AgentControlRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+        expires_at:
+          type: string
+          format: date-time
+        redirect_agent_id:
+          type: string
+
+    RateLimitViolation:
+      type: object
+      properties:
+        id:
+          type: string
+        fleet_id:
+          $ref: "#/components/schemas/FleetId"
+        agent_id:
+          $ref: "#/components/schemas/AgentId"
+        window_start:
+          type: string
+          format: date-time
+        message_count:
+          type: integer
+        limit_value:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    RateLimitViolationsResponse:
+      type: object
+      required: [violations]
+      properties:
+        violations:
+          type: array
+          items:
+            $ref: "#/components/schemas/RateLimitViolation"
+
+    ApprovalListResponse:
+      type: object
+      required: [approvals, total, page, limit]
+      properties:
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalDetail"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    EventListResponse:
+      type: object
+      required: [events, total, page, limit]
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    PolicyConditions:
+      type: object
+      properties:
+        sender_agent_id:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        recipient_agent_id:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        message_type:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        priority:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+
+    PolicyRule:
+      type: object
+      required: [action, conditions]
+      properties:
+        action:
+          $ref: "#/components/schemas/PolicyAction"
+        conditions:
+          $ref: "#/components/schemas/PolicyConditions"
+
+    Policy:
+      type: object
+      properties:
+        id:
+          type: string
+        fleet_id:
+          $ref: "#/components/schemas/FleetId"
+        name:
+          type: string
+        scope_kind:
+          $ref: "#/components/schemas/ScopeKind"
+        scope_id:
+          type: string
+          nullable: true
+        rule:
+          $ref: "#/components/schemas/PolicyRule"
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    PolicyListResponse:
+      type: object
+      required: [policies]
+      properties:
+        policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Policy"
+
+    CreatePolicyRequest:
+      type: object
+      required: [name, scope_kind, rule]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        scope_kind:
+          $ref: "#/components/schemas/ScopeKind"
+        scope_id:
+          type: string
+        rule:
+          $ref: "#/components/schemas/PolicyRule"
+        enabled:
+          type: boolean
+          default: true
+
+    CreatePolicyResponse:
+      type: object
+      required: [policyId]
+      properties:
+        policyId:
+          type: string
+
+    UpdatePolicyRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        scope_kind:
+          $ref: "#/components/schemas/ScopeKind"
+        scope_id:
+          type: string
+          nullable: true
+        rule:
+          $ref: "#/components/schemas/PolicyRule"
+        enabled:
+          type: boolean
+
+    DeadLetter:
+      type: object
+      properties:
+        id:
+          type: string
+        fleet_id:
+          $ref: "#/components/schemas/FleetId"
+        original_message_id:
+          type: string
+        original_delivery_id:
+          type: string
+        recipient_agent_id:
+          $ref: "#/components/schemas/AgentId"
+        sender_agent_id:
+          $ref: "#/components/schemas/AgentId"
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        message_type:
+          $ref: "#/components/schemas/MessageType"
+        body:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+          nullable: true
+        retry_count:
+          type: integer
+        failure_reason:
+          type: string
+        dead_lettered_at:
+          type: string
+          format: date-time
+
+    DeadLetterListResponse:
+      type: object
+      required: [dead_letters, total, page, limit]
+      properties:
+        dead_letters:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeadLetter"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    EnrollmentTokenResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+
+    HealthResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          const: true
+
+    ServiceInfoResponse:
+      type: object
+      required: [service, version, tier, setup_required, docs]
+      properties:
+        service:
+          type: string
+          example: ekho-relay
+        version:
+          type: string
+          example: 0.1.0
+        tier:
+          type: string
+        setup_required:
+          type: boolean
+        docs:
+          type: object
+          properties:
+            architecture:
+              type: string
+            ui:
+              type: string
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+          description: Human-readable error message or structured validation error.
+
+    RateLimitError:
+      type: object
+      required: [error, retry_after_seconds]
+      properties:
+        error:
+          type: string
+        retry_after_seconds:
+          type: integer
+
+    PolicyBlockedError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        policy:
+          type: string
+          description: Name of the policy that denied the message.
+
+  parameters:
+    PaginationLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    PaginationPage:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+    SearchParam:
+      name: search
+      in: query
+      schema:
+        type: string
+
+    SortByParam:
+      name: sortBy
+      in: query
+      schema:
+        type: string
+
+    SortOrderParam:
+      name: sortOrder
+      in: query
+      schema:
+        type: string
+        enum: [asc, desc]
+
+    DateFromParam:
+      name: dateFrom
+      in: query
+      schema:
+        type: string
+        format: date-time
+
+    DateToParam:
+      name: dateTo
+      in: query
+      schema:
+        type: string
+        format: date-time
+
+  responses:
+    BadRequest:
+      description: Validation error or malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Unauthorized:
+      description: Missing or invalid authentication credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Forbidden:
+      description: Agent is quarantined/paused or action is blocked by policy.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    NotFound:
+      description: Requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    RateLimited:
+      description: Rate limit exceeded. Retry after the indicated interval.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RateLimitError"
+
 paths:
+  # ---- System ----
+
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [System]
+      summary: Health check
+      description: Returns a simple liveness probe response.
+      responses:
+        "200":
+          description: Relay is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /:
+    get:
+      operationId: getServiceInfo
+      tags: [System]
+      summary: Service metadata
+      description: Returns service name, version, license tier, setup state, and documentation links.
+      responses:
+        "200":
+          description: Service information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceInfoResponse"
+
+  # ---- Agent API ----
+
   /v1/enroll:
     post:
-      summary: Enroll an agent with a one-time token.
+      operationId: enrollAgent
+      tags: [Agent]
+      summary: Enroll a new agent
+      description: >
+        Registers a new agent with the relay using a one-time enrollment token.
+        No authentication required. Returns agent credentials that must be stored
+        securely — the secret is only shown once.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollRequest"
+      responses:
+        "200":
+          description: Agent enrolled successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
   /v1/messages:
     post:
-      summary: Submit a message to the relay.
+      operationId: sendMessage
+      tags: [Agent]
+      summary: Send a message
+      description: >
+        Sends a message to another agent, a group, or broadcasts to the fleet.
+        Subject to policy evaluation and rate limiting.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "200":
+          description: Message accepted and queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Agent is quarantined/paused or message blocked by policy.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Error"
+                  - $ref: "#/components/schemas/PolicyBlockedError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
   /v1/inbox:
     get:
-      summary: Fetch pending inbox messages and control actions.
+      operationId: getInbox
+      tags: [Agent]
+      summary: Poll inbox
+      description: >
+        Retrieves pending messages and control directives for the authenticated agent.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of messages to return (1-100).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: Inbox contents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/acks:
     post:
-      summary: Acknowledge delivered messages.
+      operationId: acknowledgeMessages
+      tags: [Agent]
+      summary: Acknowledge messages
+      description: >
+        Confirms receipt of one or more messages, advancing them out of the
+        delivery pipeline.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AckRequest"
+      responses:
+        "200":
+          description: Acknowledgements processed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AckResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/heartbeats:
     post:
-      summary: Submit agent liveness data.
+      operationId: sendHeartbeat
+      tags: [Agent]
+      summary: Send heartbeat
+      description: >
+        Reports agent health status, active conversations, and optional metrics.
+        Missing heartbeats trigger auto-quarantine after consecutive misses.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+      responses:
+        "200":
+          description: Heartbeat recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/actions/propose:
     post:
-      summary: Propose a high-risk action for approval.
+      operationId: proposeAction
+      tags: [Agent]
+      summary: Propose an action for approval
+      description: >
+        Submits a proposed action with a risk level. Low-risk actions may be
+        auto-approved; higher-risk actions require operator approval.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposeActionRequest"
+      responses:
+        "200":
+          description: >
+            Decision returned. One of: `allow` (auto-approved), `deny`
+            (auto-rejected), or `pending_approval` (awaiting operator).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ProposeActionResponseAllow"
+                  - $ref: "#/components/schemas/ProposeActionResponseDeny"
+                  - $ref: "#/components/schemas/ProposeActionResponsePending"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/actions/result:
+    post:
+      operationId: reportActionResult
+      tags: [Agent]
+      summary: Report action execution result
+      description: >
+        Reports the outcome of a previously approved action back to the relay.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionResultRequest"
+      responses:
+        "200":
+          description: Result recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/actions/{approvalId}:
+    get:
+      operationId: getApprovalStatus
+      tags: [Agent]
+      summary: Check approval status
+      description: >
+        Returns the current status of a pending or resolved approval request.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---- Operator API ----
+
   /v1/operator/login:
     post:
-      summary: Authenticate an operator session.
+      operationId: operatorLogin
+      tags: [Operator]
+      summary: Operator login
+      description: >
+        Authenticates an operator and returns a bearer token for subsequent
+        operator API calls.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperatorLoginRequest"
+      responses:
+        "200":
+          description: Login successful.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorLoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/operator/overview:
     get:
-      summary: Return fleet overview for the operator UI.
-  /v1/operator/approvals:
+      operationId: getFleetOverview
+      tags: [Operator]
+      summary: Fleet overview dashboard
+      description: >
+        Returns a summary of fleet health including agent statuses, pending
+        approvals, queue depths, dead letters, quarantine counts, and recent events.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Fleet overview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/agents:
     get:
-      summary: Return pending approvals for the operator console.
-  /v1/operator/enrollment-tokens:
-    post:
-      summary: Issue a new one-time agent enrollment token.
+      operationId: listAgents
+      tags: [Operator]
+      summary: List agents
+      description: >
+        Returns a paginated, filterable list of agents in the fleet.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/SearchParam"
+        - name: status
+          in: query
+          description: Filter by agent status.
+          schema:
+            $ref: "#/components/schemas/AgentStatus"
+        - $ref: "#/components/parameters/SortByParam"
+        - $ref: "#/components/parameters/SortOrderParam"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationPage"
+      responses:
+        "200":
+          description: Paginated agent list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/operator/agents/{agentId}:
     get:
-      summary: Return detailed agent state, recent messages, controls, and events.
+      operationId: getAgentDetail
+      tags: [Operator]
+      summary: Agent detail
+      description: >
+        Returns full details for a single agent including recent events,
+        active controls, and recent messages.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Agent detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/agents/{agentId}/{action}:
+    post:
+      operationId: controlAgent
+      tags: [Operator]
+      summary: Pause, resume, or quarantine an agent
+      description: >
+        Issues a control action against an agent. Paused and quarantined agents
+        cannot send messages.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: action
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/AgentAction"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentControlRequest"
+      responses:
+        "200":
+          description: Control action applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/agents/{agentId}/rate-limits:
+    get:
+      operationId: getAgentRateLimits
+      tags: [Operator]
+      summary: Agent rate limit violation history
+      description: >
+        Returns the rate limit violation history for a specific agent.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Rate limit violations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RateLimitViolationsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/approvals:
+    get:
+      operationId: listApprovals
+      tags: [Operator]
+      summary: List pending approvals
+      description: >
+        Returns a paginated list of approval requests, filterable by risk level
+        and date range.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/SearchParam"
+        - name: risk
+          in: query
+          description: Filter by risk level.
+          schema:
+            $ref: "#/components/schemas/RiskLevel"
+        - $ref: "#/components/parameters/DateFromParam"
+        - $ref: "#/components/parameters/DateToParam"
+        - $ref: "#/components/parameters/SortByParam"
+        - $ref: "#/components/parameters/SortOrderParam"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationPage"
+      responses:
+        "200":
+          description: Paginated approval list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/approvals/{approvalId}/{decision}:
+    post:
+      operationId: resolveApproval
+      tags: [Operator]
+      summary: Approve or reject an action
+      description: >
+        Resolves a pending approval request. The agent will see the decision
+        on its next poll.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: decision
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ApprovalDecision"
+      responses:
+        "200":
+          description: Approval resolved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/events:
+    get:
+      operationId: listEvents
+      tags: [Operator]
+      summary: List fleet events
+      description: >
+        Returns a paginated, filterable audit log of fleet events.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/SearchParam"
+        - name: type
+          in: query
+          description: Filter by event type.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/DateFromParam"
+        - $ref: "#/components/parameters/DateToParam"
+        - $ref: "#/components/parameters/SortByParam"
+        - $ref: "#/components/parameters/SortOrderParam"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationPage"
+      responses:
+        "200":
+          description: Paginated event list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/enrollment-tokens:
+    post:
+      operationId: issueEnrollmentToken
+      tags: [Operator]
+      summary: Issue enrollment token
+      description: >
+        Generates a one-time enrollment token that an agent uses to register
+        with the relay.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrollmentTokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/conversations/{conversationId}:
+    get:
+      operationId: getConversation
+      tags: [Operator]
+      summary: Conversation event timeline
+      description: >
+        Returns a paginated, filterable timeline of events within a conversation.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/SearchParam"
+        - name: type
+          in: query
+          description: Filter by event type.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/DateFromParam"
+        - $ref: "#/components/parameters/DateToParam"
+        - $ref: "#/components/parameters/SortByParam"
+        - $ref: "#/components/parameters/SortOrderParam"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationPage"
+      responses:
+        "200":
+          description: Conversation events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/policies:
+    get:
+      operationId: listPolicies
+      tags: [Operator]
+      summary: List policies
+      description: >
+        Returns all message routing policies for the fleet.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Policy list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      operationId: createPolicy
+      tags: [Operator]
+      summary: Create a policy
+      description: >
+        Creates a new message routing policy. Policies are evaluated on every
+        message send to allow or deny based on sender, recipient, type, or priority.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePolicyRequest"
+      responses:
+        "201":
+          description: Policy created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatePolicyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/policies/{policyId}:
+    put:
+      operationId: updatePolicy
+      tags: [Operator]
+      summary: Update a policy
+      description: >
+        Partially updates an existing policy. Only provided fields are changed.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePolicyRequest"
+      responses:
+        "200":
+          description: Policy updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deletePolicy
+      tags: [Operator]
+      summary: Delete a policy
+      description: >
+        Permanently removes a policy from the fleet.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Policy deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OkResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/dead-letters:
+    get:
+      operationId: listDeadLetters
+      tags: [Operator]
+      summary: List dead letters
+      description: >
+        Returns a paginated list of messages that exhausted all delivery retries.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationPage"
+      responses:
+        "200":
+          description: Dead letter list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeadLetterListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/dead-letters/{id}:
+    get:
+      operationId: getDeadLetter
+      tags: [Operator]
+      summary: Dead letter detail
+      description: >
+        Returns full details of a single dead-lettered message including
+        original body, metadata, and failure reason.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Dead letter detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeadLetter"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"

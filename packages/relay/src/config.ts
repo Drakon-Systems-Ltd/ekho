@@ -36,5 +36,9 @@ export const config = {
   heartbeatLivenessThreshold: resolveNumber(process.env.EKHO_HEARTBEAT_LIVENESS_THRESHOLD, 3),
   heartbeatTimeoutSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_TIMEOUT_SECONDS, 90),
   rateLimitViolationThreshold: resolveNumber(process.env.EKHO_RATE_LIMIT_VIOLATION_THRESHOLD, 5),
-  rateLimitViolationWindowSeconds: resolveNumber(process.env.EKHO_RATE_LIMIT_VIOLATION_WINDOW_SECONDS, 3600)
+  rateLimitViolationWindowSeconds: resolveNumber(process.env.EKHO_RATE_LIMIT_VIOLATION_WINDOW_SECONDS, 3600),
+
+  // Licensing
+  licenseKey: process.env.EKHO_LICENSE_KEY as string | undefined,
+  licensePath: process.env.EKHO_LICENSE_PATH as string | undefined
 } as const;
