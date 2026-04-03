@@ -1,0 +1,41 @@
+openapi: 3.1.0
+info:
+  title: Ekho Relay API
+  version: 0.1.0
+  description: v1 API for the Ekho private communication and control relay.
+servers:
+  - url: http://127.0.0.1:4000
+paths:
+  /v1/enroll:
+    post:
+      summary: Enroll an agent with a one-time token.
+  /v1/messages:
+    post:
+      summary: Submit a message to the relay.
+  /v1/inbox:
+    get:
+      summary: Fetch pending inbox messages and control actions.
+  /v1/acks:
+    post:
+      summary: Acknowledge delivered messages.
+  /v1/heartbeats:
+    post:
+      summary: Submit agent liveness data.
+  /v1/actions/propose:
+    post:
+      summary: Propose a high-risk action for approval.
+  /v1/operator/login:
+    post:
+      summary: Authenticate an operator session.
+  /v1/operator/overview:
+    get:
+      summary: Return fleet overview for the operator UI.
+  /v1/operator/approvals:
+    get:
+      summary: Return pending approvals for the operator console.
+  /v1/operator/enrollment-tokens:
+    post:
+      summary: Issue a new one-time agent enrollment token.
+  /v1/operator/agents/{agentId}:
+    get:
+      summary: Return detailed agent state, recent messages, controls, and events.

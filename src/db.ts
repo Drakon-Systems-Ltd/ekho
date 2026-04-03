@@ -1,0 +1,1052 @@
+import fs from "node:fs";
+import path from "node:path";
+import Database from "better-sqlite3";
+import { config } from "./config";
+import { schemaSql } from "./schema";
+import { addSeconds, hashSecret, id, nowIso } from "./utils";
+
+type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+export class EkhoDb {
+  private db: Database.Database;
+
+  constructor() {
+    fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
+    this.db = new Database(config.dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.exec(schemaSql);
+    this.runMigrations();
+  }
+
+  private runMigrations() {
+    this.db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+    const applied = new Set(
+      (this.db.prepare("SELECT version FROM schema_migrations").all() as Array<{ version: number }>).map((r) => r.version)
+    );
+    const migrationsDir = path.join(process.cwd(), "migrations");
+    if (!fs.existsSync(migrationsDir)) return;
+    const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
+    for (const file of files) {
+      const version = parseInt(file.split("_")[0], 10);
+      if (!Number.isFinite(version) || applied.has(version)) continue;
+      const sql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
+      try {
+        this.db.exec(sql);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("duplicate column")) {
+          // For ALTER TABLE migrations on existing DBs, run statements individually
+          const statements = sql.split(";").map((s) => s.trim()).filter(Boolean);
+          for (const stmt of statements) {
+            try { this.db.exec(stmt); } catch (e: unknown) {
+              const m = e instanceof Error ? e.message : String(e);
+              if (!m.includes("duplicate column") && !m.includes("already exists")) throw e;
+            }
+          }
+        } else {
+          throw err;
+        }
+      }
+      this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, nowIso());
+    }
+  }
+
+  raw() {
+    return this.db;
+  }
+
+  private escapeLike(value: string) {
+    return value.replace(/[%_\\]/g, "\\$&");
+  }
+
+  private buildLikeSearch(value?: string) {
+    if (!value?.trim()) {
+      return undefined;
+    }
+    return `%${this.escapeLike(value.trim().toLowerCase())}%`;
+  }
+
+  private normalizeDateStart(value?: string) {
+    if (!value?.trim()) {
+      return undefined;
+    }
+    return `${value.trim()}T00:00:00.000Z`;
+  }
+
+  private normalizeDateEnd(value?: string) {
+    if (!value?.trim()) {
+      return undefined;
+    }
+    return `${value.trim()}T23:59:59.999Z`;
+  }
+
+  createBootstrap(fleetName: string, email: string, password: string) {
+    const fleetId = id("flt");
+    const operatorId = id("opr");
+    const now = nowIso();
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare("INSERT INTO fleets (id, name, created_at) VALUES (?, ?, ?)").run(fleetId, fleetName, now);
+      this.db.prepare(
+        "INSERT INTO operators (id, fleet_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(operatorId, fleetId, email, hashSecret(password), "owner", now);
+    });
+
+    tx();
+    return { fleetId, operatorId };
+  }
+
+  findFleetByName(name: string) {
+    return this.db.prepare("SELECT * FROM fleets WHERE name = ?").get(name) as Record<string, unknown> | undefined;
+  }
+
+  authenticateOperator(fleetName: string, email: string, password: string) {
+    const row = this.db.prepare(
+      `SELECT operators.*, fleets.name AS fleet_name
+       FROM operators
+       JOIN fleets ON fleets.id = operators.fleet_id
+       WHERE fleets.name = ? AND operators.email = ?`
+    ).get(fleetName, email) as Record<string, unknown> | undefined;
+
+    if (!row || row.password_hash !== hashSecret(password)) {
+      return null;
+    }
+
+    return row;
+  }
+
+  issueEnrollmentToken(fleetId: string, operatorId: string) {
+    const tokenId = id("ent");
+    const token = `${tokenId}.${id("tok")}`;
+    this.db.prepare(
+      "INSERT INTO enrollment_tokens (id, fleet_id, token_hash, issued_by_operator_id, expires_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(tokenId, fleetId, hashSecret(token), operatorId, addSeconds(nowIso(), 3600));
+    return token;
+  }
+
+  consumeEnrollmentToken(token: string, fleetId: string) {
+    const row = this.db.prepare(
+      "SELECT * FROM enrollment_tokens WHERE token_hash = ? AND fleet_id = ? AND used_at IS NULL AND expires_at > ?"
+    ).get(hashSecret(token), fleetId, nowIso()) as Record<string, unknown> | undefined;
+    return row;
+  }
+
+  createAgentFromEnrollment(input: {
+    fleetId: string;
+    tokenId: string;
+    displayName: string;
+    runtime: string;
+    hostname?: string;
+  }) {
+    const agentId = `agent_${id("agt").slice(-12)}`;
+    const secret = `${id("secret")}${id("secret")}`;
+    const now = nowIso();
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now);
+
+      this.db.prepare(
+        "INSERT INTO agent_credentials (id, agent_id, secret_hash, status, created_at) VALUES (?, ?, ?, ?, ?)"
+      ).run(id("cred"), agentId, hashSecret(secret), "active", now);
+
+      this.db.prepare("UPDATE enrollment_tokens SET used_at = ?, used_by_agent_id = ? WHERE id = ?").run(now, agentId, input.tokenId);
+    });
+
+    tx();
+    return { agentId, secret };
+  }
+
+  authenticateAgent(agentId: string, secret: string) {
+    return this.db.prepare(
+      `SELECT agents.*, agent_credentials.secret_hash
+       FROM agents
+       JOIN agent_credentials ON agent_credentials.agent_id = agents.id
+       WHERE agents.id = ?
+         AND agent_credentials.status = 'active'
+         AND agents.revoked_at IS NULL
+       ORDER BY agent_credentials.created_at DESC
+       LIMIT 1`
+    ).get(agentId) as Record<string, unknown> | undefined;
+  }
+
+  rememberNonce(agentId: string, nonce: string) {
+    this.db.prepare("INSERT INTO replay_nonces (id, agent_id, nonce, created_at) VALUES (?, ?, ?, ?)").run(id("rpl"), agentId, nonce, nowIso());
+  }
+
+  findNonce(agentId: string, nonce: string) {
+    return this.db.prepare("SELECT id FROM replay_nonces WHERE agent_id = ? AND nonce = ?").get(agentId, nonce);
+  }
+
+  createMessage(input: {
+    fleetId: string;
+    senderAgentId: string;
+    recipientKind: string;
+    recipientId?: string;
+    messageType: string;
+    priority: string;
+    ttlSeconds: number;
+    requiresApproval: boolean;
+    body: JsonValue;
+    metadata?: JsonValue;
+    conversationId: string;
+    correlationId: string;
+  }) {
+    const messageId = id("msg");
+    const createdAt = nowIso();
+    const expiresAt = addSeconds(createdAt, input.ttlSeconds);
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO messages (
+          id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+          message_type, priority, requires_approval, body_json, metadata_json, ttl_seconds, created_at, expires_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        messageId,
+        input.fleetId,
+        input.conversationId,
+        input.correlationId,
+        input.senderAgentId,
+        input.recipientKind,
+        input.recipientId ?? null,
+        input.messageType,
+        input.priority,
+        input.requiresApproval ? 1 : 0,
+        JSON.stringify(input.body),
+        input.metadata ? JSON.stringify(input.metadata) : null,
+        input.ttlSeconds,
+        createdAt,
+        expiresAt,
+        "queued"
+      );
+
+      if (input.recipientKind === "agent" && input.recipientId) {
+        this.db.prepare(
+          "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
+        ).run(id("dly"), messageId, input.recipientId, createdAt, "queued");
+      }
+
+      this.recordEvent(input.fleetId, "message.queued", "agent", input.senderAgentId, "message", messageId, input.conversationId, {
+        recipient_kind: input.recipientKind,
+        recipient_id: input.recipientId ?? null,
+        message_type: input.messageType
+      });
+    });
+
+    tx();
+    return { messageId, createdAt };
+  }
+
+  getInbox(agentId: string, limit: number) {
+    const now = nowIso();
+    const deliveries = this.db.prepare(
+      `SELECT messages.*, message_deliveries.id AS delivery_id, message_deliveries.queued_at
+       FROM message_deliveries
+       JOIN messages ON messages.id = message_deliveries.message_id
+       WHERE message_deliveries.recipient_agent_id = ?
+         AND message_deliveries.status = 'queued'
+         AND messages.expires_at > ?
+         AND (message_deliveries.next_retry_at IS NULL OR message_deliveries.next_retry_at <= ?)
+       ORDER BY message_deliveries.queued_at ASC
+       LIMIT ?`
+    ).all(agentId, now, now, limit) as Array<Record<string, unknown>>;
+
+    const update = this.db.prepare("UPDATE message_deliveries SET status = 'delivered', delivered_at = ?, delivery_attempts = delivery_attempts + 1 WHERE id = ?");
+    const eventStmt = this.db.prepare(
+      "INSERT INTO events (id, fleet_id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    );
+    const deliveredAt = nowIso();
+    const tx = this.db.transaction(() => {
+      for (const row of deliveries) {
+        update.run(deliveredAt, row.delivery_id);
+        eventStmt.run(
+          id("evt"),
+          row.fleet_id,
+          "message.delivered",
+          "agent",
+          agentId,
+          "message",
+          row.id,
+          row.conversation_id,
+          JSON.stringify({ delivery_id: row.delivery_id }),
+          deliveredAt
+        );
+      }
+    });
+    tx();
+
+    const controls = this.db.prepare(
+      "SELECT * FROM control_actions WHERE target_kind = 'agent' AND target_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC"
+    ).all(agentId, nowIso()) as Array<Record<string, unknown>>;
+
+    return {
+      messages: deliveries.map((row) => ({
+        message_id: row.id,
+        conversation_id: row.conversation_id,
+        correlation_id: row.correlation_id,
+        sender_agent_id: row.sender_agent_id,
+        message_type: row.message_type,
+        priority: row.priority,
+        body: JSON.parse(String(row.body_json)),
+        metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : {},
+        created_at: row.created_at,
+        deadline_at: row.expires_at
+      })),
+      controls: controls.map((row) => ({
+        control_id: row.id,
+        action: row.action,
+        reason: row.payload_json ? JSON.parse(String(row.payload_json)).reason ?? "operator control" : "operator control"
+      }))
+    };
+  }
+
+  ackMessages(agentId: string, ackRows: Array<{ message_id: string; received_at: string }>) {
+    const tx = this.db.transaction(() => {
+      for (const ack of ackRows) {
+        this.db.prepare(
+          "UPDATE message_deliveries SET status = 'acked', acked_at = ? WHERE message_id = ? AND recipient_agent_id = ?"
+        ).run(ack.received_at, ack.message_id, agentId);
+
+        this.db.prepare("UPDATE messages SET status = 'acked' WHERE id = ?").run(ack.message_id);
+
+        const message = this.db.prepare("SELECT fleet_id, conversation_id FROM messages WHERE id = ?").get(ack.message_id) as Record<string, unknown> | undefined;
+        if (message) {
+          this.recordEvent(String(message.fleet_id), "message.acked", "agent", agentId, "message", ack.message_id, String(message.conversation_id), {
+            received_at: ack.received_at
+          });
+        }
+      }
+    });
+    tx();
+    return ackRows.length;
+  }
+
+  insertHeartbeat(agentId: string, status: string, metrics: JsonValue) {
+    const agent = this.db.prepare("SELECT fleet_id, status AS agent_status, quarantine_reason FROM agents WHERE id = ?").get(agentId) as Record<string, unknown> | undefined;
+    if (!agent) {
+      return;
+    }
+    const receivedAt = nowIso();
+    const newStatus = status === "healthy" ? "healthy" : "degraded";
+    const tx = this.db.transaction(() => {
+      this.db.prepare("INSERT INTO heartbeats (id, agent_id, status, metrics_json, received_at) VALUES (?, ?, ?, ?, ?)").run(
+        id("hbt"),
+        agentId,
+        status,
+        JSON.stringify(metrics),
+        receivedAt
+      );
+
+      // Auto-restore from heartbeat-timeout quarantine
+      if (agent.agent_status === "quarantined" && agent.quarantine_reason === "heartbeat_timeout") {
+        this.db.prepare(
+          "UPDATE agents SET status = ?, last_seen_at = ?, consecutive_missed_heartbeats = 0, auto_quarantined_at = NULL, quarantine_reason = NULL WHERE id = ?"
+        ).run(newStatus, receivedAt, agentId);
+        this.recordEvent(String(agent.fleet_id), "agent.auto_unquarantined", "system", null, "agent", agentId, null, { reason: "heartbeat_resumed" });
+      } else {
+        this.db.prepare(
+          "UPDATE agents SET status = ?, last_seen_at = ?, consecutive_missed_heartbeats = 0 WHERE id = ? AND status NOT IN ('quarantined', 'paused')"
+        ).run(newStatus, receivedAt, agentId);
+      }
+
+      this.recordEvent(String(agent.fleet_id), "agent.heartbeat", "agent", agentId, "agent", agentId, null, { status, metrics });
+    });
+    tx();
+  }
+
+  proposeAction(input: {
+    agentId: string;
+    conversationId: string;
+    actionType: string;
+    summary: string;
+    riskLevel: string;
+    payload: JsonValue;
+  }) {
+    const agent = this.db.prepare("SELECT fleet_id, status FROM agents WHERE id = ?").get(input.agentId) as Record<string, unknown> | undefined;
+    if (!agent) {
+      return { decision: "deny" as const };
+    }
+
+    if (agent.status === "paused" || agent.status === "quarantined") {
+      return { decision: "deny" as const };
+    }
+
+    if (input.riskLevel === "high" || input.riskLevel === "critical") {
+      const approvalId = id("apr");
+      const requestedAt = nowIso();
+      this.db.prepare(
+        "INSERT INTO approvals (id, fleet_id, agent_id, conversation_id, action_type, risk_level, summary, payload_json, status, requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(approvalId, agent.fleet_id, input.agentId, input.conversationId, input.actionType, input.riskLevel, input.summary, JSON.stringify(input.payload), "pending", requestedAt);
+      this.recordEvent(String(agent.fleet_id), "approval.requested", "agent", input.agentId, "approval", approvalId, input.conversationId, {
+        action_type: input.actionType,
+        risk_level: input.riskLevel
+      });
+      return { decision: "pending_approval" as const, approvalId };
+    }
+
+    return { decision: "allow" as const };
+  }
+
+  completeActionResult(approvalId: string, result: string, output: JsonValue) {
+    const approval = this.db.prepare("SELECT fleet_id, conversation_id, agent_id FROM approvals WHERE id = ?").get(approvalId) as Record<string, unknown> | undefined;
+    if (!approval) {
+      return false;
+    }
+
+    const resolvedAt = nowIso();
+    this.db.prepare("UPDATE approvals SET status = ?, resolved_at = ? WHERE id = ?").run(result === "executed" ? "executed" : result, resolvedAt, approvalId);
+    this.recordEvent(String(approval.fleet_id), "approval.result", "agent", String(approval.agent_id), "approval", approvalId, String(approval.conversation_id ?? ""), {
+      result,
+      output
+    });
+    return true;
+  }
+
+  getApprovalStatus(approvalId: string) {
+    const approval = this.db.prepare(
+      "SELECT id, status, action_type, risk_level, summary, requested_at, resolved_at FROM approvals WHERE id = ?"
+    ).get(approvalId) as Record<string, unknown> | undefined;
+    return approval ?? null;
+  }
+
+  approveOrReject(approvalId: string, operatorId: string, status: "approved" | "rejected") {
+    const approval = this.db.prepare("SELECT fleet_id, conversation_id FROM approvals WHERE id = ?").get(approvalId) as Record<string, unknown> | undefined;
+    if (!approval) {
+      return false;
+    }
+
+    this.db.prepare("UPDATE approvals SET status = ?, resolved_at = ?, resolved_by_operator_id = ? WHERE id = ?").run(status, nowIso(), operatorId, approvalId);
+    this.recordEvent(String(approval.fleet_id), `approval.${status}`, "operator", operatorId, "approval", approvalId, String(approval.conversation_id ?? ""), {});
+    return true;
+  }
+
+  controlAgent(agentId: string, operatorId: string, action: "pause" | "resume" | "quarantine", payload: JsonValue) {
+    const agent = this.db.prepare("SELECT fleet_id FROM agents WHERE id = ?").get(agentId) as Record<string, unknown> | undefined;
+    if (!agent) {
+      return false;
+    }
+
+    const nextStatus = action === "pause" ? "paused" : action === "quarantine" ? "quarantined" : "healthy";
+    const controlId = id("ctl");
+    const now = nowIso();
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(controlId, agent.fleet_id, "agent", agentId, action, JSON.stringify(payload), operatorId, now);
+      this.db.prepare("UPDATE agents SET status = ? WHERE id = ?").run(nextStatus, agentId);
+      this.recordEvent(String(agent.fleet_id), `agent.${action}`, "operator", operatorId, "agent", agentId, null, payload);
+    });
+    tx();
+    return true;
+  }
+
+  getFleetOverview(fleetId: string) {
+    const agents = this.db.prepare(
+      "SELECT id, display_name, runtime, status, last_seen_at FROM agents WHERE fleet_id = ? ORDER BY created_at DESC LIMIT 10"
+    ).all(fleetId) as Array<Record<string, unknown>>;
+    const pendingApprovals = this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE fleet_id = ? AND status = 'pending'").get(fleetId) as { count: number };
+    const queuedMessages = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM message_deliveries JOIN messages ON messages.id = message_deliveries.message_id WHERE message_deliveries.status = 'queued' AND messages.fleet_id = ?"
+    ).get(fleetId) as { count: number };
+    const deadLetterCount = (this.db.prepare("SELECT COUNT(*) AS count FROM dead_letters WHERE fleet_id = ?").get(fleetId) as { count: number }).count;
+    const quarantinedAgentCount = (this.db.prepare("SELECT COUNT(*) AS count FROM agents WHERE fleet_id = ? AND status = 'quarantined'").get(fleetId) as { count: number }).count;
+    const rateLimitCutoff = new Date(Date.now() - 86400 * 1000).toISOString();
+    const rateLimitViolationsLast24h = (this.db.prepare("SELECT COUNT(*) AS count FROM rate_limit_violations WHERE fleet_id = ? AND created_at > ?").get(fleetId, rateLimitCutoff) as { count: number }).count;
+    const recentEvents = this.db.prepare(
+      "SELECT event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, created_at FROM events WHERE fleet_id = ? ORDER BY created_at DESC LIMIT 20"
+    ).all(fleetId);
+    return {
+      agents,
+      pendingApprovals: pendingApprovals.count,
+      queuedMessages: queuedMessages.count,
+      deadLetterCount,
+      quarantinedAgentCount,
+      rateLimitViolationsLast24h,
+      recentEvents
+    };
+  }
+
+  listDeadLetters(fleetId: string, options: { limit: number; offset: number }) {
+    const rows = this.db.prepare(
+      `SELECT id, original_message_id, recipient_agent_id, sender_agent_id, conversation_id, message_type, retry_count, failure_reason, dead_lettered_at
+       FROM dead_letters WHERE fleet_id = ? ORDER BY dead_lettered_at DESC LIMIT ? OFFSET ?`
+    ).all(fleetId, options.limit, options.offset);
+    const totalRow = this.db.prepare("SELECT COUNT(*) AS count FROM dead_letters WHERE fleet_id = ?").get(fleetId) as { count: number };
+    return { items: rows, total: totalRow.count };
+  }
+
+  getDeadLetterDetail(fleetId: string, deadLetterId: string) {
+    return this.db.prepare(
+      "SELECT * FROM dead_letters WHERE id = ? AND fleet_id = ?"
+    ).get(deadLetterId, fleetId) as Record<string, unknown> | undefined ?? null;
+  }
+
+  getAgentRateLimitHistory(fleetId: string, agentId: string) {
+    return this.db.prepare(
+      "SELECT id, window_start, message_count, limit_value, created_at FROM rate_limit_violations WHERE fleet_id = ? AND agent_id = ? ORDER BY created_at DESC LIMIT 50"
+    ).all(fleetId, agentId);
+  }
+
+  listAgents(fleetId: string, options: { search?: string; status?: string; sortBy?: string; sortOrder?: string; limit: number; offset: number }) {
+    const search = this.buildLikeSearch(options.search);
+    const status = options.status && options.status !== "all" ? options.status : undefined;
+    const sortable: Record<string, string> = {
+      display_name: "display_name",
+      status: "status",
+      last_seen_at: "last_seen_at",
+      created_at: "created_at"
+    };
+    const sortBy = sortable[options.sortBy ?? "created_at"] ?? "created_at";
+    const sortOrder = options.sortOrder === "asc" ? "ASC" : "DESC";
+
+    const where = [
+      "fleet_id = ?",
+      status ? "status = ?" : "",
+      search ? "(LOWER(display_name) LIKE ? ESCAPE '\\' OR LOWER(id) LIKE ? ESCAPE '\\' OR LOWER(runtime) LIKE ? ESCAPE '\\')" : ""
+    ].filter(Boolean).join(" AND ");
+
+    const params: Array<string | number> = [fleetId];
+    if (status) params.push(status);
+    if (search) params.push(search, search, search);
+
+    const rows = this.db.prepare(
+      `SELECT id, display_name, runtime, status, last_seen_at
+       FROM agents
+       WHERE ${where}
+       ORDER BY ${sortBy} ${sortOrder}
+       LIMIT ? OFFSET ?`
+    ).all(...params, options.limit, options.offset);
+
+    const totalRow = this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM agents
+       WHERE ${where}`
+    ).get(...params) as { count: number };
+
+    return { items: rows, total: totalRow.count };
+  }
+
+  listPendingApprovals(fleetId: string, options: { search?: string; risk?: string; dateFrom?: string; dateTo?: string; sortBy?: string; sortOrder?: string; limit: number; offset: number }) {
+    const search = this.buildLikeSearch(options.search);
+    const risk = options.risk && options.risk !== "all" ? options.risk : undefined;
+    const dateFrom = this.normalizeDateStart(options.dateFrom);
+    const dateTo = this.normalizeDateEnd(options.dateTo);
+    const sortable: Record<string, string> = {
+      requested_at: "approvals.requested_at",
+      risk_level: "approvals.risk_level",
+      summary: "approvals.summary"
+    };
+    const sortBy = sortable[options.sortBy ?? "requested_at"] ?? "approvals.requested_at";
+    const sortOrder = options.sortOrder === "asc" ? "ASC" : "DESC";
+    const where = [
+      "approvals.fleet_id = ?",
+      "approvals.status = 'pending'",
+      risk ? "approvals.risk_level = ?" : "",
+      dateFrom ? "approvals.requested_at >= ?" : "",
+      dateTo ? "approvals.requested_at <= ?" : "",
+      search
+        ? "(LOWER(approvals.summary) LIKE ? ESCAPE '\\' OR LOWER(agents.display_name) LIKE ? ESCAPE '\\' OR LOWER(approvals.agent_id) LIKE ? ESCAPE '\\' OR LOWER(approvals.action_type) LIKE ? ESCAPE '\\')"
+        : ""
+    ].filter(Boolean).join(" AND ");
+
+    const params: Array<string | number> = [fleetId];
+    if (risk) params.push(risk);
+    if (dateFrom) params.push(dateFrom);
+    if (dateTo) params.push(dateTo);
+    if (search) params.push(search, search, search, search);
+
+    const rows = this.db.prepare(
+      `SELECT approvals.id, approvals.agent_id, approvals.conversation_id, approvals.action_type, approvals.risk_level,
+              approvals.summary, approvals.status, approvals.requested_at, agents.display_name
+       FROM approvals
+       JOIN agents ON agents.id = approvals.agent_id
+       WHERE ${where}
+       ORDER BY ${sortBy} ${sortOrder}
+       LIMIT ? OFFSET ?`
+    ).all(...params, options.limit, options.offset);
+
+    const totalRow = this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM approvals
+       JOIN agents ON agents.id = approvals.agent_id
+       WHERE ${where}`
+    ).get(...params) as { count: number };
+
+    return { items: rows, total: totalRow.count };
+  }
+
+  listEvents(fleetId: string, options: { search?: string; type?: string; dateFrom?: string; dateTo?: string; sortBy?: string; sortOrder?: string; limit: number; offset: number }) {
+    const search = this.buildLikeSearch(options.search);
+    const type = options.type && options.type !== "all" ? `${options.type}.%` : undefined;
+    const dateFrom = this.normalizeDateStart(options.dateFrom);
+    const dateTo = this.normalizeDateEnd(options.dateTo);
+    const sortable: Record<string, string> = {
+      created_at: "created_at",
+      event_type: "event_type",
+      actor_id: "actor_id",
+      resource_kind: "resource_kind"
+    };
+    const sortBy = sortable[options.sortBy ?? "created_at"] ?? "created_at";
+    const sortOrder = options.sortOrder === "asc" ? "ASC" : "DESC";
+    const where = [
+      "fleet_id = ?",
+      type ? "event_type LIKE ?" : "",
+      dateFrom ? "created_at >= ?" : "",
+      dateTo ? "created_at <= ?" : "",
+      search
+        ? "(LOWER(event_type) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(actor_id, '')) LIKE ? ESCAPE '\\' OR LOWER(resource_kind) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(resource_id, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(conversation_id, '')) LIKE ? ESCAPE '\\')"
+        : ""
+    ].filter(Boolean).join(" AND ");
+
+    const params: Array<string | number> = [fleetId];
+    if (type) params.push(type);
+    if (dateFrom) params.push(dateFrom);
+    if (dateTo) params.push(dateTo);
+    if (search) params.push(search, search, search, search, search);
+
+    const rows = this.db.prepare(
+      `SELECT event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, created_at
+       FROM events
+       WHERE ${where}
+       ORDER BY ${sortBy} ${sortOrder}
+       LIMIT ? OFFSET ?`
+    ).all(...params, options.limit, options.offset);
+
+    const totalRow = this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM events
+       WHERE ${where}`
+    ).get(...params) as { count: number };
+
+    return { items: rows, total: totalRow.count };
+  }
+
+  getAgentDetail(fleetId: string, agentId: string) {
+    const agent = this.db.prepare(
+      "SELECT id, display_name, runtime, status, hostname, policy_profile, created_at, last_seen_at FROM agents WHERE fleet_id = ? AND id = ?"
+    ).get(fleetId, agentId) as Record<string, unknown> | undefined;
+
+    if (!agent) {
+      return null;
+    }
+
+    const recentEvents = this.db.prepare(
+      `SELECT event_type, resource_kind, resource_id, conversation_id, payload_json, created_at
+       FROM events
+       WHERE fleet_id = ? AND (
+         (resource_kind = 'agent' AND resource_id = ?)
+         OR actor_id = ?
+       )
+       ORDER BY created_at DESC
+       LIMIT 20`
+    ).all(fleetId, agentId, agentId);
+
+    const controls = this.db.prepare(
+      `SELECT id, action, payload_json, created_at, expires_at
+       FROM control_actions
+       WHERE fleet_id = ? AND target_kind = 'agent' AND target_id = ?
+       ORDER BY created_at DESC
+       LIMIT 10`
+    ).all(fleetId, agentId);
+
+    const recentMessages = this.db.prepare(
+      `SELECT id, conversation_id, correlation_id, message_type, priority, sender_agent_id, recipient_id, created_at, status
+       FROM messages
+       WHERE fleet_id = ? AND (sender_agent_id = ? OR recipient_id = ?)
+       ORDER BY created_at DESC
+       LIMIT 20`
+    ).all(fleetId, agentId, agentId);
+
+    return { agent, recentEvents, controls, recentMessages };
+  }
+
+  getConversation(fleetId: string, conversationId: string, options?: { search?: string; type?: string; dateFrom?: string; dateTo?: string; sortBy?: string; sortOrder?: string; limit?: number; offset?: number }) {
+    const search = this.buildLikeSearch(options?.search);
+    const type = options?.type && options.type !== "all" ? `${options.type}.%` : undefined;
+    const dateFrom = this.normalizeDateStart(options?.dateFrom);
+    const dateTo = this.normalizeDateEnd(options?.dateTo);
+    const limit = options?.limit ?? 100;
+    const offset = options?.offset ?? 0;
+    const sortable: Record<string, string> = {
+      created_at: "created_at",
+      event_type: "event_type",
+      actor_id: "actor_id",
+      resource_kind: "resource_kind"
+    };
+    const sortBy = sortable[options?.sortBy ?? "created_at"] ?? "created_at";
+    const sortOrder = options?.sortOrder === "desc" ? "DESC" : "ASC";
+    const where = [
+      "fleet_id = ?",
+      "conversation_id = ?",
+      type ? "event_type LIKE ?" : "",
+      dateFrom ? "created_at >= ?" : "",
+      dateTo ? "created_at <= ?" : "",
+      search
+        ? "(LOWER(event_type) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(actor_id, '')) LIKE ? ESCAPE '\\' OR LOWER(resource_kind) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(resource_id, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(payload_json, '')) LIKE ? ESCAPE '\\')"
+        : ""
+    ].filter(Boolean).join(" AND ");
+
+    const params: Array<string | number> = [fleetId, conversationId];
+    if (type) params.push(type);
+    if (dateFrom) params.push(dateFrom);
+    if (dateTo) params.push(dateTo);
+    if (search) params.push(search, search, search, search, search);
+
+    const rows = this.db.prepare(
+      `SELECT event_type, actor_kind, actor_id, resource_kind, resource_id, payload_json, created_at
+       FROM events
+       WHERE ${where}
+       ORDER BY ${sortBy} ${sortOrder}
+       LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset);
+
+    const totalRow = this.db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM events
+       WHERE ${where}`
+    ).get(...params) as { count: number };
+
+    return { items: rows, total: totalRow.count };
+  }
+
+  // --- Policy engine ---
+
+  evaluateMessagePolicies(
+    fleetId: string,
+    senderAgentId: string,
+    recipientId: string | null,
+    messageType: string,
+    priority: string
+  ): { allowed: boolean; deniedByPolicy?: string } {
+    const policies = this.db.prepare(
+      `SELECT id, name, scope_kind, scope_id, rule_json
+       FROM policies
+       WHERE fleet_id = ? AND enabled = 1
+         AND (scope_kind = 'fleet' OR (scope_kind = 'agent' AND scope_id IN (?, ?)))
+       ORDER BY CASE WHEN json_extract(rule_json, '$.action') = 'deny' THEN 0 ELSE 1 END`
+    ).all(fleetId, senderAgentId, recipientId ?? "") as Array<Record<string, unknown>>;
+
+    for (const policy of policies) {
+      const rule = JSON.parse(String(policy.rule_json)) as {
+        action: "allow" | "deny";
+        conditions: Record<string, string | string[] | undefined>;
+      };
+
+      if (this.matchesPolicyConditions(rule.conditions, senderAgentId, recipientId, messageType, priority)) {
+        if (rule.action === "deny") {
+          this.recordEvent(fleetId, "message.policy_denied", "system", null, "policy", String(policy.id), null, {
+            policy_name: policy.name, sender: senderAgentId, recipient: recipientId, message_type: messageType
+          });
+          return { allowed: false, deniedByPolicy: String(policy.name) };
+        }
+        return { allowed: true };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  private matchesPolicyConditions(
+    conditions: Record<string, string | string[] | undefined>,
+    senderAgentId: string,
+    recipientId: string | null,
+    messageType: string,
+    priority: string
+  ): boolean {
+    const checks: Array<[string | undefined | string[], string | null]> = [
+      [conditions.sender_agent_id, senderAgentId],
+      [conditions.recipient_agent_id, recipientId],
+      [conditions.message_type, messageType],
+      [conditions.priority, priority]
+    ];
+
+    for (const [condition, value] of checks) {
+      if (condition === undefined) continue;
+      if (value === null) return false;
+      const allowed = Array.isArray(condition) ? condition : [condition];
+      if (!allowed.includes(value)) return false;
+    }
+
+    return true;
+  }
+
+  createPolicy(fleetId: string, input: { name: string; scopeKind: string; scopeId?: string; rule: unknown; enabled: boolean }) {
+    const policyId = id("pol");
+    const now = nowIso();
+    this.db.prepare(
+      "INSERT INTO policies (id, fleet_id, name, scope_kind, scope_id, rule_json, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(policyId, fleetId, input.name, input.scopeKind, input.scopeId ?? null, JSON.stringify(input.rule), input.enabled ? 1 : 0, now);
+    this.recordEvent(fleetId, "policy.created", "operator", null, "policy", policyId, null, { name: input.name });
+    return { policyId };
+  }
+
+  listPolicies(fleetId: string) {
+    return this.db.prepare(
+      "SELECT id, name, scope_kind, scope_id, rule_json, enabled, created_at FROM policies WHERE fleet_id = ? ORDER BY created_at DESC"
+    ).all(fleetId) as Array<Record<string, unknown>>;
+  }
+
+  updatePolicy(policyId: string, fleetId: string, updates: { name?: string; scopeKind?: string; scopeId?: string | null; rule?: unknown; enabled?: boolean }) {
+    const existing = this.db.prepare("SELECT * FROM policies WHERE id = ? AND fleet_id = ?").get(policyId, fleetId);
+    if (!existing) return false;
+
+    const sets: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (updates.name !== undefined) { sets.push("name = ?"); params.push(updates.name); }
+    if (updates.scopeKind !== undefined) { sets.push("scope_kind = ?"); params.push(updates.scopeKind); }
+    if (updates.scopeId !== undefined) { sets.push("scope_id = ?"); params.push(updates.scopeId); }
+    if (updates.rule !== undefined) { sets.push("rule_json = ?"); params.push(JSON.stringify(updates.rule)); }
+    if (updates.enabled !== undefined) { sets.push("enabled = ?"); params.push(updates.enabled ? 1 : 0); }
+
+    if (sets.length === 0) return true;
+    params.push(policyId, fleetId);
+    this.db.prepare(`UPDATE policies SET ${sets.join(", ")} WHERE id = ? AND fleet_id = ?`).run(...params);
+    this.recordEvent(fleetId, "policy.updated", "operator", null, "policy", policyId, null, { updates: Object.keys(updates) });
+    return true;
+  }
+
+  deletePolicy(policyId: string, fleetId: string) {
+    const result = this.db.prepare("DELETE FROM policies WHERE id = ? AND fleet_id = ?").run(policyId, fleetId);
+    if (result.changes > 0) {
+      this.recordEvent(fleetId, "policy.deleted", "operator", null, "policy", policyId, null, {});
+    }
+    return result.changes > 0;
+  }
+
+  // --- Sweep: retry, dead-letter, expiry ---
+
+  sweepRetryDeliveries() {
+    const now = nowIso();
+    const timeoutThreshold = addSeconds(now, -config.deliveryTimeoutSeconds);
+
+    const timedOut = this.db.prepare(
+      `SELECT message_deliveries.id AS delivery_id, message_deliveries.retry_count,
+              messages.id AS message_id, messages.fleet_id, messages.conversation_id,
+              messages.sender_agent_id, messages.message_type, messages.body_json,
+              messages.metadata_json, message_deliveries.recipient_agent_id
+       FROM message_deliveries
+       JOIN messages ON messages.id = message_deliveries.message_id
+       WHERE message_deliveries.status = 'delivered'
+         AND message_deliveries.delivered_at < ?
+         AND messages.expires_at > ?`
+    ).all(timeoutThreshold, now) as Array<Record<string, unknown>>;
+
+    if (timedOut.length === 0) return { retried: 0, deadLettered: 0 };
+
+    let retried = 0;
+    let deadLettered = 0;
+
+    const tx = this.db.transaction(() => {
+      for (const row of timedOut) {
+        const retryCount = (row.retry_count as number) + 1;
+        if (retryCount > config.maxRetries) {
+          this.moveToDeadLetter(row);
+          deadLettered++;
+        } else {
+          const backoffIndex = Math.min(retryCount - 1, config.retryBackoffSeconds.length - 1);
+          const nextRetryAt = addSeconds(now, config.retryBackoffSeconds[backoffIndex]);
+          this.db.prepare(
+            `UPDATE message_deliveries
+             SET status = 'queued', delivered_at = NULL, retry_count = ?, next_retry_at = ?, last_failure_reason = 'timeout'
+             WHERE id = ? AND status = 'delivered'`
+          ).run(retryCount, nextRetryAt, row.delivery_id);
+
+          this.recordEvent(
+            String(row.fleet_id), "message.retry_requeued", "system", null,
+            "message", String(row.message_id), String(row.conversation_id),
+            { delivery_id: row.delivery_id, retry_count: retryCount, next_retry_at: nextRetryAt }
+          );
+          retried++;
+        }
+      }
+    });
+    tx();
+    return { retried, deadLettered };
+  }
+
+  private moveToDeadLetter(row: Record<string, unknown>) {
+    const now = nowIso();
+    const dlId = id("dl");
+
+    const result = this.db.prepare(
+      "UPDATE message_deliveries SET status = 'dead_lettered' WHERE id = ? AND status = 'delivered'"
+    ).run(row.delivery_id);
+
+    if (result.changes === 0) return;
+
+    this.db.prepare(
+      `INSERT INTO dead_letters (id, fleet_id, original_message_id, original_delivery_id, recipient_agent_id, sender_agent_id, conversation_id, message_type, body_json, metadata_json, retry_count, failure_reason, dead_lettered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      dlId, row.fleet_id, row.message_id, row.delivery_id,
+      row.recipient_agent_id, row.sender_agent_id, row.conversation_id,
+      row.message_type, row.body_json, row.metadata_json ?? null,
+      row.retry_count, "max_retries_exceeded", now
+    );
+
+    this.db.prepare("UPDATE messages SET status = 'dead_lettered' WHERE id = ? AND status NOT IN ('acked')").run(row.message_id);
+
+    this.recordEvent(
+      String(row.fleet_id), "message.dead_lettered", "system", null,
+      "message", String(row.message_id), String(row.conversation_id),
+      { delivery_id: row.delivery_id, retry_count: row.retry_count, dead_letter_id: dlId }
+    );
+  }
+
+  // --- Rate limiting ---
+
+  checkAndIncrementRateLimit(agentId: string, fleetId: string): { allowed: boolean; current: number; limit: number } {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const windowStart = new Date(Math.floor(nowSec / config.rateLimitWindowSeconds) * config.rateLimitWindowSeconds * 1000).toISOString();
+    const limit = config.rateLimitMaxMessages;
+
+    let current = 0;
+    let allowed = true;
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT OR IGNORE INTO rate_limit_counters (agent_id, window_start, message_count) VALUES (?, ?, 0)"
+      ).run(agentId, windowStart);
+
+      const row = this.db.prepare(
+        "SELECT message_count FROM rate_limit_counters WHERE agent_id = ? AND window_start = ?"
+      ).get(agentId, windowStart) as { message_count: number };
+
+      if (row.message_count >= limit) {
+        current = row.message_count;
+        allowed = false;
+        this.db.prepare(
+          "INSERT INTO rate_limit_violations (id, fleet_id, agent_id, window_start, message_count, limit_value, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        ).run(id("rlv"), fleetId, agentId, windowStart, current, limit, nowIso());
+
+        this.recordEvent(fleetId, "agent.rate_limit_exceeded", "agent", agentId, "agent", agentId, null, {
+          window_start: windowStart, message_count: current, limit
+        });
+      } else {
+        this.db.prepare(
+          "UPDATE rate_limit_counters SET message_count = message_count + 1 WHERE agent_id = ? AND window_start = ?"
+        ).run(agentId, windowStart);
+        current = row.message_count + 1;
+      }
+    });
+    tx();
+
+    if (!allowed) {
+      this.checkRateLimitQuarantine(agentId, fleetId);
+    }
+
+    return { allowed, current, limit };
+  }
+
+  sweepStaleRateLimitCounters() {
+    const cutoff = new Date(Date.now() - config.rateLimitWindowSeconds * 2 * 1000).toISOString();
+    this.db.prepare("DELETE FROM rate_limit_counters WHERE window_start < ?").run(cutoff);
+  }
+
+  // --- Quarantine automation ---
+
+  sweepHeartbeatLiveness(): number {
+    const now = Date.now();
+    const agents = this.db.prepare(
+      "SELECT id, fleet_id, last_seen_at FROM agents WHERE status IN ('healthy', 'degraded') AND last_seen_at IS NOT NULL"
+    ).all() as Array<Record<string, unknown>>;
+
+    let quarantined = 0;
+    const tx = this.db.transaction(() => {
+      for (const agent of agents) {
+        const lastSeen = new Date(String(agent.last_seen_at)).getTime();
+        const missed = Math.floor((now - lastSeen) / (config.heartbeatTimeoutSeconds * 1000));
+
+        this.db.prepare("UPDATE agents SET consecutive_missed_heartbeats = ? WHERE id = ?").run(missed, agent.id);
+
+        if (missed >= config.heartbeatLivenessThreshold) {
+          this.db.prepare(
+            "UPDATE agents SET status = 'quarantined', auto_quarantined_at = ?, quarantine_reason = 'heartbeat_timeout', consecutive_missed_heartbeats = ? WHERE id = ?"
+          ).run(nowIso(), missed, agent.id);
+
+          this.db.prepare(
+            "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+          ).run(id("ctl"), agent.fleet_id, "agent", agent.id, "quarantine", JSON.stringify({ reason: "heartbeat_timeout", missed_count: missed }), "system", nowIso());
+
+          this.recordEvent(
+            String(agent.fleet_id), "agent.auto_quarantined", "system", null,
+            "agent", String(agent.id), null,
+            { reason: "heartbeat_timeout", missed_count: missed }
+          );
+          quarantined++;
+        }
+      }
+    });
+    tx();
+    return quarantined;
+  }
+
+  checkRateLimitQuarantine(agentId: string, fleetId: string) {
+    const cutoff = new Date(Date.now() - config.rateLimitViolationWindowSeconds * 1000).toISOString();
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS count FROM rate_limit_violations WHERE agent_id = ? AND created_at > ?"
+    ).get(agentId, cutoff) as { count: number };
+
+    if (row.count >= config.rateLimitViolationThreshold) {
+      const now = nowIso();
+      this.db.prepare(
+        "UPDATE agents SET status = 'quarantined', auto_quarantined_at = ?, quarantine_reason = 'rate_limit_abuse' WHERE id = ? AND status NOT IN ('quarantined', 'paused')"
+      ).run(now, agentId);
+
+      this.db.prepare(
+        "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(id("ctl"), fleetId, "agent", agentId, "quarantine", JSON.stringify({ reason: "rate_limit_abuse", violation_count: row.count }), "system", now);
+
+      this.recordEvent(fleetId, "agent.auto_quarantined", "system", null, "agent", agentId, null, {
+        reason: "rate_limit_abuse", violation_count: row.count
+      });
+    }
+  }
+
+  sweepExpiredMessages() {
+    const now = nowIso();
+
+    const expired = this.db.prepare(
+      `SELECT message_deliveries.id AS delivery_id, messages.id AS message_id,
+              messages.fleet_id, messages.conversation_id
+       FROM message_deliveries
+       JOIN messages ON messages.id = message_deliveries.message_id
+       WHERE message_deliveries.status IN ('queued', 'delivered')
+         AND messages.expires_at <= ?`
+    ).all(now) as Array<Record<string, unknown>>;
+
+    if (expired.length === 0) return 0;
+
+    const tx = this.db.transaction(() => {
+      for (const row of expired) {
+        this.db.prepare("UPDATE message_deliveries SET status = 'expired' WHERE id = ?").run(row.delivery_id);
+        this.db.prepare("UPDATE messages SET status = 'expired' WHERE id = ? AND status NOT IN ('acked', 'dead_lettered')").run(row.message_id);
+        this.recordEvent(
+          String(row.fleet_id), "message.expired", "system", null,
+          "message", String(row.message_id), String(row.conversation_id), {}
+        );
+      }
+    });
+    tx();
+    return expired.length;
+  }
+
+  recordEvent(
+    fleetId: string,
+    eventType: string,
+    actorKind: string,
+    actorId: string | null,
+    resourceKind: string,
+    resourceId: string | null,
+    conversationId: string | null,
+    payload: JsonValue
+  ) {
+    this.db.prepare(
+      "INSERT INTO events (id, fleet_id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(id("evt"), fleetId, eventType, actorKind, actorId, resourceKind, resourceId, conversationId, JSON.stringify(payload), nowIso());
+  }
+}
+
+export const db = new EkhoDb();
