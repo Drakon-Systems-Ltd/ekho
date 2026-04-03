@@ -9,7 +9,7 @@ import { startSweepJob } from "./sweep";
 
 async function buildServer() {
   const app = fastify({ logger: true });
-  const uiRoot = path.join(process.cwd(), "ui-dist");
+  const uiRoot = path.join(__dirname, "..", "ui-dist");
 
   await app.register(fastifyStatic, {
     root: uiRoot,

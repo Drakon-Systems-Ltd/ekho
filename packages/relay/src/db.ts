@@ -23,7 +23,7 @@ export class EkhoDb {
     const applied = new Set(
       (this.db.prepare("SELECT version FROM schema_migrations").all() as Array<{ version: number }>).map((r) => r.version)
     );
-    const migrationsDir = path.join(process.cwd(), "migrations");
+    const migrationsDir = path.join(__dirname, "..", "migrations");
     if (!fs.existsSync(migrationsDir)) return;
     const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
     for (const file of files) {

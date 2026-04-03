@@ -16,7 +16,7 @@ export const config = {
   host: process.env.EKHO_HOST ?? "127.0.0.1",
   port: resolveNumber(process.env.EKHO_PORT, 4000),
   baseUrl: process.env.EKHO_BASE_URL ?? "http://127.0.0.1:4000",
-  dbPath: path.resolve(process.cwd(), process.env.EKHO_DB_PATH ?? "./data/ekho.sqlite"),
+  dbPath: path.resolve(process.env.EKHO_DB_PATH ?? path.join(__dirname, "..", "data", "ekho.sqlite")),
   operatorSessionSecret: process.env.EKHO_OPERATOR_SESSION_SECRET ?? "change-me",
   timestampSkewSeconds: resolveNumber(process.env.EKHO_TIMESTAMP_SKEW_SECONDS, 300),
   pollIntervalSeconds: resolveNumber(process.env.EKHO_POLL_INTERVAL_SECONDS, 5),

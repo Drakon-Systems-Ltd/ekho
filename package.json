@@ -1,40 +1,20 @@
 {
   "name": "ekho",
-  "version": "0.1.0",
-  "description": "Private communication and control layer for distributed AI agents.",
-  "main": "dist/server.js",
+  "private": true,
+  "workspaces": ["packages/*"],
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
-    "setup": "tsx src/setup.ts",
-    "doctor": "tsx src/setup.ts --doctor",
-    "typecheck": "tsc --noEmit",
-    "agent:demo": "tsx src/demo-agent.ts",
-    "ui:dev": "vite",
-    "ui:build": "vite build --config vite.config.mjs",
-    "build": "npm run ui:build && npm run typecheck"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "dependencies": {
-    "@fastify/static": "^9.0.0",
-    "better-sqlite3": "^12.8.0",
-    "dotenv": "^17.4.0",
-    "fastify": "^5.8.4",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "zod": "^4.3.6"
+    "dev": "npm run dev -w @ekho/relay",
+    "start": "npm run start -w @ekho/relay",
+    "setup": "npm run setup -w @ekho/relay",
+    "build": "npm run build -w @ekho/sdk && npm run build -w @ekho/relay",
+    "typecheck": "npm run typecheck -w @ekho/sdk && npm run typecheck -w @ekho/relay",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.0",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
-    "vite": "^8.0.3"
+    "vitest": "^3.2.1"
   }
 }
