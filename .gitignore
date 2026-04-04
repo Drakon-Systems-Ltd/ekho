@@ -3,3 +3,5 @@ dist
 data
 .env
 ui-dist
+*.license
+license-private-key.pem
