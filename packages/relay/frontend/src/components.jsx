@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 
 export function toneForValue(value) {
   const normalized = String(value || "").toLowerCase();
@@ -55,9 +55,9 @@ export function Panel({ title, meta, children }) {
   );
 }
 
-export function KpiCard({ label, value }) {
+export function KpiCard({ label, value, tone }) {
   return (
-    <article className="kpi-card">
+    <article className={`kpi-card${tone ? ` kpi-card--${tone}` : ""}`}>
       <div className="kpi-card__label">{label}</div>
       <div className="kpi-card__value">{value}</div>
     </article>
@@ -208,4 +208,90 @@ export function Timeline({ conversationId, events, onRefresh }) {
       </div>
     </>
   );
+}
+
+export function Modal({ title, children, onClose, actions = [] }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal__header">
+          <h2>{title}</h2>
+          <button className="button button--ghost modal__close" onClick={onClose}>&times;</button>
+        </div>
+        <div className="modal__body">{children}</div>
+        {actions.length > 0 && (
+          <div className="modal__footer">
+            {actions.map((action, i) => (
+              <button key={i} className={`button ${action.variant ? `button--${action.variant}` : ""}`} onClick={action.onClick} disabled={action.disabled}>
+                {action.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ConfirmDialog({ title, message, onConfirm, onCancel, confirmLabel = "Confirm", confirmVariant = "danger" }) {
+  return (
+    <Modal title={title} onClose={onCancel} actions={[
+      { label: "Cancel", onClick: onCancel, variant: "ghost" },
+      { label: confirmLabel, onClick: onConfirm, variant: confirmVariant },
+    ]}>
+      <p style={{ margin: 0, lineHeight: 1.6 }}>{message}</p>
+    </Modal>
+  );
+}
+
+export function PromptDialog({ title, message, defaultValue = "", onConfirm, onCancel }) {
+  const [value, setValue] = useState(defaultValue);
+  return (
+    <Modal title={title} onClose={onCancel} actions={[
+      { label: "Cancel", onClick: onCancel, variant: "ghost" },
+      { label: "Confirm", onClick: () => onConfirm(value), disabled: !value.trim() },
+    ]}>
+      <p style={{ margin: "0 0 12px", lineHeight: 1.6 }}>{message}</p>
+      <input value={value} onChange={(e) => setValue(e.target.value)} autoFocus />
+    </Modal>
+  );
+}
+
+export function LoadingSpinner() {
+  return <div className="loading-spinner" />;
+}
+
+export function Skeleton({ width = "100%", height = "16px", count = 1 }) {
+  return (
+    <>
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className="skeleton" style={{ width, height }} />
+      ))}
+    </>
+  );
+}
+
+export class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="console-shell">
+          <Panel title="Something went wrong">
+            <StatusMessage tone="error">{this.state.error?.message || "Unknown error"}</StatusMessage>
+            <button className="button" style={{ marginTop: 16 }} onClick={() => this.setState({ hasError: false, error: null })}>
+              Try Again
+            </button>
+          </Panel>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }

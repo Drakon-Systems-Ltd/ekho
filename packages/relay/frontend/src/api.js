@@ -91,3 +91,17 @@ export const resolveApproval = (token, approvalId, decision) =>
     token,
     method: "POST",
   });
+export const getPolicies = (token) =>
+  request("/v1/operator/policies", { token });
+export const createPolicy = (token, body) =>
+  request("/v1/operator/policies", { token, method: "POST", body });
+export const updatePolicy = (token, policyId, body) =>
+  request(`/v1/operator/policies/${encodeURIComponent(policyId)}`, { token, method: "PUT", body });
+export const deletePolicy = (token, policyId) =>
+  request(`/v1/operator/policies/${encodeURIComponent(policyId)}`, { token, method: "DELETE" });
+export const getDeadLetters = (token, params = {}) =>
+  request(`/v1/operator/dead-letters?${new URLSearchParams(params).toString()}`, { token });
+export const getDeadLetterDetail = (token, id) =>
+  request(`/v1/operator/dead-letters/${encodeURIComponent(id)}`, { token });
+export const getAgentRateLimits = (token, agentId) =>
+  request(`/v1/operator/agents/${encodeURIComponent(agentId)}/rate-limits`, { token });
