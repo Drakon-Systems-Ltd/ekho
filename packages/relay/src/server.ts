@@ -6,12 +6,28 @@ import { db } from "./db";
 import { registerAgentRoutes } from "./routes-agent";
 import { registerOperatorRoutes } from "./routes-operator";
 import { startSweepJob } from "./sweep";
-import { loadLicense } from "./license";
+import { loadLicense, registerExtension } from "./license";
 
 async function buildServer() {
   const app = fastify({ logger: true });
   const license = loadLicense();
   app.log.info({ tier: license.tier, org: license.org }, "ekho license loaded");
+
+  // Load ShieldCortex bridge if configured
+  if (config.shieldcortexPath) {
+    try {
+      const { createShieldCortexExtension } = await import("@ekho/shieldcortex-bridge");
+      registerExtension(createShieldCortexExtension({
+        cortexBinaryPath: config.shieldcortexPath,
+        defenceProfile: config.shieldcortexProfile,
+        enableMemoryExtraction: true,
+        enableIronDome: true
+      }));
+      app.log.info({ profile: config.shieldcortexProfile }, "shieldcortex bridge loaded");
+    } catch (err) {
+      app.log.warn({ err }, "failed to load shieldcortex bridge");
+    }
+  }
 
   const uiRoot = path.join(__dirname, "..", "ui-dist");
 

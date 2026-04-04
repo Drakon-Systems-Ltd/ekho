@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { config } from "./config";
+
 
 export interface EkhoLicense {
   tier: "oss" | "pro";
@@ -17,6 +17,9 @@ export interface BeforeMessageContext {
   senderAgentId: string;
   recipientId: string | null;
   messageType: string;
+  priority: string;
+  body: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface FleetCreateContext {

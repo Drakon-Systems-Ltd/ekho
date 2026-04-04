@@ -1,0 +1,13 @@
+{
+  "name": "@ekho/shieldcortex-bridge",
+  "version": "0.1.0",
+  "description": "Ekho relay extension that connects ShieldCortex defence pipeline and Iron Dome for message scanning.",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  }
+}

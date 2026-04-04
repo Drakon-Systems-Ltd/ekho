@@ -3,6 +3,7 @@ import { db } from "./db";
 import { actionResultSchema, ackSchema, enrollSchema, heartbeatSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { config } from "./config";
+import { getExtensions } from "./license";
 
 export async function registerAgentRoutes(app: FastifyInstance) {
   app.post("/v1/enroll", async (request, reply) => {
@@ -59,6 +60,24 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     );
     if (!policyResult.allowed) {
       return reply.code(403).send({ error: "blocked by policy", policy: policyResult.deniedByPolicy });
+    }
+
+    for (const ext of getExtensions()) {
+      if (ext.onBeforeMessage) {
+        try {
+          await ext.onBeforeMessage({
+            fleetId: request.agent.fleetId,
+            senderAgentId: request.agent.id,
+            recipientId: parsed.data.recipient.id ?? null,
+            messageType: parsed.data.message_type,
+            priority: parsed.data.priority,
+            body: parsed.data.body as Record<string, unknown>,
+            metadata: parsed.data.metadata as Record<string, unknown> | undefined
+          });
+        } catch (err) {
+          return reply.code(403).send({ error: `blocked by extension ${ext.name}: ${err instanceof Error ? err.message : String(err)}` });
+        }
+      }
     }
 
     const result = db.createMessage({

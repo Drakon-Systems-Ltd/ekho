@@ -40,5 +40,9 @@ export const config = {
 
   // Licensing
   licenseKey: process.env.EKHO_LICENSE_KEY as string | undefined,
-  licensePath: process.env.EKHO_LICENSE_PATH as string | undefined
+  licensePath: process.env.EKHO_LICENSE_PATH as string | undefined,
+
+  // ShieldCortex integration
+  shieldcortexPath: process.env.EKHO_SHIELDCORTEX_PATH as string | undefined,
+  shieldcortexProfile: (process.env.EKHO_SHIELDCORTEX_PROFILE ?? "balanced") as "strict" | "balanced" | "permissive"
 } as const;

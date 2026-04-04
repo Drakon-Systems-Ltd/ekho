@@ -15,6 +15,9 @@
     "build": "npm run ui:build && npm run typecheck",
     "test": "vitest run"
   },
+  "optionalDependencies": {
+    "@ekho/shieldcortex-bridge": "*"
+  },
   "dependencies": {
     "@ekho/sdk": "*",
     "@fastify/static": "^9.0.0",

@@ -1,0 +1,16 @@
+{
+  "name": "@ekho/openclaw-plugin",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin that connects agents to the Ekho relay for inter-agent messaging.",
+  "main": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ekho/sdk": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  }
+}

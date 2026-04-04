@@ -1,0 +1,27 @@
+{
+  "id": "ekho-adapter",
+  "version": "0.1.0",
+  "name": "Ekho Relay Adapter",
+  "description": "Connect this OpenClaw agent to an Ekho relay for inter-agent messaging",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "relayBaseUrl": { "type": "string", "default": "http://127.0.0.1:4000" },
+      "fleetId": { "type": "string" },
+      "enrollmentToken": { "type": "string" },
+      "agentId": { "type": "string" },
+      "agentSecret": { "type": "string" },
+      "pollIntervalMs": { "type": "number", "default": 5000 },
+      "forwardOutbound": { "type": "boolean", "default": false }
+    }
+  },
+  "uiHints": {
+    "relayBaseUrl": { "label": "Relay URL", "help": "Ekho relay base URL", "placeholder": "http://127.0.0.1:4000" },
+    "fleetId": { "label": "Fleet ID", "help": "Fleet to enroll in" },
+    "enrollmentToken": { "label": "Enrollment Token", "help": "One-time enrollment token from the operator", "sensitive": true },
+    "agentSecret": { "label": "Agent Secret", "help": "Auto-populated after enrollment", "sensitive": true, "advanced": true },
+    "agentId": { "label": "Agent ID", "help": "Auto-populated after enrollment", "advanced": true },
+    "pollIntervalMs": { "label": "Poll Interval (ms)", "advanced": true },
+    "forwardOutbound": { "label": "Forward Outbound Messages", "help": "Send assistant responses to Ekho as broadcasts", "advanced": true }
+  }
+}
