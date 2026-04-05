@@ -6,14 +6,24 @@
   "author": "Drakon Systems <hello@drakonsystems.com> (https://drakonsystems.com)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/DrakonSystems/ekho.git",
+    "url": "https://github.com/Drakon-Systems-Ltd/ekho.git",
     "directory": "packages/sdk"
   },
   "homepage": "https://drakonsystems.com/products/ekho",
-  "keywords": ["ai", "agents", "messaging", "relay", "sdk", "ekho", "tailscale"],
+  "keywords": [
+    "ai",
+    "agents",
+    "messaging",
+    "relay",
+    "sdk",
+    "ekho",
+    "tailscale"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
