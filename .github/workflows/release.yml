@@ -22,9 +22,9 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - run: npm ci
+      - run: npm run build -w @ekho/sdk
       - run: npm run typecheck
       - run: npx vitest run
-      - run: npm run build -w @ekho/sdk
 
       # Publish SDK to npm (if NPM_TOKEN is set)
       - name: Publish @ekho/sdk to npm
