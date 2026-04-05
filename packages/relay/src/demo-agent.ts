@@ -1,4 +1,4 @@
-import { EkhoAgentAdapter } from "@ekho/sdk";
+import { EkhoAgentAdapter, type InboxMessage, type ControlMessage } from "@ekho/sdk";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -17,7 +17,7 @@ const adapter = new EkhoAgentAdapter(
     pollIntervalSeconds: Number(process.env.EKHO_AGENT_POLL_INTERVAL ?? "5")
   },
   {
-    async onMessage(message, currentAdapter) {
+    async onMessage(message: InboxMessage, currentAdapter: EkhoAgentAdapter) {
       console.log(`[demo-agent] received ${message.message_type} from ${message.sender_agent_id}:`, message.body);
 
       if (message.message_type === "handoff") {
@@ -46,16 +46,16 @@ const adapter = new EkhoAgentAdapter(
         }
       }
     },
-    async onControl(control) {
+    async onControl(control: ControlMessage) {
       console.log(`[demo-agent] control ${control.action}: ${control.reason}`);
     },
-    async onApprovalPending(approvalId) {
+    async onApprovalPending(approvalId: string) {
       console.log(`[demo-agent] waiting for approval ${approvalId}`);
     }
   }
 );
 
-adapter.start().catch((error) => {
+adapter.start().catch((error: Error) => {
   console.error(error);
   process.exit(1);
 });
