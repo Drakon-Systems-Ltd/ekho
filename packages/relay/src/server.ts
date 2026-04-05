@@ -61,14 +61,17 @@ async function buildServer() {
     return reply.code(404).send({ message: `Route ${request.method}:${requestedPath} not found` });
   });
 
-  return app;
+  // Register sweep job shutdown hook before listening
+  let sweep: ReturnType<typeof startSweepJob> | null = null;
+  app.addHook("onClose", () => { if (sweep) sweep.stop(); });
+
+  return { app, startSweep: () => { sweep = startSweepJob(db); } };
 }
 
 buildServer()
-  .then(async (app) => {
+  .then(async ({ app, startSweep }) => {
     await app.listen({ host: config.host, port: config.port });
-    const sweep = startSweepJob(db);
-    app.addHook("onClose", () => sweep.stop());
+    startSweep();
   })
   .catch((error) => {
     console.error(error);
