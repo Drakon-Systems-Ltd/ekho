@@ -65,8 +65,8 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState("Not synced");
   const [formState, setFormState] = useState({
     fleet_name: "default",
-    email: "admin@example.com",
-    password: "changeme123",
+    email: "",
+    password: "",
   });
   const { query: agentsQuery, updateQuery: updateAgentsQuery } = useQueryState({
     text: "",
