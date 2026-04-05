@@ -2,13 +2,26 @@
   "name": "@ekho/sdk",
   "version": "0.1.0",
   "description": "Agent SDK for Ekho — the private communication layer for distributed AI agents.",
+  "license": "MIT",
+  "author": "Drakon Systems <hello@drakonsystems.com> (https://drakonsystems.com)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DrakonSystems/ekho.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://drakonsystems.com/products/ekho",
+  "keywords": ["ai", "agents", "messaging", "relay", "sdk", "ekho", "tailscale"],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": ["dist"],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@types/node": "^25.5.0"

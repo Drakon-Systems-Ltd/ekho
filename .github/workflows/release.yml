@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run
+      - run: npm run build -w @ekho/sdk
+
+      # Publish SDK to npm (if NPM_TOKEN is set)
+      - name: Publish @ekho/sdk to npm
+        run: npm publish -w @ekho/sdk --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        continue-on-error: true
+
+      # Create GitHub Release
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Ekho v${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## Ekho v${{ steps.version.outputs.VERSION }}
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+            ### Quick Start
+            ```bash
+            # npm
+            npm install @ekho/sdk
+
+            # Docker
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+
+            # From source
+            git clone https://github.com/${{ github.repository }}.git
+            cd ekho && npm install && npm run build && npm start
+            ```
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
+          generate_release_notes: true
