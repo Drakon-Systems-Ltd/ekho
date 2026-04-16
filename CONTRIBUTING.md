@@ -5,7 +5,7 @@ Thanks for your interest in contributing to Ekho. This document covers the essen
 ## Getting Started
 
 ```bash
-git clone https://github.com/DrakonSystems/ekho.git
+git clone https://github.com/Drakon-Systems-Ltd/ekho.git
 cd ekho
 npm install
 npm run build -w @ekho/sdk
@@ -61,7 +61,7 @@ Relay tests use Fastify's `inject()` for HTTP testing without starting a real se
 
 ## Reporting Issues
 
-Open an issue at [github.com/DrakonSystems/ekho/issues](https://github.com/DrakonSystems/ekho/issues).
+Open an issue at [github.com/DrakonSystems/ekho/issues](https://github.com/Drakon-Systems-Ltd/ekho/issues).
 
 ## License
 

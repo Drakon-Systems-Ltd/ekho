@@ -17,12 +17,13 @@ Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and a
 - **Operator console** — React dashboard for fleet monitoring, approvals, policies, and intervention
 - **Approval workflows** — gate high-risk agent actions behind operator review
 - **Extension hooks** — plugin system for custom message scanning, memory extraction, security gates
+- **A2A protocol native** — [A2A v1.0](https://a2a-protocol.org/latest/specification/) endpoints alongside the proprietary API, so any A2A client can discover and message Ekho agents out of the box ([docs](./docs/a2a.md))
 - **Open-core licensing** — free OSS relay with Pro tier for multi-fleet, advanced policies, analytics
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/DrakonSystems/ekho.git
+git clone https://github.com/Drakon-Systems-Ltd/ekho.git
 cd ekho
 npm install
 npm run build
