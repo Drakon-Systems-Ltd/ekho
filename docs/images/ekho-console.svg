@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="Ekho operator console preview: dark dashboard with fleet KPIs, agent table, and event feed.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0f1a"/>
+      <stop offset="1" stop-color="#0c1222"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Browser chrome frame -->
+  <rect width="960" height="540" rx="12" fill="url(#bg)" stroke="rgba(255,255,255,0.08)"/>
+
+  <!-- Titlebar -->
+  <rect x="0" y="0" width="960" height="36" fill="#0a0f1a" stroke="rgba(255,255,255,0.06)"/>
+  <circle cx="20" cy="18" r="5" fill="#ff5f57"/>
+  <circle cx="40" cy="18" r="5" fill="#febc2e"/>
+  <circle cx="60" cy="18" r="5" fill="#28c840"/>
+  <rect x="380" y="10" width="200" height="18" rx="6" fill="rgba(255,255,255,0.04)"/>
+  <text x="480" y="22" text-anchor="middle" fill="rgba(148,163,184,0.6)" font-family="monospace" font-size="10">relay.internal:4000</text>
+
+  <!-- Top bar -->
+  <g transform="translate(24,56)">
+    <rect x="0" y="0" width="24" height="24" rx="5" fill="rgba(45,212,191,0.2)"/>
+    <path d="M12 6 L4 10 L12 14 L20 10 Z M4 14 L12 18 L20 14 M4 18 L12 22 L20 18" stroke="#2dd4bf" stroke-width="1.5" fill="none" transform="translate(0,-2)"/>
+    <text x="36" y="17" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="14" font-weight="600">production-fleet</text>
+    <rect x="160" y="4" width="60" height="18" rx="9" fill="rgba(52,211,153,0.12)"/>
+    <text x="190" y="16" text-anchor="middle" fill="#34d399" font-family="system-ui,sans-serif" font-size="10" font-weight="500">healthy</text>
+    <rect x="720" y="2" width="180" height="22" rx="6" fill="rgba(255,255,255,0.04)"/>
+    <text x="810" y="16" text-anchor="middle" fill="rgba(148,163,184,0.7)" font-family="system-ui,sans-serif" font-size="10">Last sweep: 4s ago</text>
+  </g>
+
+  <!-- KPI row -->
+  <g transform="translate(24,104)" font-family="system-ui,sans-serif">
+    <g>
+      <rect x="0" y="0" width="125" height="70" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">AGENTS</text>
+      <text x="12" y="42" fill="#e2e8f0" font-size="22" font-weight="700">12</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">active</text>
+    </g>
+    <g transform="translate(132,0)">
+      <rect width="125" height="70" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">MESSAGES</text>
+      <text x="12" y="42" fill="#e2e8f0" font-size="22" font-weight="700">4,892</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">total</text>
+    </g>
+    <g transform="translate(264,0)">
+      <rect width="125" height="70" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">DELIVERED</text>
+      <text x="12" y="42" fill="#2dd4bf" font-size="22" font-weight="700">4,847</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">99.1%</text>
+    </g>
+    <g transform="translate(396,0)">
+      <rect width="125" height="70" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">QUEUED</text>
+      <text x="12" y="42" fill="#e2e8f0" font-size="22" font-weight="700">23</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">pending</text>
+    </g>
+    <g transform="translate(528,0)">
+      <rect width="125" height="70" rx="8" fill="rgba(251,191,36,0.05)" stroke="rgba(251,191,36,0.18)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">QUARANTINED</text>
+      <text x="12" y="42" fill="#fbbf24" font-size="22" font-weight="700">1</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">auto</text>
+    </g>
+    <g transform="translate(660,0)">
+      <rect width="125" height="70" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">DEAD LETTERS</text>
+      <text x="12" y="42" fill="#e2e8f0" font-size="22" font-weight="700">3</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">archived</text>
+    </g>
+    <g transform="translate(792,0)">
+      <rect width="120" height="70" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+      <text x="12" y="18" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">RATE VIOL.</text>
+      <text x="12" y="42" fill="#e2e8f0" font-size="22" font-weight="700">17</text>
+      <text x="12" y="58" fill="rgba(148,163,184,0.5)" font-size="9">24h</text>
+    </g>
+  </g>
+
+  <!-- Agent table -->
+  <g transform="translate(24,200)" font-family="system-ui,sans-serif">
+    <rect width="912" height="196" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+    <!-- Header -->
+    <rect width="912" height="32" rx="8" fill="rgba(255,255,255,0.02)"/>
+    <g fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">
+      <text x="16" y="20">AGENT</text>
+      <text x="240" y="20">STATUS</text>
+      <text x="400" y="20">MESSAGES</text>
+      <text x="560" y="20">LAST SEEN</text>
+      <text x="720" y="20">RUNTIME</text>
+    </g>
+    <!-- Rows -->
+    <g font-size="11">
+      <g transform="translate(0,32)">
+        <rect width="912" height="40" fill="transparent"/>
+        <line x1="0" y1="40" x2="912" y2="40" stroke="rgba(255,255,255,0.04)"/>
+        <text x="16" y="24" fill="#2dd4bf" font-family="monospace" font-size="10">agent_planner</text>
+        <rect x="240" y="14" width="54" height="18" rx="9" fill="rgba(52,211,153,0.12)"/>
+        <text x="267" y="26" text-anchor="middle" fill="#34d399" font-size="10">active</text>
+        <text x="400" y="24" fill="#94a3b8">1,243</text>
+        <text x="560" y="24" fill="#94a3b8">2s ago</text>
+        <text x="720" y="24" fill="#94a3b8">openclaw</text>
+      </g>
+      <g transform="translate(0,72)">
+        <rect width="912" height="40" fill="transparent"/>
+        <line x1="0" y1="40" x2="912" y2="40" stroke="rgba(255,255,255,0.04)"/>
+        <text x="16" y="24" fill="#2dd4bf" font-family="monospace" font-size="10">agent_executor</text>
+        <rect x="240" y="14" width="54" height="18" rx="9" fill="rgba(52,211,153,0.12)"/>
+        <text x="267" y="26" text-anchor="middle" fill="#34d399" font-size="10">active</text>
+        <text x="400" y="24" fill="#94a3b8">892</text>
+        <text x="560" y="24" fill="#94a3b8">5s ago</text>
+        <text x="720" y="24" fill="#94a3b8">custom</text>
+      </g>
+      <g transform="translate(0,112)">
+        <rect width="912" height="40" fill="transparent"/>
+        <line x1="0" y1="40" x2="912" y2="40" stroke="rgba(255,255,255,0.04)"/>
+        <text x="16" y="24" fill="#2dd4bf" font-family="monospace" font-size="10">agent_monitor</text>
+        <rect x="240" y="14" width="54" height="18" rx="9" fill="rgba(52,211,153,0.12)"/>
+        <text x="267" y="26" text-anchor="middle" fill="#34d399" font-size="10">active</text>
+        <text x="400" y="24" fill="#94a3b8">2,104</text>
+        <text x="560" y="24" fill="#94a3b8">1s ago</text>
+        <text x="720" y="24" fill="#94a3b8">openclaw</text>
+      </g>
+      <g transform="translate(0,152)">
+        <rect width="912" height="40" fill="transparent"/>
+        <text x="16" y="24" fill="#2dd4bf" font-family="monospace" font-size="10">agent_scanner</text>
+        <rect x="240" y="14" width="80" height="18" rx="9" fill="rgba(251,191,36,0.12)"/>
+        <text x="280" y="26" text-anchor="middle" fill="#fbbf24" font-size="10">quarantined</text>
+        <text x="400" y="24" fill="#94a3b8">653</text>
+        <text x="560" y="24" fill="#94a3b8">4m ago</text>
+        <text x="720" y="24" fill="#94a3b8">custom</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- Event feed -->
+  <g transform="translate(24,420)" font-family="system-ui,sans-serif">
+    <rect width="912" height="92" rx="8" fill="rgba(255,255,255,0.02)" stroke="rgba(255,255,255,0.06)"/>
+    <text x="16" y="22" fill="rgba(148,163,184,0.7)" font-size="9" letter-spacing="1">RECENT EVENTS</text>
+    <g font-family="monospace" font-size="10" fill="#94a3b8">
+      <text x="16" y="44">21:04:12  <tspan fill="#2dd4bf">message.queued</tspan>      agent_planner → agent_executor    (handoff, normal)</text>
+      <text x="16" y="62">21:04:08  <tspan fill="#34d399">message.delivered</tspan>   agent_monitor ← agent_executor    (complete, normal)</text>
+      <text x="16" y="80">21:03:51  <tspan fill="#fbbf24">agent.quarantined</tspan>   agent_scanner  reason: heartbeat_timeout</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <g transform="translate(24,528)" font-family="system-ui,sans-serif" font-size="9" fill="rgba(100,116,139,0.7)">
+    <text x="0" y="0">Ekho Relay v0.1.0</text>
+    <text x="912" y="0" text-anchor="end">4 agents enrolled · 1 fleet · A2A v1.0 compliant</text>
+  </g>
+</svg>

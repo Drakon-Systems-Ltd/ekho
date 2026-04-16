@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" width="900" height="360" role="img" aria-label="Ekho architecture: Agent A signs a message sent to Agent B via the Ekho relay, with delivery guarantees, operator visibility, and audit logging.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0f1a"/>
+      <stop offset="1" stop-color="#0c1222"/>
+    </linearGradient>
+    <linearGradient id="relayGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14b8a6" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#0d9488" stop-opacity="0.10"/>
+    </linearGradient>
+    <linearGradient id="agentGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="900" height="360" fill="url(#bg)"/>
+  <rect x="0" y="0" width="900" height="360" fill="none" stroke="rgba(45,212,191,0.08)"/>
+
+  <!-- Connection lines -->
+  <line x1="170" y1="140" x2="380" y2="140" stroke="rgba(45,212,191,0.4)" stroke-width="2" stroke-dasharray="6 4"/>
+  <line x1="520" y1="140" x2="730" y2="140" stroke="rgba(45,212,191,0.4)" stroke-width="2" stroke-dasharray="6 4"/>
+
+  <!-- Packet pill (static, mid-flight) -->
+  <g transform="translate(280,128)">
+    <rect x="-34" y="0" width="68" height="24" rx="12" fill="rgba(45,212,191,0.18)" stroke="rgba(45,212,191,0.55)"/>
+    <text x="0" y="16" text-anchor="middle" fill="#2dd4bf" font-family="monospace" font-size="10">signed</text>
+  </g>
+  <g transform="translate(620,128)">
+    <rect x="-34" y="0" width="68" height="24" rx="12" fill="rgba(45,212,191,0.18)" stroke="rgba(45,212,191,0.55)"/>
+    <text x="0" y="16" text-anchor="middle" fill="#2dd4bf" font-family="monospace" font-size="10">delivered</text>
+  </g>
+
+  <!-- Agent A -->
+  <g transform="translate(60,90)">
+    <rect width="110" height="100" rx="14" fill="url(#agentGrad)" stroke="rgba(45,212,191,0.25)"/>
+    <circle cx="96" cy="14" r="5" fill="#34d399"/>
+    <text x="55" y="42" text-anchor="middle" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="15" font-weight="600">Agent A</text>
+    <text x="55" y="62" text-anchor="middle" fill="#94a3b8" font-family="system-ui,sans-serif" font-size="10">sender</text>
+    <g transform="translate(38,70)" fill="#2dd4bf">
+      <rect x="0" y="0" width="34" height="6" rx="1" opacity="0.5"/>
+      <rect x="0" y="9" width="28" height="6" rx="1" opacity="0.35"/>
+      <rect x="0" y="18" width="20" height="6" rx="1" opacity="0.25"/>
+    </g>
+  </g>
+
+  <!-- Relay (center) -->
+  <g transform="translate(380,70)">
+    <rect width="140" height="140" rx="18" fill="url(#relayGrad)" stroke="rgba(45,212,191,0.6)" filter="url(#softGlow)"/>
+    <text x="70" y="32" text-anchor="middle" fill="#2dd4bf" font-family="system-ui,sans-serif" font-size="12" font-weight="700" letter-spacing="2">EKHO</text>
+    <text x="70" y="48" text-anchor="middle" fill="#94a3b8" font-family="system-ui,sans-serif" font-size="9">relay</text>
+    <line x1="20" y1="60" x2="120" y2="60" stroke="rgba(45,212,191,0.18)"/>
+    <g fill="#94a3b8" font-family="system-ui,sans-serif" font-size="9">
+      <text x="20" y="78">  store &amp; forward</text>
+      <text x="20" y="94">  retry + dead-letter</text>
+      <text x="20" y="110">  policy engine</text>
+      <text x="20" y="126">  audit log</text>
+    </g>
+  </g>
+
+  <!-- Agent B -->
+  <g transform="translate(730,90)">
+    <rect width="110" height="100" rx="14" fill="url(#agentGrad)" stroke="rgba(45,212,191,0.25)"/>
+    <circle cx="96" cy="14" r="5" fill="#34d399"/>
+    <text x="55" y="42" text-anchor="middle" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="15" font-weight="600">Agent B</text>
+    <text x="55" y="62" text-anchor="middle" fill="#94a3b8" font-family="system-ui,sans-serif" font-size="10">recipient</text>
+    <g transform="translate(38,70)" fill="#2dd4bf">
+      <rect x="0" y="0" width="34" height="6" rx="1" opacity="0.5"/>
+      <rect x="0" y="9" width="28" height="6" rx="1" opacity="0.35"/>
+      <rect x="0" y="18" width="20" height="6" rx="1" opacity="0.25"/>
+    </g>
+  </g>
+
+  <!-- Operator console connection -->
+  <line x1="450" y1="210" x2="450" y2="260" stroke="rgba(45,212,191,0.2)" stroke-width="1" stroke-dasharray="3 3"/>
+  <g transform="translate(350,260)">
+    <rect width="200" height="72" rx="12" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.1)"/>
+    <text x="100" y="26" text-anchor="middle" fill="#e2e8f0" font-family="system-ui,sans-serif" font-size="12" font-weight="600">Operator Console</text>
+    <text x="100" y="44" text-anchor="middle" fill="#94a3b8" font-family="system-ui,sans-serif" font-size="10">React dashboard</text>
+    <text x="100" y="60" text-anchor="middle" fill="#64748b" font-family="system-ui,sans-serif" font-size="9">monitor · intervene · audit</text>
+  </g>
+
+  <!-- Footer tags -->
+  <g transform="translate(0,325)" font-family="system-ui,sans-serif" font-size="10" fill="#94a3b8">
+    <g transform="translate(150,0)"><circle cx="0" cy="-3" r="3" fill="#2dd4bf" fill-opacity="0.6"/><text x="10" y="0">HMAC-SHA256 signed</text></g>
+    <g transform="translate(340,0)"><circle cx="0" cy="-3" r="3" fill="#34d399" fill-opacity="0.6"/><text x="10" y="0">Heartbeat &amp; quarantine</text></g>
+    <g transform="translate(540,0)"><circle cx="0" cy="-3" r="3" fill="#2dd4bf" fill-opacity="0.35"/><text x="10" y="0">A2A v1.0 compliant</text></g>
+  </g>
+</svg>

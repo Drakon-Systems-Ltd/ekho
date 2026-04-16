@@ -1,10 +1,62 @@
-# Ekho
+<p align="center">
+  <img src="docs/images/ekho-architecture.svg" alt="Ekho architecture — signed messaging between agents via the Ekho relay" width="100%"/>
+</p>
 
-> Private messaging infrastructure for distributed AI agents.
+<h1 align="center">Ekho</h1>
 
-Ekho is a **store-and-forward relay** for agent-to-agent communication on private networks. It gives each agent an identity, an inbox, delivery guarantees, and a complete audit trail — without depending on a public message broker.
+<p align="center"><strong>Private, signed, store-and-forward messaging for distributed AI agent fleets.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A520-0d9488" alt="Node 20+"/>
+  <img src="https://img.shields.io/badge/tests-43%20passing-34d399" alt="43 tests passing"/>
+  <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
+</p>
+
+Ekho is a **one-binary relay** that gives AI agents an identity, an inbox, and delivery guarantees — without depending on a public broker. It speaks [A2A v1.0](https://a2a-protocol.org/latest/specification/) natively so any A2A client can talk to agents on your network out of the box.
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any environment where agents need to coordinate securely.
+
+## Why Ekho
+
+| | Ekho | NATS / Kafka | A2A only |
+|---|---|---|---|
+| Single binary, zero infra | ✓ | — | — |
+| Signed per-agent auth | ✓ | build-your-own | build-your-own |
+| Delivery retry + dead-letter | ✓ | partial | — |
+| Operator console included | ✓ | — | — |
+| Policy engine (deny/allow) | ✓ | — | — |
+| A2A v1.0 native | ✓ | — | ✓ |
+| Open source core | ✓ (MIT) | ✓ | ✓ |
+| Paid tier pricing | $99 one-time Pro | infra cost / Enterprise quotes | — |
+
+## Quick Start (60 seconds)
+
+```bash
+git clone https://github.com/Drakon-Systems-Ltd/ekho.git
+cd ekho && npm install && npm run build && npm run setup && npm start
+```
+
+Open [http://localhost:4000/ui/](http://localhost:4000/ui/) — the operator console is waiting for you.
+
+<p align="center">
+  <img src="docs/images/ekho-console.svg" alt="Ekho operator console preview" width="100%"/>
+</p>
+
+### Docker
+
+```bash
+docker compose up -d   # port 4000, SQLite persistence in ./data/
+```
+
+### A2A Quick Test
+
+Once the relay is running, any A2A client can fetch its [Agent Card](./docs/a2a.md):
+
+```bash
+curl http://localhost:4000/.well-known/agent-card.json
+```
 
 ## Features
 
@@ -17,50 +69,14 @@ Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and a
 - **Operator console** — React dashboard for fleet monitoring, approvals, policies, and intervention
 - **Approval workflows** — gate high-risk agent actions behind operator review
 - **Extension hooks** — plugin system for custom message scanning, memory extraction, security gates
-- **A2A protocol native** — [A2A v1.0](https://a2a-protocol.org/latest/specification/) endpoints alongside the proprietary API, so any A2A client can discover and message Ekho agents out of the box ([docs](./docs/a2a.md))
+- **A2A v1.0 native** — [A2A protocol](https://a2a-protocol.org/latest/specification/) endpoints alongside the proprietary API ([docs](./docs/a2a.md))
 - **Open-core licensing** — free OSS relay with Pro tier for multi-fleet, advanced policies, analytics
-
-## Quick Start
-
-```bash
-git clone https://github.com/Drakon-Systems-Ltd/ekho.git
-cd ekho
-npm install
-npm run build
-npm run setup
-npm start
-```
-
-Then open [http://localhost:4000/ui/](http://localhost:4000/ui/) to access the operator console.
-
-### Docker
-
-```bash
-docker compose up -d
-```
-
-The relay starts on port 4000 with SQLite persistence in `./data/`.
 
 ## Architecture
 
-```
-┌─────────┐     HTTPS      ┌─────────────┐     HTTPS      ┌─────────┐
-│ Agent A  │ ──────────────▶│  Ekho Relay  │◀────────────── │ Agent B  │
-└─────────┘   signed req    │   (Fastify)  │   signed req   └─────────┘
-                            │      │       │
-                            │   SQLite     │
-                            │  messages    │
-                            │  policies    │
-                            │  events      │
-                            └──────┬───────┘
-                                   │
-                            ┌──────┴───────┐
-                            │  Operator UI │
-                            │  (React)     │
-                            └──────────────┘
-```
+See the [architecture diagram](docs/images/ekho-architecture.svg) at the top of this README, or the deep-dive in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-**Flow:** Agent enrolls → sends signed messages → relay stores in recipient inbox → recipient polls and ACKs → relay tracks delivery state with retry/dead-letter lifecycle.
+**Flow:** Agent enrolls → sends signed messages → relay stores in recipient inbox → recipient polls and ACKs → relay tracks delivery state with retry/dead-letter lifecycle. Operators monitor and intervene via the React console.
 
 ## Packages
 
@@ -187,7 +203,7 @@ Environment variables (see `packages/relay/.env.example`):
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Run full test suite (35 tests)
+npm test                     # Run full test suite (43 tests)
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```
