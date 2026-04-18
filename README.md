@@ -10,7 +10,7 @@
   <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-0d9488" alt="Node 20+"/>
-  <img src="https://img.shields.io/badge/tests-43%20passing-34d399" alt="43 tests passing"/>
+  <img src="https://img.shields.io/badge/tests-46%20passing-34d399" alt="46 tests passing"/>
   <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
 </p>
 
@@ -50,6 +50,18 @@ Open [http://localhost:4000/ui/](http://localhost:4000/ui/) — the operator con
 docker compose up -d   # port 4000, SQLite persistence in ./data/
 ```
 
+### Kubernetes
+
+A production-ready Helm chart is provided at [`deploy/helm/ekho/`](deploy/helm/ekho/):
+
+```bash
+helm install ekho ./deploy/helm/ekho \
+  --namespace ekho --create-namespace \
+  --set secrets.operatorSessionSecret=$(openssl rand -hex 32)
+```
+
+See [`deploy/helm/ekho/README.md`](deploy/helm/ekho/README.md) for production overrides, ingress, and upgrade notes.
+
 ### A2A Quick Test
 
 Once the relay is running, any A2A client can fetch its [Agent Card](./docs/a2a.md):
@@ -57,6 +69,12 @@ Once the relay is running, any A2A client can fetch its [Agent Card](./docs/a2a.
 ```bash
 curl http://localhost:4000/.well-known/agent-card.json
 ```
+
+## Examples
+
+Runnable end-to-end demos live in [`examples/`](./examples).
+
+- [**writer-reviewer**](./examples/writer-reviewer/) — a writer agent drafts an article, a reviewer agent critiques it and replies; watch messages flow through the relay in under 30 seconds: `npm run example:writer-reviewer`.
 
 ## Features
 
@@ -70,6 +88,7 @@ curl http://localhost:4000/.well-known/agent-card.json
 - **Approval workflows** — gate high-risk agent actions behind operator review
 - **Extension hooks** — plugin system for custom message scanning, memory extraction, security gates
 - **A2A v1.0 native** — [A2A protocol](https://a2a-protocol.org/latest/specification/) endpoints alongside the proprietary API ([docs](./docs/a2a.md))
+- **Prometheus metrics** — scrapeable `/metrics` endpoint out of the box (agents, messages, deliveries, dead letters, rate violations, A2A tasks)
 - **Open-core licensing** — free OSS relay with Pro tier for multi-fleet, advanced policies, analytics
 
 ## Architecture
@@ -80,7 +99,7 @@ See the [architecture diagram](docs/images/ekho-architecture.svg) at the top of 
 
 ## Packages
 
-This is a monorepo with four packages:
+This is a monorepo with four Node packages plus a Python SDK:
 
 | Package | Description |
 |---------|-------------|
@@ -88,6 +107,7 @@ This is a monorepo with four packages:
 | [`@ekho/sdk`](packages/sdk/) | Zero-dependency agent client and adapter for Node.js |
 | [`@ekho/openclaw-plugin`](packages/openclaw-plugin/) | OpenClaw agent runtime integration plugin |
 | [`@ekho/shieldcortex-bridge`](packages/shieldcortex-bridge/) | ShieldCortex defence pipeline and Iron Dome security extension |
+| [Python SDK](sdks/python/) | Sync Python client and adapter mirroring `@ekho/sdk` (requests-only, Python 3.9+) |
 
 ## SDK Usage
 
@@ -203,7 +223,7 @@ Environment variables (see `packages/relay/.env.example`):
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Run full test suite (43 tests)
+npm test                     # Run full test suite (46 tests)
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```

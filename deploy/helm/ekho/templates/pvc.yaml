@@ -1,0 +1,9 @@
+{{/*
+  NOTE: No standalone PVC is rendered. Persistent storage is provided by the
+  StatefulSet's volumeClaimTemplate (see statefulset.yaml) so that the PVC
+  follows the pod identity and is garbage-collected correctly on chart
+  uninstall. When persistence.enabled=false, the StatefulSet falls back to
+  an emptyDir — data is lost on pod restart, dev/testing only.
+
+  This file is kept as a documentation marker only; intentionally empty.
+*/}}

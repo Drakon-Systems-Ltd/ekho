@@ -1,0 +1,178 @@
+# Default values for ekho.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Container image configuration.
+image:
+  repository: ghcr.io/drakon-systems-ltd/ekho
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Number of relay replicas.
+# IMPORTANT: Ekho stores state in SQLite via better-sqlite3 which uses a
+# single-writer file lock. Running more than one replica against the same
+# PersistentVolume will corrupt the database. Keep this at 1.
+# Horizontal scaling is not supported at this time.
+replicaCount: 1
+
+# -- Deployment strategy. For a StatefulSet backed by a single PVC the only
+# safe strategy is to terminate the old pod before starting the new one.
+# (This is the default for StatefulSets.)
+updateStrategy:
+  type: RollingUpdate
+
+serviceAccount:
+  # -- Specifies whether a service account should be created.
+  create: false
+  # -- Annotations to add to the service account.
+  annotations: {}
+  # -- The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# -- Pod-level security context.
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# -- Container-level security context.
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 4000
+  # -- Optional nodePort, only applies when service.type is NodePort.
+  nodePort: ""
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: ekho.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: ekho-tls
+  #    hosts:
+  #      - ekho.local
+
+# -- Persistence for the SQLite database at /app/data.
+# SQLite requires a single writer so this chart uses a StatefulSet with a
+# single-replica volumeClaimTemplate. Do NOT share this PVC across replicas.
+persistence:
+  enabled: true
+  size: 1Gi
+  # -- StorageClass to use. Leave empty for the cluster default.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  # -- Optional annotations for the PVC.
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Horizontal Pod Autoscaling is intentionally disabled.
+# Ekho uses SQLite with a single-writer lock, so multiple replicas against
+# the same volume will corrupt data. Do not enable autoscaling until the
+# storage backend is replaced with a network database.
+autoscaling:
+  enabled: false
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Non-secret environment variables. Each entry is rendered into a
+# ConfigMap and mounted as EKHO_* envFrom. Values are always strings in
+# Kubernetes env vars, so coerce as needed.
+#
+# All values below mirror packages/relay/src/config.ts defaults, except for
+# EKHO_HOST which must bind to 0.0.0.0 inside the pod and EKHO_DB_PATH which
+# must point at the persistent volume mount.
+config:
+  EKHO_HOST: "0.0.0.0"
+  EKHO_PORT: "4000"
+  EKHO_BASE_URL: "http://127.0.0.1:4000"
+  EKHO_DB_PATH: "/app/data/ekho.sqlite"
+  EKHO_TIMESTAMP_SKEW_SECONDS: "300"
+  EKHO_POLL_INTERVAL_SECONDS: "5"
+  EKHO_HEARTBEAT_INTERVAL_SECONDS: "30"
+  EKHO_DELIVERY_TIMEOUT_SECONDS: "120"
+  EKHO_SWEEP_INTERVAL_MS: "30000"
+  EKHO_RATE_LIMIT_WINDOW_SECONDS: "60"
+  EKHO_RATE_LIMIT_MAX_MESSAGES: "30"
+  EKHO_HEARTBEAT_LIVENESS_THRESHOLD: "3"
+  EKHO_HEARTBEAT_TIMEOUT_SECONDS: "90"
+  EKHO_RATE_LIMIT_VIOLATION_THRESHOLD: "5"
+  EKHO_RATE_LIMIT_VIOLATION_WINDOW_SECONDS: "3600"
+  EKHO_SHIELDCORTEX_PROFILE: "balanced"
+
+# -- Extra non-secret env vars to append (raw list of {name, value, valueFrom}).
+extraEnv: []
+
+# -- Secret values. REQUIRED: operatorSessionSecret must be set.
+# Generate with: openssl rand -hex 32
+secrets:
+  # -- Operator session signing secret. MUST be a long random string.
+  # Install will fail with a clear error if this is empty.
+  operatorSessionSecret: ""
+  # -- Optional Pro license key (JWT). Leave empty for OSS mode.
+  licenseKey: ""
+  # -- If set, the chart will not create a Secret and will instead reference
+  # this existing Secret. It must expose EKHO_OPERATOR_SESSION_SECRET and
+  # optionally EKHO_LICENSE_KEY keys.
+  existingSecret: ""

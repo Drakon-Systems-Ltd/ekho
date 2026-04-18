@@ -9,3 +9,10 @@ license-private-key.pem
 # Internal docs
 docs/plans/
 docs/internal/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/

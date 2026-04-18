@@ -29,12 +29,14 @@ export async function createTestRelay() {
   const { registerAgentRoutes } = await import("../src/routes-agent");
   const { registerOperatorRoutes } = await import("../src/routes-operator");
   const { registerA2ARoutes } = await import("../src/a2a/routes");
+  const { registerMetricsRoute } = await import("../src/metrics");
   const { sign } = await import("../src/utils");
 
   const app = fastify({ logger: false });
   await registerAgentRoutes(app);
   await registerOperatorRoutes(app);
   await registerA2ARoutes(app);
+  registerMetricsRoute(app);
 
   const { fleetId, operatorId } = db.createBootstrap(fleetName, `admin-${testId}@test.com`, "testpassword1");
   const tokenCore = `${operatorId}.${fleetId}`;

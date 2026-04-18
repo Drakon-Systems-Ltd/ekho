@@ -6,6 +6,7 @@ import { db } from "./db";
 import { registerAgentRoutes } from "./routes-agent";
 import { registerOperatorRoutes } from "./routes-operator";
 import { registerA2ARoutes } from "./a2a/routes";
+import { registerMetricsRoute } from "./metrics";
 import { startSweepJob } from "./sweep";
 import { loadLicense, registerExtension } from "./license";
 
@@ -48,13 +49,15 @@ async function buildServer() {
     docs: {
       architecture: "/ARCHITECTURE.md",
       ui: "/ui/",
-      a2a_agent_card: "/.well-known/agent-card.json"
+      a2a_agent_card: "/.well-known/agent-card.json",
+      metrics: "/metrics"
     }
   }));
 
   await registerAgentRoutes(app);
   await registerOperatorRoutes(app);
   await registerA2ARoutes(app);
+  registerMetricsRoute(app);
 
   app.setNotFoundHandler((request, reply) => {
     const requestedPath = String(request.url);

@@ -1,0 +1,26 @@
+apiVersion: v2
+name: ekho
+description: Private, signed, store-and-forward messaging relay for distributed AI agent fleets
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.23.0-0"
+home: https://github.com/Drakon-Systems-Ltd/ekho
+sources:
+  - https://github.com/Drakon-Systems-Ltd/ekho
+keywords:
+  - ekho
+  - a2a
+  - agents
+  - messaging
+  - relay
+  - ai
+  - fastify
+  - drakon-systems
+maintainers:
+  - name: Drakon Systems
+    email: support@drakonsystems.com
+    url: https://drakonsystems.com
+icon: https://drakonsystems.com/images/products/ekho/icon.svg
+annotations:
+  category: MessageBroker

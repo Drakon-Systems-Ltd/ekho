@@ -9,7 +9,8 @@
     "build": "npm run build -w @ekho/sdk && npm run build -w @ekho/relay",
     "typecheck": "npm run typecheck -w @ekho/sdk && npm run typecheck -w @ekho/relay",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "example:writer-reviewer": "tsx examples/writer-reviewer/run.ts"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
