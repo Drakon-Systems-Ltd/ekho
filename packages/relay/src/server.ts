@@ -1,17 +1,32 @@
 import path from "node:path";
-import fastify from "fastify";
+import fastify, { type FastifyInstance } from "fastify";
 import fastifyStatic from "@fastify/static";
-import { config } from "./config";
+import { config, assertOperatorSecret, isInsecureSecret } from "./config";
 import { db } from "./db";
 import { registerAgentRoutes } from "./routes-agent";
 import { registerOperatorRoutes } from "./routes-operator";
 import { registerA2ARoutes } from "./a2a/routes";
 import { registerMetricsRoute } from "./metrics";
+import { registerHealthRoutes } from "./health";
+import { buildHttpsOptions } from "./tls";
 import { startSweepJob } from "./sweep";
 import { loadLicense, registerExtension } from "./license";
 
 async function buildServer() {
-  const app = fastify({ logger: true });
+  assertOperatorSecret(config.operatorSessionSecret, Boolean(process.env.EKHO_DEV_INSECURE));
+
+  const https = buildHttpsOptions();
+  // The HTTPS server exposes the same route API; pin to the default instance
+  // type so the route registrars accept it regardless of TLS.
+  const app: FastifyInstance = https
+    ? (fastify({ logger: true, https }) as unknown as FastifyInstance)
+    : fastify({ logger: true });
+  if (https) {
+    app.log.info("TLS enabled — serving HTTPS");
+  }
+  if (isInsecureSecret(config.operatorSessionSecret)) {
+    app.log.warn("EKHO_OPERATOR_SESSION_SECRET is insecure — running only because EKHO_DEV_INSECURE is set. Do NOT use in production.");
+  }
   const license = loadLicense();
   app.log.info({ tier: license.tier, org: license.org }, "ekho license loaded");
 
@@ -40,10 +55,10 @@ async function buildServer() {
 
   app.get("/ui", async (_request, reply) => reply.redirect("/ui/"));
 
-  app.get("/healthz", async () => ({ ok: true }));
+  registerHealthRoutes(app);
   app.get("/", async () => ({
     service: "ekho-relay",
-    version: "0.1.0",
+    version: "0.2.0",
     tier: license.tier,
     setup_required: !db.findFleetByName("default"),
     docs: {
@@ -76,6 +91,22 @@ async function buildServer() {
 
 buildServer()
   .then(async ({ app, startSweep }) => {
+    let shuttingDown = false;
+    const shutdown = async (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      app.log.info({ signal }, "shutting down");
+      try {
+        await app.close();
+        process.exit(0);
+      } catch (err) {
+        app.log.error({ err }, "error during shutdown");
+        process.exit(1);
+      }
+    };
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+
     await app.listen({ host: config.host, port: config.port });
     startSweep();
   })

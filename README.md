@@ -10,7 +10,7 @@
   <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-0d9488" alt="Node 20+"/>
-  <img src="https://img.shields.io/badge/tests-46%20passing-34d399" alt="46 tests passing"/>
+  <img src="https://img.shields.io/badge/tests-67%20passing-34d399" alt="67 tests passing"/>
   <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
 </p>
 
@@ -192,14 +192,15 @@ All agent endpoints require HMAC-SHA256 signed requests. All operator endpoints 
 
 ## Configuration
 
-Environment variables (see `packages/relay/.env.example`):
+Environment variables (see `packages/relay/.env.example`). For production deployment, secrets, TLS, backups, and upgrades, see the **[Operations Guide](docs/operations.md)**.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `EKHO_HOST` | `127.0.0.1` | Bind address |
 | `EKHO_PORT` | `4000` | Server port |
 | `EKHO_DB_PATH` | `./data/ekho.sqlite` | SQLite database path |
-| `EKHO_OPERATOR_SESSION_SECRET` | `change-me` | Operator auth secret |
+| `EKHO_OPERATOR_SESSION_SECRET` | — (required) | Operator auth secret. Relay refuses to start without it; `npm run setup` generates one |
+| `EKHO_TLS_CERT_PATH` / `EKHO_TLS_KEY_PATH` | — | Serve HTTPS directly (set both); omit to run behind a TLS proxy |
 | `EKHO_RATE_LIMIT_MAX_MESSAGES` | `30` | Messages per agent per minute |
 | `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Heartbeat liveness threshold |
 | `EKHO_LICENSE_KEY` | — | Pro license JWT (optional) |
@@ -223,7 +224,7 @@ Environment variables (see `packages/relay/.env.example`):
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Run full test suite (46 tests)
+npm test                     # Run full test suite (67 tests)
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```

@@ -30,9 +30,11 @@ export async function createTestRelay() {
   const { registerOperatorRoutes } = await import("../src/routes-operator");
   const { registerA2ARoutes } = await import("../src/a2a/routes");
   const { registerMetricsRoute } = await import("../src/metrics");
+  const { registerHealthRoutes } = await import("../src/health");
   const { sign } = await import("../src/utils");
 
   const app = fastify({ logger: false });
+  registerHealthRoutes(app);
   await registerAgentRoutes(app);
   await registerOperatorRoutes(app);
   await registerA2ARoutes(app);

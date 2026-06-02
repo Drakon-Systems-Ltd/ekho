@@ -2,6 +2,25 @@
 
 All notable changes to Ekho are documented here.
 
+## [0.2.0] - 2026-06-02
+
+Deploy-readiness and production hardening.
+
+### Deployment & Release
+- Release workflow now builds and publishes the relay container image to GHCR (`ghcr.io/drakon-systems-ltd/ekho`)
+- New [Operations Guide](docs/operations.md): deployment, secrets, TLS, backups, upgrades, troubleshooting
+
+### Security & Runtime Hardening
+- Relay refuses to start with an unset or default operator session secret (`EKHO_DEV_INSECURE=1` opt-out for local dev); `npm run setup` now generates and persists a strong secret
+- `docker compose` requires `EKHO_OPERATOR_SESSION_SECRET` (no insecure default)
+- Optional native TLS via `EKHO_TLS_CERT_PATH` / `EKHO_TLS_KEY_PATH`
+- Graceful shutdown on `SIGTERM`/`SIGINT`
+- `/readyz` readiness probe with database health check (Helm readiness probe now targets it)
+- Replay-nonce table pruned by the background sweep to prevent unbounded growth
+
+### Tests
+- Expanded suite to 67 tests: agent auth/signing, retry/dead-letter/expiry sweep, TLS options, and startup hardening
+
 ## [0.1.0] - 2026-04-04
 
 First release. Core relay, SDK, operator console, and ecosystem integrations.

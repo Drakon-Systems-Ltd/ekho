@@ -27,7 +27,7 @@ packages/
 1. Create a branch from `main`
 2. Make your changes
 3. Run `npm run typecheck` — must pass
-4. Run `npm test` — all 35+ tests must pass
+4. Run `npm test` — all 67+ tests must pass
 5. Run `npm run ui:build -w @ekho/relay` — frontend must build
 6. Open a pull request
 

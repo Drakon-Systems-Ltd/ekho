@@ -5,7 +5,7 @@ services:
       - "4000:4000"
     environment:
       - EKHO_HOST=0.0.0.0
-      - EKHO_OPERATOR_SESSION_SECRET=${EKHO_OPERATOR_SESSION_SECRET:-change-me}
+      - EKHO_OPERATOR_SESSION_SECRET=${EKHO_OPERATOR_SESSION_SECRET:?set a strong secret, e.g. run `export EKHO_OPERATOR_SESSION_SECRET=$(openssl rand -hex 32)`}
     volumes:
       - ekho-data:/app/data
     restart: unless-stopped

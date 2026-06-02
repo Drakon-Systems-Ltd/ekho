@@ -44,5 +44,29 @@ export const config = {
 
   // ShieldCortex integration
   shieldcortexPath: process.env.EKHO_SHIELDCORTEX_PATH as string | undefined,
-  shieldcortexProfile: (process.env.EKHO_SHIELDCORTEX_PROFILE ?? "balanced") as "strict" | "balanced" | "permissive"
+  shieldcortexProfile: (process.env.EKHO_SHIELDCORTEX_PROFILE ?? "balanced") as "strict" | "balanced" | "permissive",
+
+  // TLS (optional — omit to serve plain HTTP behind a TLS-terminating proxy)
+  tlsCertPath: process.env.EKHO_TLS_CERT_PATH as string | undefined,
+  tlsKeyPath: process.env.EKHO_TLS_KEY_PATH as string | undefined
 } as const;
+
+/** True when the operator session secret is unset or the shipped default. */
+export function isInsecureSecret(secret: string): boolean {
+  return !secret || secret === "change-me";
+}
+
+/**
+ * Refuse to run with an unset or default operator session secret — a default
+ * secret means anyone can forge an operator session token. Local development
+ * can opt out with EKHO_DEV_INSECURE=1.
+ */
+export function assertOperatorSecret(secret: string, allowInsecure: boolean): void {
+  if (isInsecureSecret(secret) && !allowInsecure) {
+    throw new Error(
+      "EKHO_OPERATOR_SESSION_SECRET is unset or set to the insecure default 'change-me'. " +
+        "Generate a strong secret with `openssl rand -hex 32` and set it via the environment. " +
+        "For local development only, set EKHO_DEV_INSECURE=1 to bypass this check."
+    );
+  }
+}

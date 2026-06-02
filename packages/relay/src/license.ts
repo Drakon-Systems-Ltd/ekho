@@ -61,7 +61,9 @@ function verifyAndDecodeLicenseJwt(token: string): EkhoLicense {
   if (parts.length !== 3) throw new Error("invalid license format");
 
   const [headerB64, payloadB64, signatureB64] = parts;
-  const publicKeyPem = fs.readFileSync(path.join(__dirname, "license-public-key.pem"), "utf-8");
+  // Path is overridable for testing so the bundled key is never used as scratch.
+  const publicKeyPath = process.env.EKHO_LICENSE_PUBLIC_KEY_PATH ?? path.join(__dirname, "license-public-key.pem");
+  const publicKeyPem = fs.readFileSync(publicKeyPath, "utf-8");
 
   const verifier = crypto.createVerify("RSA-SHA256");
   verifier.update(`${headerB64}.${payloadB64}`);

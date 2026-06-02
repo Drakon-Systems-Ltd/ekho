@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
+import crypto from "node:crypto";
 import { config } from "./config";
 import { db } from "./db";
 import { loadLicense, assertFleetCreationAllowed, getLoadedLicense } from "./license";
@@ -13,6 +15,44 @@ const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 function pass(label: string, msg: string) { console.log(`  ${green("✓")} ${bold(label.padEnd(12))} ${msg}`); }
 function warn(label: string, msg: string) { console.log(`  ${yellow("!")} ${bold(label.padEnd(12))} ${msg}`); }
 function fail(label: string, msg: string) { console.log(`  ${red("✗")} ${bold(label.padEnd(12))} ${msg}`); }
+
+/** Write or replace a single KEY=value line in the repo-root .env file. */
+function upsertEnv(key: string, value: string): string {
+  const envPath = path.join(process.cwd(), ".env");
+  const lines = fs.existsSync(envPath)
+    ? fs.readFileSync(envPath, "utf-8").split("\n")
+    : [];
+  const entry = `${key}=${value}`;
+  const idx = lines.findIndex((line) => line.startsWith(`${key}=`));
+  if (idx >= 0) {
+    lines[idx] = entry;
+  } else {
+    if (lines.length && lines[lines.length - 1] !== "") lines.push("");
+    lines.push(entry);
+  }
+  fs.writeFileSync(envPath, lines.join("\n"), { mode: 0o600 });
+  return envPath;
+}
+
+/**
+ * Ensure a strong operator session secret exists. If one is already configured
+ * via the environment we leave it alone; otherwise we generate a random secret
+ * and persist it to .env so the relay starts securely without manual steps.
+ */
+function ensureOperatorSecret() {
+  if (config.operatorSessionSecret && config.operatorSessionSecret !== "change-me") {
+    pass("Secret", "operator session secret configured");
+    return;
+  }
+  const secret = crypto.randomBytes(32).toString("hex");
+  try {
+    const envPath = upsertEnv("EKHO_OPERATOR_SESSION_SECRET", secret);
+    pass("Secret", `generated and saved to ${dim(envPath)}`);
+  } catch (err) {
+    warn("Secret", `could not write .env (${err instanceof Error ? err.message : String(err)})`);
+    console.log(`    ${dim("Set this before starting:")} EKHO_OPERATOR_SESSION_SECRET=${secret}`);
+  }
+}
 
 function checkPort(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -80,6 +120,7 @@ function runSetup() {
   console.log(`\n  ${bold("Ekho Setup")}\n`);
 
   loadLicense();
+  ensureOperatorSecret();
 
   const existing = db.findFleetByName("default");
   if (existing) {

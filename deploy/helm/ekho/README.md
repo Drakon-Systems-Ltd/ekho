@@ -42,7 +42,7 @@ Create a `values.prod.yaml`:
 ```yaml
 image:
   repository: ghcr.io/drakon-systems-ltd/ekho
-  tag: "0.1.0"
+  tag: "0.2.0"
 
 persistence:
   enabled: true
@@ -158,7 +158,7 @@ networked backend.
 | Key | Default | Description |
 |---|---|---|
 | `image.repository` | `ghcr.io/drakon-systems-ltd/ekho` | Container image |
-| `image.tag` | `0.1.0` | Image tag |
+| `image.tag` | `0.2.0` | Image tag |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `replicaCount` | `1` | Must stay 1 — see above |
 | `service.type` | `ClusterIP` | Service type |

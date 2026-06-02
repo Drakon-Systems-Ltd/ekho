@@ -179,6 +179,17 @@ export class EkhoDb {
     return this.db.prepare("SELECT id FROM replay_nonces WHERE agent_id = ? AND nonce = ?").get(agentId, nonce);
   }
 
+  /**
+   * Prune replay nonces older than twice the timestamp-skew window. A request
+   * whose timestamp is outside the skew window is rejected before its nonce is
+   * ever checked, so older nonces can never enable a replay — keeping them only
+   * grows the table unbounded. Returns the number of rows deleted.
+   */
+  sweepStaleNonces(): number {
+    const cutoff = new Date(Date.now() - config.timestampSkewSeconds * 2 * 1000).toISOString();
+    return this.db.prepare("DELETE FROM replay_nonces WHERE created_at < ?").run(cutoff).changes;
+  }
+
   createMessage(input: {
     fleetId: string;
     senderAgentId: string;

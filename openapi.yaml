@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ekho Relay API
-  version: 0.1.0
+  version: 0.2.0
   description: >
     Multi-agent relay service providing message routing, policy enforcement,
     approval workflows, rate limiting, and fleet management for AI agent systems.
@@ -775,7 +775,7 @@ components:
           example: ekho-relay
         version:
           type: string
-          example: 0.1.0
+          example: 0.2.0
         tier:
           type: string
         setup_required:

@@ -35,6 +35,15 @@ export function startSweepJob(db: EkhoDb): { stop: () => void } {
     } catch (err) {
       console.error("[sweep] rate limit counter cleanup failed:", err);
     }
+
+    try {
+      const nonces = db.sweepStaleNonces();
+      if (nonces > 0) {
+        console.log(`[sweep] replay nonces: ${nonces} pruned`);
+      }
+    } catch (err) {
+      console.error("[sweep] nonce cleanup failed:", err);
+    }
   }, config.sweepIntervalMs);
 
   return {

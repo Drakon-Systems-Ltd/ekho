@@ -11,10 +11,12 @@ const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
   privateKeyEncoding: { type: "pkcs8", format: "pem" }
 });
 
-// Write the test public key over the bundled one
-const publicKeyPath = path.join(__dirname, "..", "src", "license-public-key.pem");
-const originalPublicKey = fs.readFileSync(publicKeyPath, "utf-8");
+// Point the license module at a temp public key — never touch the bundled
+// (tracked) src/license-public-key.pem, which must stay pristine in git.
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ekho-license-"));
+const publicKeyPath = path.join(tmpDir, "license-public-key.pem");
 fs.writeFileSync(publicKeyPath, publicKey);
+process.env.EKHO_LICENSE_PUBLIC_KEY_PATH = publicKeyPath;
 
 function base64urlEncode(data: Buffer | string): string {
   const buf = typeof data === "string" ? Buffer.from(data) : data;
@@ -36,9 +38,9 @@ afterEach(() => {
   delete process.env.EKHO_LICENSE_PATH;
 });
 
-// Restore original public key when done
+// Clean up the temp key directory on exit.
 process.on("exit", () => {
-  fs.writeFileSync(publicKeyPath, originalPublicKey);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe("License system", () => {
