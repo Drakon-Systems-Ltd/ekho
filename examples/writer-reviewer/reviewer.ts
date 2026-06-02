@@ -9,7 +9,7 @@
  *   4. Exit cleanly after the reply is sent.
  */
 
-import { EkhoAgentAdapter, type InboxMessage } from "@ekho/sdk";
+import { EkhoAgentAdapter, type InboxMessage } from "@drakon-systems/ekho-sdk";
 import { enrollAgent } from "./enroll";
 import {
   colour,

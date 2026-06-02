@@ -1,6 +1,6 @@
 {
   "name": "@ekho/relay",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Ekho relay server — private communication and control layer for distributed AI agents.",
   "main": "src/server.ts",
   "scripts": {
@@ -19,7 +19,7 @@
     "@ekho/shieldcortex-bridge": "*"
   },
   "dependencies": {
-    "@ekho/sdk": "*",
+    "@drakon-systems/ekho-sdk": "*",
     "@fastify/static": "^9.0.0",
     "better-sqlite3": "^12.8.0",
     "dotenv": "^17.4.0",

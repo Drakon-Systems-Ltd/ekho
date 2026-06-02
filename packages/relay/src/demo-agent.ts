@@ -1,4 +1,4 @@
-import { EkhoAgentAdapter, type InboxMessage, type ControlMessage } from "@ekho/sdk";
+import { EkhoAgentAdapter, type InboxMessage, type ControlMessage } from "@drakon-systems/ekho-sdk";
 
 function requireEnv(name: string): string {
   const value = process.env[name];

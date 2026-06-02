@@ -1,4 +1,4 @@
-import { EkhoAgentClient } from "@ekho/sdk";
+import { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { EkhoCredentials } from "./credentials";
 
 export interface PollerCallbacks {

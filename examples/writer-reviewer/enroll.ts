@@ -7,10 +7,10 @@
  *
  * This helper hits POST /v1/enroll directly so the example can be run
  * end-to-end with just an enrollment token. Every subsequent operation
- * (send, poll, ack, heartbeat) goes through @ekho/sdk.
+ * (send, poll, ack, heartbeat) goes through @drakon-systems/ekho-sdk.
  */
 
-import type { AgentCredentials } from "@ekho/sdk";
+import type { AgentCredentials } from "@drakon-systems/ekho-sdk";
 
 export type EnrollParams = {
   relayBaseUrl: string;

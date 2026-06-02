@@ -8,7 +8,7 @@ Thanks for your interest in contributing to Ekho. This document covers the essen
 git clone https://github.com/Drakon-Systems-Ltd/ekho.git
 cd ekho
 npm install
-npm run build -w @ekho/sdk
+npm run build -w @drakon-systems/ekho-sdk
 npm test
 ```
 
@@ -17,7 +17,7 @@ npm test
 ```
 packages/
   relay/          # @ekho/relay — Fastify server, SQLite, operator console
-  sdk/            # @ekho/sdk — Zero-dep agent client and adapter
+  sdk/            # @drakon-systems/ekho-sdk — Zero-dep agent client and adapter
   openclaw-plugin/      # OpenClaw agent runtime integration
   shieldcortex-bridge/  # ShieldCortex defence pipeline bridge
 ```
@@ -46,7 +46,7 @@ Tests use Vitest across all packages:
 ```bash
 npm test              # Run everything
 npm test -w @ekho/relay   # Relay tests only
-npm test -w @ekho/sdk     # SDK tests only
+npm test -w @drakon-systems/ekho-sdk     # SDK tests only
 ```
 
 Relay tests use Fastify's `inject()` for HTTP testing without starting a real server. SDK tests start a real relay on a random port.

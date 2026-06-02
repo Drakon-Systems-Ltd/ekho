@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { EkhoAgentClient, EkhoAgentAdapter } from "../src/index";
 import { createTestRelayForSdk } from "./setup";
 
-describe("@ekho/sdk", () => {
+describe("@drakon-systems/ekho-sdk", () => {
   let relay: Awaited<ReturnType<typeof createTestRelayForSdk>>;
 
   beforeAll(async () => { relay = await createTestRelayForSdk(); });

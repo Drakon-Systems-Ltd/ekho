@@ -8,7 +8,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ekho/sdk": "*"
+    "@drakon-systems/ekho-sdk": "*"
   },
   "devDependencies": {
     "@types/node": "^25.5.0"

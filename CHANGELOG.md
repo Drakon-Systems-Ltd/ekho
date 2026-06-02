@@ -2,6 +2,11 @@
 
 All notable changes to Ekho are documented here.
 
+## [0.2.1] - 2026-06-02
+
+### Changed
+- Published the agent SDK to npm as **`@drakon-systems/ekho-sdk`** (renamed from the unpublished `@ekho/sdk`). Install with `npm install @drakon-systems/ekho-sdk`; imports change from `@ekho/sdk` to `@drakon-systems/ekho-sdk`.
+
 ## [0.2.0] - 2026-06-02
 
 Deploy-readiness and production hardening.

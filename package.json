@@ -6,8 +6,8 @@
     "dev": "npm run dev -w @ekho/relay",
     "start": "npm run start -w @ekho/relay",
     "setup": "npm run setup -w @ekho/relay",
-    "build": "npm run build -w @ekho/sdk && npm run build -w @ekho/relay",
-    "typecheck": "npm run typecheck -w @ekho/sdk && npm run typecheck -w @ekho/relay",
+    "build": "npm run build -w @drakon-systems/ekho-sdk && npm run build -w @ekho/relay",
+    "typecheck": "npm run typecheck -w @drakon-systems/ekho-sdk && npm run typecheck -w @ekho/relay",
     "test": "vitest run",
     "test:watch": "vitest",
     "example:writer-reviewer": "tsx examples/writer-reviewer/run.ts"

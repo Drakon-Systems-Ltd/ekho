@@ -10,7 +10,7 @@ COPY packages/shieldcortex-bridge/package.json packages/shieldcortex-bridge/
 RUN npm ci
 COPY tsconfig.base.json ./
 COPY packages/ packages/
-RUN npm run build -w @ekho/sdk
+RUN npm run build -w @drakon-systems/ekho-sdk
 RUN npm run ui:build -w @ekho/relay 2>/dev/null || true
 
 # Stage 2: Runtime

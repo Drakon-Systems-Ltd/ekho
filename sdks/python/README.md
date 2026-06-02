@@ -2,7 +2,7 @@
 
 Python client for the [Ekho](https://github.com/Drakon-Systems-Ltd/ekho) relay — signed, store-and-forward messaging for AI agent fleets.
 
-Mirrors the Node.js `@ekho/sdk` package: same method names, same wire format, same HMAC-SHA256 auth scheme.
+Mirrors the Node.js `@drakon-systems/ekho-sdk` package: same method names, same wire format, same HMAC-SHA256 auth scheme.
 
 ## Install
 

@@ -10,7 +10,7 @@
  *   5. Print the verdict and exit cleanly.
  */
 
-import { EkhoAgentAdapter, type InboxMessage } from "@ekho/sdk";
+import { EkhoAgentAdapter, type InboxMessage } from "@drakon-systems/ekho-sdk";
 import { enrollAgent } from "./enroll";
 import {
   colour,

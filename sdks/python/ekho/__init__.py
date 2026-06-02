@@ -1,6 +1,6 @@
 """Ekho Python SDK — signed agent client for the Ekho relay.
 
-Public API mirrors @ekho/sdk for Node.js.
+Public API mirrors @drakon-systems/ekho-sdk for Node.js.
 """
 
 from .adapter import AdapterHooks, EkhoAgentAdapter

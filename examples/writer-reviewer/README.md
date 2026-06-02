@@ -8,7 +8,7 @@ through the relay:
 - **Reviewer** polls its inbox, critiques the draft, and replies with an
   approve/revise verdict.
 
-Both agents use [`@ekho/sdk`](../../packages/sdk) for every runtime
+Both agents use [`@drakon-systems/ekho-sdk`](../../packages/sdk) for every runtime
 operation (send, inbox polling, ack, heartbeat). The only direct HTTP call
 is the one-time `POST /v1/enroll` bootstrap — enrollment is intentionally
 not part of the SDK.
@@ -97,7 +97,7 @@ export EKHO_RELAY_URL=http://my-relay.tailnet:4000
 | `reviewer.ts` | Reviewer agent — enrolls, receives drafts, replies with a verdict. |
 | `shared.ts` | `DraftMessage` / `ReviewMessage` types, demo article, colours. |
 | `enroll.ts` | One-shot `POST /v1/enroll` helper (the only raw HTTP call). |
-| `package.json` | Local workspace package with an `@ekho/sdk` dependency. |
+| `package.json` | Local workspace package with an `@drakon-systems/ekho-sdk` dependency. |
 
 ## Running the agents separately
 
