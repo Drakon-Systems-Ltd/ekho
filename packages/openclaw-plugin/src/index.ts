@@ -9,11 +9,12 @@ import { ensureConnected, type EkhoPluginConfig } from "./connection.js";
  *   - ekho_send:  message another agent (delegate, ask, coordinate)
  *   - ekho_inbox: read pending messages from other agents
  *
- * On first use it enrolls (or loads saved credentials) and starts a background
- * heartbeat so the agent appears healthy in the operator console. All identity
+ * On startup (and again lazily on first tool use) it enrolls (or loads saved
+ * credentials) and starts a background heartbeat so the agent appears healthy
+ * in the operator console without having to call a tool first. All identity
  * (relay URL, fleet, token) comes from per-agent config — nothing is hardcoded.
  */
-export default defineToolPlugin({
+const plugin = defineToolPlugin({
   id: "ekho-adapter",
   name: "Ekho Relay Adapter",
   description: "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
@@ -84,3 +85,20 @@ export default defineToolPlugin({
     })
   ]
 });
+
+// Extend the tool plugin's register() so the agent connects on gateway startup —
+// enroll/load credentials and begin heartbeating immediately, so it shows healthy
+// in the operator console without waiting for the first tool call. Failure here is
+// non-fatal: the tools still connect lazily on first use.
+const registerTools = plugin.register;
+plugin.register = (api) => {
+  registerTools(api);
+  const config = api.pluginConfig as EkhoPluginConfig | undefined;
+  if (config?.relayBaseUrl) {
+    void ensureConnected(config, api.logger).catch((err) => {
+      api.logger?.warn?.(`[ekho-adapter] startup connect failed: ${String(err)}`);
+    });
+  }
+};
+
+export default plugin;

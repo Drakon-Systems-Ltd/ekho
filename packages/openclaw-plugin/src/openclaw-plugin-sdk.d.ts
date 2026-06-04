@@ -43,7 +43,32 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
     tools: (tool: ToolFactory<ToolPluginConfig<TConfigSchema>>) => readonly unknown[];
   }
 
+  interface PluginLogger {
+    info?: (...args: unknown[]) => void;
+    warn?: (...args: unknown[]) => void;
+    error?: (...args: unknown[]) => void;
+    debug?: (...args: unknown[]) => void;
+  }
+
+  // The slice of OpenClawPluginApi the register() wrapper touches at startup.
+  interface PluginApi {
+    pluginConfig?: Record<string, unknown>;
+    logger?: PluginLogger;
+    [key: string]: unknown;
+  }
+
+  // defineToolPlugin returns a plugin entry whose register(api) the host calls
+  // at load. We wrap that register to add a startup connect, so it must be typed
+  // as a callable (and mutable) property.
+  interface DefinedToolPluginEntry {
+    id: string;
+    name: string;
+    description: string;
+    register: (api: PluginApi) => void;
+    [key: string]: unknown;
+  }
+
   export function defineToolPlugin<TConfigSchema extends TSchema | undefined = undefined>(
     definition: DefineToolPluginOptions<TConfigSchema>
-  ): unknown;
+  ): DefinedToolPluginEntry;
 }
