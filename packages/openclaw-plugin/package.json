@@ -1,14 +1,41 @@
 {
   "name": "@ekho/openclaw-plugin",
-  "version": "0.1.0",
-  "description": "OpenClaw plugin that connects agents to the Ekho relay for inter-agent messaging.",
-  "main": "src/index.ts",
+  "version": "0.2.1",
+  "description": "OpenClaw plugin that connects agents to an Ekho relay so they can message and coordinate with the rest of the fleet.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
+    "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
   "dependencies": {
-    "@drakon-systems/ekho-sdk": "*"
+    "@drakon-systems/ekho-sdk": "*",
+    "typebox": "^1.1.38"
   },
   "devDependencies": {
     "@types/node": "^25.5.0"

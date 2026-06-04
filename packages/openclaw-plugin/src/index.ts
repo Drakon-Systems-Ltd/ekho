@@ -1,143 +1,86 @@
-import path from "node:path";
-import { enrollOrLoad, type EkhoCredentials } from "./credentials";
-import { InboxPoller } from "./poller";
+import { Type } from "typebox";
+import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import { ensureConnected, type EkhoPluginConfig } from "./connection.js";
 
-interface PluginConfig {
-  relayBaseUrl?: string;
-  fleetId?: string;
-  enrollmentToken?: string;
-  agentId?: string;
-  agentSecret?: string;
-  pollIntervalMs?: number;
-  forwardOutbound?: boolean;
-}
-
-interface PluginApi {
-  id: string;
-  pluginConfig?: PluginConfig;
-  logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
-  registerHook: (name: string | string[], handler: (...args: unknown[]) => unknown, opts?: { name?: string; description?: string }) => void;
-  registerCommand: (def: { name: string; description: string; handler: () => Promise<{ text: string }> }) => void;
-  resolvePath?: (input: string) => string;
-}
-
-let poller: InboxPoller | null = null;
-let credentials: EkhoCredentials | null = null;
-let connected = false;
-
-async function ensureConnected(api: PluginApi): Promise<boolean> {
-  if (connected && poller) return true;
-
-  const config = api.pluginConfig ?? {};
-  const relayBaseUrl = config.relayBaseUrl ?? "http://127.0.0.1:4000";
-  const configDir = api.resolvePath ? api.resolvePath(".") : path.join(process.env.HOME ?? "~", ".openclaw", "extensions", "ekho-adapter");
-
-  try {
-    credentials = await enrollOrLoad({
-      configDir,
-      relayBaseUrl,
-      fleetId: config.fleetId,
-      enrollmentToken: config.enrollmentToken,
-      agentId: config.agentId,
-      agentSecret: config.agentSecret,
-      displayName: `openclaw-${process.env.HOSTNAME ?? "agent"}`
-    });
-
-    poller = new InboxPoller(credentials, config.pollIntervalMs ?? 5000, {
-      onMessage(msg) {
-        api.logger.info(`[ekho] message from ${msg.sender_agent_id}: ${msg.message_type}`, msg.body);
-      },
-      onControl(ctrl) {
-        api.logger.warn(`[ekho] control: ${ctrl.action} — ${ctrl.reason}`);
-      },
-      onError(err) {
-        api.logger.error(`[ekho] poll error: ${err.message}`);
-      }
-    });
-
-    poller.start();
-    connected = true;
-    api.logger.info(`[ekho] connected as ${credentials.agentId}`);
-    return true;
-  } catch (err) {
-    api.logger.error(`[ekho] connection failed: ${err instanceof Error ? err.message : err}`);
-    return false;
-  }
-}
-
-export default {
+/**
+ * Ekho relay adapter for OpenClaw.
+ *
+ * Gives the agent two tools to coordinate with the rest of an Ekho fleet:
+ *   - ekho_send:  message another agent (delegate, ask, coordinate)
+ *   - ekho_inbox: read pending messages from other agents
+ *
+ * On first use it enrolls (or loads saved credentials) and starts a background
+ * heartbeat so the agent appears healthy in the operator console. All identity
+ * (relay URL, fleet, token) comes from per-agent config — nothing is hardcoded.
+ */
+export default defineToolPlugin({
   id: "ekho-adapter",
   name: "Ekho Relay Adapter",
-  version: "0.1.0",
-  description: "Connect this OpenClaw agent to an Ekho relay for inter-agent messaging",
-
-  register(api: PluginApi) {
-    api.logger.info("[ekho] registering Ekho adapter plugin");
-
-    // Connect on session start
-    api.registerHook("session_start", () => {
-      void ensureConnected(api);
-    }, { name: "ekho-connect", description: "Connect to Ekho relay" });
-
-    // Clean up on session end
-    api.registerHook("session_end", () => {
-      if (poller) {
-        poller.stop();
-        connected = false;
-        api.logger.info("[ekho] disconnected");
+  description: "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
+  activation: { onStartup: true },
+  configSchema: Type.Object({
+    relayBaseUrl: Type.String({ description: "Ekho relay base URL, e.g. https://relay.example.ts.net" }),
+    fleetId: Type.Optional(Type.String({ description: "Fleet ID to enroll into (with enrollmentToken on first run)" })),
+    enrollmentToken: Type.Optional(Type.String({ description: "One-time operator enrollment token (first run only)" })),
+    agentId: Type.Optional(Type.String({ description: "Pre-provisioned agent id (skips enrollment)" })),
+    agentSecret: Type.Optional(Type.String({ description: "Pre-provisioned agent secret (skips enrollment)" })),
+    displayName: Type.Optional(Type.String({ description: "Display name shown in the operator console" })),
+    heartbeatIntervalMs: Type.Optional(Type.Number({ description: "Heartbeat interval in ms (default 30000)" }))
+  }),
+  tools: (tool) => [
+    tool({
+      name: "ekho_send",
+      description:
+        "Send a message to another agent in your fleet via the Ekho relay. Use this to delegate a task, ask a question, hand off work, or coordinate. Set recipient_agent_id to 'broadcast' to reach the whole fleet.",
+      parameters: Type.Object({
+        recipient_agent_id: Type.String({ description: "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet." }),
+        message: Type.String({ description: "The message text to send." }),
+        conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional)." }))
+      }),
+      execute: async ({ recipient_agent_id, message, conversation_id }, config: EkhoPluginConfig) => {
+        const { client } = await ensureConnected(config);
+        const conversationId = conversation_id ?? `oc-${Date.now()}`;
+        const stamp = `oc-${Date.now()}`;
+        const result = await client.sendMessage({
+          recipient: recipient_agent_id === "broadcast" ? { kind: "broadcast" } : { kind: "agent", id: recipient_agent_id },
+          message_type: "direct",
+          body: { text: message },
+          conversation_id: conversationId,
+          correlation_id: stamp
+        });
+        return { sent: true, message_id: result.message_id, conversation_id: conversationId };
       }
-    }, { name: "ekho-disconnect", description: "Disconnect from Ekho relay" });
-
-    // Optionally forward outbound messages
-    const config = api.pluginConfig ?? {};
-    if (config.forwardOutbound) {
-      api.registerHook("message_sending", (event: unknown) => {
-        if (!poller || !connected) return;
-        const evt = event as { content?: string; role?: string };
-        if (evt.role === "assistant" && evt.content) {
-          void poller.sendMessage(
-            "broadcast",
-            evt.content.slice(0, 500),
-            `openclaw-session-${Date.now()}`
-          ).catch(() => {});
-        }
-      }, { name: "ekho-forward", description: "Forward outbound messages to Ekho" });
-    }
-
-    // Status command
-    api.registerCommand({
-      name: "ekho-status",
-      description: "Show Ekho relay connection status",
-      async handler() {
-        if (!connected || !credentials) {
-          return { text: "Ekho: disconnected\n  Run /ekho-connect to connect." };
+    }),
+    tool({
+      name: "ekho_inbox",
+      description:
+        "Read and acknowledge messages other agents have sent you via the Ekho relay. Call this to check for delegated tasks, replies, or coordination requests.",
+      parameters: Type.Object({}),
+      execute: async (_params, config: EkhoPluginConfig) => {
+        const { client } = await ensureConnected(config);
+        const inbox = await client.getInbox();
+        const messages = inbox.messages as Array<Record<string, unknown>>;
+        if (messages.length > 0) {
+          await client.ackMessages(
+            messages.map((m) => ({
+              message_id: String(m.message_id),
+              status: "received" as const,
+              received_at: new Date().toISOString()
+            }))
+          );
         }
         return {
-          text: [
-            `Ekho: connected`,
-            `  Agent:  ${credentials.agentId}`,
-            `  Relay:  ${credentials.relayBaseUrl}`,
-            `  Fleet:  ${credentials.fleetId}`,
-            `  Polling: every ${(api.pluginConfig?.pollIntervalMs ?? 5000) / 1000}s`
-          ].join("\n")
+          count: messages.length,
+          messages: messages.map((m) => ({
+            from: m.sender_agent_id,
+            type: m.message_type,
+            body: m.body,
+            conversation_id: m.conversation_id,
+            sent_at: m.created_at
+          })),
+          controls: inbox.controls
         };
       }
-    });
-
-    // Manual send command
-    api.registerCommand({
-      name: "ekho-send",
-      description: "Send a message to another agent via Ekho (usage: /ekho-send <agent_id> <message>)",
-      async handler() {
-        return { text: "Usage: /ekho-send <agent_id> <message>\n(Command argument parsing requires OpenClaw command args support)" };
-      }
-    });
-
-    // Auto-connect on load if credentials exist
-    void ensureConnected(api);
-  }
-};
-
-export { InboxPoller } from "./poller";
-export { enrollOrLoad, loadCredentials, saveCredentials } from "./credentials";
-export type { EkhoCredentials } from "./credentials";
+    })
+  ]
+});

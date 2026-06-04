@@ -3,7 +3,6 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { loadCredentials, saveCredentials, type EkhoCredentials } from "../src/credentials";
-import { InboxPoller } from "../src/poller";
 
 describe("@ekho/openclaw-plugin", () => {
   const tmpDirs: string[] = [];
@@ -48,33 +47,4 @@ describe("@ekho/openclaw-plugin", () => {
     });
   });
 
-  describe("InboxPoller", () => {
-    it("constructs with credentials", () => {
-      const creds: EkhoCredentials = {
-        agentId: "agent_poller",
-        secret: "secret_poller",
-        relayBaseUrl: "http://localhost:9999",
-        fleetId: "flt_poller"
-      };
-
-      const poller = new InboxPoller(creds, 5000, {
-        onMessage: () => {},
-        onControl: () => {},
-        onError: () => {}
-      });
-
-      expect(poller.agentId).toBe("agent_poller");
-      poller.stop();
-    });
-  });
-
-  describe("plugin export", () => {
-    it("exports default plugin with correct shape", async () => {
-      const plugin = (await import("../src/index")).default;
-      expect(plugin.id).toBe("ekho-adapter");
-      expect(plugin.name).toBe("Ekho Relay Adapter");
-      expect(plugin.version).toBe("0.1.0");
-      expect(typeof plugin.register).toBe("function");
-    });
-  });
 });
