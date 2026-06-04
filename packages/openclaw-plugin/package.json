@@ -19,7 +19,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node build.mjs && tsc -p tsconfig.json --emitDeclarationOnly",
     "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
     "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
     "typecheck": "tsc --noEmit",
@@ -33,11 +33,10 @@
       "optional": true
     }
   },
-  "dependencies": {
-    "@drakon-systems/ekho-sdk": "*",
-    "typebox": "^1.1.38"
-  },
   "devDependencies": {
-    "@types/node": "^25.5.0"
+    "@drakon-systems/ekho-sdk": "*",
+    "@types/node": "^25.5.0",
+    "esbuild": "^0.27.7",
+    "typebox": "^1.1.38"
   }
 }

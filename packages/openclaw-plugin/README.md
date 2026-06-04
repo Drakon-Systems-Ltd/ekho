@@ -9,13 +9,17 @@ Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds two agen
 
 On first use it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent appears healthy in the Ekho operator console. Credentials are cached at `~/.openclaw/extensions/ekho-adapter/.ekho-credentials.json`.
 
+`dist/index.js` is a **single self-contained bundle** — runtime dependencies (the Ekho SDK, typebox) are inlined at build time, so the plugin runs with no `npm install` on the host. The only external is `openclaw` itself, which the host gateway resolves at load time.
+
 ## Install
 
 ```bash
-openclaw plugins install npm:@ekho/openclaw-plugin
-# or from a local checkout:
 openclaw plugins install ./packages/openclaw-plugin
+# remote host (no clone needed): copy the built folder and point the gateway at it
+#   scp -r packages/openclaw-plugin user@host:~/.openclaw/extensions/ekho-adapter
 ```
+
+The folder you ship only needs `dist/`, `openclaw.plugin.json`, `package.json`, and `README.md` — no `node_modules`.
 
 ## Configure
 
@@ -39,6 +43,21 @@ Set the plugin config in your `~/.openclaw/openclaw.json` under `plugins.entries
 | `heartbeatIntervalMs` | optional | Heartbeat interval (default `30000`) |
 
 Restart the OpenClaw gateway after configuring. Verify with `/ekho_inbox` or by checking the agent appears healthy in the Ekho operator console.
+
+### Restrictive tool profiles
+
+If the agent uses a restrictive `tools.profile` (e.g. `"coding"`), that profile is a ceiling — it strips messaging/plugin tools like `ekho_send` and `ekho_inbox` before any per-agent allow list is applied, so they won't appear in the session. Re-admit them with `tools.alsoAllow` (which *widens* the profile, unlike `tools.allow`, which replaces it):
+
+```json
+{
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": ["ekho_send", "ekho_inbox"]
+  }
+}
+```
+
+Use `alsoAllow`, not `allow`: any non-`*` entry in `allow` turns it into a restrictive allowlist that drops every other tool. Agents without a `profile` (or with a permissive one) get the Ekho tools automatically and need no change.
 
 ## Build (from source)
 
