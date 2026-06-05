@@ -451,3 +451,79 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
   .tw-caret { display: none; }
   .typing-dots span { animation: none; opacity: 0.6; transform: none; }
 }
+
+/* ============================================================
+   Mobile / responsive — collapse the 3-pane desktop layout to a
+   single active view with stack navigation + a slide-in ops drawer.
+   Mobile-only controls are hidden by default (desktop unaffected).
+   ============================================================ */
+.chat__back, .chat__ops, .rail__mobilebar, .rail-backdrop { display: none; }
+
+@media (max-width: 860px) {
+  /* Compact app bar */
+  .appbar { height: 52px; padding: 0 max(10px, env(safe-area-inset-left)) 0 max(10px, env(safe-area-inset-right)); }
+  .appbar__sub, .brand-by, .sync-pill { display: none; }
+  .brand-name { font-size: 15px; }
+  .appbar__brand { gap: 8px; }
+  .appbar__right { gap: 4px; }
+  .appbar__right .button { padding: 7px 11px; font-size: 12px; }
+
+  /* One pane at a time: left rail (list) OR chat overlaid in the same cell */
+  .layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
+  .rail--left, .chat { grid-row: 1; grid-column: 1; min-width: 0; border: 0; }
+  .app--list .chat { display: none; }
+  .app--chat .rail--left { display: none; }
+
+  /* Mobile nav controls */
+  .chat__back, .chat__ops { display: inline-flex; align-items: center; }
+  .chat__back {
+    background: none; border: 0; color: var(--accent); cursor: pointer;
+    font-size: 14px; font-weight: 560; padding: 6px 8px 6px 0; flex: 0 0 auto;
+  }
+  .chat__ops {
+    background: rgba(255,255,255,0.05); border: 1px solid var(--hair);
+    color: var(--text); cursor: pointer; font-size: 12.5px; font-weight: 560;
+    padding: 7px 13px; border-radius: 9px; flex: 0 0 auto;
+  }
+  .chat__header { gap: 8px; padding: 0 12px; }
+  .chat__convid { max-width: 48vw; }
+  .toggle--inline { display: none; } /* power feature; hidden on mobile (off by default) */
+
+  /* Right rail becomes a slide-in drawer */
+  .rail--right {
+    position: fixed; top: 0; right: 0; bottom: 0;
+    width: min(380px, 90vw);
+    transform: translateX(101%);
+    transition: transform 240ms var(--ease);
+    z-index: 70; box-shadow: -16px 0 48px rgba(0,0,0,0.55);
+    border-left: 1px solid var(--hair);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .app--ops .rail--right { transform: translateX(0); }
+  .rail-backdrop {
+    display: block; position: fixed; inset: 0;
+    background: rgba(4, 6, 9, 0.55);
+    opacity: 0; pointer-events: none; transition: opacity 240ms var(--ease);
+    z-index: 65;
+  }
+  .app--ops .rail-backdrop { opacity: 1; pointer-events: auto; }
+  .rail__mobilebar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid var(--hair);
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint);
+  }
+
+  /* Chat + composer comfort on small screens */
+  .chat__body { padding: 14px 14px 6px; }
+  .bubble { max-width: 84%; }
+  .composer { padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); }
+  .composer__recipient { max-width: 124px; padding: 10px 24px 10px 10px; }
+  .composer__send { padding: 0 16px; }
+
+  /* Bigger touch targets in the lists */
+  .agent-row, .conv-row { padding-top: 11px; padding-bottom: 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail--right, .rail-backdrop { transition: none; }
+}

@@ -182,6 +182,10 @@ export default function App() {
   const [agentSearch, setAgentSearch] = useState("");
   const [rightTab, setRightTab] = useState("approvals");
   const [showSystem, setShowSystem] = useState(false);
+  // Mobile navigation (no effect on desktop — gated by CSS media query):
+  // 'list' shows the fleet/conversations rail; 'chat' shows the conversation.
+  const [mobileView, setMobileView] = useState("list");
+  const [opsOpen, setOpsOpen] = useState(false); // right-rail drawer (mobile)
   const [composerText, setComposerText] = useState("");
   const [composerRecipient, setComposerRecipient] = useState("broadcast");
   const [optimistic, setOptimistic] = useState([]); // pending operator messages
@@ -450,6 +454,7 @@ export default function App() {
   function selectAgent(agentId) {
     setSelectedAgentId(agentId);
     setRightTab("agent");
+    setOpsOpen(true); // mobile: slide in the ops drawer on the Agent tab
     refreshAgentDetail(agentId);
     refreshAgentRateLimits(agentId);
     if (agentId !== "broadcast") setComposerRecipient(agentId);
@@ -459,6 +464,8 @@ export default function App() {
     if (!conversationId) return;
     setSelectedConversationId(conversationId);
     setTimelineEvents([]);
+    setMobileView("chat"); // mobile: open the conversation full-screen
+    setOpsOpen(false);
     refreshTimeline(conversationId).catch((error) => handleApiError(error, { allowSessionReset: true }));
   }
 
@@ -825,7 +832,7 @@ export default function App() {
   const selectedAgent = agents.find((a) => a.id === selectedAgentId) || agentDetail?.agent;
 
   return (
-    <div className="app">
+    <div className={`app app--${mobileView}${opsOpen ? " app--ops" : ""}`}>
       <header className="appbar">
         <div className="appbar__brand">
           <span className="brand-mark">E</span>
@@ -935,6 +942,9 @@ export default function App() {
         {/* CENTER — CHAT */}
         <main className="chat">
           <div className="chat__header">
+            <button className="chat__back" onClick={() => setMobileView("list")} aria-label="Back to fleet">
+              ‹ Fleet
+            </button>
             <div className="chat__heading">
               {selectedConversationId ? (
                 <>
@@ -949,6 +959,9 @@ export default function App() {
               <input type="checkbox" checked={showSystem} onChange={(e) => setShowSystem(e.target.checked)} />
               <span>System events</span>
             </label>
+            <button className="chat__ops" onClick={() => setOpsOpen(true)} aria-label="Open operations panel">
+              Ops
+            </button>
           </div>
 
           <ChatScroller
@@ -1057,7 +1070,12 @@ export default function App() {
         </main>
 
         {/* RIGHT RAIL */}
+        <div className="rail-backdrop" onClick={() => setOpsOpen(false)} aria-hidden="true" />
         <aside className="rail rail--right">
+          <div className="rail__mobilebar">
+            <span>Operations</span>
+            <button className="icon-button" onClick={() => setOpsOpen(false)} aria-label="Close operations panel">✕</button>
+          </div>
           <div className="tabs">
             {[
               ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
