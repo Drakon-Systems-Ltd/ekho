@@ -120,7 +120,7 @@ input:focus, textarea:focus, select:focus { border-color: rgba(45, 212, 191, 0.5
 select { appearance: none; cursor: pointer; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 16px) center, calc(100% - 11px) center; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 30px; }
 
 /* ---------------- app shell ---------------- */
-.app { height: 100dvh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
+.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
 .appbar {
   display: flex; align-items: center; justify-content: space-between;
   height: 56px; padding: 0 18px;
@@ -431,15 +431,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .help-hint { display: block; width: 100%; text-align: center; background: none; border: 0; padding: 4px 0 0; font-size: 11.5px; color: var(--faint); cursor: pointer; transition: color var(--t); }
 .help-hint:hover { color: var(--muted); }
 
-/* ---------------- responsive ---------------- */
-@media (max-width: 1100px) {
-  .layout { grid-template-columns: 260px minmax(0, 1fr); }
-  .rail--right { display: none; }
-}
-@media (max-width: 720px) {
-  .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .rail--left { display: none; }
-}
+/* Responsive layout is handled by the mobile block below (single-pane nav). */
 
 /* ---------------- reduced motion ---------------- */
 @media (prefers-reduced-motion: reduce) {
@@ -459,7 +451,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
    ============================================================ */
 .chat__back, .chat__ops, .rail__mobilebar, .rail-backdrop { display: none; }
 
-@media (max-width: 860px) {
+@media (max-width: 960px) {
   /* Compact app bar */
   .appbar { height: 52px; padding: 0 max(10px, env(safe-area-inset-left)) 0 max(10px, env(safe-area-inset-right)); }
   .appbar__sub, .brand-by, .sync-pill { display: none; }
@@ -468,11 +460,18 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
   .appbar__right { gap: 4px; }
   .appbar__right .button { padding: 7px 11px; font-size: 12px; }
 
-  /* One pane at a time: left rail (list) OR chat overlaid in the same cell */
-  .layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
-  .rail--left, .chat { grid-row: 1; grid-column: 1; min-width: 0; border: 0; }
+  /* One pane at a time: the active pane fills the shell (robust flex, not grid) */
+  .layout { display: flex; flex-direction: column; min-height: 0; }
+  .rail--left, .chat { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; }
   .app--list .chat { display: none; }
   .app--chat .rail--left { display: none; }
+
+  /* LIST view: scroll the WHOLE left rail as one column — no nested scroll panes
+     (the desktop two-section independent-scroll layout collapses on small screens). */
+  .rail--left { overflow-y: auto; }
+  .rail--left .rail__section,
+  .rail--left .rail__section--grow { flex: 0 0 auto; min-height: 0; }
+  .rail--left .rail__list { overflow: visible; min-height: 0; }
 
   /* Mobile nav controls */
   .chat__back, .chat__ops { display: inline-flex; align-items: center; }

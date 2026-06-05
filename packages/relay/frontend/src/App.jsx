@@ -454,7 +454,7 @@ export default function App() {
   function selectAgent(agentId) {
     setSelectedAgentId(agentId);
     setRightTab("agent");
-    setOpsOpen(true); // mobile: slide in the ops drawer on the Agent tab
+    setMobileView("chat"); // mobile: open the chat (composer pre-targeted) so you can message this agent
     refreshAgentDetail(agentId);
     refreshAgentRateLimits(agentId);
     if (agentId !== "broadcast") setComposerRecipient(agentId);
