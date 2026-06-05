@@ -32,3 +32,12 @@ export function useFilteredCollection(collection, predicate, deps = []) {
   return useMemo(() => collection.filter(predicate), [collection, predicate, ...deps]);
 }
 
+// Re-renders once a minute so relative timestamps stay fresh without per-tick churn.
+export function useNow(intervalMs = 30000) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return now;
+}

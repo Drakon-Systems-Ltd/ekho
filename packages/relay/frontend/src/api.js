@@ -80,6 +80,16 @@ export const getConversationEvents = (token, conversationId, params = {}) =>
   request(`/v1/operator/conversations/${encodeURIComponent(conversationId)}?${new URLSearchParams(params).toString()}`, { token });
 export const issueEnrollmentToken = (token) =>
   request("/v1/operator/enrollment-tokens", { token, method: "POST" });
+export const sendOperatorMessage = (token, { recipientAgentId, text, conversationId }) =>
+  request("/v1/operator/messages", {
+    token,
+    method: "POST",
+    body: {
+      recipient_agent_id: recipientAgentId,
+      text,
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+    },
+  });
 export const controlAgent = (token, agentId, action, body) =>
   request(`/v1/operator/agents/${encodeURIComponent(agentId)}/${action}`, {
     token,
@@ -90,6 +100,12 @@ export const resolveApproval = (token, approvalId, decision) =>
   request(`/v1/operator/approvals/${encodeURIComponent(approvalId)}/${decision}`, {
     token,
     method: "POST",
+  });
+export const setAgentTrust = (token, agentId, trusted) =>
+  request(`/v1/operator/agents/${encodeURIComponent(agentId)}/trust`, {
+    token,
+    method: "POST",
+    body: { trusted },
   });
 export const getPolicies = (token) =>
   request("/v1/operator/policies", { token });
