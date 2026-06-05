@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type {
   AgentCredentials,
   ActionDecision,
+  InboxResponse,
   SendMessagePayload,
   HeartbeatPayload,
   ProposeActionPayload,
@@ -59,7 +60,7 @@ export class EkhoAgentClient {
   }
 
   getInbox(limit = 25) {
-    return this.request<{ messages: Array<Record<string, unknown>>; controls: Array<Record<string, unknown>> }>("GET", `/v1/inbox?limit=${limit}`);
+    return this.request<InboxResponse>("GET", `/v1/inbox?limit=${limit}`);
   }
 
   ackMessages(acks: Array<{ message_id: string; status: "received"; received_at: string }>) {

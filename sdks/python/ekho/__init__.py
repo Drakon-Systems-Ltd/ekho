@@ -19,6 +19,7 @@ from .types import (
     InboxMessage,
     InboxResponse,
     ProposeActionInput,
+    RosterEntry,
     SendMessageInput,
     SendMessageResult,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "SendMessageResult",
     "InboxMessage",
     "InboxResponse",
+    "RosterEntry",
     "ControlMessage",
     "AckInput",
     # Heartbeats / actions

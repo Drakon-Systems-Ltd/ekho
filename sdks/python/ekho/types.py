@@ -36,6 +36,8 @@ class InboxMessage:
     metadata: Dict[str, Any]
     created_at: str
     deadline_at: str
+    # "operator" iff the sender is the verified fleet operator; else "agent".
+    sender_kind: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxMessage":
@@ -50,6 +52,7 @@ class InboxMessage:
             metadata=data.get("metadata") or {},
             created_at=data["created_at"],
             deadline_at=data["deadline_at"],
+            sender_kind=data.get("sender_kind"),
         )
 
 
@@ -69,9 +72,30 @@ class ControlMessage:
 
 
 @dataclass
+class RosterEntry:
+    agent_id: str
+    display_name: str
+    runtime: str
+    status: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RosterEntry":
+        return cls(
+            agent_id=data["agent_id"],
+            display_name=data.get("display_name", ""),
+            runtime=data.get("runtime", ""),
+            status=data.get("status", ""),
+        )
+
+
+@dataclass
 class InboxResponse:
     messages: List[InboxMessage]
     controls: List[ControlMessage]
+    # Whether this agent recognizes the console operator as its verified principal.
+    operator_trusted: bool = False
+    # Other agents in the same fleet (excludes the operator identity and self).
+    roster: List[RosterEntry] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxResponse":
@@ -83,6 +107,11 @@ class InboxResponse:
             controls=[
                 ControlMessage.from_dict(c)
                 for c in data.get("controls", [])
+            ],
+            operator_trusted=bool(data.get("operator_trusted", False)),
+            roster=[
+                RosterEntry.from_dict(r)
+                for r in data.get("roster", [])
             ],
         )
 

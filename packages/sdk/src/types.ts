@@ -16,6 +16,8 @@ export type InboxMessage = {
   conversation_id: string;
   correlation_id: string;
   sender_agent_id: string;
+  /** "operator" iff the sender is the verified fleet operator; otherwise "agent". */
+  sender_kind?: "operator" | "agent";
   message_type: string;
   priority: string;
   body: Record<string, unknown>;
@@ -28,6 +30,22 @@ export type ControlMessage = {
   control_id: string;
   action: string;
   reason: string;
+};
+
+export type RosterEntry = {
+  agent_id: string;
+  display_name: string;
+  runtime: string;
+  status: string;
+};
+
+export type InboxResponse = {
+  messages: InboxMessage[];
+  controls: ControlMessage[];
+  /** Whether this agent recognizes the console operator as its verified principal. */
+  operator_trusted?: boolean;
+  /** Other agents in the same fleet (excludes the operator identity and self). */
+  roster?: RosterEntry[];
 };
 
 export type SendMessagePayload = {

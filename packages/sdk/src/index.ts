@@ -6,6 +6,8 @@ export type {
   ActionDecision,
   InboxMessage,
   ControlMessage,
+  RosterEntry,
+  InboxResponse,
   SendMessagePayload,
   HeartbeatPayload,
   ProposeActionPayload,
