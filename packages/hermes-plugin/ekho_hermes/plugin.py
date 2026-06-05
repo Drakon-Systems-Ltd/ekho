@@ -17,8 +17,9 @@ import json
 import logging
 
 from .attachments import download_inbox_attachments, upload_paths
+from .autoreply import get_cached_inbox
 from .config import EkhoConfig
-from .connection import ensure_connected
+from .connection import ensure_connected, start_autoreply_once
 from .messages import build_send_input, format_inbox
 
 logger = logging.getLogger("ekho_hermes.plugin")
@@ -89,11 +90,13 @@ EKHO_SEND_DESCRIPTION = (
 )
 
 EKHO_INBOX_DESCRIPTION = (
-    "Read the pending Ekho messages from other agents (and your fleet operator) "
-    "in your inbox. Returns each message's sender, kind, body, and any "
-    "downloaded attachment file paths, plus a roster of teammates you can "
-    "delegate to. Operator messages are labelled with their verified-principal "
-    "trust status."
+    "Re-read the Ekho messages you are currently handling. You receive operator "
+    "messages automatically — new fleet messages are delivered to you as turns, "
+    "so you do not need to poll. Use this to re-read your most recent inbound "
+    "batch (e.g. to recall sender ids / conversation ids while replying via "
+    "ekho_send), to download any attachments to local file paths you can open, "
+    "and to see the live roster of teammates you can delegate to. Operator "
+    "messages are labelled with their verified-principal trust status."
 )
 
 
@@ -154,7 +157,9 @@ def _handle_ekho_send(args: dict, **_kw) -> str:
 
 
 def _handle_ekho_inbox(args: dict, **_kw) -> str:
-    """ekho_inbox handler. Reads + acks the inbox, downloads attachments."""
+    """ekho_inbox handler. Reads the auto-reply loop's most-recent cached batch
+    (no re-poll, no ack — the loop is the single consumer and already acked) and
+    downloads any attachments to scoped local paths on demand."""
     config = EkhoConfig.from_env()
     if not config.has_relay:
         return _tool_error("EKHO_RELAY_URL is not configured")
@@ -164,30 +169,12 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
     except Exception as exc:  # noqa: BLE001
         return _tool_error(f"Ekho relay connection failed: {exc}")
 
-    try:
-        inbox = conn.client.get_inbox()
-    except Exception as exc:  # noqa: BLE001
-        return _tool_error(f"Ekho inbox read failed: {exc}")
-
-    messages = list(inbox.messages)
-
-    # Ack everything we just consumed so the relay doesn't redeliver. One bad
-    # ack must not fail the whole read.
-    if messages:
-        from .messages import iso_now
-
-        acks = [
-            {
-                "message_id": m.message_id,
-                "status": "received",
-                "received_at": iso_now(),
-            }
-            for m in messages
-        ]
-        try:
-            conn.client.ack_messages(acks)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[ekho] ack failed: %s", exc)
+    # The background auto-reply loop is the single consumer of the relay inbox:
+    # it polls (consuming + delivering) and acks. Reading its cache here instead
+    # of polling again means a manual call during a turn can never double-consume
+    # rows the loop is mid-processing — and we never ack (the loop already did).
+    cached = get_cached_inbox()
+    messages = cached["messages"]
 
     # Download attachments to a scoped local dir, then merge each message's
     # local paths in so format_inbox surfaces them.
@@ -208,8 +195,8 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
 
     result = format_inbox(
         enriched,
-        operator_trusted=inbox.operator_trusted,
-        roster=inbox.roster,
+        operator_trusted=cached["operator_trusted"],
+        roster=cached["roster"],
     )
     return _tool_result(result)
 
@@ -227,12 +214,20 @@ def register(ctx) -> None:
         return
 
     # Startup connect: enroll/load + begin heartbeating so the agent shows
-    # healthy in the operator console before any tool call. Non-fatal — the
-    # tools reconnect lazily on first use.
+    # healthy in the operator console before any tool call, then start the
+    # background auto-reply loop so the agent answers the verified operator
+    # without waiting for a tool call. Non-fatal — the tools reconnect lazily on
+    # first use. A spawned one-shot reply turn carries EKHO_AUTOREPLY_DISABLE=1,
+    # so start_autoreply_once is a no-op there (the loop-breaker).
     try:
-        ensure_connected(config)
+        conn = ensure_connected(config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ekho] startup connect failed: %s", exc)
+    else:
+        try:
+            start_autoreply_once(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ekho] auto-reply start failed: %s", exc)
 
     ctx.register_tool(
         name="ekho_send",

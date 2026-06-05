@@ -11,6 +11,7 @@ unverified one with a caution note.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -44,12 +45,19 @@ def iso_now() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
 
+def new_id(prefix: str) -> str:
+    """A fresh unique id with the given prefix (mirrors the OpenClaw plugin's
+    ``oc-<...>`` stamps; we use ``hermes-<uuid>``)."""
+    return f"{prefix}-{uuid.uuid4().hex}"
+
+
 def build_send_input(
     recipient_agent_id: str,
     text: str,
     *,
     conversation_id: Optional[str] = None,
     attachment_ids: Optional[Sequence[str]] = None,
+    correlation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a ``SendMessageInput`` dict for ``client.send_message``.
 
@@ -57,6 +65,11 @@ def build_send_input(
     is a direct message to that agent. Attachment ids ride inside the signed
     ``body.attachments`` so the relay binds + validates them, exactly like the
     OpenClaw plugin does.
+
+    The relay's ``sendMessageSchema`` requires BOTH ``conversation_id`` and
+    ``correlation_id`` as non-empty strings, so we always set them — threading a
+    caller-supplied ``conversation_id`` (an auto-reply continues the operator's
+    thread) and otherwise minting fresh ids.
     """
     if recipient_agent_id == "broadcast":
         recipient: Dict[str, Any] = {"kind": "broadcast"}
@@ -68,15 +81,14 @@ def build_send_input(
     if ids:
         body["attachments"] = list(ids)
 
-    payload: Dict[str, Any] = {
+    return {
         "recipient": recipient,
         "message_type": "direct",
         "body": body,
         "metadata": {"ekho_origin": EKHO_ORIGIN_STAMP},
+        "conversation_id": conversation_id or new_id("hermes-conv"),
+        "correlation_id": correlation_id or new_id("hermes"),
     }
-    if conversation_id:
-        payload["conversation_id"] = conversation_id
-    return payload
 
 
 def _message_get(message: Any, key: str, default: Any = None) -> Any:

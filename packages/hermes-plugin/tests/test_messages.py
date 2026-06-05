@@ -17,8 +17,27 @@ def test_build_send_input_agent_recipient():
     assert payload["message_type"] == "direct"
     assert payload["body"] == {"text": "hello there"}
     assert payload["metadata"] == {"ekho_origin": EKHO_ORIGIN_STAMP}
-    # No conversation_id passed -> key absent.
-    assert "conversation_id" not in payload
+
+
+def test_build_send_input_always_includes_required_ids():
+    # The relay's sendMessageSchema requires BOTH conversation_id and
+    # correlation_id as non-empty strings (z.string().min(1)); a send missing
+    # either 400s. So build_send_input must always set them, generating ids
+    # when the caller doesn't supply them.
+    payload = build_send_input("agent-123", "hello there")
+    assert isinstance(payload["conversation_id"], str) and payload["conversation_id"]
+    assert isinstance(payload["correlation_id"], str) and payload["correlation_id"]
+
+
+def test_build_send_input_explicit_correlation_id_passes_through():
+    payload = build_send_input("agent-9", "x", correlation_id="corr-42")
+    assert payload["correlation_id"] == "corr-42"
+
+
+def test_build_send_input_generates_unique_ids_per_call():
+    a = build_send_input("agent-1", "x")
+    b = build_send_input("agent-1", "x")
+    assert a["correlation_id"] != b["correlation_id"]
 
 
 def test_build_send_input_broadcast():

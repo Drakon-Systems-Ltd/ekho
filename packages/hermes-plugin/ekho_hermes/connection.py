@@ -15,9 +15,11 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 from ekho import AgentCredentials, EkhoAgentClient
 
+from . import autoreply
 from .config import EkhoConfig
 from .credentials import enroll_or_load
 
@@ -42,6 +44,8 @@ _connection: Connection | None = None
 _lock = threading.Lock()
 _heartbeat_thread: threading.Thread | None = None
 _heartbeat_stop = threading.Event()
+# The background auto-reply loop's stop() callable, started at most once.
+_autoreply_stop: Optional[Callable[[], None]] = None
 
 
 def _heartbeat_loop(client: EkhoAgentClient, interval_seconds: int) -> None:
@@ -104,9 +108,55 @@ def ensure_connected(
         return _connection
 
 
+def start_autoreply_once(
+    conn: Connection,
+    *,
+    env: Optional[dict] = None,
+    start_fn: Optional[Callable[..., Callable[[], None]]] = None,
+) -> Optional[Callable[[], None]]:
+    """Start the background auto-reply loop exactly once for this process.
+
+    Mirrors the OpenClaw plugin's ``maybeStartAutoReply``: a process carrying
+    ``EKHO_AUTOREPLY_DISABLE=1`` (the spawned one-shot reply turn) connects for
+    the ``ekho_send`` tool but never starts its own loop — the structural
+    loop-breaker. ``env`` and ``start_fn`` are injectable for tests.
+    """
+    global _autoreply_stop
+    env = os.environ if env is None else env
+    if env.get(autoreply.EKHO_AUTOREPLY_DISABLE_ENV) == "1":
+        logger.info(
+            "[ekho] auto-reply disabled in this process (%s)",
+            autoreply.EKHO_AUTOREPLY_DISABLE_ENV,
+        )
+        return None
+    with _lock:
+        if _autoreply_stop is not None:
+            return _autoreply_stop
+        starter = start_fn or autoreply.start_autoreply
+        _autoreply_stop = starter(
+            client=conn.client,
+            self_agent_id=conn.credentials.agent_id,
+            log=logger,
+        )
+        return _autoreply_stop
+
+
+def reset_autoreply_singleton() -> None:
+    """Clear the auto-reply singleton without stopping a live loop (test hook)."""
+    global _autoreply_stop
+    _autoreply_stop = None
+
+
 def shutdown() -> None:
-    """Stop the heartbeat thread and reset the singleton. Idempotent."""
-    global _connection, _heartbeat_thread
+    """Stop the heartbeat + auto-reply threads and reset the singleton."""
+    global _connection, _heartbeat_thread, _autoreply_stop
+
+    if _autoreply_stop is not None:
+        try:
+            _autoreply_stop()
+        except Exception:  # noqa: BLE001
+            pass
+        _autoreply_stop = None
 
     _heartbeat_stop.set()
     thread = _heartbeat_thread
