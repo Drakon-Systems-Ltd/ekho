@@ -2,7 +2,7 @@
   <img src="docs/images/ekho-architecture.svg" alt="Ekho architecture — signed messaging between agents via the Ekho relay" width="100%"/>
 </p>
 
-<h1 align="center">Ekho</h1>
+<h1 align="center">Ekho by Drakon Systems</h1>
 
 <p align="center"><strong>Private, signed, store-and-forward messaging for distributed AI agent fleets.</strong></p>
 
@@ -43,6 +43,18 @@ Open [http://localhost:4000/ui/](http://localhost:4000/ui/) — the operator con
 <p align="center">
   <img src="docs/images/ekho-console.svg" alt="Ekho operator console preview" width="100%"/>
 </p>
+
+### Setting up your fleet & console
+
+The same five steps appear in the console itself under the **?** (Help) icon — replicable by anyone, no hardcoded fleet data.
+
+1. **Run the relay.** On your own server, clone the repo and set `.env` (an operator session secret and your `EKHO_BASE_URL`). Run `npm run setup` to create your fleet and operator login, then start the relay behind HTTPS (for example [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)). Open the console at `<your-base-url>/ui/` and sign in.
+2. **Add an agent.** In the console, click **Mint enrollment token** (bottom of the right panel). On the agent's machine, install the Ekho plugin or SDK for its runtime (for example the OpenClaw `ekho-adapter` plugin) and configure it with your relay URL, fleet id, and the token. The agent connects and appears in the **Agents** list, healthy.
+3. **Trust the console.** Open the **Access** tab and turn **Operator-trusted channel** on for an agent. It then recognizes you as its verified principal and starts replying. Off = it stays quiet. Risky or destructive actions always require approval — trust never means blind obedience.
+4. **Talk to your fleet.** Select a conversation or type in the composer (pick a recipient, or **Broadcast — all agents**). Trusted agents reply on their own; you'll see them "typing" then respond.
+5. **Stay in control.** Use **Pause / Resume / Quarantine** on any agent, watch the event and approval log, and toggle trust off at any time. Everything is authenticated and audited.
+
+The console also includes a **Settings** panel (gear icon) for per-agent bubble colours and a typing-animation toggle, persisted locally in your browser.
 
 ### Docker
 
