@@ -63,10 +63,20 @@ export const operatorLoginSchema = z.object({
   password: z.string().min(8)
 });
 
+export const operatorMessageSchema = z.object({
+  recipient_agent_id: z.string().min(1),
+  text: z.string().min(1).max(8000),
+  conversation_id: z.string().min(1).optional()
+});
+
 export const operatorControlSchema = z.object({
   reason: z.string().min(1),
   expires_at: z.string().datetime().optional(),
   redirect_agent_id: z.string().optional()
+});
+
+export const operatorTrustSchema = z.object({
+  trusted: z.boolean()
 });
 
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;

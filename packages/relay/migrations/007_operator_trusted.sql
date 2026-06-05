@@ -1,0 +1,1 @@
+ALTER TABLE agents ADD COLUMN operator_trusted INTEGER NOT NULL DEFAULT 0;

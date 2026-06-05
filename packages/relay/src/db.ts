@@ -190,6 +190,22 @@ export class EkhoDb {
     return this.db.prepare("DELETE FROM replay_nonces WHERE created_at < ?").run(cutoff).changes;
   }
 
+  /**
+   * Active recipients for a broadcast: every non-revoked agent in the fleet
+   * except the sender and the synthetic operator identity (runtime='operator',
+   * which can send but never receives). Returns agent ids only.
+   */
+  private broadcastRecipientIds(fleetId: string, senderAgentId: string): string[] {
+    const rows = this.db.prepare(
+      `SELECT id FROM agents
+       WHERE fleet_id = ?
+         AND runtime != 'operator'
+         AND revoked_at IS NULL
+         AND id != ?`
+    ).all(fleetId, senderAgentId) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
   createMessage(input: {
     fleetId: string;
     senderAgentId: string;
@@ -233,10 +249,15 @@ export class EkhoDb {
         "queued"
       );
 
+      const deliveryStmt = this.db.prepare(
+        "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
+      );
       if (input.recipientKind === "agent" && input.recipientId) {
-        this.db.prepare(
-          "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
-        ).run(id("dly"), messageId, input.recipientId, createdAt, "queued");
+        deliveryStmt.run(id("dly"), messageId, input.recipientId, createdAt, "queued");
+      } else if (input.recipientKind === "broadcast") {
+        for (const recipientId of this.broadcastRecipientIds(input.fleetId, input.senderAgentId)) {
+          deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
+        }
       }
 
       this.recordEvent(input.fleetId, "message.queued", "agent", input.senderAgentId, "message", messageId, input.conversationId, {
@@ -248,6 +269,101 @@ export class EkhoDb {
 
     tx();
     return { messageId, createdAt };
+  }
+
+  /**
+   * Synthetic per-fleet "operator" agent used as the sender identity for
+   * operator-originated messages. better-sqlite3 enables foreign_keys by
+   * default, so messages.sender_agent_id must reference a real agents row.
+   * This agent is marked with runtime='operator' and a revoked credential so
+   * it can never authenticate as an agent, and is filtered out of the operator
+   * UI (listAgents / getFleetOverview). Idempotent.
+   */
+  ensureOperatorAgent(fleetId: string): string {
+    const operatorAgentId = `op_${fleetId}`;
+    const existing = this.db.prepare("SELECT id FROM agents WHERE id = ?").get(operatorAgentId);
+    if (existing) return operatorAgentId;
+    const now = nowIso();
+    this.db.prepare(
+      "INSERT INTO agents (id, fleet_id, display_name, runtime, status, policy_profile, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(operatorAgentId, fleetId, "Operator", "operator", "healthy", "default", now, now);
+    return operatorAgentId;
+  }
+
+  /**
+   * Operator-originated send. Mirrors createMessage exactly (same messages +
+   * message_deliveries inserts) but stamps the sender as the synthetic operator
+   * agent and embeds the message text + a "Operator" sender label in the
+   * message.queued event payload, so the conversation timeline can render it as
+   * a chat bubble and the recipient agent receives it in its inbox.
+   */
+  createOperatorMessage(input: {
+    fleetId: string;
+    operatorId: string;
+    recipientId: string; // "broadcast" allowed
+    text: string;
+    conversationId?: string;
+  }) {
+    const messageId = id("msg");
+    const createdAt = nowIso();
+    const ttlSeconds = 900;
+    const expiresAt = addSeconds(createdAt, ttlSeconds);
+    const conversationId = input.conversationId?.trim() || `op-${Date.now()}-${id("conv").slice(-8)}`;
+    const correlationId = id("cor");
+    const isBroadcast = input.recipientId === "broadcast";
+    const recipientKind = isBroadcast ? "broadcast" : "agent";
+    const recipientId = isBroadcast ? null : input.recipientId;
+    const messageType = isBroadcast ? "broadcast" : "direct";
+    const senderId = this.ensureOperatorAgent(input.fleetId);
+    const body = { text: input.text };
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO messages (
+          id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+          message_type, priority, requires_approval, body_json, metadata_json, ttl_seconds, created_at, expires_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        messageId,
+        input.fleetId,
+        conversationId,
+        correlationId,
+        senderId,
+        recipientKind,
+        recipientId,
+        messageType,
+        "normal",
+        0,
+        JSON.stringify(body),
+        JSON.stringify({ sender_label: "Operator", operator_id: input.operatorId }),
+        ttlSeconds,
+        createdAt,
+        expiresAt,
+        "queued"
+      );
+
+      const deliveryStmt = this.db.prepare(
+        "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
+      );
+      if (recipientKind === "agent" && recipientId) {
+        deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
+      } else if (recipientKind === "broadcast") {
+        for (const rid of this.broadcastRecipientIds(input.fleetId, senderId)) {
+          deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
+        }
+      }
+
+      this.recordEvent(input.fleetId, "message.queued", "operator", senderId, "message", messageId, conversationId, {
+        recipient_kind: recipientKind,
+        recipient_id: recipientId,
+        message_type: messageType,
+        sender_label: "Operator",
+        text: input.text
+      });
+    });
+
+    tx();
+    return { messageId, conversationId, createdAt };
   }
 
   getInbox(agentId: string, limit: number) {
@@ -292,12 +408,51 @@ export class EkhoDb {
       "SELECT * FROM control_actions WHERE target_kind = 'agent' AND target_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC"
     ).all(agentId, nowIso()) as Array<Record<string, unknown>>;
 
+    // The polling agent's own trust flag + fleet — drives operator_trusted and
+    // scopes the teammate roster. An unknown agent id yields untrusted + empty.
+    const self = this.db.prepare(
+      "SELECT fleet_id, operator_trusted FROM agents WHERE id = ?"
+    ).get(agentId) as Record<string, unknown> | undefined;
+    const fleetId = self ? String(self.fleet_id) : null;
+    const operatorTrusted = Boolean(self?.operator_trusted);
+
+    // Resolve each distinct sender's runtime so messages can be tagged
+    // operator vs agent. The synthetic op_<fleetId> sender has runtime
+    // 'operator'; everything else is a peer agent.
+    const senderIds = Array.from(new Set(deliveries.map((row) => String(row.sender_agent_id))));
+    const senderRuntime = new Map<string, string>();
+    if (senderIds.length > 0) {
+      const placeholders = senderIds.map(() => "?").join(",");
+      const senders = this.db.prepare(
+        `SELECT id, runtime FROM agents WHERE id IN (${placeholders})`
+      ).all(...senderIds) as Array<Record<string, unknown>>;
+      for (const s of senders) senderRuntime.set(String(s.id), String(s.runtime));
+    }
+
+    // Lightweight teammate roster: other agents in the same fleet, excluding
+    // the synthetic operator identity and self, capped so the inbox stays small.
+    const roster = fleetId
+      ? (this.db.prepare(
+          `SELECT id, display_name, runtime, status
+           FROM agents
+           WHERE fleet_id = ? AND runtime != 'operator' AND id != ?
+           ORDER BY last_seen_at DESC NULLS LAST, created_at DESC
+           LIMIT 50`
+        ).all(fleetId, agentId) as Array<Record<string, unknown>>).map((row) => ({
+          agent_id: row.id,
+          display_name: row.display_name,
+          runtime: row.runtime,
+          status: row.status
+        }))
+      : [];
+
     return {
       messages: deliveries.map((row) => ({
         message_id: row.id,
         conversation_id: row.conversation_id,
         correlation_id: row.correlation_id,
         sender_agent_id: row.sender_agent_id,
+        sender_kind: senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent",
         message_type: row.message_type,
         priority: row.priority,
         body: JSON.parse(String(row.body_json)),
@@ -309,7 +464,9 @@ export class EkhoDb {
         control_id: row.id,
         action: row.action,
         reason: row.payload_json ? JSON.parse(String(row.payload_json)).reason ?? "operator control" : "operator control"
-      }))
+      })),
+      operator_trusted: operatorTrusted,
+      roster
     };
   }
 
@@ -453,9 +610,26 @@ export class EkhoDb {
     return true;
   }
 
+  /**
+   * Toggle the per-agent "operator-trusted channel" flag. When on, the relay
+   * tells the agent (via its inbox) that the console operator is its verified
+   * principal — a dynamic, centrally-controlled trust signal rather than a
+   * static per-machine config change. Returns the new value, or null if the
+   * agent is not in this fleet (so the route can 404). Records an audit event.
+   */
+  setAgentTrust(fleetId: string, agentId: string, operatorId: string, trusted: boolean): boolean | null {
+    const agent = this.db.prepare("SELECT id FROM agents WHERE id = ? AND fleet_id = ? AND runtime != 'operator'").get(agentId, fleetId) as Record<string, unknown> | undefined;
+    if (!agent) {
+      return null;
+    }
+    this.db.prepare("UPDATE agents SET operator_trusted = ? WHERE id = ? AND fleet_id = ?").run(trusted ? 1 : 0, agentId, fleetId);
+    this.recordEvent(fleetId, "agent.trust_changed", "operator", operatorId, "agent", agentId, null, { operator_trusted: trusted });
+    return trusted;
+  }
+
   getFleetOverview(fleetId: string) {
     const agents = this.db.prepare(
-      "SELECT id, display_name, runtime, status, last_seen_at FROM agents WHERE fleet_id = ? ORDER BY created_at DESC LIMIT 10"
+      "SELECT id, display_name, runtime, status, last_seen_at FROM agents WHERE fleet_id = ? AND runtime != 'operator' ORDER BY created_at DESC LIMIT 10"
     ).all(fleetId) as Array<Record<string, unknown>>;
     const pendingApprovals = this.db.prepare("SELECT COUNT(*) AS count FROM approvals WHERE fleet_id = ? AND status = 'pending'").get(fleetId) as { count: number };
     const queuedMessages = this.db.prepare(
@@ -514,6 +688,7 @@ export class EkhoDb {
 
     const where = [
       "fleet_id = ?",
+      "runtime != 'operator'",
       status ? "status = ?" : "",
       search ? "(LOWER(display_name) LIKE ? ESCAPE '\\' OR LOWER(id) LIKE ? ESCAPE '\\' OR LOWER(runtime) LIKE ? ESCAPE '\\')" : ""
     ].filter(Boolean).join(" AND ");
@@ -522,13 +697,16 @@ export class EkhoDb {
     if (status) params.push(status);
     if (search) params.push(search, search, search);
 
-    const rows = this.db.prepare(
-      `SELECT id, display_name, runtime, status, last_seen_at
+    const rows = (this.db.prepare(
+      `SELECT id, display_name, runtime, status, last_seen_at, operator_trusted
        FROM agents
        WHERE ${where}
        ORDER BY ${sortBy} ${sortOrder}
        LIMIT ? OFFSET ?`
-    ).all(...params, options.limit, options.offset);
+    ).all(...params, options.limit, options.offset) as Array<Record<string, unknown>>).map((row) => ({
+      ...row,
+      operator_trusted: Boolean(row.operator_trusted)
+    }));
 
     const totalRow = this.db.prepare(
       `SELECT COUNT(*) AS count
@@ -711,7 +889,36 @@ export class EkhoDb {
        WHERE ${where}
        ORDER BY ${sortBy} ${sortOrder}
        LIMIT ? OFFSET ?`
-    ).all(...params, limit, offset);
+    ).all(...params, limit, offset) as Array<Record<string, unknown>>;
+
+    // Attach the actual message body to message events so the conversation
+    // timeline can render agent-sent messages as real chat bubbles (the event
+    // payload alone doesn't carry the text for agent sends).
+    const messageIds = Array.from(
+      new Set(
+        rows
+          .filter((row) => row.resource_kind === "message" && row.resource_id)
+          .map((row) => String(row.resource_id))
+      )
+    );
+    if (messageIds.length > 0) {
+      const placeholders = messageIds.map(() => "?").join(",");
+      const bodies = this.db.prepare(
+        `SELECT id, body_json, sender_agent_id, recipient_kind, recipient_id FROM messages WHERE id IN (${placeholders})`
+      ).all(...messageIds) as Array<Record<string, unknown>>;
+      const byId = new Map(bodies.map((row) => [String(row.id), row]));
+      for (const row of rows) {
+        if (row.resource_kind === "message" && row.resource_id) {
+          const message = byId.get(String(row.resource_id));
+          if (message) {
+            row.message_body_json = message.body_json ?? null;
+            row.message_sender_id = message.sender_agent_id ?? null;
+            row.message_recipient_kind = message.recipient_kind ?? null;
+            row.message_recipient_id = message.recipient_id ?? null;
+          }
+        }
+      }
+    }
 
     const totalRow = this.db.prepare(
       `SELECT COUNT(*) AS count

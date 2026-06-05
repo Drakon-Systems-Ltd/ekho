@@ -2,7 +2,7 @@ import { FastifyInstance } from "fastify";
 import { config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { createPolicySchema, operatorControlSchema, operatorLoginSchema, updatePolicySchema } from "./types";
+import { createPolicySchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, updatePolicySchema } from "./types";
 import { sign } from "./utils";
 
 function parsePagination(query: Record<string, unknown>) {
@@ -102,6 +102,24 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ token });
   });
 
+  app.post("/v1/operator/messages", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = operatorMessageSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const result = db.createOperatorMessage({
+      fleetId: request.operator.fleetId,
+      operatorId: request.operator.id,
+      recipientId: parsed.data.recipient_agent_id,
+      text: parsed.data.text,
+      conversationId: parsed.data.conversation_id
+    });
+    return reply.code(201).send({ message_id: result.messageId, conversation_id: result.conversationId, queued_at: result.createdAt });
+  });
+
   app.get("/v1/operator/conversations/:conversationId", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });
@@ -144,6 +162,25 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
     const ok = db.approveOrReject(params.approvalId, request.operator.id, params.decision === "approve" ? "approved" : "rejected");
     return reply.send({ ok });
+  });
+
+  app.post("/v1/operator/agents/:agentId/trust", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+
+    const parsed = operatorTrustSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    const params = request.params as { agentId: string };
+    const result = db.setAgentTrust(request.operator.fleetId, params.agentId, request.operator.id, parsed.data.trusted);
+    if (result === null) {
+      return reply.code(404).send({ error: "agent not found" });
+    }
+
+    return reply.send({ agent_id: params.agentId, operator_trusted: result });
   });
 
   app.post("/v1/operator/agents/:agentId/:action", { preHandler: requireOperatorAuth }, async (request, reply) => {

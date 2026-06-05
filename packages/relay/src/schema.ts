@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS agents (
   consecutive_missed_heartbeats INTEGER NOT NULL DEFAULT 0,
   auto_quarantined_at TEXT,
   quarantine_reason TEXT,
+  operator_trusted INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 

@@ -67,6 +67,98 @@ describe("Relay integration", () => {
       expect(ackRes.body.updated).toBe(1);
     });
 
+    it("exposes operator_trusted, roster, and sender_kind in the inbox", async () => {
+      const receiver = await relay.enrollAgent("inbox-receiver");
+      const peer = await relay.enrollAgent("inbox-peer");
+
+      // Peer-agent message → sender_kind "agent".
+      await relay.agentRequest(peer.agent_id, peer.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: receiver.agent_id },
+        message_type: "direct",
+        body: { text: "from peer" },
+        conversation_id: "conv-inbox",
+        correlation_id: "corr-inbox"
+      });
+
+      // Operator message via the console → sender_kind "operator".
+      await relay.operatorRequest("POST", "/v1/operator/messages", {
+        recipient_agent_id: receiver.agent_id,
+        text: "from operator"
+      });
+
+      // Trust the receiver so operator_trusted flips to true.
+      await relay.operatorRequest("POST", `/v1/operator/agents/${receiver.agent_id}/trust`, { trusted: true });
+
+      const inbox = await relay.agentRequest(receiver.agent_id, receiver.secret, "GET", "/v1/inbox");
+      expect(inbox.status).toBe(200);
+      expect(inbox.body.operator_trusted).toBe(true);
+
+      const kinds = inbox.body.messages.map((m: { sender_kind: string }) => m.sender_kind).sort();
+      expect(kinds).toEqual(["agent", "operator"]);
+
+      // Roster lists the peer, excludes the operator identity and self.
+      const rosterIds = inbox.body.roster.map((r: { agent_id: string }) => r.agent_id);
+      expect(rosterIds).toContain(peer.agent_id);
+      expect(rosterIds).not.toContain(receiver.agent_id);
+      expect(rosterIds.some((id: string) => id.startsWith("op_"))).toBe(false);
+    });
+
+    it("fans a broadcast out to every other agent in the fleet", async () => {
+      const sender = await relay.enrollAgent("bcast-sender");
+      const r1 = await relay.enrollAgent("bcast-r1");
+      const r2 = await relay.enrollAgent("bcast-r2");
+
+      const sendRes = await relay.agentRequest(sender.agent_id, sender.secret, "POST", "/v1/messages", {
+        recipient: { kind: "broadcast" },
+        message_type: "broadcast",
+        body: { text: "all hands" },
+        conversation_id: "conv-bcast",
+        correlation_id: "corr-bcast"
+      });
+      expect(sendRes.status).toBe(200);
+      const messageId = sendRes.body.message_id;
+
+      // Both recipients receive it, tagged as a broadcast.
+      for (const r of [r1, r2]) {
+        const inbox = await relay.agentRequest(r.agent_id, r.secret, "GET", "/v1/inbox");
+        expect(inbox.body.messages).toHaveLength(1);
+        expect(inbox.body.messages[0].message_id).toBe(messageId);
+        expect(inbox.body.messages[0].message_type).toBe("broadcast");
+        expect(inbox.body.messages[0].body.text).toBe("all hands");
+      }
+
+      // The sender never receives its own broadcast.
+      const senderInbox = await relay.agentRequest(sender.agent_id, sender.secret, "GET", "/v1/inbox");
+      expect(senderInbox.body.messages).toHaveLength(0);
+
+      // Each recipient acks only its own delivery row.
+      const ack1 = await relay.agentRequest(r1.agent_id, r1.secret, "POST", "/v1/acks", {
+        acks: [{ message_id: messageId, status: "received", received_at: new Date().toISOString() }]
+      });
+      expect(ack1.body.updated).toBe(1);
+    });
+
+    it("fans an operator broadcast out to every agent in the fleet", async () => {
+      const r1 = await relay.enrollAgent("op-bcast-r1");
+      const r2 = await relay.enrollAgent("op-bcast-r2");
+
+      const opRes = await relay.operatorRequest("POST", "/v1/operator/messages", {
+        recipient_agent_id: "broadcast",
+        text: "operator all-hands"
+      });
+      expect(opRes.status).toBe(201);
+      const messageId = opRes.body.message_id;
+
+      for (const r of [r1, r2]) {
+        const inbox = await relay.agentRequest(r.agent_id, r.secret, "GET", "/v1/inbox");
+        expect(inbox.body.messages).toHaveLength(1);
+        expect(inbox.body.messages[0].message_id).toBe(messageId);
+        expect(inbox.body.messages[0].message_type).toBe("broadcast");
+        expect(inbox.body.messages[0].sender_kind).toBe("operator");
+        expect(inbox.body.messages[0].body.text).toBe("operator all-hands");
+      }
+    });
+
     it("does not deliver to wrong agent", async () => {
       const sender = await relay.enrollAgent("sender");
       const receiver = await relay.enrollAgent("receiver");
@@ -201,6 +293,37 @@ describe("Relay integration", () => {
         headers: { authorization: `Bearer ${relay.operatorToken}` }
       });
       expect(deleteRes.statusCode).toBe(200);
+    });
+
+    it("toggles the operator-trusted channel flag", async () => {
+      const agent = await relay.enrollAgent("trust-agent");
+
+      // Defaults to untrusted.
+      const list = await relay.operatorRequest("GET", "/v1/operator/agents");
+      const row = list.body.agents.find((a: { id: string }) => a.id === agent.agent_id);
+      expect(row.operator_trusted).toBe(false);
+
+      const on = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/trust`, { trusted: true });
+      expect(on.status).toBe(200);
+      expect(on.body).toEqual({ agent_id: agent.agent_id, operator_trusted: true });
+
+      const list2 = await relay.operatorRequest("GET", "/v1/operator/agents");
+      const row2 = list2.body.agents.find((a: { id: string }) => a.id === agent.agent_id);
+      expect(row2.operator_trusted).toBe(true);
+
+      const off = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/trust`, { trusted: false });
+      expect(off.body.operator_trusted).toBe(false);
+    });
+
+    it("404s trust toggle for an unknown agent", async () => {
+      const res = await relay.operatorRequest("POST", "/v1/operator/agents/agent_does_not_exist/trust", { trusted: true });
+      expect(res.status).toBe(404);
+    });
+
+    it("400s trust toggle with an invalid body", async () => {
+      const agent = await relay.enrollAgent("trust-bad-body");
+      const res = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/trust`, { trusted: "yes" });
+      expect(res.status).toBe(400);
     });
 
     it("quarantines and resumes agent", async () => {
