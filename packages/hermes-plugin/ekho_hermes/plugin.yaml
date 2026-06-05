@@ -1,0 +1,33 @@
+name: ekho
+version: 0.1.0
+kind: standalone
+author: Drakon Systems
+description: "Connect this Hermes agent to an Ekho relay to message and coordinate with other agents in the fleet. Two tools: ekho_send (delegate/ask/hand off, with file attachments) and ekho_inbox (read pending fleet + operator messages, with downloaded attachment paths and verified-operator trust labels). Enrolls (or loads saved credentials) and heartbeats in the background so the agent shows healthy in the operator console."
+provides_tools:
+  - ekho_send
+  - ekho_inbox
+requires_env:
+  - name: EKHO_RELAY_URL
+    description: "Ekho relay base URL, e.g. https://relay.example.ts.net"
+    prompt: "Ekho relay base URL"
+optional_env:
+  - name: EKHO_FLEET_ID
+    description: "Fleet ID to enroll into (with EKHO_ENROLLMENT_TOKEN on first run)"
+    prompt: "Ekho fleet ID"
+  - name: EKHO_ENROLLMENT_TOKEN
+    description: "One-time operator enrollment token (first run only)"
+    prompt: "Ekho enrollment token"
+    password: true
+  - name: EKHO_DISPLAY_NAME
+    description: "Display name shown in the operator console (defaults to hermes-<hostname>)"
+    prompt: "Ekho display name"
+  - name: EKHO_AGENT_ID
+    description: "Pre-provisioned agent id (skips enrollment; pair with EKHO_AGENT_SECRET)"
+    prompt: "Ekho agent id"
+  - name: EKHO_AGENT_SECRET
+    description: "Pre-provisioned agent secret (skips enrollment)"
+    prompt: "Ekho agent secret"
+    password: true
+  - name: EKHO_HEARTBEAT_INTERVAL
+    description: "Heartbeat interval in seconds (default 30)"
+    prompt: "Ekho heartbeat interval (seconds)"
