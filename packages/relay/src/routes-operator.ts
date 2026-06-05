@@ -1,8 +1,11 @@
 import { FastifyInstance } from "fastify";
-import { config } from "./config";
+import fs from "node:fs";
+import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { createPolicySchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createPolicySchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, updatePolicySchema } from "./types";
+import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
+import { sendAttachment } from "./routes-agent";
 import { sign } from "./utils";
 
 function parsePagination(query: Record<string, unknown>) {
@@ -110,14 +113,60 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
-    const result = db.createOperatorMessage({
-      fleetId: request.operator.fleetId,
-      operatorId: request.operator.id,
-      recipientId: parsed.data.recipient_agent_id,
-      text: parsed.data.text,
-      conversationId: parsed.data.conversation_id
-    });
+    let result: { messageId: string; conversationId: string; createdAt: string };
+    try {
+      result = db.createOperatorMessage({
+        fleetId: request.operator.fleetId,
+        operatorId: request.operator.id,
+        recipientId: parsed.data.recipient_agent_id,
+        text: parsed.data.text,
+        conversationId: parsed.data.conversation_id,
+        attachmentIds: parsed.data.attachment_ids
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      if (msg.includes("too many")) return reply.code(400).send({ error: msg });
+      throw err;
+    }
     return reply.code(201).send({ message_id: result.messageId, conversation_id: result.conversationId, queued_at: result.createdAt });
+  });
+
+  // Upload — raised body limit on THIS route only (Fastify 5 defaults to 1 MB).
+  app.post("/v1/operator/attachments", { preHandler: requireOperatorAuth, bodyLimit: ATTACHMENT_UPLOAD_BODY_LIMIT }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = attachmentUploadSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { filename, mime, size_bytes, data_base64 } = parsed.data;
+
+    if (!isAllowedMime(mime)) return reply.code(415).send({ error: "unsupported media type", mime });
+    if (size_bytes > config.attachmentMaxBytes) return reply.code(413).send({ error: "declared size exceeds cap", max_bytes: config.attachmentMaxBytes });
+
+    let bytes: Buffer;
+    try { bytes = decodeBase64Strict(data_base64); }
+    catch { return reply.code(400).send({ error: "invalid base64" }); }
+
+    if (bytes.length > config.attachmentMaxBytes) return reply.code(413).send({ error: "decoded size exceeds cap", max_bytes: config.attachmentMaxBytes });
+    if (!sniffImageMatches(mime, bytes)) return reply.code(415).send({ error: "file bytes do not match declared image type" });
+
+    const result = db.createAttachment({
+      fleetId: request.operator.fleetId,
+      uploaderKind: "operator",
+      uploaderId: request.operator.id,
+      filename: sanitizeFilename(filename),
+      mime,
+      bytes
+    });
+    return reply.code(201).send(result); // { id, filename, mime, size_bytes, created_at }
+  });
+
+  // Download — fleet-scoped. Cross-fleet/miss → 404 (never 403).
+  app.get("/v1/operator/attachments/:id", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const { id: attachmentId } = request.params as { id: string };
+    const att = db.getAttachment(request.operator.fleetId, attachmentId);
+    if (!att || !fs.existsSync(att.storage_path)) return reply.code(404).send({ error: "attachment not found" });
+    return sendAttachment(reply, att);
   });
 
   app.get("/v1/operator/conversations/:conversationId", { preHandler: requireOperatorAuth }, async (request, reply) => {

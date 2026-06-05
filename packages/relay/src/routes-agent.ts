@@ -1,9 +1,30 @@
-import { FastifyInstance } from "fastify";
+import { FastifyInstance, FastifyReply } from "fastify";
+import fs from "node:fs";
 import { db } from "./db";
-import { actionResultSchema, ackSchema, enrollSchema, heartbeatSchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
-import { config } from "./config";
+import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
+import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { getExtensions } from "./license";
+
+/**
+ * Stream an attachment to the client with hardened headers. EVERY type is forced
+ * to download via Content-Disposition: attachment and X-Content-Type-Options:
+ * nosniff + a restrictive CSP, so nothing is ever inline-executed. Only image
+ * types are returned with their image/* content-type (for object-URL preview);
+ * docs are served as application/octet-stream. Shared by agent + operator routes.
+ */
+export function sendAttachment(reply: FastifyReply, att: { filename: string; mime: string; storage_path: string }) {
+  const contentType = isAllowedMime(att.mime) && isImageMime(att.mime) ? att.mime : "application/octet-stream";
+  const safeName = sanitizeFilename(att.filename);
+  reply
+    .header("Content-Type", contentType)
+    .header("Content-Disposition", `attachment; filename="${safeName.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(safeName)}`)
+    .header("X-Content-Type-Options", "nosniff")          // no MIME sniffing
+    .header("Content-Security-Policy", "default-src 'none'; sandbox") // neutralize any HTML/JS
+    .header("Cache-Control", "private, no-store");
+  return reply.send(fs.createReadStream(att.storage_path));
+}
 
 export async function registerAgentRoutes(app: FastifyInstance) {
   app.post("/v1/enroll", async (request, reply) => {
@@ -80,22 +101,70 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       }
     }
 
-    const result = db.createMessage({
-      fleetId: request.agent.fleetId,
-      senderAgentId: request.agent.id,
-      recipientKind: parsed.data.recipient.kind,
-      recipientId: parsed.data.recipient.id,
-      messageType: parsed.data.message_type,
-      priority: parsed.data.priority,
-      ttlSeconds: parsed.data.ttl_seconds,
-      requiresApproval: parsed.data.requires_approval,
-      body: parsed.data.body,
-      metadata: parsed.data.metadata,
-      conversationId: parsed.data.conversation_id,
-      correlationId: parsed.data.correlation_id
-    });
+    let result: { messageId: string; createdAt: string };
+    try {
+      result = db.createMessage({
+        fleetId: request.agent.fleetId,
+        senderAgentId: request.agent.id,
+        recipientKind: parsed.data.recipient.kind,
+        recipientId: parsed.data.recipient.id,
+        messageType: parsed.data.message_type,
+        priority: parsed.data.priority,
+        ttlSeconds: parsed.data.ttl_seconds,
+        requiresApproval: parsed.data.requires_approval,
+        body: parsed.data.body,
+        metadata: parsed.data.metadata,
+        conversationId: parsed.data.conversation_id,
+        correlationId: parsed.data.correlation_id
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      if (msg.includes("too many")) return reply.code(400).send({ error: msg });
+      throw err;
+    }
 
     return reply.send({ message_id: result.messageId, status: "queued", queued_at: result.createdAt });
+  });
+
+  // Upload — raised body limit on THIS route only (Fastify 5 defaults to 1 MB).
+  app.post("/v1/attachments", { preHandler: requireAgentAuth, bodyLimit: ATTACHMENT_UPLOAD_BODY_LIMIT }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    if (request.agent.status === "quarantined" || request.agent.status === "paused") {
+      return reply.code(403).send({ error: `agent is ${request.agent.status}` });
+    }
+    const parsed = attachmentUploadSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const { filename, mime, size_bytes, data_base64 } = parsed.data;
+
+    if (!isAllowedMime(mime)) return reply.code(415).send({ error: "unsupported media type", mime });
+    if (size_bytes > config.attachmentMaxBytes) return reply.code(413).send({ error: "declared size exceeds cap", max_bytes: config.attachmentMaxBytes });
+
+    let bytes: Buffer;
+    try { bytes = decodeBase64Strict(data_base64); }
+    catch { return reply.code(400).send({ error: "invalid base64" }); }
+
+    if (bytes.length > config.attachmentMaxBytes) return reply.code(413).send({ error: "decoded size exceeds cap", max_bytes: config.attachmentMaxBytes });
+    if (!sniffImageMatches(mime, bytes)) return reply.code(415).send({ error: "file bytes do not match declared image type" });
+
+    const result = db.createAttachment({
+      fleetId: request.agent.fleetId,
+      uploaderKind: "agent",
+      uploaderId: request.agent.id,
+      filename: sanitizeFilename(filename),
+      mime,
+      bytes
+    });
+    return reply.code(201).send(result); // { id, filename, mime, size_bytes, created_at }
+  });
+
+  // Download — HMAC; fleet-scoped. Cross-fleet/miss → 404 (never 403).
+  app.get("/v1/attachments/:id", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const { id: attachmentId } = request.params as { id: string };
+    const att = db.getAttachment(request.agent.fleetId, attachmentId);
+    if (!att || !fs.existsSync(att.storage_path)) return reply.code(404).send({ error: "attachment not found" });
+    return sendAttachment(reply, att);
   });
 
   app.get("/v1/inbox", { preHandler: requireAgentAuth }, async (request, reply) => {

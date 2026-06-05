@@ -248,4 +248,21 @@ CREATE TABLE IF NOT EXISTS a2a_task_messages (
   FOREIGN KEY (task_id) REFERENCES a2a_tasks(id),
   FOREIGN KEY (message_id) REFERENCES messages(id)
 );
+
+-- File attachments: metadata only. Bytes live on disk at storage_path,
+-- keyed by the generated id (never the user filename → no path traversal).
+CREATE TABLE IF NOT EXISTS attachments (
+  id TEXT PRIMARY KEY,
+  fleet_id TEXT NOT NULL,
+  uploader_kind TEXT NOT NULL,
+  uploader_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  storage_path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (fleet_id) REFERENCES fleets(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attachments_fleet_created ON attachments(fleet_id, created_at);
 `;

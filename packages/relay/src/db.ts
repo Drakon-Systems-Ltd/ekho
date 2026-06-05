@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { config } from "./config";
 import { schemaSql } from "./schema";
+import { writeAttachmentBytes } from "./attachments";
 import { addSeconds, hashSecret, id, nowIso } from "./utils";
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
@@ -224,6 +225,19 @@ export class EkhoDb {
     const createdAt = nowIso();
     const expiresAt = addSeconds(createdAt, input.ttlSeconds);
 
+    // Attachment binding rides inside the (HMAC-signed) body as body.attachments.
+    // Validate the count cap and that every id belongs to the sender's fleet AND
+    // was uploaded by this sender — the authoritative anti-smuggling check.
+    const attachmentIds = Array.isArray((input.body as Record<string, unknown> | undefined)?.attachments)
+      ? ((input.body as Record<string, unknown>).attachments as unknown[]).map(String)
+      : [];
+    if (attachmentIds.length > config.attachmentMaxPerMessage) {
+      throw new Error(`too many attachments (max ${config.attachmentMaxPerMessage})`);
+    }
+    if (!this.validateAttachmentOwnership(input.fleetId, input.senderAgentId, attachmentIds)) {
+      throw new Error("attachment not found in fleet or not owned by sender");
+    }
+
     const tx = this.db.transaction(() => {
       this.db.prepare(
         `INSERT INTO messages (
@@ -263,7 +277,8 @@ export class EkhoDb {
       this.recordEvent(input.fleetId, "message.queued", "agent", input.senderAgentId, "message", messageId, input.conversationId, {
         recipient_kind: input.recipientKind,
         recipient_id: input.recipientId ?? null,
-        message_type: input.messageType
+        message_type: input.messageType,
+        attachments: attachmentIds
       });
     });
 
@@ -303,6 +318,7 @@ export class EkhoDb {
     recipientId: string; // "broadcast" allowed
     text: string;
     conversationId?: string;
+    attachmentIds?: string[];
   }) {
     const messageId = id("msg");
     const createdAt = nowIso();
@@ -315,7 +331,17 @@ export class EkhoDb {
     const recipientId = isBroadcast ? null : input.recipientId;
     const messageType = isBroadcast ? "broadcast" : "direct";
     const senderId = this.ensureOperatorAgent(input.fleetId);
-    const body = { text: input.text };
+
+    // Validate operator-owned attachments before binding them into the body.
+    const attachmentIds = input.attachmentIds ?? [];
+    if (attachmentIds.length > config.attachmentMaxPerMessage) {
+      throw new Error(`too many attachments (max ${config.attachmentMaxPerMessage})`);
+    }
+    if (!this.validateAttachmentOwnership(input.fleetId, input.operatorId, attachmentIds)) {
+      throw new Error("attachment not found in fleet or not owned by operator");
+    }
+    const body: Record<string, unknown> = { text: input.text };
+    if (attachmentIds.length) body.attachments = attachmentIds;
 
     const tx = this.db.transaction(() => {
       this.db.prepare(
@@ -358,7 +384,8 @@ export class EkhoDb {
         recipient_id: recipientId,
         message_type: messageType,
         sender_label: "Operator",
-        text: input.text
+        text: input.text,
+        attachments: attachmentIds
       });
     });
 
@@ -446,20 +473,42 @@ export class EkhoDb {
         }))
       : [];
 
+    // Parse bodies once, collect every attachment id across the batch, and
+    // resolve their metadata in a single fleet-scoped query (O(1) queries like
+    // the sender-runtime resolution above). Metadata only — never bytes.
+    const parsedBodies = deliveries.map((row) => JSON.parse(String(row.body_json)) as Record<string, unknown>);
+    const allAttachmentIds = Array.from(new Set(
+      parsedBodies.flatMap((body) => Array.isArray(body.attachments) ? (body.attachments as unknown[]).map(String) : [])
+    ));
+    const attachmentMetaById = new Map<string, { id: string; filename: string; mime: string; size_bytes: number }>();
+    if (allAttachmentIds.length > 0 && fleetId) {
+      for (const meta of this.getAttachmentsMeta(fleetId, allAttachmentIds)) {
+        attachmentMetaById.set(meta.id, meta);
+      }
+    }
+
     return {
-      messages: deliveries.map((row) => ({
-        message_id: row.id,
-        conversation_id: row.conversation_id,
-        correlation_id: row.correlation_id,
-        sender_agent_id: row.sender_agent_id,
-        sender_kind: senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent",
-        message_type: row.message_type,
-        priority: row.priority,
-        body: JSON.parse(String(row.body_json)),
-        metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : {},
-        created_at: row.created_at,
-        deadline_at: row.expires_at
-      })),
+      messages: deliveries.map((row, i) => {
+        const body = parsedBodies[i];
+        const attIds = Array.isArray(body.attachments) ? (body.attachments as unknown[]).map(String) : [];
+        const attachments = attIds
+          .map((aid) => attachmentMetaById.get(aid))
+          .filter((m): m is { id: string; filename: string; mime: string; size_bytes: number } => Boolean(m));
+        return {
+          message_id: row.id,
+          conversation_id: row.conversation_id,
+          correlation_id: row.correlation_id,
+          sender_agent_id: row.sender_agent_id,
+          sender_kind: senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent",
+          message_type: row.message_type,
+          priority: row.priority,
+          body,
+          attachments,   // [{id, filename, mime, size_bytes}] — NEVER bytes
+          metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : {},
+          created_at: row.created_at,
+          deadline_at: row.expires_at
+        };
+      }),
       controls: controls.map((row) => ({
         control_id: row.id,
         action: row.action,
@@ -907,6 +956,26 @@ export class EkhoDb {
         `SELECT id, body_json, sender_agent_id, recipient_kind, recipient_id FROM messages WHERE id IN (${placeholders})`
       ).all(...messageIds) as Array<Record<string, unknown>>;
       const byId = new Map(bodies.map((row) => [String(row.id), row]));
+
+      // Collect every attachment id referenced by the page's message bodies and
+      // resolve their metadata in one fleet-scoped query (one batched call).
+      const allAttachmentIds = Array.from(new Set(
+        bodies.flatMap((row) => {
+          try {
+            const body = JSON.parse(String(row.body_json)) as Record<string, unknown>;
+            return Array.isArray(body.attachments) ? (body.attachments as unknown[]).map(String) : [];
+          } catch {
+            return [];
+          }
+        })
+      ));
+      const attachmentMetaById = new Map<string, { id: string; filename: string; mime: string; size_bytes: number }>();
+      if (allAttachmentIds.length > 0) {
+        for (const meta of this.getAttachmentsMeta(fleetId, allAttachmentIds)) {
+          attachmentMetaById.set(meta.id, meta);
+        }
+      }
+
       for (const row of rows) {
         if (row.resource_kind === "message" && row.resource_id) {
           const message = byId.get(String(row.resource_id));
@@ -915,6 +984,18 @@ export class EkhoDb {
             row.message_sender_id = message.sender_agent_id ?? null;
             row.message_recipient_kind = message.recipient_kind ?? null;
             row.message_recipient_id = message.recipient_id ?? null;
+            // Resolve attachment metadata (never bytes) so App.jsx can render
+            // them on the chat bubble.
+            try {
+              const body = JSON.parse(String(message.body_json)) as Record<string, unknown>;
+              const attIds = Array.isArray(body.attachments) ? (body.attachments as unknown[]).map(String) : [];
+              const metas = attIds
+                .map((aid) => attachmentMetaById.get(aid))
+                .filter((m): m is { id: string; filename: string; mime: string; size_bytes: number } => Boolean(m));
+              if (metas.length) row.message_attachments = metas;
+            } catch {
+              // non-JSON body — no attachments to surface
+            }
           }
         }
       }
@@ -1249,6 +1330,64 @@ export class EkhoDb {
     });
     tx();
     return expired.length;
+  }
+
+  // --- Attachments ---
+
+  createAttachment(input: {
+    fleetId: string;
+    uploaderKind: "operator" | "agent";
+    uploaderId: string;
+    filename: string;     // already sanitized by the route
+    mime: string;         // already allowlist-checked by the route
+    bytes: Buffer;        // already decoded + size/sniff-validated by the route
+  }): { id: string; filename: string; mime: string; size_bytes: number; created_at: string } {
+    const attachmentId = id("att");
+    const createdAt = nowIso();
+    const storagePath = writeAttachmentBytes(input.fleetId, attachmentId, input.bytes);
+    this.db.prepare(
+      `INSERT INTO attachments (id, fleet_id, uploader_kind, uploader_id, filename, mime, size_bytes, storage_path, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(attachmentId, input.fleetId, input.uploaderKind, input.uploaderId, input.filename, input.mime, input.bytes.length, storagePath, createdAt);
+    this.recordEvent(input.fleetId, "attachment.uploaded", input.uploaderKind, input.uploaderId, "attachment", attachmentId, null, {
+      filename: input.filename, mime: input.mime, size_bytes: input.bytes.length
+    });
+    return { id: attachmentId, filename: input.filename, mime: input.mime, size_bytes: input.bytes.length, created_at: createdAt };
+  }
+
+  // Returns the row ONLY if it belongs to fleetId. A mismatch returns undefined,
+  // which the route maps to 404 (never 403) so cross-fleet existence never leaks.
+  getAttachment(fleetId: string, attachmentId: string): {
+    id: string; fleet_id: string; filename: string; mime: string;
+    size_bytes: number; storage_path: string;
+  } | undefined {
+    return this.db.prepare(
+      "SELECT id, fleet_id, filename, mime, size_bytes, storage_path FROM attachments WHERE id = ? AND fleet_id = ?"
+    ).get(attachmentId, fleetId) as {
+      id: string; fleet_id: string; filename: string; mime: string;
+      size_bytes: number; storage_path: string;
+    } | undefined;
+  }
+
+  // Metadata for a set of ids, fleet-scoped. Used to surface inbox/conversation
+  // attachment metadata. Silently drops ids not in the fleet.
+  getAttachmentsMeta(fleetId: string, ids: string[]): Array<{ id: string; filename: string; mime: string; size_bytes: number }> {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    return this.db.prepare(
+      `SELECT id, filename, mime, size_bytes FROM attachments WHERE fleet_id = ? AND id IN (${placeholders})`
+    ).all(fleetId, ...ids) as Array<{ id: string; filename: string; mime: string; size_bytes: number }>;
+  }
+
+  // Validate that every id belongs to fleetId AND was uploaded by this sender.
+  // Returns true only if all ids resolve. Used to bind attachments to a message.
+  validateAttachmentOwnership(fleetId: string, uploaderId: string, ids: string[]): boolean {
+    if (ids.length === 0) return true;
+    const placeholders = ids.map(() => "?").join(",");
+    const row = this.db.prepare(
+      `SELECT COUNT(DISTINCT id) AS count FROM attachments WHERE fleet_id = ? AND uploader_id = ? AND id IN (${placeholders})`
+    ).get(fleetId, uploaderId, ...ids) as { count: number };
+    return row.count === new Set(ids).size;
   }
 
   recordEvent(

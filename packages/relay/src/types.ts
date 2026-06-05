@@ -66,7 +66,8 @@ export const operatorLoginSchema = z.object({
 export const operatorMessageSchema = z.object({
   recipient_agent_id: z.string().min(1),
   text: z.string().min(1).max(8000),
-  conversation_id: z.string().min(1).optional()
+  conversation_id: z.string().min(1).optional(),
+  attachment_ids: z.array(z.string().min(1)).max(50).optional()
 });
 
 export const operatorControlSchema = z.object({
@@ -113,3 +114,20 @@ export const updatePolicySchema = z.object({
 });
 
 export type PolicyRule = z.infer<typeof policyRuleSchema>;
+
+// --- Attachments ---
+export const attachmentUploadSchema = z.object({
+  filename: z.string().min(1).max(255),
+  mime: z.string().min(1).max(127),
+  // Declared decoded size in bytes; cross-checked against actual decoded length.
+  size_bytes: z.number().int().nonnegative(),
+  data_base64: z.string().min(1)
+});
+
+// Extend the message body to optionally carry attachment ids. The existing
+// sendMessageSchema.body accepts `z.record(...)`, so attachments already pass
+// through untyped; this dedicated schema is used to VALIDATE the array shape
+// (count cap + id format) inside createMessage, not at the route boundary.
+export const attachmentIdsSchema = z.array(z.string().min(1)).max(50); // hard ceiling; per-message cap enforced via config
+
+export type AttachmentUploadInput = z.infer<typeof attachmentUploadSchema>;

@@ -12,11 +12,14 @@ function resolveNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+// Resolve the DB path once so dbPath and attachmentsDir always share a parent.
+const dbPath = path.resolve(process.env.EKHO_DB_PATH ?? path.join(__dirname, "..", "data", "ekho.sqlite"));
+
 export const config = {
   host: process.env.EKHO_HOST ?? "127.0.0.1",
   port: resolveNumber(process.env.EKHO_PORT, 4000),
   baseUrl: process.env.EKHO_BASE_URL ?? "http://127.0.0.1:4000",
-  dbPath: path.resolve(process.env.EKHO_DB_PATH ?? path.join(__dirname, "..", "data", "ekho.sqlite")),
+  dbPath,
   operatorSessionSecret: process.env.EKHO_OPERATOR_SESSION_SECRET ?? "change-me",
   timestampSkewSeconds: resolveNumber(process.env.EKHO_TIMESTAMP_SKEW_SECONDS, 300),
   pollIntervalSeconds: resolveNumber(process.env.EKHO_POLL_INTERVAL_SECONDS, 5),
@@ -48,8 +51,18 @@ export const config = {
 
   // TLS (optional — omit to serve plain HTTP behind a TLS-terminating proxy)
   tlsCertPath: process.env.EKHO_TLS_CERT_PATH as string | undefined,
-  tlsKeyPath: process.env.EKHO_TLS_KEY_PATH as string | undefined
+  tlsKeyPath: process.env.EKHO_TLS_KEY_PATH as string | undefined,
+
+  // File attachments
+  attachmentsDir: process.env.EKHO_ATTACHMENTS_DIR
+    ? path.resolve(process.env.EKHO_ATTACHMENTS_DIR)
+    : path.join(path.dirname(dbPath), "attachments"),
+  attachmentMaxBytes: resolveNumber(process.env.EKHO_ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024), // 25 MiB
+  attachmentMaxPerMessage: resolveNumber(process.env.EKHO_ATTACHMENT_MAX_PER_MESSAGE, 10)
 } as const;
+
+// base64 inflates by 4/3; add headroom for the JSON envelope + filename/mime fields.
+export const ATTACHMENT_UPLOAD_BODY_LIMIT = Math.ceil(config.attachmentMaxBytes * 4 / 3) + 64 * 1024;
 
 /** True when the operator session secret is unset or the shipped default. */
 export function isInsecureSecret(secret: string): boolean {
