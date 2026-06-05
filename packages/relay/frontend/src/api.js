@@ -80,7 +80,7 @@ export const getConversationEvents = (token, conversationId, params = {}) =>
   request(`/v1/operator/conversations/${encodeURIComponent(conversationId)}?${new URLSearchParams(params).toString()}`, { token });
 export const issueEnrollmentToken = (token) =>
   request("/v1/operator/enrollment-tokens", { token, method: "POST" });
-export const sendOperatorMessage = (token, { recipientAgentId, text, conversationId }) =>
+export const sendOperatorMessage = (token, { recipientAgentId, text, conversationId, attachmentIds }) =>
   request("/v1/operator/messages", {
     token,
     method: "POST",
@@ -88,8 +88,31 @@ export const sendOperatorMessage = (token, { recipientAgentId, text, conversatio
       recipient_agent_id: recipientAgentId,
       text,
       ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}),
     },
   });
+
+// Upload a single attachment (base64-in-JSON). Returns { id, filename, mime,
+// size_bytes, created_at }. The relay cross-checks size_bytes against the decoded
+// byte length, so the caller derives it from the actual bytes.
+export const uploadOperatorAttachment = (token, { filename, mime, dataBase64, sizeBytes }) =>
+  request("/v1/operator/attachments", {
+    token,
+    method: "POST",
+    body: { filename, mime, size_bytes: sizeBytes, data_base64: dataBase64 },
+  });
+
+// The download route requires an Authorization header, so we can't point an
+// <img src> at it directly. Fetch the bytes with the Bearer token and hand back
+// an object URL; the caller MUST URL.revokeObjectURL it once done (on unmount).
+export async function fetchAttachmentObjectUrl(token, id) {
+  const res = await fetch(`/v1/operator/attachments/${encodeURIComponent(id)}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new ApiError(`HTTP ${res.status}`, res.status);
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
 export const controlAgent = (token, agentId, action, body) =>
   request(`/v1/operator/agents/${encodeURIComponent(agentId)}/${action}`, {
     token,

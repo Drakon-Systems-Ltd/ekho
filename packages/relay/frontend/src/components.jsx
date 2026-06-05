@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { fetchAttachmentObjectUrl } from "./api";
 
 /* ---------- settings (persisted to localStorage) ---------- */
 
@@ -116,6 +117,59 @@ export function clockTime(value) {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return String(value);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+export function formatBytes(n) {
+  const bytes = Number(n) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+}
+
+/* ---------- attachment allowlist (mirrors the relay's ATTACHMENT_MIME_ALLOWLIST) ---------- */
+
+// Keep this in lockstep with packages/relay/src/attachments.ts. The server is
+// authoritative; these are UX hints (accept attr + friendly pre-flight errors).
+export const ATTACHMENT_ALLOWED_MIME = {
+  "image/png": { ext: "png", image: true },
+  "image/jpeg": { ext: "jpg", image: true },
+  "image/gif": { ext: "gif", image: true },
+  "image/webp": { ext: "webp", image: true },
+  "application/pdf": { ext: "pdf", image: false },
+  "text/plain": { ext: "txt", image: false },
+  "text/markdown": { ext: "md", image: false },
+  "text/csv": { ext: "csv", image: false },
+  "application/json": { ext: "json", image: false },
+};
+export const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024; // 25 MiB — matches config default
+export const ATTACHMENT_MAX_PER_MESSAGE = 10;
+// `accept` string for the file input: every allowed mime + the common extensions
+// (some browsers report empty/oddball mime for .md/.csv, so list extensions too).
+export const ATTACHMENT_ACCEPT = [
+  ...Object.keys(ATTACHMENT_ALLOWED_MIME),
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".txt", ".md", ".csv", ".json",
+].join(",");
+
+export function isAllowedAttachmentMime(mime) {
+  return Object.prototype.hasOwnProperty.call(ATTACHMENT_ALLOWED_MIME, mime);
+}
+export function isImageAttachmentMime(mime) {
+  return Boolean(ATTACHMENT_ALLOWED_MIME[mime]?.image);
+}
+// Browsers occasionally hand back "" or a generic type for text/markdown/csv;
+// fall back to the file extension so the pre-flight check + thumbnail logic agree
+// with what the server will accept.
+export function resolveAttachmentMime(file) {
+  const byType = String(file.type || "").toLowerCase();
+  if (isAllowedAttachmentMime(byType)) return byType;
+  const ext = String(file.name || "").toLowerCase().split(".").pop();
+  const fromExt = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    pdf: "application/pdf", txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json",
+  }[ext];
+  return fromExt || byType || "application/octet-stream";
 }
 
 /* ---------- atoms ---------- */
@@ -452,6 +506,154 @@ export function TypingDots({ color, animated = true }) {
       <span style={{ background: color }} />
       <span style={{ background: color }} />
     </span>
+  );
+}
+
+/* ---------- attachment icons ---------- */
+
+export function PaperclipIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  );
+}
+
+function FileIcon({ ext }) {
+  return (
+    <span className="att-chip__icon" aria-hidden="true">
+      <svg width="20" height="24" viewBox="0 0 24 28" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
+        <path d="M4 2h11l5 5v19a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+        <path d="M15 2v5h5" />
+      </svg>
+      {ext ? <span className="att-chip__ext">{ext}</span> : null}
+    </span>
+  );
+}
+
+function SpinnerDot() {
+  return <span className="att-spinner" aria-label="Loading" />;
+}
+
+/* ---------- attachment renderers (chat bubbles) ----------
+   The download route requires an Authorization header, so we fetch the bytes
+   with the operator's Bearer token, build an object URL, and revoke it on
+   unmount. Never point an <img src> straight at the route. */
+
+export function AttachmentImage({ token, id, filename, mime, size, onLoad }) {
+  const [url, setUrl] = useState("");
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    let revoked = false;
+    let objectUrl = "";
+    setUrl("");
+    setError(false);
+    fetchAttachmentObjectUrl(token, id)
+      .then((u) => {
+        if (revoked) {
+          URL.revokeObjectURL(u);
+          return;
+        }
+        objectUrl = u;
+        setUrl(u);
+      })
+      .catch(() => {
+        if (!revoked) setError(true);
+      });
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [token, id]);
+
+  const openFull = () => {
+    if (url) window.open(url, "_blank", "noopener");
+  };
+
+  if (error) {
+    return <AttachmentChip token={token} id={id} filename={filename} mime={mime} size={size} />;
+  }
+  return (
+    <figure className="att-image">
+      {url ? (
+        <button type="button" className="att-image__btn" onClick={openFull} title={`Open ${filename}`}>
+          <img src={url} alt={filename} loading="lazy" onLoad={() => onLoad?.()} />
+        </button>
+      ) : (
+        <div className="att-image__loading"><SpinnerDot /></div>
+      )}
+      <figcaption className="att-image__cap">
+        <span className="att-image__name" title={filename}>{filename}</span>
+        {size != null ? <span className="att-image__size">{formatBytes(size)}</span> : null}
+      </figcaption>
+    </figure>
+  );
+}
+
+export function AttachmentChip({ token, id, filename, mime, size }) {
+  const [busy, setBusy] = useState(false);
+  const ext = (ATTACHMENT_ALLOWED_MIME[mime]?.ext || String(filename || "").split(".").pop() || "file").toUpperCase().slice(0, 4);
+
+  const download = async () => {
+    if (busy) return;
+    setBusy(true);
+    let objectUrl = "";
+    try {
+      objectUrl = await fetchAttachmentObjectUrl(token, id);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename || id;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch {
+      /* surfaced by the disabled→enabled toggle; the bubble stays intact */
+    } finally {
+      if (objectUrl) {
+        // give the browser a tick to start the download before revoking
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 4000);
+      }
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button type="button" className="att-chip" onClick={download} disabled={busy} title={`Download ${filename}`}>
+      <FileIcon ext={ext} />
+      <span className="att-chip__main">
+        <span className="att-chip__name" title={filename}>{filename}</span>
+        <span className="att-chip__meta">{size != null ? formatBytes(size) : mime}</span>
+      </span>
+      <span className="att-chip__action" aria-hidden="true">{busy ? <SpinnerDot /> : <DownloadGlyph />}</span>
+    </button>
+  );
+}
+
+function DownloadGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+// Render a list of attachment metadata on a chat bubble: images inline, docs as
+// chips. `token` is required to fetch bytes (auth-gated route).
+export function AttachmentList({ token, attachments, onImageLoad }) {
+  if (!attachments?.length) return null;
+  return (
+    <div className="att-list">
+      {attachments.map((att) =>
+        isImageAttachmentMime(att.mime) ? (
+          <AttachmentImage key={att.id} token={token} id={att.id} filename={att.filename} mime={att.mime} size={att.size_bytes} onLoad={onImageLoad} />
+        ) : (
+          <AttachmentChip key={att.id} token={token} id={att.id} filename={att.filename} mime={att.mime} size={att.size_bytes} />
+        )
+      )}
+    </div>
   );
 }
 

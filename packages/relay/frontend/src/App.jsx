@@ -22,8 +22,13 @@ import {
   setAgentTrust,
   storeSession,
   updatePolicy,
+  uploadOperatorAttachment,
 } from "./api";
 import {
+  ATTACHMENT_ACCEPT,
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_MAX_PER_MESSAGE,
+  AttachmentList,
   Avatar,
   Badge,
   ConfirmDialog,
@@ -31,6 +36,7 @@ import {
   HelpModal,
   LiveDot,
   Modal,
+  PaperclipIcon,
   PromptDialog,
   SettingsModal,
   Skeleton,
@@ -42,9 +48,12 @@ import {
   clockTime,
   colorForAgent,
   colorForId,
+  formatBytes,
+  isAllowedAttachmentMime,
   loadSettings,
   prefersReducedMotion,
   relativeTime,
+  resolveAttachmentMime,
   saveSettings,
 } from "./components";
 import { useAutoRefresh, useNow } from "./hooks";
@@ -80,6 +89,10 @@ function describeEvent(event) {
   const recipientKind = payload.recipient_kind || event.message_recipient_kind || "";
   const recipientId = payload.recipient_id || event.message_recipient_id || "";
 
+  // Attachment metadata (never bytes) stitched onto message events by the relay's
+  // getConversation. Surface it so the bubble can render thumbnails/chips.
+  const attachments = isMessage && Array.isArray(event.message_attachments) ? event.message_attachments : [];
+
   return {
     kind: isSystem ? "system" : "message",
     side: isOperator ? "operator" : "agent",
@@ -90,6 +103,7 @@ function describeEvent(event) {
     recipientKind,
     recipientId,
     text,
+    attachments,
     type,
     createdAt: event.created_at,
   };
@@ -172,6 +186,11 @@ export default function App() {
   const [composerRecipient, setComposerRecipient] = useState("broadcast");
   const [optimistic, setOptimistic] = useState([]); // pending operator messages
   const [sending, setSending] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState([]); // [{id, filename, mime, size_bytes}]
+  const [uploading, setUploading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [composerError, setComposerError] = useState("");
+  const fileInputRef = useRef(null);
   const [trustPending, setTrustPending] = useState(""); // agentId whose trust toggle is in-flight
 
   // login
@@ -324,6 +343,8 @@ export default function App() {
     setTimelineEvents([]);
     setOptimistic([]);
     setAgentRateLimits([]);
+    setPendingAttachments([]);
+    setComposerError("");
     initialized.current = { overview: false, agents: false, approvals: false, policies: false, deadLetters: false };
   }
 
@@ -441,22 +462,127 @@ export default function App() {
     refreshTimeline(conversationId).catch((error) => handleApiError(error, { allowSessionReset: true }));
   }
 
+  /* ---------------- attachments ---------------- */
+
+  // Read a File → bare base64 (strip the "data:<mime>;base64," prefix).
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error || new Error("read failed"));
+      reader.onload = () => {
+        const result = String(reader.result || "");
+        const comma = result.indexOf(",");
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function ingestFiles(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setComposerError("");
+
+    // Respect the per-message count cap (server is authoritative; this is UX).
+    const room = ATTACHMENT_MAX_PER_MESSAGE - pendingAttachments.length;
+    if (room <= 0) {
+      setComposerError(`Up to ${ATTACHMENT_MAX_PER_MESSAGE} attachments per message.`);
+      return;
+    }
+    const accepted = [];
+    const rejected = [];
+    for (const file of files.slice(0, room)) {
+      const mime = resolveAttachmentMime(file);
+      if (!isAllowedAttachmentMime(mime)) {
+        rejected.push(`${file.name} — unsupported type`);
+      } else if (file.size > ATTACHMENT_MAX_BYTES) {
+        rejected.push(`${file.name} — over ${formatBytes(ATTACHMENT_MAX_BYTES)}`);
+      } else {
+        accepted.push({ file, mime });
+      }
+    }
+    if (files.length > room) rejected.push(`only ${room} more allowed this message`);
+
+    setUploading(true);
+    try {
+      for (const { file, mime } of accepted) {
+        try {
+          const dataBase64 = await readFileAsBase64(file);
+          const sizeBytes = file.size;
+          const meta = await uploadOperatorAttachment(session.token, {
+            filename: file.name,
+            mime,
+            dataBase64,
+            sizeBytes,
+          });
+          setPendingAttachments((items) => [...items, meta]);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 401) {
+            handleApiError(error, { allowSessionReset: true });
+            return;
+          }
+          rejected.push(`${file.name} — ${error.message || "upload failed"}`);
+        }
+      }
+    } finally {
+      setUploading(false);
+    }
+    if (rejected.length) setComposerError(rejected.join(" · "));
+  }
+
+  function handleFilePick(event) {
+    const { files } = event.target;
+    ingestFiles(files);
+    event.target.value = ""; // allow re-selecting the same file
+  }
+
+  function handleComposerDrop(event) {
+    event.preventDefault();
+    setDragActive(false);
+    if (event.dataTransfer?.files?.length) ingestFiles(event.dataTransfer.files);
+  }
+
+  function removePendingAttachment(id) {
+    setPendingAttachments((items) => items.filter((a) => a.id !== id));
+    setComposerError("");
+  }
+
   async function handleSend() {
     const text = composerText.trim();
-    if (!text || sending) return;
+    const attachmentIds = pendingAttachments.map((a) => a.id);
+    // The relay requires non-empty message text (operatorMessageSchema.text is
+    // min(1)); attachments ride alongside the text, they don't replace it. If the
+    // operator queued files but typed nothing, prompt for a caption instead of
+    // firing a request the server will reject.
+    if (!text) {
+      if (attachmentIds.length && !sending && !uploading) {
+        setComposerError("Add a message to send with your attachment.");
+      }
+      return;
+    }
+    if (sending || uploading) return;
     const recipient = composerRecipient || "broadcast";
     const convId = selectedConversationId || undefined;
+    const sentAttachments = pendingAttachments;
     const optimisticItem = {
       id: `optim-${Date.now()}`,
       conversationId: convId || "__pending__",
       text,
+      attachments: sentAttachments,
       createdAt: new Date().toISOString(),
     };
     setOptimistic((items) => [...items, optimisticItem]);
     setComposerText("");
+    setPendingAttachments([]);
+    setComposerError("");
     setSending(true);
     try {
-      const res = await sendOperatorMessage(session.token, { recipientAgentId: recipient, text, conversationId: convId });
+      const res = await sendOperatorMessage(session.token, {
+        recipientAgentId: recipient,
+        text,
+        conversationId: convId,
+        attachmentIds: attachmentIds.length ? attachmentIds : undefined,
+      });
       const newConvId = res.conversation_id;
       // bind the optimistic item to the resolved conversation id
       setOptimistic((items) => items.map((o) => (o.id === optimisticItem.id ? { ...o, conversationId: newConvId } : o)));
@@ -468,6 +594,7 @@ export default function App() {
     } catch (error) {
       setOptimistic((items) => items.filter((o) => o.id !== optimisticItem.id));
       setComposerText(text);
+      setPendingAttachments(sentAttachments); // restore so the operator can retry
       handleApiError(error, { allowSessionReset: true });
     } finally {
       setSending(false);
@@ -602,7 +729,7 @@ export default function App() {
     const visible = showSystem ? fromEvents : fromEvents.filter((i) => i.kind === "message" || !isHeartbeatEvent(i.type));
     const pending = optimistic
       .filter((o) => o.conversationId === selectedConversationId)
-      .map((o) => ({ kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, type: "message.queued", createdAt: o.createdAt, pending: true }));
+      .map((o) => ({ kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, attachments: o.attachments || [], type: "message.queued", createdAt: o.createdAt, pending: true }));
     return [...visible, ...pending];
   }, [timelineEvents, showSystem, optimistic, selectedConversationId]);
 
@@ -833,30 +960,99 @@ export default function App() {
             nameFor={nameFor}
             animatedIds={animatedIds}
             typingNow={typingNow}
+            token={session.token}
           />
 
-          <div className="composer">
-            <select className="composer__recipient" value={composerRecipient} onChange={(e) => setComposerRecipient(e.target.value)}>
-              {recipientOptions.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-            <textarea
-              className="composer__input"
-              placeholder="Message the fleet…  (Enter to send · Shift+Enter for newline)"
-              value={composerText}
-              rows={1}
-              onChange={(e) => setComposerText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSend();
-                }
-              }}
-            />
-            <button className="button composer__send" onClick={handleSend} disabled={!composerText.trim() || sending}>
-              {sending ? "Sending…" : "Send"}
-            </button>
+          <div
+            className={`composer${dragActive ? " composer--drag" : ""}`}
+            onDragOver={(e) => {
+              if (e.dataTransfer?.types?.includes("Files")) {
+                e.preventDefault();
+                if (!dragActive) setDragActive(true);
+              }
+            }}
+            onDragLeave={(e) => {
+              // only clear when leaving the composer itself, not its children
+              if (e.currentTarget === e.target) setDragActive(false);
+            }}
+            onDrop={handleComposerDrop}
+          >
+            {dragActive ? <div className="composer__dropveil"><PaperclipIcon /> Drop files to attach</div> : null}
+
+            {(pendingAttachments.length || uploading) ? (
+              <div className="composer__attachments">
+                {pendingAttachments.map((a) => (
+                  <span className="att-pending" key={a.id} title={a.filename}>
+                    <span className="att-pending__name">{a.filename}</span>
+                    <span className="att-pending__size">{formatBytes(a.size_bytes)}</span>
+                    <button
+                      type="button"
+                      className="att-pending__remove"
+                      onClick={() => removePendingAttachment(a.id)}
+                      aria-label={`Remove ${a.filename}`}
+                    >
+                      &times;
+                    </button>
+                  </span>
+                ))}
+                {uploading ? (
+                  <span className="att-pending att-pending--uploading">
+                    <span className="att-spinner" aria-hidden="true" />
+                    <span className="att-pending__name">Uploading…</span>
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+
+            {composerError ? <div className="composer__error">{composerError}</div> : null}
+
+            <div className="composer__row">
+              <select className="composer__recipient" value={composerRecipient} onChange={(e) => setComposerRecipient(e.target.value)}>
+                {recipientOptions.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={ATTACHMENT_ACCEPT}
+                className="composer__file"
+                onChange={handleFilePick}
+                tabIndex={-1}
+              />
+              <button
+                type="button"
+                className="composer__attach"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={pendingAttachments.length >= ATTACHMENT_MAX_PER_MESSAGE || uploading}
+                title={pendingAttachments.length >= ATTACHMENT_MAX_PER_MESSAGE ? `Max ${ATTACHMENT_MAX_PER_MESSAGE} attachments` : "Attach files"}
+                aria-label="Attach files"
+              >
+                <PaperclipIcon />
+              </button>
+              <textarea
+                className="composer__input"
+                placeholder="Message the fleet…  (Enter to send · Shift+Enter for newline)"
+                value={composerText}
+                rows={1}
+                onChange={(e) => setComposerText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+              />
+              <button
+                className="button composer__send"
+                onClick={handleSend}
+                disabled={!composerText.trim() || sending || uploading}
+                title={!composerText.trim() && pendingAttachments.length ? "Add a message to send with your attachment" : undefined}
+              >
+                {sending ? "Sending…" : "Send"}
+              </button>
+            </div>
           </div>
         </main>
 
@@ -1002,7 +1198,7 @@ function HelpIcon() {
 
 const NEW_MESSAGE_MS = 45_000; // window in which an incoming agent message animates
 
-function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow }) {
+function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow, token }) {
   const ref = useRef(null);
   const nearBottomRef = useRef(true);
 
@@ -1085,19 +1281,26 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
                   <span className="bubble-meta__time mono">{clockTime(item.createdAt)}</span>
                 </div>
               ) : null}
-              <div className={`bubble${isOp ? " bubble--op" : ""}${item.pending ? " bubble--pending" : ""}`} style={bubbleStyle}>
-                {shouldType ? (
-                  <Typewriter
-                    text={item.text}
-                    onTick={stickToBottom}
-                    onDone={() => {
-                      typingNow.current.delete(id);
-                      animatedIds.current.add(id);
-                    }}
-                  />
-                ) : (
-                  item.text
-                )}
+              <div className={`bubble${isOp ? " bubble--op" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`} style={bubbleStyle}>
+                {item.text ? (
+                  <div className="bubble__text">
+                    {shouldType ? (
+                      <Typewriter
+                        text={item.text}
+                        onTick={stickToBottom}
+                        onDone={() => {
+                          typingNow.current.delete(id);
+                          animatedIds.current.add(id);
+                        }}
+                      />
+                    ) : (
+                      item.text
+                    )}
+                  </div>
+                ) : null}
+                {item.attachments?.length ? (
+                  <AttachmentList token={token} attachments={item.attachments} onImageLoad={stickToBottom} />
+                ) : null}
               </div>
             </div>
           </div>
