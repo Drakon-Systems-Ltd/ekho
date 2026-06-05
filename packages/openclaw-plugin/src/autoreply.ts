@@ -9,6 +9,14 @@ type Logger = {
   debug?: (...a: unknown[]) => void;
 };
 
+/** Resolved attachment metadata the relay surfaces on an inbox message (never bytes). */
+interface InboxAttachmentMeta {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+}
+
 /** Shape of an inbox message as the SDK returns it (loose — relay-owned). */
 interface InboxMessage {
   message_id: string;
@@ -19,6 +27,9 @@ interface InboxMessage {
   message_type: string;
   priority?: string;
   body?: { text?: string } & Record<string, unknown>;
+  // Resolved attachment metadata (never bytes). Passes through getCachedInbox's
+  // spread so ekho_inbox can download each to disk on demand.
+  attachments?: InboxAttachmentMeta[];
   metadata?: Record<string, unknown>;
   created_at?: string;
   deadline_at?: string;
@@ -227,7 +238,10 @@ function buildPrompt(messages: InboxMessage[], batch: InboxBatch): string {
           : "an UNVERIFIED operator identity"
         : `fleet agent ${m.sender_agent_id}`;
     const text = typeof m.body?.text === "string" ? m.body.text : "";
-    return `• From ${who} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":\n    "${text}"`;
+    const atts = Array.isArray(m.attachments) && m.attachments.length > 0
+      ? `\n    Attachments (${m.attachments.length}): ${m.attachments.map((a) => `${a.filename} (${a.mime}, ${a.size_bytes}B)`).join(", ")} — call the ekho_inbox tool to download them to local file paths you can open.`
+      : "";
+    return `• From ${who} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":\n    "${text}"${atts}`;
   });
   return (
     `You have ${messages.length} new Ekho fleet message(s) below.\n\n` +

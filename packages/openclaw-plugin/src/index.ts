@@ -1,14 +1,96 @@
+import fs from "node:fs";
+import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, type EkhoPluginConfig } from "./connection.js";
 import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
+import {
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_MAX_PER_MESSAGE,
+  attachmentLocalPath,
+  attachmentsDownloadDir,
+  readUploadFile,
+  sanitizeFilename
+} from "./attachments.js";
+
+/** Attachment metadata as the relay surfaces it on an inbox message (never bytes). */
+interface InboxAttachmentMeta {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+}
+
+/** What the agent sees per attachment after we download it to disk. */
+interface LocalAttachment {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  local_path: string;
+}
+
+/**
+ * For each inbox message, download its attachments to the scoped local dir and
+ * return a parallel array (index-aligned to `messages`) of the local attachment
+ * descriptors. Each download is wrapped in try/catch so a single failure (bad
+ * id, oversize, network) drops just that attachment and never fails the whole
+ * inbox read. Already-present files are not re-downloaded (id-keyed path).
+ */
+async function resolveLocalAttachments(
+  messages: Array<Record<string, unknown>>,
+  client: EkhoAgentClient
+): Promise<LocalAttachment[][]> {
+  const dir = attachmentsDownloadDir();
+  let dirReady = false;
+  const ensureDir = () => {
+    if (!dirReady) {
+      fs.mkdirSync(dir, { recursive: true });
+      dirReady = true;
+    }
+  };
+
+  return Promise.all(
+    messages.map(async (m) => {
+      const metas = Array.isArray(m.attachments) ? (m.attachments as InboxAttachmentMeta[]) : [];
+      const out: LocalAttachment[] = [];
+      for (const meta of metas) {
+        if (!meta || typeof meta.id !== "string") continue;
+        // Size guard mirrors the upload cap — never write more than the cap to disk.
+        if (typeof meta.size_bytes === "number" && meta.size_bytes > ATTACHMENT_MAX_BYTES) {
+          continue;
+        }
+        const filename = sanitizeFilename(typeof meta.filename === "string" ? meta.filename : meta.id);
+        const localPath = attachmentLocalPath(meta.id, filename);
+        try {
+          if (!fs.existsSync(localPath)) {
+            const { bytes } = await client.downloadAttachment(meta.id);
+            if (bytes.length > ATTACHMENT_MAX_BYTES) continue; // defence: trust decoded length too
+            ensureDir();
+            fs.writeFileSync(localPath, bytes, { mode: 0o600 });
+          }
+          out.push({
+            id: meta.id,
+            filename,
+            mime: typeof meta.mime === "string" ? meta.mime : "application/octet-stream",
+            size_bytes: typeof meta.size_bytes === "number" ? meta.size_bytes : 0,
+            local_path: localPath
+          });
+        } catch {
+          // One bad attachment must not fail the inbox read — skip it silently.
+        }
+      }
+      return out;
+    })
+  );
+}
 
 /**
  * Ekho relay adapter for OpenClaw.
  *
  * Gives the agent two tools to coordinate with the rest of an Ekho fleet:
- *   - ekho_send:  message another agent (delegate, ask, coordinate)
- *   - ekho_inbox: read pending messages from other agents
+ *   - ekho_send:  message another agent (delegate, ask, coordinate) + attach files
+ *   - ekho_inbox: read pending messages from other agents (+ download attachments)
  *
  * On startup (and again lazily on first tool use) it enrolls (or loads saved
  * credentials) and starts a background heartbeat so the agent appears healthy
@@ -37,23 +119,52 @@ const plugin = defineToolPlugin({
       parameters: Type.Object({
         recipient_agent_id: Type.String({ description: "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet." }),
         message: Type.String({ description: "The message text to send." }),
-        conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional)." }))
+        conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional)." })),
+        attachment_paths: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Local file path(s) to attach. Each is read, base64-encoded, and uploaded; must be an allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) under the 25 MiB size cap. Max 10 per message."
+          })
+        )
       }),
-      execute: async ({ recipient_agent_id, message, conversation_id }, config: EkhoPluginConfig) => {
+      execute: async ({ recipient_agent_id, message, conversation_id, attachment_paths }, config: EkhoPluginConfig) => {
         const { client } = await ensureConnected(config);
         const conversationId = conversation_id ?? `oc-${Date.now()}`;
         const stamp = `oc-${Date.now()}`;
+
+        // Upload any attachments first; collect their server-issued ids to bind
+        // into the (HMAC-signed) message body as body.attachments. Validate the
+        // count + each file locally for a fast, clear error — the relay is still
+        // authoritative and re-checks everything.
+        const paths = Array.isArray(attachment_paths) ? attachment_paths : [];
+        if (paths.length > ATTACHMENT_MAX_PER_MESSAGE) {
+          throw new Error(`too many attachments (${paths.length}); max ${ATTACHMENT_MAX_PER_MESSAGE} per message`);
+        }
+        const attachmentIds: string[] = [];
+        for (const p of paths) {
+          const { bytes, mime, filename } = readUploadFile(p);
+          const up = await client.uploadAttachment({ filename, mime, dataBase64: bytes.toString("base64") });
+          attachmentIds.push(up.id);
+        }
+
         const result = await client.sendMessage({
           recipient: recipient_agent_id === "broadcast" ? { kind: "broadcast" } : { kind: "agent", id: recipient_agent_id },
           message_type: "direct",
-          body: { text: message },
+          // body.attachments rides inside the signed body — the relay binds it to
+          // the message and validates ownership against this agent.
+          body: { text: message, ...(attachmentIds.length ? { attachments: attachmentIds } : {}) },
           // Stamp every agent send so peers' auto-reply loops (and ours) can tell
           // a machine reply from a human/operator one and avoid echo ping-pong.
           metadata: { ekho_origin: EKHO_ORIGIN_STAMP },
           conversation_id: conversationId,
           correlation_id: stamp
         });
-        return { sent: true, message_id: result.message_id, conversation_id: conversationId };
+        return {
+          sent: true,
+          message_id: result.message_id,
+          conversation_id: conversationId,
+          attachments: attachmentIds
+        };
       }
     }),
     tool({
@@ -68,26 +179,37 @@ const plugin = defineToolPlugin({
         // getInbox() again, so a manual call during a turn can never double-
         // consume rows the loop is mid-processing. No ack here for the same
         // reason — the loop already acked.
-        await ensureConnected(config);
+        const { client } = await ensureConnected(config);
         const cached = getCachedInbox();
         const messages = cached.messages as unknown as Array<Record<string, unknown>>;
         const operatorTrusted = Boolean(cached.operator_trusted);
         const roster = (cached.roster ?? []) as unknown as Array<Record<string, unknown>>;
         const controls = (cached.controls ?? []) as unknown as Array<Record<string, unknown>>;
+
+        // Download each message's attachments to a scoped local dir and surface
+        // the local_path so the agent's file tools can open them. Done here (on
+        // demand) — not in the background poll loop — so we don't write disk on
+        // every poll. Each download is isolated: one bad attachment never fails
+        // the whole inbox read. Bytes are written 0o600 under an id-prefixed,
+        // sanitized filename (no collisions, no path traversal).
+        const localAttachments = await resolveLocalAttachments(messages, client);
+
         return {
           count: messages.length,
           // When ON, the relay vouches that the console operator is this agent's
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.
           operator_trusted: operatorTrusted,
-          messages: messages.map((m) => {
+          messages: messages.map((m, i) => {
             const fromKind = m.sender_kind === "operator" ? "operator" : "agent";
+            const attachments = localAttachments[i];
             const base = {
               type: m.message_type,
               body: m.body,
               conversation_id: m.conversation_id,
               sent_at: m.created_at,
-              from_kind: fromKind
+              from_kind: fromKind,
+              ...(attachments.length ? { attachments } : {})
             };
             if (fromKind === "operator") {
               return operatorTrusted
