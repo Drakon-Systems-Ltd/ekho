@@ -4,6 +4,9 @@ export type { AdapterHooks } from "./adapter";
 export type {
   AgentCredentials,
   ActionDecision,
+  AttachmentMeta,
+  AttachmentRef,
+  AttachmentUploadInput,
   InboxMessage,
   ControlMessage,
   RosterEntry,

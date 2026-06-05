@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type {
   AgentCredentials,
   ActionDecision,
+  AttachmentUploadInput,
   InboxResponse,
   SendMessagePayload,
   HeartbeatPayload,
@@ -84,5 +85,28 @@ export class EkhoAgentClient {
 
   actionResult(payload: ActionResultPayload) {
     return this.request<{ ok: boolean }>("POST", "/v1/actions/result", payload);
+  }
+
+  uploadAttachment(input: AttachmentUploadInput) {
+    // size_bytes derived from the decoded byte length so the server cross-check passes.
+    const size_bytes = Buffer.from(input.dataBase64, "base64").length;
+    return this.request<{ id: string; filename: string; mime: string; size_bytes: number; created_at: string }>(
+      "POST", "/v1/attachments",
+      { filename: input.filename, mime: input.mime, size_bytes, data_base64: input.dataBase64 }
+    );
+  }
+
+  async downloadAttachment(id: string): Promise<{ bytes: Buffer; filename: string; mime: string }> {
+    const routePath = `/v1/attachments/${encodeURIComponent(id)}`;
+    const signaturePath = routePath; // no query
+    const response = await fetch(`${this.credentials.relayBaseUrl}${routePath}`, {
+      method: "GET",
+      headers: this.signedHeaders("GET", signaturePath, "")   // body "" → signs the same as other GETs
+    });
+    if (!response.ok) throw new Error(`Ekho download failed for ${routePath}: ${response.status} ${await response.text()}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const cd = response.headers.get("content-disposition") ?? "";
+    const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? id;
+    return { bytes, filename, mime: response.headers.get("content-type") ?? "application/octet-stream" };
   }
 }

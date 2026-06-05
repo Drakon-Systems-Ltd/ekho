@@ -22,6 +22,25 @@ class AgentCredentials:
     poll_interval_seconds: Optional[int] = None
 
 
+# --- Attachments -----------------------------------------------------------
+
+@dataclass
+class AttachmentMeta:
+    id: str
+    filename: str
+    mime: str
+    size_bytes: int
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "AttachmentMeta":
+        return cls(
+            id=data["id"],
+            filename=data.get("filename", ""),
+            mime=data.get("mime", ""),
+            size_bytes=int(data.get("size_bytes", 0)),
+        )
+
+
 # --- Inbound message shapes ------------------------------------------------
 
 @dataclass
@@ -38,6 +57,9 @@ class InboxMessage:
     deadline_at: str
     # "operator" iff the sender is the verified fleet operator; else "agent".
     sender_kind: Optional[str] = None
+    # Resolved attachment metadata (never bytes). Fetch via
+    # download_attachment.
+    attachments: List[AttachmentMeta] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxMessage":
@@ -53,6 +75,10 @@ class InboxMessage:
             created_at=data["created_at"],
             deadline_at=data["deadline_at"],
             sender_kind=data.get("sender_kind"),
+            attachments=[
+                AttachmentMeta.from_dict(a)
+                for a in data.get("attachments", [])
+            ],
         )
 
 

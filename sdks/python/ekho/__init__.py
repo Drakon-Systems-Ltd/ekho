@@ -11,6 +11,7 @@ from .types import (
     ActionResultInput,
     AgentCredentials,
     ApprovalStatus,
+    AttachmentMeta,
     ControlMessage,
     EnrollInput,
     EnrollResponse,
@@ -45,6 +46,7 @@ __all__ = [
     "RosterEntry",
     "ControlMessage",
     "AckInput",
+    "AttachmentMeta",
     # Heartbeats / actions
     "HeartbeatInput",
     "HeartbeatResult",

@@ -11,6 +11,10 @@ export type ActionDecision =
   | { decision: "deny" }
   | { decision: "pending_approval"; approval_id: string };
 
+export type AttachmentMeta = { id: string; filename: string; mime: string; size_bytes: number };
+export type AttachmentRef = AttachmentMeta;
+export type AttachmentUploadInput = { filename: string; mime: string; dataBase64: string };
+
 export type InboxMessage = {
   message_id: string;
   conversation_id: string;
@@ -21,6 +25,8 @@ export type InboxMessage = {
   message_type: string;
   priority: string;
   body: Record<string, unknown>;
+  /** Resolved attachment metadata (never bytes). Fetch bytes via downloadAttachment. */
+  attachments?: AttachmentMeta[];
   metadata: Record<string, unknown>;
   created_at: string;
   deadline_at: string;

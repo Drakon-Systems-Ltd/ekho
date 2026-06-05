@@ -277,3 +277,122 @@ def test_custom_intervals():
     client = EkhoAgentClient(creds)
     assert client.poll_interval_seconds == 2
     assert client.heartbeat_interval_seconds == 60
+
+
+# --- Attachments ----------------------------------------------------------
+
+def test_attachment_meta_parses_from_dict():
+    from ekho.types import AttachmentMeta
+
+    meta = AttachmentMeta.from_dict(
+        {
+            "id": "att_1",
+            "filename": "diagram.png",
+            "mime": "image/png",
+            "size_bytes": 2048,
+        }
+    )
+    assert meta.id == "att_1"
+    assert meta.filename == "diagram.png"
+    assert meta.mime == "image/png"
+    assert meta.size_bytes == 2048
+
+
+def test_inbox_message_parses_attachments():
+    from ekho.types import InboxMessage
+
+    msg = InboxMessage.from_dict(
+        {
+            "message_id": "m1",
+            "conversation_id": "c1",
+            "correlation_id": "k1",
+            "sender_agent_id": "agent_x",
+            "message_type": "direct",
+            "priority": "normal",
+            "body": {"text": "hi", "attachments": ["att_1"]},
+            "metadata": {},
+            "created_at": "2026-06-05T00:00:00.000Z",
+            "deadline_at": "2026-06-05T00:15:00.000Z",
+            "attachments": [
+                {
+                    "id": "att_1",
+                    "filename": "diagram.png",
+                    "mime": "image/png",
+                    "size_bytes": 2048,
+                }
+            ],
+        }
+    )
+    assert len(msg.attachments) == 1
+    assert msg.attachments[0].id == "att_1"
+    assert msg.attachments[0].filename == "diagram.png"
+
+
+def test_inbox_message_defaults_empty_attachments():
+    from ekho.types import InboxMessage
+
+    msg = InboxMessage.from_dict(
+        {
+            "message_id": "m1",
+            "conversation_id": "c1",
+            "correlation_id": "k1",
+            "sender_agent_id": "agent_x",
+            "message_type": "direct",
+            "priority": "normal",
+            "body": {"text": "no files"},
+            "metadata": {},
+            "created_at": "2026-06-05T00:00:00.000Z",
+            "deadline_at": "2026-06-05T00:15:00.000Z",
+        }
+    )
+    assert msg.attachments == []
+
+
+def test_client_upload_attachment_derives_size_and_posts():
+    client, session = _make_client_with_mock()
+    response = MagicMock()
+    response.ok = True
+    response.content = b'{"id":"att_1","filename":"x.txt"}'
+    response.json.return_value = {"id": "att_1", "filename": "x.txt"}
+    session.request.return_value = response
+
+    import base64
+
+    data_b64 = base64.b64encode(b"hello world").decode("ascii")
+    result = client.upload_attachment(
+        filename="x.txt", mime="text/plain", data_base64=data_b64
+    )
+    assert result["id"] == "att_1"
+
+    call = session.request.call_args
+    assert call.args[0] == "POST"
+    assert call.args[1] == "http://relay.example/v1/attachments"
+    # Body carries the server-cross-checkable decoded size.
+    sent = json.loads(call.kwargs["data"])
+    assert sent["size_bytes"] == len(b"hello world")
+    assert sent["mime"] == "text/plain"
+    assert sent["data_base64"] == data_b64
+
+
+def test_client_download_attachment_returns_raw_bytes():
+    client, session = _make_client_with_mock()
+    response = MagicMock()
+    response.ok = True
+    response.content = b"\x89PNG\r\n\x1a\nrawbytes"
+    session.request.return_value = response
+
+    raw = client.download_attachment("att_1")
+    assert raw == b"\x89PNG\r\n\x1a\nrawbytes"
+
+    call = session.request.call_args
+    assert call.args[0] == "GET"
+    assert call.args[1] == "http://relay.example/v1/attachments/att_1"
+    # Signed like other GETs: no body sent, all auth headers present.
+    headers = call.kwargs["headers"]
+    for h in (
+        "x-ekho-agent-id",
+        "x-ekho-timestamp",
+        "x-ekho-nonce",
+        "x-ekho-signature",
+    ):
+        assert h in headers

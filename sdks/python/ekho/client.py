@@ -195,6 +195,52 @@ class EkhoAgentClient:
     def action_result(self, payload: ActionResultInput) -> Dict[str, Any]:
         return self._request("POST", "/v1/actions/result", dict(payload))
 
+    def upload_attachment(
+        self,
+        *,
+        filename: str,
+        mime: str,
+        data_base64: str,
+    ) -> Dict[str, Any]:
+        import base64
+
+        size_bytes = len(base64.b64decode(data_base64))
+        return self._request(
+            "POST",
+            "/v1/attachments",
+            {
+                "filename": filename,
+                "mime": mime,
+                "size_bytes": size_bytes,
+                "data_base64": data_base64,
+            },
+        )
+
+    def download_attachment(self, attachment_id: str) -> bytes:
+        # _request JSON-parses; download bypasses it like enroll does.
+        route_path = f"/v1/attachments/{attachment_id}"
+        headers = signed_headers(
+            self._credentials.agent_id,
+            self._credentials.secret,
+            "GET",
+            route_path,
+            "",
+        )
+        url = f"{self._credentials.relay_base_url}{route_path}"
+        resp = self._session.request(
+            "GET",
+            url,
+            headers=headers,
+            timeout=self._timeout,
+        )
+        if not resp.ok:
+            raise EkhoRequestError(
+                route_path,
+                resp.status_code,
+                resp.text,
+            )
+        return resp.content
+
     def close(self) -> None:
         self._session.close()
 

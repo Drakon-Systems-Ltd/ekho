@@ -62,6 +62,56 @@ describe("@drakon-systems/ekho-sdk", () => {
       });
       await expect(client.heartbeat({ status: "healthy" })).rejects.toThrow("401");
     });
+
+    it("uploads and downloads an attachment, then binds it to a message", async () => {
+      const senderCreds = await relay.enrollAgent("sdk-att-sender");
+      const receiverCreds = await relay.enrollAgent("sdk-att-receiver");
+
+      const sender = new EkhoAgentClient({
+        agentId: senderCreds.agent_id,
+        secret: senderCreds.secret,
+        relayBaseUrl: senderCreds.relayBaseUrl
+      });
+      const receiver = new EkhoAgentClient({
+        agentId: receiverCreds.agent_id,
+        secret: receiverCreds.secret,
+        relayBaseUrl: receiverCreds.relayBaseUrl
+      });
+
+      // 1x1 PNG (passes the relay's magic-byte sniff).
+      const pngB64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNgAAACAAFUok+eAAAAAElFTkSuQmCC";
+
+      const up = await sender.uploadAttachment({
+        filename: "sdk.png",
+        mime: "image/png",
+        dataBase64: pngB64
+      });
+      expect(up.id).toMatch(/^att_/);
+      expect(up.size_bytes).toBe(Buffer.from(pngB64, "base64").length);
+
+      // Download round-trips the exact bytes.
+      const dl = await sender.downloadAttachment(up.id);
+      expect(dl.bytes.toString("base64")).toBe(pngB64);
+      expect(dl.mime).toContain("image/png");
+      expect(dl.filename).toBe("sdk.png");
+
+      // Bind it into a message body and confirm the recipient sees the metadata.
+      await sender.sendMessage({
+        recipient: { kind: "agent", id: receiverCreds.agent_id },
+        message_type: "direct",
+        body: { text: "with attachment", attachments: [up.id] },
+        conversation_id: "sdk-att-conv",
+        correlation_id: "sdk-att-corr"
+      });
+
+      const inbox = await receiver.getInbox();
+      expect(inbox.messages).toHaveLength(1);
+      expect(inbox.messages[0].attachments).toHaveLength(1);
+      expect(inbox.messages[0].attachments?.[0]).toMatchObject({
+        id: up.id, filename: "sdk.png", mime: "image/png"
+      });
+    });
   });
 
   describe("EkhoAgentAdapter", () => {
