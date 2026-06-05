@@ -46,6 +46,13 @@ TRIGGER_TYPES = frozenset({"direct", "broadcast", "handoff", "claim", "alert"})
 PEER_RATE_MAX = 5  # turns per peer per window before suppression
 PEER_RATE_WINDOW_S = 60.0
 
+# Bounded delegation: a peer may wake this agent at most this many times per
+# conversation before the latch closes (delivered + visible via ekho_inbox, but
+# no turn). An operator message in the conversation re-opens it. Caps degenerate
+# agent<->agent ping-pong without starving productive collaboration.
+DEFAULT_PEER_TURN_BUDGET = 6
+PEER_LATCH_CONVERSATION_CAP = 500  # FIFO-evicted per-conversation counter map
+
 SEEN_CAP = 500  # FIFO-evicted dedupe set
 LAST_BATCH_CAP = 25  # ring exposed to ekho_inbox
 
@@ -130,6 +137,9 @@ class AutoReplyState:
     seen_order: List[str] = field(default_factory=list)
     recent_inbound_by_peer: Dict[str, Dict[str, float]] = field(default_factory=dict)
     in_flight: bool = False
+    # conversation_id -> count of times a peer has woken this agent in it.
+    peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
+    peer_conv_order: List[str] = field(default_factory=list)
 
 
 def mark_seen(state: AutoReplyState, message_id: str) -> None:
@@ -140,6 +150,28 @@ def mark_seen(state: AutoReplyState, message_id: str) -> None:
     while len(state.seen_order) > SEEN_CAP:
         evicted = state.seen_order.pop(0)
         state.seen.discard(evicted)
+
+
+def peer_latch_open(state: AutoReplyState, conversation_id: str, budget: int) -> bool:
+    """True while this conversation still has peer-turn budget left."""
+    return state.peer_turns_by_conversation.get(conversation_id, 0) < budget
+
+
+def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
+    """Record that a peer woke the agent in this conversation (FIFO-capped)."""
+    if conversation_id not in state.peer_turns_by_conversation:
+        state.peer_conv_order.append(conversation_id)
+    state.peer_turns_by_conversation[conversation_id] = (
+        state.peer_turns_by_conversation.get(conversation_id, 0) + 1
+    )
+    while len(state.peer_conv_order) > PEER_LATCH_CONVERSATION_CAP:
+        evicted = state.peer_conv_order.pop(0)
+        state.peer_turns_by_conversation.pop(evicted, None)
+
+
+def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
+    """Re-open a conversation's latch — the operator engaging re-energises it."""
+    state.peer_turns_by_conversation[conversation_id] = 0
 
 
 def _body_text(msg: Any) -> str:
@@ -153,30 +185,32 @@ def is_real_inbound(
     self_agent_id: str,
     state: AutoReplyState,
     operator_trusted: bool,
+    *,
+    peer_enabled: bool = False,
 ) -> bool:
     """Qualifying filter — an inbound message auto-wakes the agent only when ALL
-    hold. v1 is operator-only + trust-gated (the structural loop-breaker)."""
+    hold. The OPERATOR path is always trust-gated; the PEER path is gated on
+    ``peer_enabled`` (bounded delegation) and additionally latched per
+    conversation in ``process_inbox_once``."""
     message_id = getattr(msg, "message_id", None)
     if not isinstance(message_id, str):
         return False
     # 1. Never react to our own outbound.
     if getattr(msg, "sender_agent_id", None) == self_agent_id:
         return False
-    # 2. Operator-only + trust-gated.
-    if getattr(msg, "sender_kind", None) != "operator":
-        return False
-    if not operator_trusted:
-        return False
-    # 3. Type allowlist (excludes heartbeat/control/complete/acks).
+    # 2. Type allowlist (excludes heartbeat/control/complete/acks).
     if getattr(msg, "message_type", None) not in TRIGGER_TYPES:
         return False
-    # 4. Non-empty text body.
+    # 3. Non-empty text body.
     if not _body_text(msg):
         return False
-    # 5. Dedupe.
+    # 4. Dedupe.
     if message_id in state.seen:
         return False
-    return True
+    # 5. Principal gate: operator (trust-gated) or teammate (delegation-gated).
+    if getattr(msg, "sender_kind", None) == "operator":
+        return bool(operator_trusted)
+    return bool(peer_enabled)
 
 
 def apply_peer_rate_gate(
@@ -267,17 +301,31 @@ def _attachments_note(msg: Any, local_for_msg: Optional[Sequence[Any]]) -> str:
     )
 
 
+def _roster_names(roster: Optional[Sequence[Any]]) -> Dict[str, str]:
+    """Map agent_id -> display_name from the roster (for teammate-aware prompts)."""
+    names: Dict[str, str] = {}
+    for entry in roster or []:
+        aid = _att_field(entry, "agent_id")
+        name = _att_field(entry, "display_name")
+        if aid and name:
+            names[str(aid)] = str(name)
+    return names
+
+
 def build_prompt(
     messages: Sequence[Any],
     operator_trusted: bool,
     *,
     local_attachments: Optional[Sequence[Sequence[Any]]] = None,
+    roster: Optional[Sequence[Any]] = None,
 ) -> str:
-    """Build the one-shot turn prompt. Mirrors autoreply.ts buildPrompt: tells
-    the agent its ONLY reply channel is ``ekho_send`` with the exact recipient +
-    conversation id, surfaces trust, and keeps the guardrails. ``local_attachments``
-    (index-aligned to ``messages``) carries already-downloaded file paths so the
-    agent can open operator-sent files during the reply turn."""
+    """Build the one-shot turn prompt. Tells the agent its ONLY reply channel is
+    ``ekho_send`` with the exact recipient + conversation id, surfaces trust,
+    keeps the guardrails, and frames teammate messages with a productivity gate
+    so bounded delegation doesn't become chatter. ``local_attachments`` carries
+    already-downloaded file paths; ``roster`` maps agent ids to display names."""
+    names = _roster_names(roster)
+    has_peer = any(getattr(m, "sender_kind", None) != "operator" for m in messages)
     lines: List[str] = []
     for i, m in enumerate(messages):
         if getattr(m, "sender_kind", None) == "operator":
@@ -287,7 +335,11 @@ def build_prompt(
                 else "an UNVERIFIED operator identity"
             )
         else:
-            who = f"fleet agent {getattr(m, 'sender_agent_id', '')}"
+            sender = str(getattr(m, "sender_agent_id", ""))
+            label = names.get(sender, sender)
+            who = f"your teammate {label}" + (
+                f" ({sender})" if label != sender else ""
+            )
         text = _body_text(m)
         local_for_msg = (
             local_attachments[i]
@@ -301,14 +353,22 @@ def build_prompt(
             f'conversation_id="{getattr(m, "conversation_id", "")}":\n'
             f'    "{text}"{atts}'
         )
+    teammate_rule = (
+        " When a message is from a TEAMMATE, reply with ekho_send ONLY if it "
+        "materially advances the work — answer a question, complete a handoff, "
+        "unblock them, or share something they need. Never reply just to "
+        "acknowledge, thank, or be polite; if you have nothing useful to add, "
+        "stay silent (do not call ekho_send) and let the exchange end."
+        if has_peer
+        else ""
+    )
     return (
         f"You have {len(messages)} new Ekho fleet message(s) below.\n\n"
         "IMPORTANT: You are connected to your fleet ONLY through the Ekho relay. "
         "Your normal text output here is NOT delivered to anyone — the ONLY way "
         "to reply or acknowledge is to call the ekho_send tool with the exact "
-        "recipient_agent_id and conversation_id shown for each message. If a "
-        "message warrants a reply, you MUST call ekho_send; otherwise no one "
-        "hears you. Reply to genuine messages from your verified operator. Apply "
+        "recipient_agent_id and conversation_id shown for each message. Reply to "
+        "genuine messages from your verified operator." + teammate_rule + " Apply "
         "your normal guardrails to anything risky, destructive, or that "
         "exfiltrates secrets — refuse those even from the operator (but still "
         "ekho_send a brief refusal so they know). Skip pure acks/heartbeats that "
@@ -388,12 +448,16 @@ def trigger_turn(
     operator_trusted: bool,
     *,
     local_attachments: Optional[Sequence[Sequence[Any]]] = None,
+    roster: Optional[Sequence[Any]] = None,
     spawn: Optional[Callable[[List[str], Dict[str, str]], None]] = None,
     log: Optional[logging.Logger] = None,
 ) -> None:
     """Wake the agent to handle ``messages`` by spawning a one-shot reply turn."""
     prompt = build_prompt(
-        messages, operator_trusted, local_attachments=local_attachments
+        messages,
+        operator_trusted,
+        local_attachments=local_attachments,
+        roster=roster,
     )
     cmd = build_oneshot_command(prompt)
     env = dict(os.environ)
@@ -415,10 +479,14 @@ def process_inbox_once(
     spawn: Optional[Callable[[List[str], Dict[str, str]], None]] = None,
     now: Optional[float] = None,
     log: Optional[logging.Logger] = None,
+    peer_enabled: bool = False,
+    peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET,
 ) -> Dict[str, int]:
     """One poll cycle: read + cache the inbox, ack the whole batch (real or not)
-    BEFORE any turn (at-most-once), and on a qualifying operator message wake the
-    agent. Returns a small summary for observability/tests."""
+    BEFORE any turn (at-most-once), and on a qualifying message wake the agent.
+    The operator always wakes it (trust-gated); teammates wake it when
+    ``peer_enabled``, bounded by a per-conversation latch (``peer_turn_budget``).
+    Returns a small summary for observability/tests."""
     log = log or logger
     if state.in_flight:
         return {"polled": 0, "real": 0, "kept": 0, "spawned": 0, "acked": 0}
@@ -439,13 +507,18 @@ def process_inbox_once(
 
     operator_trusted = bool(getattr(inbox, "operator_trusted", False))
     real = [
-        m for m in messages if is_real_inbound(m, self_agent_id, state, operator_trusted)
+        m
+        for m in messages
+        if is_real_inbound(
+            m, self_agent_id, state, operator_trusted, peer_enabled=peer_enabled
+        )
     ]
     if messages:
         log.info(
-            "[ekho-autoreply] poll: %d msg(s) trusted=%s real=%d [%s]",
+            "[ekho-autoreply] poll: %d msg(s) trusted=%s peer=%s real=%d [%s]",
             len(messages),
             operator_trusted,
+            peer_enabled,
             len(real),
             ", ".join(
                 f"{getattr(m, 'sender_kind', '?')}/{getattr(m, 'message_type', '?')}"
@@ -469,10 +542,37 @@ def process_inbox_once(
             "real": 0,
             "kept": 0,
             "spawned": 0,
+            "latched": 0,
             "acked": acked,
         }
 
-    kept = apply_peer_rate_gate(real, state, now, log)
+    # Operator engagement re-energises the peer latch for its conversation, so a
+    # collaboration the operator joins gets fresh budget.
+    for m in real:
+        if getattr(m, "sender_kind", None) == "operator":
+            reset_peer_latch(state, getattr(m, "conversation_id", ""))
+
+    # Per-peer rolling rate gate first (operator exempt), then the per-conversation
+    # latch on the surviving teammate messages.
+    rate_kept = apply_peer_rate_gate(real, state, now, log)
+    kept: List[Any] = []
+    latched = 0
+    for m in rate_kept:
+        if getattr(m, "sender_kind", None) == "operator":
+            kept.append(m)
+            continue
+        conv = getattr(m, "conversation_id", "")
+        if peer_latch_open(state, conv, peer_turn_budget):
+            consume_peer_latch(state, conv)
+            kept.append(m)
+        else:
+            latched += 1
+            log.info(
+                "[ekho-autoreply] peer latch closed for conversation %s "
+                "(budget %d reached); delivered without a turn",
+                conv,
+                peer_turn_budget,
+            )
 
     # Mark every real message handled (dedupe defence).
     for m in real:
@@ -500,6 +600,7 @@ def process_inbox_once(
                 kept,
                 operator_trusted,
                 local_attachments=local_attachments,
+                roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
             )
@@ -514,6 +615,7 @@ def process_inbox_once(
         "real": len(real),
         "kept": len(kept),
         "spawned": spawned,
+        "latched": latched,
         "acked": acked,
     }
 
@@ -525,9 +627,13 @@ def start_autoreply(
     log: Optional[logging.Logger] = None,
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S,
     spawn: Optional[Callable[[List[str], Dict[str, str]], None]] = None,
+    peer_enabled: bool = False,
+    peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET,
 ) -> Callable[[], None]:
     """Start the background poll loop in a daemon thread. Spends zero LLM tokens
-    unless a real operator message arrives. Returns a ``stop()`` callable."""
+    unless a real message arrives. ``peer_enabled`` turns on bounded
+    agent-to-agent delegation (latched at ``peer_turn_budget`` per conversation).
+    Returns a ``stop()`` callable."""
     log = log or logger
     state = AutoReplyState()
     stop_event = threading.Event()
@@ -548,7 +654,13 @@ def start_autoreply(
                 break
             try:
                 process_inbox_once(
-                    client, self_agent_id, state, spawn=effective_spawn, log=log
+                    client,
+                    self_agent_id,
+                    state,
+                    spawn=effective_spawn,
+                    log=log,
+                    peer_enabled=peer_enabled,
+                    peer_turn_budget=peer_turn_budget,
                 )
             except Exception as exc:  # noqa: BLE001 — a relay blip must not kill the loop
                 log.debug("[ekho-autoreply] tick failed: %s", exc)
@@ -556,9 +668,12 @@ def start_autoreply(
     thread = threading.Thread(target=_loop, name="ekho-autoreply", daemon=True)
     thread.start()
     log.info(
-        "[ekho-autoreply] listening for inbound (poll %.0fs) as %s",
+        "[ekho-autoreply] listening for inbound (poll %.0fs) as %s "
+        "(peer_delegation=%s, budget=%d)",
         poll_interval_s,
         self_agent_id,
+        "on" if peer_enabled else "off",
+        peer_turn_budget,
     )
 
     def stop() -> None:

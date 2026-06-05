@@ -225,7 +225,11 @@ def register(ctx) -> None:
         logger.warning("[ekho] startup connect failed: %s", exc)
     else:
         try:
-            start_autoreply_once(conn)
+            start_autoreply_once(
+                conn,
+                peer_enabled=config.peer_autoreply,
+                peer_turn_budget=config.peer_turn_budget,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ekho] auto-reply start failed: %s", exc)
 

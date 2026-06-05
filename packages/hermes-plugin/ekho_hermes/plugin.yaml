@@ -31,3 +31,9 @@ optional_env:
   - name: EKHO_HEARTBEAT_INTERVAL
     description: "Heartbeat interval in seconds (default 30)"
     prompt: "Ekho heartbeat interval (seconds)"
+  - name: EKHO_PEER_AUTOREPLY
+    description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default off; 1/true/yes/on to enable)"
+    prompt: "Enable agent-to-agent delegation? (1/0)"
+  - name: EKHO_PEER_TURN_BUDGET
+    description: "Max times a teammate may wake this agent per conversation before the latch closes (default 6). An operator message re-opens it."
+    prompt: "Peer turn budget per conversation"

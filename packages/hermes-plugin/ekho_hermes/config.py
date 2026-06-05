@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
+DEFAULT_PEER_TURN_BUDGET = 6
+
+_TRUTHY = {"1", "true", "yes", "on"}
 
 
 def _clean(value: Optional[str]) -> Optional[str]:
@@ -20,6 +23,12 @@ def _clean(value: Optional[str]) -> Optional[str]:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _truthy(value: Optional[str]) -> bool:
+    """Parse a boolean-ish env value; anything not clearly truthy is False."""
+    cleaned = _clean(value)
+    return cleaned is not None and cleaned.lower() in _TRUTHY
 
 
 @dataclass
@@ -38,6 +47,10 @@ class EkhoConfig:
     agent_id: Optional[str] = None
     agent_secret: Optional[str] = None
     heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+    # Bounded agent-to-agent delegation. OFF by default so the public repo never
+    # gives an adopter surprise peer traffic; the operator opts in per fleet.
+    peer_autoreply: bool = False
+    peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET
 
     @property
     def has_relay(self) -> bool:
@@ -65,6 +78,18 @@ class EkhoConfig:
         if interval <= 0:
             interval = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
 
+        raw_budget = _clean(env.get("EKHO_PEER_TURN_BUDGET"))
+        try:
+            budget = (
+                int(raw_budget)
+                if raw_budget is not None
+                else DEFAULT_PEER_TURN_BUDGET
+            )
+        except ValueError:
+            budget = DEFAULT_PEER_TURN_BUDGET
+        if budget <= 0:
+            budget = DEFAULT_PEER_TURN_BUDGET
+
         return cls(
             relay_url=_clean(env.get("EKHO_RELAY_URL")),
             fleet_id=_clean(env.get("EKHO_FLEET_ID")),
@@ -73,4 +98,6 @@ class EkhoConfig:
             agent_id=_clean(env.get("EKHO_AGENT_ID")),
             agent_secret=_clean(env.get("EKHO_AGENT_SECRET")),
             heartbeat_interval_seconds=interval,
+            peer_autoreply=_truthy(env.get("EKHO_PEER_AUTOREPLY")),
+            peer_turn_budget=budget,
         )

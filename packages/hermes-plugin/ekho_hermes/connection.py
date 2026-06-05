@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from ekho import AgentCredentials, EkhoAgentClient
 
@@ -113,13 +113,16 @@ def start_autoreply_once(
     *,
     env: Optional[dict] = None,
     start_fn: Optional[Callable[..., Callable[[], None]]] = None,
+    peer_enabled: bool = False,
+    peer_turn_budget: int = autoreply.DEFAULT_PEER_TURN_BUDGET,
 ) -> Optional[Callable[[], None]]:
     """Start the background auto-reply loop exactly once for this process.
 
     Mirrors the OpenClaw plugin's ``maybeStartAutoReply``: a process carrying
     ``EKHO_AUTOREPLY_DISABLE=1`` (the spawned one-shot reply turn) connects for
     the ``ekho_send`` tool but never starts its own loop — the structural
-    loop-breaker. ``env`` and ``start_fn`` are injectable for tests.
+    loop-breaker. ``peer_enabled`` / ``peer_turn_budget`` drive bounded
+    agent-to-agent delegation. ``env`` and ``start_fn`` are injectable for tests.
     """
     global _autoreply_stop
     env = os.environ if env is None else env
@@ -137,6 +140,8 @@ def start_autoreply_once(
             client=conn.client,
             self_agent_id=conn.credentials.agent_id,
             log=logger,
+            peer_enabled=peer_enabled,
+            peer_turn_budget=peer_turn_budget,
         )
         return _autoreply_stop
 

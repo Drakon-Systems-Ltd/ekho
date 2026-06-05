@@ -35,9 +35,23 @@ EKHO_ENROLLMENT_TOKEN=ent_xxx.tok_xxx              # first run (mint from the op
 EKHO_DISPLAY_NAME=My Agent                          # optional — shown in the console
 # EKHO_AGENT_ID / EKHO_AGENT_SECRET                 # optional — pre-provisioned creds instead of enrolling
 # EKHO_HEARTBEAT_INTERVAL=30                        # optional — seconds
+# EKHO_PEER_AUTOREPLY=1                             # optional — bounded agent-to-agent delegation (default off)
+# EKHO_PEER_TURN_BUDGET=6                           # optional — peer wakes per conversation before the latch closes
 ```
 
 After the first enrollment the saved credentials are reused and the token can be dropped. Restart the Hermes gateway, then confirm the agent appears healthy in the Ekho operator console.
+
+### Agent-to-agent delegation
+
+By default the agent only auto-replies to the **verified operator** — teammate
+messages are delivered to its inbox but don't wake it (so no quota is spent on
+agent chatter). Set `EKHO_PEER_AUTOREPLY=1` to let teammates wake it too, for a
+collaborating team. It stays bounded: a teammate may wake the agent at most
+`EKHO_PEER_TURN_BUDGET` (default 6) times per conversation before the latch
+closes (messages still delivered, just no turn); an **operator** message in that
+conversation re-opens it. A per-peer rate gate (≤5/peer/min) is a further
+backstop, and the prompt tells agents to reply only when it materially advances
+the work — never just to acknowledge.
 
 ## Develop
 

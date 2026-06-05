@@ -23,12 +23,15 @@ from ekho_hermes.autoreply import (
     apply_peer_rate_gate,
     build_oneshot_command,
     build_prompt,
+    consume_peer_latch,
     get_cached_inbox,
     is_real_inbound,
     mark_seen,
+    peer_latch_open,
     process_inbox_once,
     record_batch,
     reset_cache,
+    reset_peer_latch,
     resolve_python_exe,
     trigger_turn,
 )
@@ -431,3 +434,145 @@ def test_start_autoreply_stop_is_prompt_with_no_traffic():
     t0 = time.monotonic()
     stop()
     assert time.monotonic() - t0 < 2.0  # stop joins the loop thread quickly
+
+
+# --- bounded peer delegation -----------------------------------------------
+
+
+def _peer(i, conversation_id="proj-1", sender="jarvis"):
+    return _msg(
+        message_id=f"p{i}",
+        sender_kind="agent",
+        sender_agent_id=sender,
+        conversation_id=conversation_id,
+        body={"text": f"teammate message {i}"},
+    )
+
+
+def test_real_inbound_allows_peer_when_peer_enabled():
+    # With peer delegation ON, a teammate message qualifies (operator_trusted is
+    # irrelevant for peers — they're authenticated fleet members).
+    assert (
+        is_real_inbound(
+            _peer(0), "self", _state(), operator_trusted=False, peer_enabled=True
+        )
+        is True
+    )
+
+
+def test_real_inbound_rejects_peer_when_peer_disabled():
+    # Default (peer delegation OFF) keeps the operator-only loop-breaker.
+    assert (
+        is_real_inbound(
+            _peer(0), "self", _state(), operator_trusted=True, peer_enabled=False
+        )
+        is False
+    )
+
+
+def test_peer_latch_opens_until_budget_then_closes():
+    state = _state()
+    assert peer_latch_open(state, "c", 2)
+    consume_peer_latch(state, "c")
+    assert peer_latch_open(state, "c", 2)
+    consume_peer_latch(state, "c")
+    assert not peer_latch_open(state, "c", 2)  # 2 consumed, budget 2 -> closed
+
+
+def test_reset_peer_latch_reopens():
+    state = _state()
+    consume_peer_latch(state, "c")
+    consume_peer_latch(state, "c")
+    assert not peer_latch_open(state, "c", 2)
+    reset_peer_latch(state, "c")
+    assert peer_latch_open(state, "c", 2)
+
+
+def test_tick_peer_enabled_wakes_on_peer_message():
+    events = []
+    client = FakeClient(
+        InboxResponse(messages=[_peer(0)], controls=[], operator_trusted=False, roster=[])
+    )
+    summary = process_inbox_once(
+        client,
+        "self",
+        _state(),
+        spawn=_spawn_recorder(events),
+        now=0.0,
+        peer_enabled=True,
+        peer_turn_budget=6,
+    )
+    assert summary["spawned"] == 1  # a teammate woke the agent
+    assert client.acked
+
+
+def test_tick_peer_latch_caps_per_conversation():
+    events = []
+    state = _state()
+    spawned = 0
+    for i in range(4):
+        client = FakeClient(
+            InboxResponse(
+                messages=[_peer(i)], controls=[], operator_trusted=False, roster=[]
+            )
+        )
+        s = process_inbox_once(
+            client,
+            "self",
+            state,
+            spawn=_spawn_recorder(events),
+            now=float(i),
+            peer_enabled=True,
+            peer_turn_budget=2,
+        )
+        spawned += s["spawned"]
+    assert spawned == 2  # budget of 2 caps the conversation; rest latched
+
+
+def test_tick_operator_message_resets_peer_latch():
+    events = []
+    state = _state()
+    spawn = _spawn_recorder(events)
+
+    # Exhaust a budget-1 latch with one peer message.
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    # Next peer message in the same conversation is latched (no wake).
+    s2 = process_inbox_once(
+        FakeClient(InboxResponse([_peer(1)], [], False, [])),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s2["spawned"] == 0
+
+    # An operator message in that conversation re-energises the latch.
+    op = _msg(message_id="o1", sender_kind="operator", sender_agent_id="op",
+              conversation_id="proj-1")
+    process_inbox_once(
+        FakeClient(InboxResponse([op], [], True, [])),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    # A fresh peer message now wakes again.
+    s4 = process_inbox_once(
+        FakeClient(InboxResponse([_peer(2)], [], False, [])),
+        "self", state, spawn=spawn, now=3.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s4["spawned"] == 1
+
+
+def test_build_prompt_peer_uses_display_name_and_productivity_gate():
+    from ekho import RosterEntry
+
+    peer = _msg(
+        sender_kind="agent",
+        sender_agent_id="agent_jarvis",
+        body={"text": "can you take the API task?"},
+    )
+    roster = [RosterEntry.from_dict({"agent_id": "agent_jarvis", "display_name": "Jarvis"})]
+    prompt = build_prompt([peer], operator_trusted=False, roster=roster)
+    assert "Jarvis" in prompt  # display name, not the raw agent id
+    assert 'recipient_agent_id="agent_jarvis"' in prompt
+    # Productivity gate — don't chatter.
+    assert "materially advances the work" in prompt
+    assert "acknowledge" in prompt
