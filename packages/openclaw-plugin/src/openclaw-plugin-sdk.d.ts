@@ -51,9 +51,29 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
   }
 
   // The slice of OpenClawPluginApi the register() wrapper touches at startup.
+  // `runtime` / `session` are host-internal surfaces the auto-reply loop
+  // feature-detects at runtime — typed optional/loose on purpose so runtime
+  // detection (not the compiler) stays the source of truth. Nothing here is a
+  // contract; absence is handled gracefully (loop logs and skips).
   interface PluginApi {
     pluginConfig?: Record<string, unknown>;
     logger?: PluginLogger;
+    runtime?: {
+      agent?: {
+        runEmbeddedAgent?: (...args: unknown[]) => unknown;
+        session?: Record<string, (...args: unknown[]) => unknown>;
+        [key: string]: unknown;
+      };
+      [key: string]: unknown;
+    };
+    session?: {
+      workflow?: {
+        scheduleSessionTurn?: (...args: unknown[]) => unknown;
+        enqueueNextTurnInjection?: (...args: unknown[]) => unknown;
+        [key: string]: unknown;
+      };
+      [key: string]: unknown;
+    };
     [key: string]: unknown;
   }
 

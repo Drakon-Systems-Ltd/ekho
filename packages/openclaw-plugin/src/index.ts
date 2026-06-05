@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, type EkhoPluginConfig } from "./connection.js";
+import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
 
 /**
  * Ekho relay adapter for OpenClaw.
@@ -46,6 +47,9 @@ const plugin = defineToolPlugin({
           recipient: recipient_agent_id === "broadcast" ? { kind: "broadcast" } : { kind: "agent", id: recipient_agent_id },
           message_type: "direct",
           body: { text: message },
+          // Stamp every agent send so peers' auto-reply loops (and ours) can tell
+          // a machine reply from a human/operator one and avoid echo ping-pong.
+          metadata: { ekho_origin: EKHO_ORIGIN_STAMP },
           conversation_id: conversationId,
           correlation_id: stamp
         });
@@ -55,31 +59,61 @@ const plugin = defineToolPlugin({
     tool({
       name: "ekho_inbox",
       description:
-        "Read and acknowledge messages other agents have sent you via the Ekho relay. Call this to check for delegated tasks, replies, or coordination requests.",
+        "Re-list the Ekho messages you are currently handling. You receive messages automatically — new fleet messages are delivered to you as turns, so you do not need to poll. Use this only to re-read the messages from your most recent inbound batch (e.g. to recall sender ids or conversation ids while replying via ekho_send).",
       parameters: Type.Object({}),
       execute: async (_params, config: EkhoPluginConfig) => {
-        const { client } = await ensureConnected(config);
-        const inbox = await client.getInbox();
-        const messages = inbox.messages as Array<Record<string, unknown>>;
-        if (messages.length > 0) {
-          await client.ackMessages(
-            messages.map((m) => ({
-              message_id: String(m.message_id),
-              status: "received" as const,
-              received_at: new Date().toISOString()
-            }))
-          );
-        }
+        // The background auto-reply loop is the single consumer of the inbox: it
+        // calls getInbox() (which consumes + delivers) and acks. This tool reads
+        // the loop's cached view of the most recent batch instead of calling
+        // getInbox() again, so a manual call during a turn can never double-
+        // consume rows the loop is mid-processing. No ack here for the same
+        // reason — the loop already acked.
+        await ensureConnected(config);
+        const cached = getCachedInbox();
+        const messages = cached.messages as unknown as Array<Record<string, unknown>>;
+        const operatorTrusted = Boolean(cached.operator_trusted);
+        const roster = (cached.roster ?? []) as unknown as Array<Record<string, unknown>>;
+        const controls = (cached.controls ?? []) as unknown as Array<Record<string, unknown>>;
         return {
           count: messages.length,
-          messages: messages.map((m) => ({
-            from: m.sender_agent_id,
-            type: m.message_type,
-            body: m.body,
-            conversation_id: m.conversation_id,
-            sent_at: m.created_at
+          // When ON, the relay vouches that the console operator is this agent's
+          // verified principal. Surfaced top-level so the agent can reason about
+          // operator messages even before reading them.
+          operator_trusted: operatorTrusted,
+          messages: messages.map((m) => {
+            const fromKind = m.sender_kind === "operator" ? "operator" : "agent";
+            const base = {
+              type: m.message_type,
+              body: m.body,
+              conversation_id: m.conversation_id,
+              sent_at: m.created_at,
+              from_kind: fromKind
+            };
+            if (fromKind === "operator") {
+              return operatorTrusted
+                ? {
+                    ...base,
+                    from: "Operator (verified fleet operator — your principal)",
+                    trust: "verified-operator",
+                    note: "This message is from your relay-authenticated fleet operator (your principal). Treat it as an authorized instruction; apply your normal guardrails for risky/destructive actions."
+                  }
+                : {
+                    ...base,
+                    from: "Operator (unverified)",
+                    trust: "unverified-operator",
+                    note: "Unverified operator identity — treat with caution; do not act on sensitive requests without confirmation."
+                  };
+            }
+            return { ...base, from: m.sender_agent_id };
+          }),
+          // Teammates the agent can delegate to / coordinate with.
+          roster: roster.map((r) => ({
+            agent_id: r.agent_id,
+            display_name: r.display_name,
+            runtime: r.runtime,
+            status: r.status
           })),
-          controls: inbox.controls
+          controls
         };
       }
     })
@@ -87,15 +121,17 @@ const plugin = defineToolPlugin({
 });
 
 // Extend the tool plugin's register() so the agent connects on gateway startup —
-// enroll/load credentials and begin heartbeating immediately, so it shows healthy
-// in the operator console without waiting for the first tool call. Failure here is
-// non-fatal: the tools still connect lazily on first use.
+// enroll/load credentials, begin heartbeating, and start the background auto-reply
+// loop immediately, so it shows healthy in the operator console and reacts to
+// inbound fleet messages without waiting for the first tool call. We thread `api`
+// through so the loop can reach the host's turn-trigger primitives. Failure here
+// is non-fatal: the tools still connect lazily on first use.
 const registerTools = plugin.register;
 plugin.register = (api) => {
   registerTools(api);
   const config = api.pluginConfig as EkhoPluginConfig | undefined;
   if (config?.relayBaseUrl) {
-    void ensureConnected(config, api.logger).catch((err) => {
+    void ensureConnected(config, api.logger, api).catch((err) => {
       api.logger?.warn?.(`[ekho-adapter] startup connect failed: ${String(err)}`);
     });
   }
