@@ -20,6 +20,7 @@ import {
   resolveApproval,
   sendOperatorMessage,
   setAgentTrust,
+  setPeerAutoreply,
   storeSession,
   updatePolicy,
   uploadOperatorAttachment,
@@ -196,6 +197,7 @@ export default function App() {
   const [composerError, setComposerError] = useState("");
   const fileInputRef = useRef(null);
   const [trustPending, setTrustPending] = useState(""); // agentId whose trust toggle is in-flight
+  const [peerPending, setPeerPending] = useState(""); // agentId whose peer-delegation control is in-flight
 
   // login
   const [formState, setFormState] = useState({ fleet_name: "default", email: "", password: "" });
@@ -428,6 +430,18 @@ export default function App() {
       handleApiError(error, { allowSessionReset: true });
     } finally {
       setTrustPending("");
+    }
+  }
+
+  async function handleSetPeerAutoreply(agentId, autoreply, budget) {
+    setPeerPending(agentId);
+    try {
+      await setPeerAutoreply(session.token, agentId, autoreply, budget);
+      await refreshAgents();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    } finally {
+      setPeerPending("");
     }
   }
 
@@ -1117,6 +1131,8 @@ export default function App() {
                 initialized={initialized.current.agents}
                 trustPending={trustPending}
                 onSetTrust={handleSetTrust}
+                peerPending={peerPending}
+                onSetPeerAutoreply={handleSetPeerAutoreply}
               />
             )}
 
@@ -1430,13 +1446,59 @@ function AgentTab({ agent, detail, rateLimits, onControl, onTrace }) {
   );
 }
 
-function AccessTab({ agents, initialized, trustPending, onSetTrust }) {
+function PeerControl({ agent, pending, onSet }) {
+  const enabled = Boolean(agent.peer_autoreply);
+  const savedBudget = agent.peer_turn_budget ?? 6;
+  const [budget, setBudget] = useState(savedBudget);
+  useEffect(() => { setBudget(savedBudget); }, [savedBudget]);
+
+  const commitBudget = () => {
+    const next = Math.max(1, Math.min(50, Math.trunc(Number(budget) || savedBudget)));
+    setBudget(next);
+    if (enabled && next !== savedBudget) onSet(agent.id, true, next);
+  };
+
+  return (
+    <div className="access-row__peer">
+      <label className={`toggle access-row__toggle${pending ? " access-row__toggle--pending" : ""}`}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={pending}
+          onChange={(e) => onSet(agent.id, e.target.checked)}
+        />
+        <span>Agent-to-agent delegation</span>
+        {pending ? <span className="access-row__spinner" aria-label="Saving" /> : null}
+      </label>
+      {enabled ? (
+        <div className="access-row__budget">
+          <span className="access-row__budget-label">Budget</span>
+          <input
+            className="access-row__budget-input"
+            type="number"
+            min={1}
+            max={50}
+            value={budget}
+            disabled={pending}
+            onChange={(e) => setBudget(e.target.value)}
+            onBlur={commitBudget}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }}
+          />
+          <span className="access-row__budget-unit">turns / conversation</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AccessTab({ agents, initialized, trustPending, onSetTrust, peerPending, onSetPeerAutoreply }) {
   if (!initialized) return <Skeleton count={3} height="64px" />;
   if (!agents.length) return <EmptyState title="No agents">Enroll an agent to grant it an operator-trusted channel.</EmptyState>;
   return (
     <div className="cards">
       <div className="access-caption">
-        When ON, this agent recognizes the console operator as its verified principal. Risky actions still require approval.
+        <strong>Operator-trusted channel:</strong> when ON, this agent recognizes the console operator as its verified principal (risky actions still require approval).<br />
+        <strong>Agent-to-agent delegation:</strong> when ON, teammates can wake this agent to collaborate, bounded by the per-conversation turn budget.
       </div>
       {agents.map((agent) => {
         const trusted = Boolean(agent.operator_trusted);
@@ -1461,6 +1523,7 @@ function AccessTab({ agents, initialized, trustPending, onSetTrust }) {
               <span>Operator-trusted channel</span>
               {pending ? <span className="access-row__spinner" aria-label="Saving" /> : null}
             </label>
+            <PeerControl agent={agent} pending={peerPending === agent.id} onSet={onSetPeerAutoreply} />
           </article>
         );
       })}

@@ -130,6 +130,12 @@ export const setAgentTrust = (token, agentId, trusted) =>
     method: "POST",
     body: { trusted },
   });
+export const setPeerAutoreply = (token, agentId, autoreply, budget) =>
+  request(`/v1/operator/agents/${encodeURIComponent(agentId)}/peer-autoreply`, {
+    token,
+    method: "POST",
+    body: budget === undefined ? { autoreply } : { autoreply, budget },
+  });
 export const getPolicies = (token) =>
   request("/v1/operator/policies", { token });
 export const createPolicy = (token, body) =>
