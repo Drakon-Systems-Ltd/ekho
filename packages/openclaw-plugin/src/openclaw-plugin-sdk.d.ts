@@ -58,6 +58,15 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
   interface PluginApi {
     pluginConfig?: Record<string, unknown>;
     logger?: PluginLogger;
+    // Resolved OpenClaw config (host-internal shape; read defensively).
+    config?: unknown;
+    // Host hook registration — used to observe the live model via "model_call_started".
+    // Feature-detected at runtime; optional because not every host/version exposes it.
+    registerHook?: (
+      events: string | string[],
+      handler: (event: unknown, ctx?: unknown) => void,
+      opts?: unknown
+    ) => void;
     runtime?: {
       agent?: {
         runEmbeddedAgent?: (...args: unknown[]) => unknown;

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { ensureConnected, type EkhoPluginConfig } from "./connection.js";
+import { ensureConnected, noteObservedModel, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
 import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
 import {
   ATTACHMENT_MAX_BYTES,
@@ -253,6 +253,27 @@ const plugin = defineToolPlugin({
 const registerTools = plugin.register;
 plugin.register = (api) => {
   registerTools(api);
+
+  // Auto-detect the active model for the operator health board (so OpenClaw agents
+  // show their model without per-host EKHO_REPORT_MODEL config). Seed from the
+  // resolved config now — the first heartbeat fires before any model call — then
+  // keep it live via the host's model_call hook. Both feature-detected and
+  // wrapped: a host/SDK lacking these surfaces just falls back to the env var (or
+  // reports no model, exactly as before). Never let detection break startup.
+  try {
+    seedConfigModelFromOpenClawConfig(api.config);
+  } catch (err) {
+    api.logger?.debug?.(`[ekho-adapter] model config seed unavailable: ${String(err)}`);
+  }
+  try {
+    api.registerHook?.("model_call_started", (event) => {
+      const e = event as { model?: string; provider?: string } | undefined;
+      noteObservedModel(e?.model, e?.provider);
+    });
+  } catch (err) {
+    api.logger?.debug?.(`[ekho-adapter] model_call hook unavailable: ${String(err)}`);
+  }
+
   const config = api.pluginConfig as EkhoPluginConfig | undefined;
   if (config?.relayBaseUrl) {
     void ensureConnected(config, api.logger, api).catch((err) => {

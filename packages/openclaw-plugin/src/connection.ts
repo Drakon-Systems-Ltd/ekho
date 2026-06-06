@@ -30,6 +30,83 @@ let connecting: Promise<EkhoConnection> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let stopAutoReply: (() => void) | null = null;
 
+// Model/provider surfaced to the operator health board on each heartbeat. Two
+// auto-detected layers plus an explicit env override, resolved by precedence in
+// pickModelMetrics: a live value observed from the host's model_call hook, and a
+// seed read from the resolved OpenClaw config at register time (covers the first
+// heartbeat, before any model call).
+let observedModel = "";
+let observedProvider = "";
+let configModel = "";
+let configProvider = "";
+
+/** Split a "provider/model" ref into parts; tolerates bare ids and whitespace. */
+export function splitModelRef(ref: string): { provider: string; model: string } {
+  const s = (ref ?? "").trim();
+  if (!s) return { provider: "", model: "" };
+  const i = s.indexOf("/");
+  if (i > 0) return { provider: s.slice(0, i), model: s.slice(i + 1) };
+  return { provider: "", model: s };
+}
+
+/**
+ * Resolve the {model, provider} metrics to report, by precedence:
+ *   env override  >  live observed (model_call hook)  >  configured seed.
+ * Each field resolves independently; whitespace-only counts as unset; an
+ * all-empty result yields {} so the heartbeat carries no model keys (as before
+ * any host set these). Pure — all inputs explicit — so it's unit-tested directly.
+ */
+export function pickModelMetrics(sources: {
+  envModel?: string; envProvider?: string;
+  observedModel?: string; observedProvider?: string;
+  configModel?: string; configProvider?: string;
+}): Record<string, string> {
+  const pick = (...vals: Array<string | undefined>) => {
+    for (const v of vals) {
+      const t = (v ?? "").trim();
+      if (t) return t;
+    }
+    return "";
+  };
+  const model = pick(sources.envModel, sources.observedModel, sources.configModel);
+  const provider = pick(sources.envProvider, sources.observedProvider, sources.configProvider);
+  const m: Record<string, string> = {};
+  if (model) m.model = model;
+  if (provider) m.provider = provider;
+  return m;
+}
+
+/** Record the live model from a host model_call event (provider optional — may be embedded as "provider/model"). */
+export function noteObservedModel(modelRef?: string, provider?: string): void {
+  const parts = splitModelRef(modelRef ?? "");
+  const p = (provider ?? "").trim() || parts.provider;
+  if (parts.model) observedModel = parts.model;
+  if (p) observedProvider = p;
+}
+
+/** Seed model/provider from the resolved OpenClaw config (a "provider/model" string). */
+export function seedConfigModel(modelRef?: string, provider?: string): void {
+  const parts = splitModelRef(modelRef ?? "");
+  const p = (provider ?? "").trim() || parts.provider;
+  if (parts.model) configModel = parts.model;
+  if (p) configProvider = p;
+}
+
+/** Best-effort: pull the agent's configured model out of an OpenClaw config object, defensively. */
+export function seedConfigModelFromOpenClawConfig(config: unknown): void {
+  try {
+    const c = config as Record<string, any> | undefined;
+    if (!c || typeof c !== "object") return;
+    const ref =
+      c.agents?.defaults?.model?.primary ??
+      c.agents?.list?.[0]?.model?.primary ??
+      (typeof c.model === "string" ? c.model : c.model?.primary);
+    if (typeof ref === "string" && ref.trim()) seedConfigModel(ref);
+  } catch {
+    /* host config shape varies by version — never let a probe throw */
+  }
+}
+
 /**
  * Enroll (or load saved credentials) and connect to the Ekho relay, starting a
  * background heartbeat so the agent shows healthy in the operator console and a
@@ -67,16 +144,18 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
     });
 
     if (!heartbeatTimer) {
-      // Best-effort metrics for the operator health board, from env so it's
-      // generic (set EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER to surface them).
-      const reportMetrics = (): Record<string, string> => {
-        const m: Record<string, string> = {};
-        const model = (process.env.EKHO_REPORT_MODEL ?? "").trim();
-        const provider = (process.env.EKHO_REPORT_PROVIDER ?? "").trim();
-        if (model) m.model = model;
-        if (provider) m.provider = provider;
-        return m;
-      };
+      // Best-effort model/provider for the operator health board. Auto-detected
+      // from the host (live model_call hook + config seed, see register), with
+      // EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER as an explicit override/fallback.
+      const reportMetrics = (): Record<string, string> =>
+        pickModelMetrics({
+          envModel: process.env.EKHO_REPORT_MODEL,
+          envProvider: process.env.EKHO_REPORT_PROVIDER,
+          observedModel,
+          observedProvider,
+          configModel,
+          configProvider
+        });
       const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
       beat();
       heartbeatTimer = setInterval(beat, config.heartbeatIntervalMs ?? 30_000);
