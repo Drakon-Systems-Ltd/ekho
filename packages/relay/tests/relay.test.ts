@@ -371,6 +371,81 @@ describe("Relay integration", () => {
       expect(res.status).toBe(400);
     });
 
+    it("creates a room with members and lists it", async () => {
+      const a = await relay.enrollAgent("room-a");
+      const b = await relay.enrollAgent("room-b");
+      const create = await relay.operatorRequest("POST", "/v1/operator/rooms", {
+        name: "API Project",
+        member_agent_ids: [a.agent_id, b.agent_id]
+      });
+      expect(create.status).toBe(201);
+      expect(create.body.id).toMatch(/^room_/);
+      expect(create.body.name).toBe("API Project");
+
+      const list = await relay.operatorRequest("GET", "/v1/operator/rooms");
+      const room = list.body.rooms.find((r: { id: string }) => r.id === create.body.id);
+      expect(room).toBeTruthy();
+      expect(room.members.map((m: { agent_id: string }) => m.agent_id).sort())
+        .toEqual([a.agent_id, b.agent_id].sort());
+    });
+
+    it("fans an operator room message out to members only", async () => {
+      const a = await relay.enrollAgent("rm-a");
+      const b = await relay.enrollAgent("rm-b");
+      const outsider = await relay.enrollAgent("rm-out");
+      const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
+        name: "P", member_agent_ids: [a.agent_id, b.agent_id]
+      })).body;
+
+      await relay.operatorRequest("POST", "/v1/operator/messages", { room_id: room.id, text: "team kickoff" });
+
+      const inboxA = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      const inboxB = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox");
+      const inboxOut = await relay.agentRequest(outsider.agent_id, outsider.secret, "GET", "/v1/inbox");
+
+      expect(inboxA.body.messages.some((m: { body: { text: string } }) => m.body.text === "team kickoff")).toBe(true);
+      expect(inboxB.body.messages.some((m: { body: { text: string } }) => m.body.text === "team kickoff")).toBe(true);
+      expect(inboxOut.body.messages.length).toBe(0);
+      expect(inboxA.body.messages[0].conversation_id).toBe(room.id);
+    });
+
+    it("fans an agent room reply out to other members (not sender, not outsiders)", async () => {
+      const a = await relay.enrollAgent("rr-a");
+      const b = await relay.enrollAgent("rr-b");
+      const outsider = await relay.enrollAgent("rr-out");
+      const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
+        name: "P2", member_agent_ids: [a.agent_id, b.agent_id]
+      })).body;
+
+      // A posts into the room. Its stated recipient is B, but room membership
+      // (keyed on the room conversation_id) drives delivery.
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: b.agent_id },
+        message_type: "direct",
+        body: { text: "hi team from a" },
+        conversation_id: room.id,
+        correlation_id: "rr-c1"
+      });
+
+      const inboxB = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox");
+      const inboxA = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      const inboxOut = await relay.agentRequest(outsider.agent_id, outsider.secret, "GET", "/v1/inbox");
+
+      expect(inboxB.body.messages.some((m: { body: { text: string } }) => m.body.text === "hi team from a")).toBe(true);
+      expect(inboxA.body.messages.length).toBe(0); // sender excluded
+      expect(inboxOut.body.messages.length).toBe(0); // not a member
+    });
+
+    it("deletes a room", async () => {
+      const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
+        name: "tmp", member_agent_ids: []
+      })).body;
+      const del = await relay.operatorRequest("DELETE", `/v1/operator/rooms/${room.id}`);
+      expect(del.status).toBe(200);
+      const list = await relay.operatorRequest("GET", "/v1/operator/rooms");
+      expect(list.body.rooms.find((r: { id: string }) => r.id === room.id)).toBeUndefined();
+    });
+
     it("quarantines and resumes agent", async () => {
       const agent = await relay.enrollAgent("q-agent");
 

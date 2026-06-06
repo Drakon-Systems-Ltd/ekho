@@ -63,11 +63,22 @@ export const operatorLoginSchema = z.object({
   password: z.string().min(8)
 });
 
-export const operatorMessageSchema = z.object({
-  recipient_agent_id: z.string().min(1),
-  text: z.string().min(1).max(8000),
-  conversation_id: z.string().min(1).optional(),
-  attachment_ids: z.array(z.string().min(1)).max(50).optional()
+export const operatorMessageSchema = z
+  .object({
+    // Target either a single agent (or "broadcast") OR a room.
+    recipient_agent_id: z.string().min(1).optional(),
+    room_id: z.string().min(1).optional(),
+    text: z.string().min(1).max(8000),
+    conversation_id: z.string().min(1).optional(),
+    attachment_ids: z.array(z.string().min(1)).max(50).optional()
+  })
+  .refine((d) => Boolean(d.recipient_agent_id) || Boolean(d.room_id), {
+    message: "recipient_agent_id or room_id is required"
+  });
+
+export const createRoomSchema = z.object({
+  name: z.string().min(1).max(120),
+  member_agent_ids: z.array(z.string().min(1)).max(50).default([])
 });
 
 export const operatorControlSchema = z.object({

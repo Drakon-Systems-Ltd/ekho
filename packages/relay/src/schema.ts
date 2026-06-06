@@ -97,6 +97,22 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
   FOREIGN KEY (recipient_agent_id) REFERENCES agents(id)
 );
 
+CREATE TABLE IF NOT EXISTS rooms (
+  id TEXT PRIMARY KEY,
+  fleet_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  created_by_operator_id TEXT,
+  FOREIGN KEY (fleet_id) REFERENCES fleets(id)
+);
+
+CREATE TABLE IF NOT EXISTS room_members (
+  room_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  PRIMARY KEY (room_id, agent_id),
+  FOREIGN KEY (room_id) REFERENCES rooms(id)
+);
+
 CREATE TABLE IF NOT EXISTS heartbeats (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL,

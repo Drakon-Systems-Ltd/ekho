@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { attachmentUploadSchema, createPolicySchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createPolicySchema, createRoomSchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
 import { sign } from "./utils";
@@ -119,6 +119,7 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
         fleetId: request.operator.fleetId,
         operatorId: request.operator.id,
         recipientId: parsed.data.recipient_agent_id,
+        roomId: parsed.data.room_id,
         text: parsed.data.text,
         conversationId: parsed.data.conversation_id,
         attachmentIds: parsed.data.attachment_ids
@@ -257,6 +258,28 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ agent_id: params.agentId, ...result });
+  });
+
+  // Rooms — named conversations with a chosen set of member agents.
+  app.get("/v1/operator/rooms", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    return reply.send({ rooms: db.listRooms(request.operator.fleetId) });
+  });
+
+  app.post("/v1/operator/rooms", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = createRoomSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const room = db.createRoom(request.operator.fleetId, request.operator.id, parsed.data.name, parsed.data.member_agent_ids);
+    return reply.code(201).send(room);
+  });
+
+  app.delete("/v1/operator/rooms/:roomId", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const params = request.params as { roomId: string };
+    const ok = db.deleteRoom(request.operator.fleetId, params.roomId, request.operator.id);
+    if (!ok) return reply.code(404).send({ error: "room not found" });
+    return reply.send({ ok: true });
   });
 
   app.post("/v1/operator/agents/:agentId/:action", { preHandler: requireOperatorAuth }, async (request, reply) => {

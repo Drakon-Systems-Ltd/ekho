@@ -207,6 +207,26 @@ export class EkhoDb {
     return rows.map((r) => r.id);
   }
 
+  /**
+   * If conversationId is a room in this fleet, return its member agent ids
+   * (minus the sender, excluding the synthetic operator + revoked agents).
+   * Otherwise null. This is what makes a room a shared space: any message
+   * whose conversation_id is the room fans out to every member.
+   */
+  private roomMemberIds(fleetId: string, conversationId: string, senderAgentId: string): string[] | null {
+    const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId);
+    if (!room) return null;
+    const rows = this.db.prepare(
+      `SELECT rm.agent_id AS id FROM room_members rm
+       JOIN agents a ON a.id = rm.agent_id
+       WHERE rm.room_id = ?
+         AND a.runtime != 'operator'
+         AND a.revoked_at IS NULL
+         AND rm.agent_id != ?`
+    ).all(conversationId, senderAgentId) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
   createMessage(input: {
     fleetId: string;
     senderAgentId: string;
@@ -266,7 +286,14 @@ export class EkhoDb {
       const deliveryStmt = this.db.prepare(
         "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
       );
-      if (input.recipientKind === "agent" && input.recipientId) {
+      // A message into a room fans out to its members (minus sender), whatever
+      // recipient the sender stated — that's what makes the room shared.
+      const roomRecipients = this.roomMemberIds(input.fleetId, input.conversationId, input.senderAgentId);
+      if (roomRecipients !== null) {
+        for (const rid of roomRecipients) {
+          deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
+        }
+      } else if (input.recipientKind === "agent" && input.recipientId) {
         deliveryStmt.run(id("dly"), messageId, input.recipientId, createdAt, "queued");
       } else if (input.recipientKind === "broadcast") {
         for (const recipientId of this.broadcastRecipientIds(input.fleetId, input.senderAgentId)) {
@@ -315,7 +342,8 @@ export class EkhoDb {
   createOperatorMessage(input: {
     fleetId: string;
     operatorId: string;
-    recipientId: string; // "broadcast" allowed
+    recipientId?: string; // "broadcast" allowed; optional when roomId is set
+    roomId?: string;
     text: string;
     conversationId?: string;
     attachmentIds?: string[];
@@ -324,13 +352,29 @@ export class EkhoDb {
     const createdAt = nowIso();
     const ttlSeconds = 900;
     const expiresAt = addSeconds(createdAt, ttlSeconds);
-    const conversationId = input.conversationId?.trim() || `op-${Date.now()}-${id("conv").slice(-8)}`;
-    const correlationId = id("cor");
-    const isBroadcast = input.recipientId === "broadcast";
-    const recipientKind = isBroadcast ? "broadcast" : "agent";
-    const recipientId = isBroadcast ? null : input.recipientId;
-    const messageType = isBroadcast ? "broadcast" : "direct";
     const senderId = this.ensureOperatorAgent(input.fleetId);
+    const correlationId = id("cor");
+
+    let conversationId: string;
+    let recipientKind: string;
+    let recipientId: string | null;
+    let messageType: string;
+    const roomId = input.roomId?.trim();
+    if (roomId) {
+      const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(roomId, input.fleetId);
+      if (!room) throw new Error("room not found");
+      // The room IS the conversation; delivery fans out to its members below.
+      conversationId = roomId;
+      recipientKind = "room";
+      recipientId = roomId;
+      messageType = "direct";
+    } else {
+      conversationId = input.conversationId?.trim() || `op-${Date.now()}-${id("conv").slice(-8)}`;
+      const isBroadcast = input.recipientId === "broadcast";
+      recipientKind = isBroadcast ? "broadcast" : "agent";
+      recipientId = isBroadcast ? null : input.recipientId ?? null;
+      messageType = isBroadcast ? "broadcast" : "direct";
+    }
 
     // Validate operator-owned attachments before binding them into the body.
     const attachmentIds = input.attachmentIds ?? [];
@@ -371,7 +415,12 @@ export class EkhoDb {
       const deliveryStmt = this.db.prepare(
         "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
       );
-      if (recipientKind === "agent" && recipientId) {
+      const roomRecipients = this.roomMemberIds(input.fleetId, conversationId, senderId);
+      if (roomRecipients !== null) {
+        for (const rid of roomRecipients) {
+          deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
+        }
+      } else if (recipientKind === "agent" && recipientId) {
         deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
       } else if (recipientKind === "broadcast") {
         for (const rid of this.broadcastRecipientIds(input.fleetId, senderId)) {
@@ -391,6 +440,59 @@ export class EkhoDb {
 
     tx();
     return { messageId, conversationId, createdAt };
+  }
+
+  /** Create a named room with a set of member agents. Returns the room + members. */
+  createRoom(fleetId: string, operatorId: string, name: string, memberAgentIds: string[]) {
+    const roomId = id("room");
+    const createdAt = nowIso();
+    // Only real, non-revoked agents in this fleet can be members.
+    const valid = new Set(
+      (this.db.prepare(
+        "SELECT id FROM agents WHERE fleet_id = ? AND runtime != 'operator' AND revoked_at IS NULL"
+      ).all(fleetId) as Array<{ id: string }>).map((r) => r.id)
+    );
+    const members = [...new Set(memberAgentIds)].filter((m) => valid.has(m));
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT INTO rooms (id, fleet_id, name, created_at, created_by_operator_id) VALUES (?, ?, ?, ?, ?)"
+      ).run(roomId, fleetId, name, createdAt, operatorId);
+      const memberStmt = this.db.prepare("INSERT OR IGNORE INTO room_members (room_id, agent_id) VALUES (?, ?)");
+      for (const m of members) memberStmt.run(roomId, m);
+      this.recordEvent(fleetId, "room.created", "operator", operatorId, "room", roomId, roomId, { name, members });
+    });
+    tx();
+    return { id: roomId, name, created_at: createdAt, members };
+  }
+
+  /** List a fleet's rooms with their members (id + display name). */
+  listRooms(fleetId: string) {
+    const rooms = this.db.prepare(
+      "SELECT id, name, created_at FROM rooms WHERE fleet_id = ? ORDER BY created_at DESC"
+    ).all(fleetId) as Array<{ id: string; name: string; created_at: string }>;
+    const memberStmt = this.db.prepare(
+      `SELECT rm.agent_id, a.display_name, a.status FROM room_members rm
+       JOIN agents a ON a.id = rm.agent_id
+       WHERE rm.room_id = ? AND a.revoked_at IS NULL
+       ORDER BY a.display_name`
+    );
+    return rooms.map((room) => ({
+      ...room,
+      members: memberStmt.all(room.id) as Array<{ agent_id: string; display_name: string; status: string }>
+    }));
+  }
+
+  /** Delete a room (and its membership). Returns false if it doesn't exist. */
+  deleteRoom(fleetId: string, roomId: string, operatorId: string): boolean {
+    const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(roomId, fleetId);
+    if (!room) return false;
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM room_members WHERE room_id = ?").run(roomId);
+      this.db.prepare("DELETE FROM rooms WHERE id = ? AND fleet_id = ?").run(roomId, fleetId);
+      this.recordEvent(fleetId, "room.deleted", "operator", operatorId, "room", roomId, roomId, {});
+    });
+    tx();
+    return true;
   }
 
   getInbox(agentId: string, limit: number) {

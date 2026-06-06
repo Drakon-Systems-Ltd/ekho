@@ -34,6 +34,17 @@ export async function createTestRelay() {
   const { sign } = await import("../src/utils");
 
   const app = fastify({ logger: false });
+  // Mirror production (server.ts): tolerate an empty body on application/json
+  // requests (e.g. a bodyless DELETE that still carries the header).
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (body === "" || body == null) return done(null, undefined);
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      (err as { statusCode?: number }).statusCode = 400;
+      done(err as Error, undefined);
+    }
+  });
   registerHealthRoutes(app);
   await registerAgentRoutes(app);
   await registerOperatorRoutes(app);

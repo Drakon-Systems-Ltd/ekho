@@ -24,6 +24,18 @@ async function buildServer() {
   if (https) {
     app.log.info("TLS enabled — serving HTTPS");
   }
+
+  // Tolerate an empty body on application/json requests (e.g. a bodyless DELETE
+  // that still carries a content-type header) instead of 400-ing on it.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (body === "" || body == null) return done(null, undefined);
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      (err as { statusCode?: number }).statusCode = 400;
+      done(err as Error, undefined);
+    }
+  });
   if (isInsecureSecret(config.operatorSessionSecret)) {
     app.log.warn("EKHO_OPERATOR_SESSION_SECRET is insecure — running only because EKHO_DEV_INSECURE is set. Do NOT use in production.");
   }
