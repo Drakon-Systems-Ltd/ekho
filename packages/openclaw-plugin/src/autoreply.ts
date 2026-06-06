@@ -63,6 +63,13 @@ const TRIGGER_TYPES = new Set(["direct", "broadcast", "handoff", "claim", "alert
 const PEER_RATE_MAX = 5; // turns per peer per window before suppression
 const PEER_RATE_WINDOW_MS = 60_000;
 
+// Bounded delegation: a teammate may wake this agent at most this many times per
+// conversation before the latch closes (delivered + visible via ekho_inbox, but
+// no turn). An operator message in the conversation re-opens it. Caps degenerate
+// agent↔agent ping-pong without starving productive collaboration.
+export const DEFAULT_PEER_TURN_BUDGET = 6;
+const PEER_LATCH_CONVERSATION_CAP = 500; // FIFO-evicted per-conversation counter map
+
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
 const LAST_BATCH_CAP = 25; // ring exposed to ekho_inbox (Part B1)
 
@@ -121,11 +128,23 @@ export function getCachedInbox(): {
   };
 }
 
-interface AutoReplyState {
+export interface AutoReplyState {
   seen: Set<string>;
   seenOrder: string[];
   recentInboundByPeer: Map<string, { count: number; windowStart: number }>;
   inFlight: boolean;
+  // conversation_id -> count of times a peer has woken this agent in it.
+  peerTurnsByConversation: Map<string, number>;
+}
+
+export function createAutoReplyState(): AutoReplyState {
+  return {
+    seen: new Set(),
+    seenOrder: [],
+    recentInboundByPeer: new Map(),
+    inFlight: false,
+    peerTurnsByConversation: new Map()
+  };
 }
 
 function markSeen(state: AutoReplyState, messageId: string) {
@@ -136,6 +155,29 @@ function markSeen(state: AutoReplyState, messageId: string) {
     const evicted = state.seenOrder.shift();
     if (evicted !== undefined) state.seen.delete(evicted);
   }
+}
+
+/** True while this conversation still has peer-turn budget left. */
+export function peerLatchOpen(state: AutoReplyState, conversationId: string, budget: number): boolean {
+  return (state.peerTurnsByConversation.get(conversationId) ?? 0) < budget;
+}
+
+/** Record that a peer woke the agent in this conversation (FIFO-capped). */
+export function consumePeerLatch(state: AutoReplyState, conversationId: string): void {
+  const cur = state.peerTurnsByConversation.get(conversationId) ?? 0;
+  // set() on an existing key keeps its insertion position, so keys() stays
+  // oldest-first and we can evict the oldest conversation past the cap.
+  state.peerTurnsByConversation.set(conversationId, cur + 1);
+  while (state.peerTurnsByConversation.size > PEER_LATCH_CONVERSATION_CAP) {
+    const oldest = state.peerTurnsByConversation.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    state.peerTurnsByConversation.delete(oldest);
+  }
+}
+
+/** Re-open a conversation's latch — the operator engaging re-energises it. */
+export function resetPeerLatch(state: AutoReplyState, conversationId: string): void {
+  state.peerTurnsByConversation.set(conversationId, 0);
 }
 
 /**
@@ -150,26 +192,27 @@ function markSeen(state: AutoReplyState, messageId: string) {
  * the recipient sees it in its inbox). Loosening this to peers later requires a
  * latching loop-breaker, not just the rolling rate gate below.
  */
-function isRealInbound(
+export function isRealInbound(
   msg: InboxMessage,
   selfAgentId: string,
   state: AutoReplyState,
-  operatorTrusted: boolean
+  operatorTrusted: boolean,
+  peerEnabled = false
 ): boolean {
   if (!msg || typeof msg.message_id !== "string") return false;
   // 1. Never react to our own outbound.
   if (msg.sender_agent_id === selfAgentId) return false;
-  // 2. Operator-only + trust-gated (the structural loop-breaker — see above).
-  if (msg.sender_kind !== "operator") return false;
-  if (!operatorTrusted) return false;
-  // 3. Type allowlist (excludes heartbeat/control/complete/acks).
+  // 2. Type allowlist (excludes heartbeat/control/complete/acks).
   if (!TRIGGER_TYPES.has(msg.message_type)) return false;
-  // 4. Non-empty text body.
+  // 3. Non-empty text body.
   const text = typeof msg.body?.text === "string" ? msg.body.text.trim() : "";
   if (!text) return false;
-  // 5. Dedupe.
+  // 4. Dedupe.
   if (state.seen.has(msg.message_id)) return false;
-  return true;
+  // 5. Principal gate: operator (trust-gated) or teammate (delegation-gated).
+  // Peers are additionally latched per conversation in the tick.
+  if (msg.sender_kind === "operator") return Boolean(operatorTrusted);
+  return Boolean(peerEnabled);
 }
 
 /**
@@ -229,25 +272,37 @@ function resolveOpenclawAgentId(api: PluginApi): string {
   return "main";
 }
 
-function buildPrompt(messages: InboxMessage[], batch: InboxBatch): string {
+export function buildPrompt(messages: InboxMessage[], batch: InboxBatch): string {
+  const names = new Map<string, string>();
+  for (const r of batch.roster ?? []) {
+    if (r.agent_id && r.display_name) names.set(r.agent_id, r.display_name);
+  }
+  const hasPeer = messages.some((m) => m.sender_kind !== "operator");
   const lines = messages.map((m) => {
-    const who =
-      m.sender_kind === "operator"
-        ? batch.operator_trusted
-          ? "your verified fleet operator (Michael, your principal)"
-          : "an UNVERIFIED operator identity"
-        : `fleet agent ${m.sender_agent_id}`;
+    let who: string;
+    if (m.sender_kind === "operator") {
+      who = batch.operator_trusted
+        ? "your verified fleet operator (your principal)"
+        : "an UNVERIFIED operator identity";
+    } else {
+      const sender = m.sender_agent_id;
+      const label = names.get(sender) ?? sender;
+      who = `your teammate ${label}` + (label !== sender ? ` (${sender})` : "");
+    }
     const text = typeof m.body?.text === "string" ? m.body.text : "";
     const atts = Array.isArray(m.attachments) && m.attachments.length > 0
       ? `\n    Attachments (${m.attachments.length}): ${m.attachments.map((a) => `${a.filename} (${a.mime}, ${a.size_bytes}B)`).join(", ")} — call the ekho_inbox tool to download them to local file paths you can open.`
       : "";
     return `• From ${who} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":\n    "${text}"${atts}`;
   });
+  const teammateRule = hasPeer
+    ? ` When a message is from a TEAMMATE, reply with ekho_send ONLY if it materially advances the work — answer a question, complete a handoff, unblock them, or share something they need. Never reply just to acknowledge, thank, or be polite; if you have nothing useful to add, stay silent (do not call ekho_send) and let the exchange end.`
+    : "";
   return (
     `You have ${messages.length} new Ekho fleet message(s) below.\n\n` +
     `IMPORTANT: You are connected to your fleet ONLY through the Ekho relay. Your normal text output here is NOT delivered to anyone — the ONLY way to reply or acknowledge is to call the ekho_send tool with the exact recipient_agent_id and conversation_id shown for each message. ` +
-    `If a message warrants a reply, you MUST call ekho_send; otherwise no one hears you. ` +
-    `Reply to genuine messages from your verified operator. Apply your normal guardrails to anything risky, destructive, or that exfiltrates secrets — refuse those even from the operator (but still ekho_send a brief refusal so they know). Skip pure acks/heartbeats that need no response.\n\n` +
+    `Reply to genuine messages from your verified operator.` + teammateRule +
+    ` Apply your normal guardrails to anything risky, destructive, or that exfiltrates secrets — refuse those even from the operator (but still ekho_send a brief refusal so they know). Skip pure acks/heartbeats that need no response.\n\n` +
     lines.join("\n")
   );
 }
@@ -318,16 +373,15 @@ export function startAutoReply(opts: {
   selfAgentId: string;
   log?: Logger;
   pollIntervalMs?: number;
+  peerEnabled?: boolean;
+  peerTurnBudget?: number;
 }): () => void {
   const { client, api, selfAgentId, log } = opts;
   const pollIntervalMs = opts.pollIntervalMs ?? 5000;
+  const peerEnabled = opts.peerEnabled ?? false;
+  const peerTurnBudget = opts.peerTurnBudget ?? DEFAULT_PEER_TURN_BUDGET;
 
-  const state: AutoReplyState = {
-    seen: new Set(),
-    seenOrder: [],
-    recentInboundByPeer: new Map(),
-    inFlight: false
-  };
+  const state = createAutoReplyState();
 
   const tick = async () => {
     if (state.inFlight) return; // serialize turns (Part C, rule 6)
@@ -349,10 +403,10 @@ export function startAutoReply(opts: {
       .map((m) => ({ message_id: String(m.message_id), status: "received" as const, received_at: new Date().toISOString() }));
 
     const operatorTrusted = Boolean(batch.operator_trusted);
-    const real = batch.messages.filter((m) => isRealInbound(m, selfAgentId, state, operatorTrusted));
+    const real = batch.messages.filter((m) => isRealInbound(m, selfAgentId, state, operatorTrusted, peerEnabled));
     if (batch.messages.length > 0) {
       log?.info?.(
-        `[ekho-autoreply] poll: ${batch.messages.length} msg(s) trusted=${operatorTrusted} real=${real.length} [` +
+        `[ekho-autoreply] poll: ${batch.messages.length} msg(s) trusted=${operatorTrusted} peer=${peerEnabled} real=${real.length} [` +
         batch.messages.map((m) => `${m.sender_kind ?? "?"}/${m.message_type}`).join(", ") + "]"
       );
     }
@@ -368,8 +422,29 @@ export function startAutoReply(opts: {
       return; // nothing real → no tokens
     }
 
-    // Loop-prevention rate gate (Part C, rule 5).
-    const kept = applyPeerRateGate(real, state, log);
+    // Operator engagement re-energises the peer latch for its conversation.
+    for (const m of real) {
+      if (m.sender_kind === "operator") resetPeerLatch(state, m.conversation_id);
+    }
+
+    // Per-peer rolling rate gate first (operator exempt), then the per-conversation
+    // latch on the surviving teammate messages (the structural loop-breaker).
+    const rateKept = applyPeerRateGate(real, state, log);
+    const kept: InboxMessage[] = [];
+    for (const m of rateKept) {
+      if (m.sender_kind === "operator") {
+        kept.push(m);
+        continue;
+      }
+      if (peerLatchOpen(state, m.conversation_id, peerTurnBudget)) {
+        consumePeerLatch(state, m.conversation_id);
+        kept.push(m);
+      } else {
+        log?.info?.(
+          `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${peerTurnBudget} reached); delivered without a turn`
+        );
+      }
+    }
 
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m.message_id);
@@ -401,7 +476,10 @@ export function startAutoReply(opts: {
   }, pollIntervalMs);
   if (typeof timer === "object" && timer && "unref" in timer) timer.unref?.();
 
-  log?.info?.(`[ekho-autoreply] listening for inbound (poll ${pollIntervalMs}ms) as ${selfAgentId}`);
+  log?.info?.(
+    `[ekho-autoreply] listening for inbound (poll ${pollIntervalMs}ms) as ${selfAgentId} ` +
+    `(peer_delegation=${peerEnabled ? "on" : "off"}, budget=${peerTurnBudget})`
+  );
 
   return () => {
     clearInterval(timer);

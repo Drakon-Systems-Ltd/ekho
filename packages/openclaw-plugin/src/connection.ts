@@ -13,6 +13,9 @@ export interface EkhoPluginConfig {
   agentSecret?: string;
   displayName?: string;
   heartbeatIntervalMs?: number;
+  // Bounded agent-to-agent delegation (default off — opt-in per fleet).
+  peerAutoreply?: boolean;
+  peerTurnBudget?: number;
 }
 
 export interface EkhoConnection {
@@ -40,7 +43,7 @@ let stopAutoReply: (() => void) | null = null;
  */
 export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, api?: PluginApi): Promise<EkhoConnection> {
   if (connection) {
-    maybeStartAutoReply(api, log);
+    maybeStartAutoReply(api, log, config);
     return connection;
   }
   if (connecting) return connecting;
@@ -72,7 +75,7 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
 
     connection = { client, credentials };
     log?.info?.(`[ekho] connected as ${credentials.agentId} -> ${credentials.relayBaseUrl}`);
-    maybeStartAutoReply(api, log);
+    maybeStartAutoReply(api, log, config);
     return connection;
   })();
 
@@ -88,7 +91,7 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
  * client. Guarded like the heartbeat timer; needs both a live connection and an
  * `api` handle (for the turn-trigger primitives) before it does anything.
  */
-function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger) {
+function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: EkhoPluginConfig) {
   if (stopAutoReply || !connection || !api) return;
   // The auto-reply loop wakes the agent by spawning `openclaw agent -m`, which
   // re-loads this plugin in a one-shot child. That child sets this env var so it
@@ -102,7 +105,9 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger) {
     client: connection.client,
     api,
     selfAgentId: connection.credentials.agentId,
-    log
+    log,
+    peerEnabled: config?.peerAutoreply ?? false,
+    peerTurnBudget: config?.peerTurnBudget
   });
 }
 
