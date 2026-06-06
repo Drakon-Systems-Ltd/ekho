@@ -561,6 +561,53 @@ def test_tick_operator_message_resets_peer_latch():
     assert s4["spawned"] == 1
 
 
+def test_tick_relay_peer_autoreply_overrides_bootstrap_off():
+    # Bootstrap default OFF, but the operator turned delegation ON in the console
+    # (relay surfaces peer_autoreply=True) -> the teammate wakes the agent live.
+    events = []
+    inbox = InboxResponse(
+        messages=[_peer(0)], controls=[], operator_trusted=False, roster=[],
+        peer_autoreply=True,
+    )
+    summary = process_inbox_once(
+        FakeClient(inbox), "self", _state(),
+        spawn=_spawn_recorder(events), now=0.0, peer_enabled=False,
+    )
+    assert summary["spawned"] == 1
+
+
+def test_tick_relay_peer_autoreply_off_overrides_bootstrap_on():
+    # Bootstrap ON via env, but the operator turned it OFF in the console.
+    events = []
+    inbox = InboxResponse(
+        messages=[_peer(0)], controls=[], operator_trusted=False, roster=[],
+        peer_autoreply=False,
+    )
+    summary = process_inbox_once(
+        FakeClient(inbox), "self", _state(),
+        spawn=_spawn_recorder(events), now=0.0, peer_enabled=True,
+    )
+    assert summary["spawned"] == 0  # console disabled it, live
+
+
+def test_tick_relay_budget_overrides_bootstrap():
+    events = []
+    state = _state()
+    spawned = 0
+    for i in range(4):
+        inbox = InboxResponse(
+            messages=[_peer(i)], controls=[], operator_trusted=False, roster=[],
+            peer_autoreply=True, peer_turn_budget=2,
+        )
+        s = process_inbox_once(
+            FakeClient(inbox), "self", state,
+            spawn=_spawn_recorder(events), now=float(i),
+            peer_enabled=True, peer_turn_budget=99,
+        )
+        spawned += s["spawned"]
+    assert spawned == 2  # relay budget 2 wins over the bootstrap default 99
+
+
 def test_build_prompt_peer_uses_display_name_and_productivity_gate():
     from ekho import RosterEntry
 

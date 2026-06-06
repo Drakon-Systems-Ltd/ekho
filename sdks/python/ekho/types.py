@@ -122,6 +122,10 @@ class InboxResponse:
     operator_trusted: bool = False
     # Other agents in the same fleet (excludes the operator identity and self).
     roster: List[RosterEntry] = field(default_factory=list)
+    # Operator-controlled bounded agent-to-agent delegation (None if the relay
+    # predates the feature — the client then falls back to its local default).
+    peer_autoreply: Optional[bool] = None
+    peer_turn_budget: Optional[int] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxResponse":
@@ -139,6 +143,8 @@ class InboxResponse:
                 RosterEntry.from_dict(r)
                 for r in data.get("roster", [])
             ],
+            peer_autoreply=data.get("peer_autoreply"),
+            peer_turn_budget=data.get("peer_turn_budget"),
         )
 
 

@@ -53,6 +53,26 @@ interface InboxBatch {
   controls?: ControlEntry[];
   operator_trusted?: boolean;
   roster?: RosterEntry[];
+  // Operator-controlled bounded delegation (live). Absent on older relays.
+  peer_autoreply?: boolean | null;
+  peer_turn_budget?: number | null;
+}
+
+/**
+ * Resolve the effective peer-delegation settings for a poll: the relay (console)
+ * value when present, otherwise the bootstrap default from plugin config. Makes
+ * the operator console the live source of truth without an agent restart.
+ */
+export function effectivePeerSettings(
+  batch: { peer_autoreply?: boolean | null; peer_turn_budget?: number | null },
+  defaults: { peerEnabled: boolean; peerTurnBudget: number }
+): { peerEnabled: boolean; peerTurnBudget: number } {
+  const relayPeer = batch.peer_autoreply;
+  const peerEnabled = typeof relayPeer === "boolean" ? relayPeer : defaults.peerEnabled;
+  const relayBudget = batch.peer_turn_budget;
+  const peerTurnBudget =
+    typeof relayBudget === "number" && relayBudget > 0 ? relayBudget : defaults.peerTurnBudget;
+  return { peerEnabled, peerTurnBudget };
 }
 
 // Message types that warrant waking the agent. Everything else (heartbeat,
@@ -403,10 +423,13 @@ export function startAutoReply(opts: {
       .map((m) => ({ message_id: String(m.message_id), status: "received" as const, received_at: new Date().toISOString() }));
 
     const operatorTrusted = Boolean(batch.operator_trusted);
-    const real = batch.messages.filter((m) => isRealInbound(m, selfAgentId, state, operatorTrusted, peerEnabled));
+    // The console (relay) is the live source of truth; fall back to the
+    // plugin-config bootstrap defaults when the relay omits the fields.
+    const eff = effectivePeerSettings(batch, { peerEnabled, peerTurnBudget });
+    const real = batch.messages.filter((m) => isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled));
     if (batch.messages.length > 0) {
       log?.info?.(
-        `[ekho-autoreply] poll: ${batch.messages.length} msg(s) trusted=${operatorTrusted} peer=${peerEnabled} real=${real.length} [` +
+        `[ekho-autoreply] poll: ${batch.messages.length} msg(s) trusted=${operatorTrusted} peer=${eff.peerEnabled} real=${real.length} [` +
         batch.messages.map((m) => `${m.sender_kind ?? "?"}/${m.message_type}`).join(", ") + "]"
       );
     }
@@ -436,12 +459,12 @@ export function startAutoReply(opts: {
         kept.push(m);
         continue;
       }
-      if (peerLatchOpen(state, m.conversation_id, peerTurnBudget)) {
+      if (peerLatchOpen(state, m.conversation_id, eff.peerTurnBudget)) {
         consumePeerLatch(state, m.conversation_id);
         kept.push(m);
       } else {
         log?.info?.(
-          `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${peerTurnBudget} reached); delivered without a turn`
+          `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${eff.peerTurnBudget} reached); delivered without a turn`
         );
       }
     }

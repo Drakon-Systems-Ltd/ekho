@@ -6,6 +6,7 @@ import {
   resetPeerLatch,
   buildPrompt,
   createAutoReplyState,
+  effectivePeerSettings,
   DEFAULT_PEER_TURN_BUDGET
 } from "../src/autoreply";
 
@@ -86,5 +87,22 @@ describe("bounded peer delegation", () => {
 
   it("defaults the per-conversation budget to 6", () => {
     expect(DEFAULT_PEER_TURN_BUDGET).toBe(6);
+  });
+
+  it("relay value overrides the bootstrap default (live console control)", () => {
+    expect(effectivePeerSettings({ peer_autoreply: true }, { peerEnabled: false, peerTurnBudget: 6 }))
+      .toEqual({ peerEnabled: true, peerTurnBudget: 6 });
+    expect(effectivePeerSettings({ peer_autoreply: false }, { peerEnabled: true, peerTurnBudget: 6 }))
+      .toEqual({ peerEnabled: false, peerTurnBudget: 6 });
+  });
+
+  it("falls back to the bootstrap default when the relay omits the field", () => {
+    expect(effectivePeerSettings({}, { peerEnabled: true, peerTurnBudget: 6 }))
+      .toEqual({ peerEnabled: true, peerTurnBudget: 6 });
+  });
+
+  it("relay budget overrides the bootstrap budget", () => {
+    expect(effectivePeerSettings({ peer_autoreply: true, peer_turn_budget: 3 }, { peerEnabled: true, peerTurnBudget: 99 }))
+      .toEqual({ peerEnabled: true, peerTurnBudget: 3 });
   });
 });

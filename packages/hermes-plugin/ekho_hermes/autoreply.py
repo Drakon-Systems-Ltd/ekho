@@ -506,11 +506,24 @@ def process_inbox_once(
     ]
 
     operator_trusted = bool(getattr(inbox, "operator_trusted", False))
+
+    # The console is the live source of truth for delegation: when the relay
+    # surfaces peer_autoreply / peer_turn_budget, they override the bootstrap
+    # env/config defaults. Older relays omit them (None) -> keep the defaults.
+    relay_peer = getattr(inbox, "peer_autoreply", None)
+    eff_peer_enabled = bool(relay_peer) if relay_peer is not None else peer_enabled
+    relay_budget = getattr(inbox, "peer_turn_budget", None)
+    eff_budget = (
+        int(relay_budget)
+        if isinstance(relay_budget, int) and relay_budget > 0
+        else peer_turn_budget
+    )
+
     real = [
         m
         for m in messages
         if is_real_inbound(
-            m, self_agent_id, state, operator_trusted, peer_enabled=peer_enabled
+            m, self_agent_id, state, operator_trusted, peer_enabled=eff_peer_enabled
         )
     ]
     if messages:
@@ -518,7 +531,7 @@ def process_inbox_once(
             "[ekho-autoreply] poll: %d msg(s) trusted=%s peer=%s real=%d [%s]",
             len(messages),
             operator_trusted,
-            peer_enabled,
+            eff_peer_enabled,
             len(real),
             ", ".join(
                 f"{getattr(m, 'sender_kind', '?')}/{getattr(m, 'message_type', '?')}"
@@ -562,7 +575,7 @@ def process_inbox_once(
             kept.append(m)
             continue
         conv = getattr(m, "conversation_id", "")
-        if peer_latch_open(state, conv, peer_turn_budget):
+        if peer_latch_open(state, conv, eff_budget):
             consume_peer_latch(state, conv)
             kept.append(m)
         else:
@@ -571,7 +584,7 @@ def process_inbox_once(
                 "[ekho-autoreply] peer latch closed for conversation %s "
                 "(budget %d reached); delivered without a turn",
                 conv,
-                peer_turn_budget,
+                eff_budget,
             )
 
     # Mark every real message handled (dedupe defence).

@@ -52,6 +52,10 @@ export type InboxResponse = {
   operator_trusted?: boolean;
   /** Other agents in the same fleet (excludes the operator identity and self). */
   roster?: RosterEntry[];
+  /** Operator-controlled bounded agent-to-agent delegation (live; absent on older relays). */
+  peer_autoreply?: boolean;
+  /** Per-conversation peer-turn budget set by the operator. */
+  peer_turn_budget?: number;
 };
 
 export type SendMessagePayload = {
