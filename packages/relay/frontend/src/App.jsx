@@ -1556,7 +1556,8 @@ function AgentTab({ agent, detail, rateLimits, onControl, onTrace }) {
 }
 
 function truncText(s, n) {
-  return typeof s === "string" && s.length > n ? `${s.slice(0, n - 1)}…` : s;
+  if (typeof s !== "string") return String(s ?? "");
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
 function formatActivity(e, nameOf) {
@@ -1576,8 +1577,10 @@ function formatActivity(e, nameOf) {
       return { who: target, line: `operator trust ${p.operator_trusted ? "ON" : "OFF"}` };
     case "agent.peer_autoreply_changed":
       return { who: target, line: `delegation ${p.peer_autoreply ? `ON · budget ${p.peer_turn_budget}` : "OFF"}` };
-    case "room.created":
-      return { who: "Operator", line: `created room “${p.name || target}”${Array.isArray(p.members) ? ` · ${p.members.length} members` : ""}` };
+    case "room.created": {
+      const roomName = (typeof p.name === "string" && p.name.trim()) || target || "untitled";
+      return { who: "Operator", line: `created room “${roomName}”${Array.isArray(p.members) ? ` · ${p.members.length} members` : ""}` };
+    }
     case "room.deleted":
       return { who: "Operator", line: "deleted a room" };
     default:
@@ -1659,8 +1662,8 @@ function HealthTab({ agents, initialized }) {
               <StatusDot status={a.status} title={a.status} />
             </div>
             <div className="health-row__stats">
-              <span className="health-stat"><strong>{a.sent_1h}</strong> sent</span>
-              <span className="health-stat"><strong>{a.received_1h}</strong> recv</span>
+              <span className="health-stat"><strong>{a.sent_1h ?? 0}</strong> sent</span>
+              <span className="health-stat"><strong>{a.received_1h ?? 0}</strong> recv</span>
               <span className="muted">/1h</span>
               <span className="health-row__spacer" />
               <span className="health-stat">{active} active</span>

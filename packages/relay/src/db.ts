@@ -899,8 +899,8 @@ export class EkhoDb {
     const where = ["fleet_id = ?", "event_type != 'agent.heartbeat'"];
     const params: Array<string | number> = [fleetId];
     if (options.type) {
-      where.push("event_type LIKE ?");
-      params.push(`${options.type}%`);
+      where.push("event_type LIKE ? ESCAPE '\\'");
+      params.push(`${this.escapeLike(options.type)}%`);
     }
     const rows = this.db.prepare(
       `SELECT id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at

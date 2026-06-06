@@ -326,8 +326,9 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .bubble--op .att-chip { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.12); }
 
 /* ---------------- right rail ---------------- */
-.tabs { display: flex; gap: 2px; padding: 10px 12px 0; border-bottom: 1px solid var(--hair); flex: 0 0 auto; }
-.tab { flex: 1 1 auto; padding: 8px 6px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-size: 12.5px; font-weight: 540; cursor: pointer; transition: color var(--t), border-color var(--t); white-space: nowrap; }
+.tabs { display: flex; gap: 4px; padding: 10px 12px 0; border-bottom: 1px solid var(--hair); flex: 0 0 auto; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: 0 0 auto; padding: 8px 8px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-size: 12.5px; font-weight: 540; cursor: pointer; transition: color var(--t), border-color var(--t); white-space: nowrap; }
 .tab:hover { color: var(--text); }
 .tab--active { color: var(--text); border-bottom-color: var(--accent); }
 .rail__scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
