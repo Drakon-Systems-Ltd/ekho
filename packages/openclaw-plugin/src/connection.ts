@@ -34,19 +34,36 @@ let stopAutoReply: (() => void) | null = null;
 // auto-detected layers plus an explicit env override, resolved by precedence in
 // pickModelMetrics: a live value observed from the host's model_call hook, and a
 // seed read from the resolved OpenClaw config at register time (covers the first
-// heartbeat, before any model call).
-let observedModel = "";
-let observedProvider = "";
-let configModel = "";
-let configProvider = "";
+// heartbeat, before any model call). model+provider are kept paired (see
+// nextModelState) so a stale provider can never sit next to a different model.
+let observed: { model: string; provider: string } = { model: "", provider: "" };
+let configured: { model: string; provider: string } = { model: "", provider: "" };
 
-/** Split a "provider/model" ref into parts; tolerates bare ids and whitespace. */
+/** Split a "provider/model" ref into parts; tolerates bare ids, leading/extra slashes, and whitespace. */
 export function splitModelRef(ref: string): { provider: string; model: string } {
-  const s = (ref ?? "").trim();
+  const s = (ref ?? "").trim().replace(/^\/+/, ""); // a leading slash means "no provider"
   if (!s) return { provider: "", model: "" };
   const i = s.indexOf("/");
-  if (i > 0) return { provider: s.slice(0, i), model: s.slice(i + 1) };
+  if (i > 0) return { provider: s.slice(0, i).trim(), model: s.slice(i + 1).trim() };
   return { provider: "", model: s };
+}
+
+/**
+ * Fold a model observation into the running model/provider state. model and
+ * provider move together: a ref carrying a model adopts THAT call's provider
+ * (even an empty one — split from a "provider/model" ref or the explicit arg), so
+ * a provider from an earlier, different model can't linger. A ref with no model
+ * (empty/no-op event) keeps the last-known-good rather than blanking the board.
+ * Pure, so the latching is unit-tested directly.
+ */
+export function nextModelState(
+  prior: { model: string; provider: string },
+  modelRef?: string,
+  provider?: string
+): { model: string; provider: string } {
+  const parts = splitModelRef(modelRef ?? "");
+  if (!parts.model) return prior;
+  return { model: parts.model, provider: (provider ?? "").trim() || parts.provider };
 }
 
 /**
@@ -78,21 +95,22 @@ export function pickModelMetrics(sources: {
 
 /** Record the live model from a host model_call event (provider optional — may be embedded as "provider/model"). */
 export function noteObservedModel(modelRef?: string, provider?: string): void {
-  const parts = splitModelRef(modelRef ?? "");
-  const p = (provider ?? "").trim() || parts.provider;
-  if (parts.model) observedModel = parts.model;
-  if (p) observedProvider = p;
+  observed = nextModelState(observed, modelRef, provider);
 }
 
 /** Seed model/provider from the resolved OpenClaw config (a "provider/model" string). */
 export function seedConfigModel(modelRef?: string, provider?: string): void {
-  const parts = splitModelRef(modelRef ?? "");
-  const p = (provider ?? "").trim() || parts.provider;
-  if (parts.model) configModel = parts.model;
-  if (p) configProvider = p;
+  configured = nextModelState(configured, modelRef, provider);
 }
 
-/** Best-effort: pull the agent's configured model out of an OpenClaw config object, defensively. */
+/**
+ * Best-effort: pull the agent's configured model out of an OpenClaw config object,
+ * defensively. Only ever a SEED for the first heartbeat(s) — once the live
+ * model_call hook fires, the observed value supersedes this (pickModelMetrics
+ * ranks observed > config). `agents.list[0]` is a coarse last resort: in a
+ * multi-agent host with no shared default it may pick a sibling agent's model for
+ * that brief pre-first-call window; the live hook then corrects it.
+ */
 export function seedConfigModelFromOpenClawConfig(config: unknown): void {
   try {
     const c = config as Record<string, any> | undefined;
@@ -151,10 +169,10 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
         pickModelMetrics({
           envModel: process.env.EKHO_REPORT_MODEL,
           envProvider: process.env.EKHO_REPORT_PROVIDER,
-          observedModel,
-          observedProvider,
-          configModel,
-          configProvider
+          observedModel: observed.model,
+          observedProvider: observed.provider,
+          configModel: configured.model,
+          configProvider: configured.provider
         });
       const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
       beat();

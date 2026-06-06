@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { loadCredentials, saveCredentials, type EkhoCredentials } from "../src/credentials";
-import { splitModelRef, pickModelMetrics } from "../src/connection";
+import { splitModelRef, pickModelMetrics, nextModelState } from "../src/connection";
 
 describe("@ekho/openclaw-plugin", () => {
   const tmpDirs: string[] = [];
@@ -29,6 +29,22 @@ describe("@ekho/openclaw-plugin", () => {
       expect(splitModelRef("")).toEqual({ provider: "", model: "" });
       // only the FIRST slash separates provider from model id (model ids can contain slashes)
       expect(splitModelRef("openrouter/meta/llama-3")).toEqual({ provider: "openrouter", model: "meta/llama-3" });
+      // a leading slash means "no provider", not a slash-prefixed model id
+      expect(splitModelRef("/claude-opus-4-8")).toEqual({ provider: "", model: "claude-opus-4-8" });
+      expect(splitModelRef("//gpt-5")).toEqual({ provider: "", model: "gpt-5" });
+      expect(splitModelRef("/")).toEqual({ provider: "", model: "" });
+    });
+
+    it("pairs model+provider atomically on each model observation (no stale provider)", () => {
+      // a new model adopts its OWN call's provider — even an empty one — so a stale
+      // provider can't stay paired with a different model
+      expect(nextModelState({ model: "claude-sonnet", provider: "anthropic" }, "claude-opus", "")).toEqual({ model: "claude-opus", provider: "" });
+      // an explicit provider arg wins; a "provider/model" ref is split
+      expect(nextModelState({ model: "x", provider: "y" }, "openai/gpt-5", "override")).toEqual({ model: "gpt-5", provider: "override" });
+      expect(nextModelState({ model: "", provider: "" }, "anthropic/claude-opus")).toEqual({ model: "claude-opus", provider: "anthropic" });
+      // an empty/no-op event keeps the last-known-good (don't blank the board)
+      expect(nextModelState({ model: "m", provider: "p" }, "", "")).toEqual({ model: "m", provider: "p" });
+      expect(nextModelState({ model: "m", provider: "p" }, undefined, undefined)).toEqual({ model: "m", provider: "p" });
     });
 
     it("resolves metrics with precedence env > observed(live) > config(seed)", () => {
