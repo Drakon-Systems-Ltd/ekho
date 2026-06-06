@@ -233,6 +233,13 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .bubble--op { background: var(--accent-soft); border-color: rgba(45, 212, 191, 0.28); color: #d4faf3; border-top-left-radius: 14px; border-top-right-radius: 5px; }
 .bubble--pending { opacity: 0.6; }
 
+/* WhatsApp-style delivery ticks (operator messages) */
+.bubble__footer { display: flex; justify-content: flex-end; margin-top: 2px; margin-bottom: -2px; }
+.ticks { font-size: 12px; line-height: 1; color: rgba(212, 250, 243, 0.5); cursor: default; }
+.ticks--delivered, .ticks--read { letter-spacing: -3px; padding-right: 3px; }
+.ticks--read { color: var(--accent); }
+.ticks--pending { opacity: 0.6; }
+
 /* typewriter caret — a soft blinking bar that trails the revealed text */
 .tw-caret { display: inline-block; width: 2px; height: 1em; margin-left: 1px; vertical-align: text-bottom; background: currentColor; opacity: 0.6; animation: tw-blink 1s steps(2, start) infinite; }
 @keyframes tw-blink { 0%, 50% { opacity: 0.6; } 50.01%, 100% { opacity: 0; } }
@@ -456,6 +463,32 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .activity__body { min-width: 0; flex: 1 1 auto; }
 .activity__line { font-size: 13px; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
 .activity__time { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* Activity drill-down: conversations grouped, expandable to their events */
+.actgroups { display: flex; flex-direction: column; gap: 6px; }
+.actgroup { border: 1px solid var(--hair); border-radius: 10px; overflow: hidden; background: rgba(255, 255, 255, 0.015); }
+.actgroup--open { border-color: var(--hair-strong); }
+.actgroup__head { display: flex; align-items: stretch; }
+.actgroup__chev {
+  flex: 0 0 auto; width: 32px; border: 0; background: transparent; color: var(--muted);
+  cursor: pointer; font-size: 16px; line-height: 1; transition: transform var(--t), color var(--t);
+}
+.actgroup__chev:hover { color: var(--text); }
+.actgroup--open .actgroup__chev { transform: rotate(90deg); color: var(--accent); }
+.actgroup__main {
+  flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 9px;
+  padding: 9px 11px 9px 0; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left;
+}
+.actgroup__main:hover { background: rgba(255, 255, 255, 0.03); }
+.actgroup__text { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 1px; }
+.actgroup__title { font-size: 13px; font-weight: 560; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.actgroup__preview { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.actgroup__preview strong { color: var(--text); font-weight: 540; }
+.actgroup__meta { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.actgroup__count { font-size: 11px; font-weight: 600; min-width: 18px; text-align: center; padding: 1px 6px; border-radius: 99px; background: var(--raised); color: var(--muted); }
+.actgroup__time { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+.actgroup__events { padding: 2px 11px 6px 32px; border-top: 1px solid var(--hair); }
+.actgroup__events .activity__row:last-child { border-bottom: 0; }
 .feed-list { display: flex; flex-direction: column; gap: 10px; }
 .feed-row { gap: 7px; }
 .feed-row__head { display: flex; align-items: flex-start; gap: 10px; }

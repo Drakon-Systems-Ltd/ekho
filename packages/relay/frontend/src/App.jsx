@@ -946,11 +946,39 @@ export default function App() {
   const nameFor = (agentId) => agentNames.get(agentId) || agentId;
 
   const chatItems = useMemo(() => {
-    const fromEvents = (timelineEvents || []).map(describeEvent);
+    const events = timelineEvents || [];
+    // Delivery/ack receipts are collapsed into per-message ticks (WhatsApp-style)
+    // instead of their own bubbles. Aggregate them by the message id they target.
+    const receipts = new Map(); // messageId → { delivered:Set<actor>, acked:Set<actor> }
+    for (const e of events) {
+      const t = e.event_type || "";
+      if (t !== "message.delivered" && t !== "message.acked") continue;
+      const mid = e.resource_kind === "message" ? e.resource_id || "" : "";
+      if (!mid) continue;
+      let r = receipts.get(mid);
+      if (!r) { r = { delivered: new Set(), acked: new Set() }; receipts.set(mid, r); }
+      const who = e.actor_id || "?";
+      r.delivered.add(who); // an ack implies delivery
+      if (t === "message.acked") r.acked.add(who);
+    }
+    const deliveryStatus = (messageId) => {
+      const r = messageId && receipts.get(messageId);
+      if (!r) return { status: "sent", deliveredN: 0, ackedN: 0 };
+      const deliveredN = r.delivered.size;
+      const ackedN = r.acked.size;
+      // "read" only once everyone who received it has acked, so a partial ack in a
+      // room stays at "delivered" (✓✓ grey) with the counts in the tooltip.
+      const status = ackedN > 0 && ackedN >= deliveredN ? "read" : deliveredN > 0 ? "delivered" : "sent";
+      return { status, deliveredN, ackedN };
+    };
+    const fromEvents = events
+      .filter((e) => { const t = e.event_type || ""; return t !== "message.delivered" && t !== "message.acked"; })
+      .map(describeEvent)
+      .map((i) => (i.kind === "message" && i.side === "operator" ? { ...i, ...deliveryStatus(i.messageId) } : i));
     const visible = showSystem ? fromEvents : fromEvents.filter((i) => i.kind === "message" || !isHeartbeatEvent(i.type));
     const pending = optimistic
       .filter((o) => o.conversationId === selectedConversationId)
-      .map((o) => ({ kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, attachments: o.attachments || [], type: "message.queued", createdAt: o.createdAt, pending: true }));
+      .map((o) => ({ kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, attachments: o.attachments || [], type: "message.queued", createdAt: o.createdAt, pending: true, status: "pending" }));
     return [...visible, ...pending];
   }, [timelineEvents, showSystem, optimistic, selectedConversationId]);
 
@@ -1491,6 +1519,22 @@ function HelpIcon() {
 
 const NEW_MESSAGE_MS = 45_000; // window in which an incoming agent message animates
 
+// WhatsApp-style delivery ticks on the operator's own messages, so per-recipient
+// "delivered/acknowledged" receipts don't each take a whole bubble.
+function DeliveryTicks({ status, deliveredN = 0, ackedN = 0 }) {
+  const title =
+    status === "pending" ? "Sending…"
+    : status === "read" ? `Acknowledged${ackedN ? ` by ${ackedN}` : ""}`
+    : status === "delivered" ? `Delivered${deliveredN ? ` to ${deliveredN}` : ""}${ackedN ? ` · read by ${ackedN}` : ""}`
+    : "Sent";
+  const single = status === "pending" || status === "sent";
+  return (
+    <span className={`ticks ticks--${status}`} title={title} aria-label={title}>
+      {single ? "✓" : "✓✓"}
+    </span>
+  );
+}
+
 function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow, token }) {
   const ref = useRef(null);
   const nearBottomRef = useRef(true);
@@ -1593,6 +1637,11 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
                 ) : null}
                 {item.attachments?.length ? (
                   <AttachmentList token={token} attachments={item.attachments} onImageLoad={stickToBottom} />
+                ) : null}
+                {isOp && item.status ? (
+                  <div className="bubble__footer">
+                    <DeliveryTicks status={item.status} deliveredN={item.deliveredN} ackedN={item.ackedN} />
+                  </div>
                 ) : null}
               </div>
             </div>
@@ -1861,6 +1910,51 @@ function ActivityTab({ events, agents, initialized, filter, onFilter, onOpenConv
   }, [agents]);
   const nameOf = (id) => (id ? nameMap.get(id) || null : null);
   const filters = [["", "All"], ["message", "Messages"], ["room", "Rooms"], ["agent", "Changes"]];
+  const [expanded, setExpanded] = useState(() => new Set());
+  const toggle = (key) => setExpanded((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
+
+  // Consolidate the flat stream into a drill-down: one row per conversation (its
+  // participants + latest activity), expandable to its events; non-conversation
+  // events (trust/room/policy changes) collect under a "Fleet changes" group.
+  const { convGroups, fleet } = useMemo(() => {
+    const byConv = new Map();
+    const fleetEvents = [];
+    for (const e of events || []) {
+      const actor = e.actor_kind === "operator" ? "Operator" : e.actor_name || nameOf(e.actor_id) || e.actor_id;
+      if (e.conversation_id) {
+        let g = byConv.get(e.conversation_id);
+        if (!g) { g = { id: e.conversation_id, events: [], actors: new Set() }; byConv.set(e.conversation_id, g); }
+        g.events.push(e);
+        if (actor) g.actors.add(actor);
+      } else {
+        fleetEvents.push(e);
+      }
+    }
+    const groups = [...byConv.values()].map((g) => ({
+      ...g,
+      latest: g.events[0],
+      // headline the latest real message, not a delivery receipt
+      latestMsg: g.events.find((e) => (e.event_type || "") === "message.queued") || g.events[0],
+      count: g.events.length,
+    }));
+    groups.sort((a, b) => ((b.latest?.created_at || "") > (a.latest?.created_at || "") ? 1 : -1));
+    return { convGroups: groups, fleet: fleetEvents };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, nameMap]);
+
+  const eventRow = (e, size = 22) => {
+    const { who, line } = formatActivity(e, nameOf);
+    return (
+      <div className="activity__row" key={e.id}>
+        <Avatar id={e.actor_id || e.event_type} label={who} size={size} />
+        <div className="activity__body">
+          <div className="activity__line"><strong>{who}</strong> {line}</div>
+          <div className="activity__time">{relativeTime(e.created_at)}</div>
+        </div>
+      </div>
+    );
+  };
+
   if (!initialized) return <Skeleton count={5} height="46px" />;
   return (
     <div className="activity">
@@ -1869,25 +1963,49 @@ function ActivityTab({ events, agents, initialized, filter, onFilter, onOpenConv
           <button key={val || "all"} className={`chip${filter === val ? " chip--active" : ""}`} onClick={() => onFilter(val)}>{label}</button>
         ))}
       </div>
-      {events.length ? (
-        <div className="activity__list">
-          {events.map((e) => {
-            const { who, line } = formatActivity(e, nameOf);
-            const clickable = Boolean(e.conversation_id && onOpenConversation);
+      {convGroups.length || fleet.length ? (
+        <div className="actgroups">
+          {convGroups.map((g) => {
+            const open = expanded.has(g.id);
+            const { who, line } = formatActivity(g.latestMsg, nameOf);
+            const names = [...g.actors];
+            const title = names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3}` : "") || "Conversation";
             return (
-              <div
-                key={e.id}
-                className={`activity__row${clickable ? " activity__row--link" : ""}`}
-                onClick={clickable ? () => onOpenConversation(e.conversation_id) : undefined}
-              >
-                <Avatar id={e.actor_id || e.event_type} label={who} size={26} />
-                <div className="activity__body">
-                  <div className="activity__line"><strong>{who}</strong> {line}</div>
-                  <div className="activity__time">{relativeTime(e.created_at)}</div>
+              <div className={`actgroup${open ? " actgroup--open" : ""}`} key={g.id}>
+                <div className="actgroup__head">
+                  <button className="actgroup__chev" onClick={() => toggle(g.id)} aria-expanded={open} aria-label={open ? "Collapse" : "Expand"}>›</button>
+                  <button className="actgroup__main" onClick={() => onOpenConversation?.(g.id)} title="Open conversation">
+                    <span className="conv-row__dot" style={{ background: colorForId(g.id) }} />
+                    <span className="actgroup__text">
+                      <span className="actgroup__title">{title}</span>
+                      <span className="actgroup__preview"><strong>{who}</strong> {line}</span>
+                    </span>
+                    <span className="actgroup__meta">
+                      <span className="actgroup__count">{g.count}</span>
+                      <span className="actgroup__time">{relativeTime(g.latest?.created_at)}</span>
+                    </span>
+                  </button>
                 </div>
+                {open ? <div className="actgroup__events">{g.events.map((e) => eventRow(e))}</div> : null}
               </div>
             );
           })}
+          {fleet.length ? (
+            <div className={`actgroup${expanded.has("__fleet__") ? " actgroup--open" : ""}`}>
+              <div className="actgroup__head">
+                <button className="actgroup__chev" onClick={() => toggle("__fleet__")} aria-expanded={expanded.has("__fleet__")} aria-label="Toggle fleet changes">›</button>
+                <button className="actgroup__main" onClick={() => toggle("__fleet__")}>
+                  <span className="conv-row__dot" style={{ background: "var(--muted)" }} />
+                  <span className="actgroup__text">
+                    <span className="actgroup__title">Fleet changes</span>
+                    <span className="actgroup__preview">trust, rooms, policies &amp; control</span>
+                  </span>
+                  <span className="actgroup__meta"><span className="actgroup__count">{fleet.length}</span></span>
+                </button>
+              </div>
+              {expanded.has("__fleet__") ? <div className="actgroup__events">{fleet.map((e) => eventRow(e))}</div> : null}
+            </div>
+          ) : null}
         </div>
       ) : (
         <EmptyState title="No activity yet">Fleet messages, hand-offs, and changes will stream here.</EmptyState>
