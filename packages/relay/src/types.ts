@@ -80,6 +80,12 @@ export const operatorTrustSchema = z.object({
   trusted: z.boolean()
 });
 
+export const peerAutoreplySchema = z.object({
+  autoreply: z.boolean(),
+  // Optional — when omitted, the existing per-agent budget is left untouched.
+  budget: z.number().int().min(1).max(50).optional()
+});
+
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
 export type AckInput = z.infer<typeof ackSchema>;
 export type HeartbeatInput = z.infer<typeof heartbeatSchema>;

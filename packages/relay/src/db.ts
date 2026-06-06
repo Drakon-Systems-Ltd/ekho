@@ -438,10 +438,12 @@ export class EkhoDb {
     // The polling agent's own trust flag + fleet — drives operator_trusted and
     // scopes the teammate roster. An unknown agent id yields untrusted + empty.
     const self = this.db.prepare(
-      "SELECT fleet_id, operator_trusted FROM agents WHERE id = ?"
+      "SELECT fleet_id, operator_trusted, peer_autoreply, peer_turn_budget FROM agents WHERE id = ?"
     ).get(agentId) as Record<string, unknown> | undefined;
     const fleetId = self ? String(self.fleet_id) : null;
     const operatorTrusted = Boolean(self?.operator_trusted);
+    const peerAutoreply = Boolean(self?.peer_autoreply);
+    const peerTurnBudget = Number(self?.peer_turn_budget) || 6;
 
     // Resolve each distinct sender's runtime so messages can be tagged
     // operator vs agent. The synthetic op_<fleetId> sender has runtime
@@ -515,6 +517,8 @@ export class EkhoDb {
         reason: row.payload_json ? JSON.parse(String(row.payload_json)).reason ?? "operator control" : "operator control"
       })),
       operator_trusted: operatorTrusted,
+      peer_autoreply: peerAutoreply,
+      peer_turn_budget: peerTurnBudget,
       roster
     };
   }
@@ -676,6 +680,34 @@ export class EkhoDb {
     return trusted;
   }
 
+  /**
+   * Enable/disable bounded agent-to-agent delegation for an agent, optionally
+   * setting its per-conversation turn budget. The agent reads both live on its
+   * next inbox poll (no restart). Returns the resulting state, or null if the
+   * agent is unknown. Mirrors setAgentTrust.
+   */
+  setPeerAutoreply(
+    fleetId: string,
+    agentId: string,
+    operatorId: string,
+    autoreply: boolean,
+    budget?: number
+  ): { peer_autoreply: boolean; peer_turn_budget: number } | null {
+    const agent = this.db.prepare("SELECT id FROM agents WHERE id = ? AND fleet_id = ? AND runtime != 'operator'").get(agentId, fleetId) as Record<string, unknown> | undefined;
+    if (!agent) {
+      return null;
+    }
+    if (typeof budget === "number") {
+      this.db.prepare("UPDATE agents SET peer_autoreply = ?, peer_turn_budget = ? WHERE id = ? AND fleet_id = ?").run(autoreply ? 1 : 0, budget, agentId, fleetId);
+    } else {
+      this.db.prepare("UPDATE agents SET peer_autoreply = ? WHERE id = ? AND fleet_id = ?").run(autoreply ? 1 : 0, agentId, fleetId);
+    }
+    const row = this.db.prepare("SELECT peer_autoreply, peer_turn_budget FROM agents WHERE id = ? AND fleet_id = ?").get(agentId, fleetId) as Record<string, unknown>;
+    const result = { peer_autoreply: Boolean(row.peer_autoreply), peer_turn_budget: Number(row.peer_turn_budget) || 6 };
+    this.recordEvent(fleetId, "agent.peer_autoreply_changed", "operator", operatorId, "agent", agentId, null, result);
+    return result;
+  }
+
   getFleetOverview(fleetId: string) {
     const agents = this.db.prepare(
       "SELECT id, display_name, runtime, status, last_seen_at FROM agents WHERE fleet_id = ? AND runtime != 'operator' ORDER BY created_at DESC LIMIT 10"
@@ -747,14 +779,16 @@ export class EkhoDb {
     if (search) params.push(search, search, search);
 
     const rows = (this.db.prepare(
-      `SELECT id, display_name, runtime, status, last_seen_at, operator_trusted
+      `SELECT id, display_name, runtime, status, last_seen_at, operator_trusted, peer_autoreply, peer_turn_budget
        FROM agents
        WHERE ${where}
        ORDER BY ${sortBy} ${sortOrder}
        LIMIT ? OFFSET ?`
     ).all(...params, options.limit, options.offset) as Array<Record<string, unknown>>).map((row) => ({
       ...row,
-      operator_trusted: Boolean(row.operator_trusted)
+      operator_trusted: Boolean(row.operator_trusted),
+      peer_autoreply: Boolean(row.peer_autoreply),
+      peer_turn_budget: Number(row.peer_turn_budget) || 6
     }));
 
     const totalRow = this.db.prepare(

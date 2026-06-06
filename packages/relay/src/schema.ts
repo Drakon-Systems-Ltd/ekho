@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS agents (
   auto_quarantined_at TEXT,
   quarantine_reason TEXT,
   operator_trusted INTEGER NOT NULL DEFAULT 0,
+  peer_autoreply INTEGER NOT NULL DEFAULT 0,
+  peer_turn_budget INTEGER NOT NULL DEFAULT 6,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 

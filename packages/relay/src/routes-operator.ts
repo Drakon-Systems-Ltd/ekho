@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { attachmentUploadSchema, createPolicySchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createPolicySchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
 import { sign } from "./utils";
@@ -230,6 +230,33 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ agent_id: params.agentId, operator_trusted: result });
+  });
+
+  // Toggle bounded agent-to-agent delegation (+ optional turn budget) per agent.
+  // The agent reads both live on its next inbox poll — no restart.
+  app.post("/v1/operator/agents/:agentId/peer-autoreply", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+
+    const parsed = peerAutoreplySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+
+    const params = request.params as { agentId: string };
+    const result = db.setPeerAutoreply(
+      request.operator.fleetId,
+      params.agentId,
+      request.operator.id,
+      parsed.data.autoreply,
+      parsed.data.budget
+    );
+    if (result === null) {
+      return reply.code(404).send({ error: "agent not found" });
+    }
+
+    return reply.send({ agent_id: params.agentId, ...result });
   });
 
   app.post("/v1/operator/agents/:agentId/:action", { preHandler: requireOperatorAuth }, async (request, reply) => {
