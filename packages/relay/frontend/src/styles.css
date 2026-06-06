@@ -422,6 +422,13 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .activity__body { min-width: 0; flex: 1 1 auto; }
 .activity__line { font-size: 13px; line-height: 1.45; color: var(--text); overflow-wrap: anywhere; }
 .activity__time { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.feed-list { display: flex; flex-direction: column; gap: 10px; }
+.feed-row { gap: 7px; }
+.feed-row__head { display: flex; align-items: flex-start; gap: 10px; }
+.feed-row__id { flex: 1 1 auto; min-width: 0; }
+.feed-row__url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-row__actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.feed-row__stats { font-size: 12px; color: var(--muted); }
 
 .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 10px; }
 .pagination__meta { color: var(--muted); font-size: 12px; }

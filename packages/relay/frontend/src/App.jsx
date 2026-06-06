@@ -24,6 +24,10 @@ import {
   getRooms,
   createRoom,
   deleteRoom,
+  getFeeds,
+  createFeedSource,
+  deleteFeedSource,
+  pollFeedSource,
   setAgentTrust,
   setPeerAutoreply,
   storeSession,
@@ -200,6 +204,8 @@ export default function App() {
   const [fleetHealth, setFleetHealth] = useState([]);
   const [activity, setActivity] = useState([]);
   const [activityFilter, setActivityFilter] = useState("");
+  const [feeds, setFeeds] = useState([]);
+  const [feedBusy, setFeedBusy] = useState("");
   const [optimistic, setOptimistic] = useState([]); // pending operator messages
   const [sending, setSending] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState([]); // [{id, filename, mime, size_bytes}]
@@ -313,6 +319,51 @@ export default function App() {
       const result = await getActivity(session.token, { limit: 60, type: activityFilter || undefined });
       setActivity(result.events || []);
       markInit("activity");
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function refreshFeeds() {
+    if (!session.token) return;
+    try {
+      const result = await getFeeds(session.token);
+      setFeeds(result.feeds || []);
+      markInit("feeds");
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function handleCreateFeed({ name, url, subscriberAgentIds }) {
+    setFeedBusy("create");
+    try {
+      await createFeedSource(session.token, { name, url, subscriberAgentIds });
+      await refreshFeeds();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+      throw error;
+    } finally {
+      setFeedBusy("");
+    }
+  }
+
+  async function handlePollFeed(feedId) {
+    setFeedBusy(feedId);
+    try {
+      await pollFeedSource(session.token, feedId);
+      await refreshFeeds();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    } finally {
+      setFeedBusy("");
+    }
+  }
+
+  async function handleDeleteFeed(feedId) {
+    try {
+      await deleteFeedSource(session.token, feedId);
+      await refreshFeeds();
     } catch (error) {
       handleApiError(error, { allowSessionReset: true });
     }
@@ -752,7 +803,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshActivity()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshActivity(), refreshFeeds()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1176,6 +1227,7 @@ export default function App() {
               ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
               ["health", "Health"],
               ["activity", "Activity"],
+              ["feeds", "Feeds"],
               ["agent", "Agent"],
               ["access", "Access"],
               ["deadletters", "Dead"],
@@ -1210,6 +1262,18 @@ export default function App() {
                 filter={activityFilter}
                 onFilter={setActivityFilter}
                 onOpenConversation={selectConversation}
+              />
+            )}
+
+            {rightTab === "feeds" && (
+              <FeedsTab
+                feeds={feeds}
+                agents={agents}
+                initialized={initialized.current.feeds}
+                busy={feedBusy}
+                onCreate={handleCreateFeed}
+                onPoll={handlePollFeed}
+                onDelete={handleDeleteFeed}
               />
             )}
 
@@ -1558,6 +1622,76 @@ function AgentTab({ agent, detail, rateLimits, onControl, onTrace }) {
 function truncText(s, n) {
   if (typeof s !== "string") return String(s ?? "");
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+function FeedsTab({ feeds, agents, initialized, busy, onCreate, onPoll, onDelete }) {
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [subs, setSubs] = useState([]);
+  const toggle = (id) => setSubs((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  const submit = async () => {
+    if (!name.trim() || !url.trim()) return;
+    try {
+      await onCreate({ name: name.trim(), url: url.trim(), subscriberAgentIds: subs });
+      setName(""); setUrl(""); setSubs([]);
+    } catch { /* error surfaced by parent */ }
+  };
+  if (!initialized) return <Skeleton count={3} height="72px" />;
+  return (
+    <div className="cards">
+      <div className="access-caption">
+        Feeds (RSS/Atom) are polled and delivered to subscribed agents as <strong>non-waking</strong>
+        {" "}context — they read them when active, spending no quota.
+      </div>
+      <div className="form">
+        <label className="field"><span>Source name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Hacker News" /></label>
+        <label className="field"><span>Feed URL (RSS / Atom)</span>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…/feed" /></label>
+        <div className="field">
+          <span>Deliver to</span>
+          <div className="room-members">
+            {agents.length ? agents.map((a) => (
+              <label className="room-member" key={a.id}>
+                <input type="checkbox" checked={subs.includes(a.id)} onChange={() => toggle(a.id)} />
+                <span>{a.display_name || a.id}</span>
+              </label>
+            )) : <span className="muted">No agents enrolled yet.</span>}
+          </div>
+        </div>
+        <button
+          className="button button--sm button--primary button--block"
+          disabled={!name.trim() || !url.trim() || busy === "create"}
+          onClick={submit}
+        >
+          {busy === "create" ? "Adding…" : "Add feed"}
+        </button>
+      </div>
+      {feeds.length ? (
+        <div className="feed-list">
+          {feeds.map((f) => (
+            <article className="rcard feed-row" key={f.id}>
+              <div className="feed-row__head">
+                <div className="feed-row__id">
+                  <div className="rcard__title">{f.name}</div>
+                  <div className="rcard__meta mono feed-row__url">{f.url}</div>
+                </div>
+                <div className="feed-row__actions">
+                  <button className="button button--sm button--ghost" disabled={busy === f.id} onClick={() => onPoll(f.id)}>{busy === f.id ? "…" : "Poll"}</button>
+                  <button className="button button--sm button--danger" onClick={() => onDelete(f.id)} aria-label="Delete feed">×</button>
+                </div>
+              </div>
+              <div className="feed-row__stats">
+                {f.subscribers?.length ?? 0} subscriber{(f.subscribers?.length ?? 0) === 1 ? "" : "s"} · {f.item_count ?? 0} items · {f.last_polled_at ? `polled ${relativeTime(f.last_polled_at)}` : "not polled yet"}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptyState title="No feeds yet">Add a source above to keep your agents current.</EmptyState>
+      )}
+    </div>
+  );
 }
 
 function formatActivity(e, nameOf) {

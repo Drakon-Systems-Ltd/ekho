@@ -103,6 +103,26 @@ export const createRoom = (token, { name, memberAgentIds }) =>
 export const deleteRoom = (token, roomId) =>
   request(`/v1/operator/rooms/${encodeURIComponent(roomId)}`, { token, method: "DELETE" });
 
+// Feeds — operator-configured sources delivered to agents as non-waking context.
+export const getFeeds = (token) => request("/v1/operator/feeds", { token });
+export const createFeedSource = (token, { name, url, pollIntervalMinutes, subscriberAgentIds }) =>
+  request("/v1/operator/feeds", {
+    token,
+    method: "POST",
+    body: {
+      name,
+      url,
+      ...(pollIntervalMinutes ? { poll_interval_minutes: pollIntervalMinutes } : {}),
+      subscriber_agent_ids: subscriberAgentIds || [],
+    },
+  });
+export const deleteFeedSource = (token, feedId) =>
+  request(`/v1/operator/feeds/${encodeURIComponent(feedId)}`, { token, method: "DELETE" });
+export const pollFeedSource = (token, feedId) =>
+  request(`/v1/operator/feeds/${encodeURIComponent(feedId)}/poll`, { token, method: "POST" });
+export const getFeedItems = (token, feedId) =>
+  request(`/v1/operator/feeds/${encodeURIComponent(feedId)}/items`, { token });
+
 // Upload a single attachment (base64-in-JSON). Returns { id, filename, mime,
 // size_bytes, created_at }. The relay cross-checks size_bytes against the decoded
 // byte length, so the caller derives it from the actual bytes.
