@@ -41,12 +41,10 @@ export function useEdgeSwipeBack(onBack, { edge = 24, threshold = 70, query = "(
   const drag = useRef(null);
 
   const onTouchStart = (e) => {
+    if (drag.current) return; // an in-progress swipe owns the gesture — ignore extra fingers
     if (typeof window !== "undefined" && window.matchMedia && !window.matchMedia(query).matches) return;
     const t = e.touches && e.touches[0];
-    if (!t || t.clientX > edge) {
-      drag.current = null;
-      return;
-    }
+    if (!t || t.clientX > edge) return;
     drag.current = { x0: t.clientX, y0: t.clientY, dx: 0, horizontal: false };
   };
 
@@ -66,7 +64,11 @@ export function useEdgeSwipeBack(onBack, { edge = 24, threshold = 70, query = "(
     if (d && d.horizontal && d.dx > threshold) onBack();
   };
 
-  return { onTouchStart, onTouchMove, onTouchEnd };
+  // touchcancel (e.g. the OS taking over the gesture) drops the in-progress drag
+  // so it can't survive to fire a spurious back on a later touchend.
+  const onTouchCancel = () => { drag.current = null; };
+
+  return { onTouchStart, onTouchMove, onTouchEnd, onTouchCancel };
 }
 
 // Re-renders once a minute so relative timestamps stay fresh without per-tick churn.

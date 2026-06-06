@@ -617,6 +617,8 @@ export default function App() {
     setSelectedAgentId(agentId);
     setRightTab("agent");
     setMobileView("chat"); // mobile: open the chat (composer pre-targeted) so you can message this agent
+    setOpsOpen(false);
+    setTraceReturn(null); // a fresh agent selection isn't a trace — drop any stale breadcrumb
     refreshAgentDetail(agentId);
     refreshAgentRateLimits(agentId);
     if (agentId !== "broadcast") setComposerRecipient(agentId);
@@ -1320,7 +1322,7 @@ export default function App() {
             )}
 
             {rightTab === "topology" && (
-              <TopologyTab data={topology} initialized={initialized.current.topology} onSelect={selectAgent} />
+              <TopologyTab data={topology} initialized={initialized.current.topology} onSelect={selectAgent} settings={settings} />
             )}
 
             {rightTab === "activity" && (
@@ -1899,7 +1901,7 @@ const topoInitials = (name) => String(name || "?").slice(0, 2).toUpperCase();
    window — thicker = more. Faint spokes anchor every agent to the hub so isolated
    ones still read. Pure SVG, no chart dependency. Hovering a node isolates its
    links; clicking focuses that agent. A roster below doubles as the label key. */
-function TopologyTab({ data, initialized, onSelect }) {
+function TopologyTab({ data, initialized, onSelect, settings }) {
   const [hovered, setHovered] = useState("");
   const nodes = data?.nodes || [];
   const edges = data?.edges || [];
@@ -1946,6 +1948,12 @@ function TopologyTab({ data, initialized, onSelect }) {
   // dead-ends at a dimmed node); everything else fades back.
   const incident = (id) => !hovered || hovered === id || Boolean(adjacency.get(hovered)?.has(id));
   const edgeLit = (e) => !hovered || e.source === hovered || e.target === hovered;
+
+  // If the hovered agent leaves the node set (e.g. removed on a poll), its
+  // onMouseLeave can never fire — clear the hover so the map doesn't stay dimmed.
+  useEffect(() => {
+    if (hovered && !byId.has(hovered)) setHovered("");
+  }, [byId, hovered]);
 
   if (!initialized) return <Skeleton count={1} height="320px" />;
   if (!nodes.length) return <EmptyState title="No agents">Enroll agents to see the fleet map here.</EmptyState>;
@@ -2016,7 +2024,7 @@ function TopologyTab({ data, initialized, onSelect }) {
               onClick={() => onSelect?.(a.id)}
             >
               <circle className={`topo-node__ring topo-node__ring--${health}`} r={r} />
-              <text className="topo-node__label" dy="0.35em" textAnchor="middle" style={{ fill: colorForAgent(a.id) }}>
+              <text className="topo-node__label" dy="0.35em" textAnchor="middle" style={{ fill: colorForAgent(a.id, settings) }}>
                 {topoInitials(a.display_name || a.id)}
               </text>
               <title>{`${a.display_name || a.id} · ${a.runtime || "custom"}${a.metrics?.model ? ` · ${a.metrics.model}` : ""}\n${a.sent_1h ?? 0} sent / ${a.received_1h ?? 0} recv (1h)`}</title>
