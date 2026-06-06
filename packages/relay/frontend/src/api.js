@@ -80,17 +80,24 @@ export const getConversationEvents = (token, conversationId, params = {}) =>
   request(`/v1/operator/conversations/${encodeURIComponent(conversationId)}?${new URLSearchParams(params).toString()}`, { token });
 export const issueEnrollmentToken = (token) =>
   request("/v1/operator/enrollment-tokens", { token, method: "POST" });
-export const sendOperatorMessage = (token, { recipientAgentId, text, conversationId, attachmentIds }) =>
+export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, conversationId, attachmentIds }) =>
   request("/v1/operator/messages", {
     token,
     method: "POST",
     body: {
-      recipient_agent_id: recipientAgentId,
+      ...(roomId ? { room_id: roomId } : { recipient_agent_id: recipientAgentId }),
       text,
       ...(conversationId ? { conversation_id: conversationId } : {}),
       ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}),
     },
   });
+
+// Rooms — named conversations with a chosen set of member agents.
+export const getRooms = (token) => request("/v1/operator/rooms", { token });
+export const createRoom = (token, { name, memberAgentIds }) =>
+  request("/v1/operator/rooms", { token, method: "POST", body: { name, member_agent_ids: memberAgentIds } });
+export const deleteRoom = (token, roomId) =>
+  request(`/v1/operator/rooms/${encodeURIComponent(roomId)}`, { token, method: "DELETE" });
 
 // Upload a single attachment (base64-in-JSON). Returns { id, filename, mime,
 // size_bytes, created_at }. The relay cross-checks size_bytes against the decoded

@@ -19,6 +19,9 @@ import {
   login,
   resolveApproval,
   sendOperatorMessage,
+  getRooms,
+  createRoom,
+  deleteRoom,
   setAgentTrust,
   setPeerAutoreply,
   storeSession,
@@ -189,6 +192,9 @@ export default function App() {
   const [opsOpen, setOpsOpen] = useState(false); // right-rail drawer (mobile)
   const [composerText, setComposerText] = useState("");
   const [composerRecipient, setComposerRecipient] = useState("broadcast");
+  const [rooms, setRooms] = useState([]);
+  const [roomModalOpen, setRoomModalOpen] = useState(false);
+  const [roomSaving, setRoomSaving] = useState(false);
   const [optimistic, setOptimistic] = useState([]); // pending operator messages
   const [sending, setSending] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState([]); // [{id, filename, mime, size_bytes}]
@@ -273,6 +279,40 @@ export default function App() {
     setAgents(result.agents || []);
     setAgentsTotal(result.total || 0);
     markInit("agents");
+  }
+
+  async function refreshRooms() {
+    if (!session.token) return;
+    try {
+      const result = await getRooms(session.token);
+      setRooms(result.rooms || []);
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function handleCreateRoom(name, memberIds) {
+    setRoomSaving(true);
+    try {
+      const room = await createRoom(session.token, { name, memberAgentIds: memberIds });
+      await refreshRooms();
+      setComposerRecipient(`room:${room.id}`);
+      setRoomModalOpen(false);
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    } finally {
+      setRoomSaving(false);
+    }
+  }
+
+  async function handleDeleteRoom(roomId) {
+    try {
+      await deleteRoom(session.token, roomId);
+      if (composerRecipient === `room:${roomId}`) setComposerRecipient("broadcast");
+      await refreshRooms();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
   }
 
   async function refreshApprovals() {
@@ -583,7 +623,10 @@ export default function App() {
     }
     if (sending || uploading) return;
     const recipient = composerRecipient || "broadcast";
-    const convId = selectedConversationId || undefined;
+    const isRoom = recipient.startsWith("room:");
+    const roomId = isRoom ? recipient.slice("room:".length) : undefined;
+    // A room message threads under the room id; otherwise the selected thread.
+    const convId = isRoom ? roomId : selectedConversationId || undefined;
     const sentAttachments = pendingAttachments;
     const optimisticItem = {
       id: `optim-${Date.now()}`,
@@ -599,7 +642,8 @@ export default function App() {
     setSending(true);
     try {
       const res = await sendOperatorMessage(session.token, {
-        recipientAgentId: recipient,
+        recipientAgentId: isRoom ? undefined : recipient,
+        roomId,
         text,
         conversationId: convId,
         attachmentIds: attachmentIds.length ? attachmentIds : undefined,
@@ -681,7 +725,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -804,9 +848,11 @@ export default function App() {
 
   const recipientOptions = useMemo(() => {
     const opts = [{ value: "broadcast", label: "Broadcast — all agents" }];
+    rooms.forEach((r) => opts.push({ value: `room:${r.id}`, label: `# ${r.name} (${r.members?.length ?? 0})` }));
     agents.forEach((a) => opts.push({ value: a.id, label: a.display_name || a.id }));
+    opts.push({ value: "__manage_rooms__", label: "＋ Manage rooms…" });
     return opts;
-  }, [agents]);
+  }, [agents, rooms]);
 
   /* ---------------- login screen ---------------- */
 
@@ -1034,7 +1080,7 @@ export default function App() {
             {composerError ? <div className="composer__error">{composerError}</div> : null}
 
             <div className="composer__row">
-              <select className="composer__recipient" value={composerRecipient} onChange={(e) => setComposerRecipient(e.target.value)}>
+              <select className="composer__recipient" value={composerRecipient} onChange={(e) => { const v = e.target.value; if (v === "__manage_rooms__") { setRoomModalOpen(true); } else { setComposerRecipient(v); } }}>
                 {recipientOptions.map((o) => (
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
@@ -1196,6 +1242,17 @@ export default function App() {
           status={policyStatus}
           onClose={() => setPolicyModalOpen(false)}
           onSave={handlePolicySave}
+        />
+      )}
+
+      {roomModalOpen && (
+        <RoomModal
+          agents={agents}
+          rooms={rooms}
+          saving={roomSaving}
+          onCreate={handleCreateRoom}
+          onDelete={handleDeleteRoom}
+          onClose={() => setRoomModalOpen(false)}
         />
       )}
 
@@ -1585,6 +1642,72 @@ function PoliciesTab({ policies, initialized, onCreate, onEdit, onDelete }) {
         <EmptyState title="No policies">Create one to control message routing across the fleet.</EmptyState>
       )}
     </div>
+  );
+}
+
+function RoomModal({ agents, rooms, saving, onCreate, onDelete, onClose }) {
+  const [name, setName] = useState("");
+  const [memberIds, setMemberIds] = useState([]);
+  const toggle = (id) =>
+    setMemberIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+  const submit = () => {
+    if (!name.trim()) return;
+    onCreate(name.trim(), memberIds);
+    setName("");
+    setMemberIds([]);
+  };
+  return (
+    <Modal
+      title="Rooms"
+      onClose={onClose}
+      actions={[{ label: "Close", onClick: onClose, variant: "ghost" }]}
+    >
+      <div className="room-caption">
+        A room is a named conversation with a chosen set of agents — message it to
+        run a project with just those teammates instead of the whole fleet.
+      </div>
+      <div className="form">
+        <label className="field">
+          <span>New room name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. API Redesign" />
+        </label>
+        <div className="field">
+          <span>Members</span>
+          <div className="room-members">
+            {agents.length ? (
+              agents.map((a) => (
+                <label className="room-member" key={a.id}>
+                  <input type="checkbox" checked={memberIds.includes(a.id)} onChange={() => toggle(a.id)} />
+                  <span>{a.display_name || a.id}</span>
+                </label>
+              ))
+            ) : (
+              <span className="muted">No agents enrolled yet.</span>
+            )}
+          </div>
+        </div>
+        <button
+          className="button button--sm button--primary button--block"
+          disabled={!name.trim() || saving}
+          onClick={submit}
+        >
+          {saving ? "Creating…" : "Create room"}
+        </button>
+      </div>
+      {rooms.length ? (
+        <div className="room-list">
+          {rooms.map((r) => (
+            <div className="room-list__item" key={r.id}>
+              <div className="room-list__meta">
+                <strong># {r.name}</strong>
+                <span className="muted"> · {r.members?.length ?? 0} member{(r.members?.length ?? 0) === 1 ? "" : "s"}</span>
+              </div>
+              <button className="button button--sm button--danger" onClick={() => onDelete(r.id)}>Delete</button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </Modal>
   );
 }
 
