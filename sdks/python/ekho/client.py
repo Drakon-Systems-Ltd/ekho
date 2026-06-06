@@ -33,6 +33,20 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_TIMEOUT_SECONDS = 30
 
 
+def _serialize_body(payload: Any) -> str:
+    """JSON body for BOTH the signature and the wire.
+
+    Must match the relay's canonical form. The relay re-serialises the parsed
+    request body with JS ``JSON.stringify`` (raw UTF-8, compact) and HMACs that.
+    Python's ``json.dumps`` defaults to ``ensure_ascii=True``, which escapes
+    non-ASCII as ``\\uXXXX`` — so a message containing an em-dash, smart quote,
+    or emoji would be signed over a different string than the relay hashes,
+    yielding ``401 invalid signature`` intermittently. ``ensure_ascii=False``
+    keeps raw UTF-8 so the two sides agree.
+    """
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
 class EkhoRequestError(RuntimeError):
     """Raised when the relay returns a non-2xx response."""
 
@@ -89,17 +103,9 @@ class EkhoAgentClient:
         route_path: str,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        # Serialise body. Empty string matches TS
-        # `payload ? JSON.stringify(payload) : ""`.
-        # separators=(',', ':') gives the compact JSON.stringify form.
-        # The relay hashes whatever body string we send; what matters is
-        # that the string we hash is the exact string we put on the wire.
-        # We pass `data=body` below, so that invariant holds.
-        body = (
-            ""
-            if payload is None
-            else json.dumps(payload, separators=(",", ":"))
-        )
+        # Serialise body to the relay's canonical form (see _serialize_body).
+        # Empty string matches TS `payload ? JSON.stringify(payload) : ""`.
+        body = "" if payload is None else _serialize_body(payload)
         signature_path = route_path.split("?")[0]
 
         headers = signed_headers(
@@ -111,9 +117,11 @@ class EkhoAgentClient:
         )
 
         url = f"{self._credentials.relay_base_url}{route_path}"
-        # For GET, TS sends no body; the signed payload hashes "" in both cases
-        # because `body` was set to "" when payload is None.
-        data = None if method == "GET" else body
+        # Send the EXACT UTF-8 bytes of the string we signed. We sign over the
+        # raw-UTF-8 JSON (ensure_ascii=False), so the wire bytes must be that
+        # string's UTF-8 encoding — otherwise the relay re-serialises the parsed
+        # body and the HMAC diverges on any non-ASCII content.
+        data = None if method == "GET" else body.encode("utf-8")
 
         response = self._session.request(
             method,
@@ -144,11 +152,11 @@ class EkhoAgentClient:
         """
         # Enroll doesn't go through requireAgentAuth, so we bypass _request
         # to avoid including stale agent credentials we may not have yet.
-        body = json.dumps(dict(payload), separators=(",", ":"))
+        body = _serialize_body(dict(payload))
         url = f"{self._credentials.relay_base_url}/v1/enroll"
         response = self._session.post(
             url,
-            data=body,
+            data=body.encode("utf-8"),
             headers={"content-type": "application/json"},
             timeout=self._timeout,
         )

@@ -193,9 +193,10 @@ def test_client_send_message_posts_signed_request():
         "x-ekho-signature",
     ):
         assert h in headers
-    # Body was sent as a non-empty JSON string.
+    # Body is sent as the UTF-8 bytes of the exact string we signed (so the
+    # relay's re-serialised hash matches even for non-ASCII content).
     data = call.kwargs["data"]
-    assert isinstance(data, str) and data.startswith("{")
+    assert isinstance(data, bytes) and data.startswith(b"{")
 
 
 def test_client_get_inbox_sends_no_body():
@@ -396,3 +397,26 @@ def test_client_download_attachment_returns_raw_bytes():
         "x-ekho-signature",
     ):
         assert h in headers
+
+
+# --- Non-ASCII body signing (regression: 401 invalid signature) ------------
+
+
+def test_serialize_body_keeps_raw_utf8_for_non_ascii():
+    """The relay re-serialises the parsed body with JS JSON.stringify (raw
+    UTF-8) and HMACs that. Python's json.dumps defaults to ensure_ascii=True,
+    which escapes non-ASCII as \\uXXXX — so any message with an em-dash, smart
+    quote, or emoji signed differently from what the relay hashes, yielding
+    `401 invalid signature`. The SDK must serialise non-ASCII the same way the
+    relay does: raw UTF-8, no \\u escapes."""
+    from ekho.client import _serialize_body
+
+    body = _serialize_body({"text": "ready — go ✓"})
+    assert body == '{"text":"ready — go ✓"}'  # matches JS JSON.stringify
+    assert "\\u" not in body
+
+
+def test_serialize_body_ascii_unchanged():
+    from ekho.client import _serialize_body
+
+    assert _serialize_body({"text": "hello", "n": 1}) == '{"text":"hello","n":1}'
