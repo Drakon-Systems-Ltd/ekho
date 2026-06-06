@@ -607,6 +607,45 @@ describe("Relay integration", () => {
       ).toBe(false);
     });
 
+    it("excludes broadcast fan-out from collaboration edges", async () => {
+      const a = await relay.enrollAgent("bc-a");
+      const b = await relay.enrollAgent("bc-b");
+      const c = await relay.enrollAgent("bc-c");
+
+      // A broadcast fans out to every other agent — that's an announcement, not
+      // pairwise collaboration, so it must NOT draw edges A->B and A->C.
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "broadcast" },
+        message_type: "direct",
+        body: { text: "hello fleet" },
+        conversation_id: "bc1",
+        correlation_id: "cor-bc1"
+      });
+      // A direct A->B message in the same window MUST still draw exactly one edge.
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: b.agent_id },
+        message_type: "direct",
+        body: { text: "just you" },
+        conversation_id: "bc2",
+        correlation_id: "cor-bc2"
+      });
+
+      const res = await relay.operatorRequest("GET", "/v1/operator/topology");
+      expect(res.status).toBe(200);
+      const edgesTouching = (id: string) =>
+        res.body.edges.filter((e: { source: string; target: string }) => e.source === id || e.target === id);
+      // c only ever received a broadcast → no edges at all.
+      expect(edgesTouching(c.agent_id).length).toBe(0);
+      // a<->b: the direct message counts (1), the broadcast delivery does not.
+      const ab = res.body.edges.find(
+        (e: { source: string; target: string }) =>
+          (e.source === a.agent_id && e.target === b.agent_id) ||
+          (e.source === b.agent_id && e.target === a.agent_id)
+      );
+      expect(ab).toBeTruthy();
+      expect(ab.count).toBe(1);
+    });
+
     it("deletes a room", async () => {
       const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
         name: "tmp", member_agent_ids: []

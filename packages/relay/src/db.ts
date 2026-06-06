@@ -990,8 +990,8 @@ export class EkhoDb {
     return { delivered, total: items.length };
   }
 
-  getFleetHealth(fleetId: string) {
-    const since = new Date(Date.now() - 3_600_000).toISOString();
+  getFleetHealth(fleetId: string, windowMinutes = 60) {
+    const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
     const agents = this.db.prepare(
       `SELECT id, display_name, runtime, status, last_seen_at, consecutive_missed_heartbeats,
               operator_trusted, peer_autoreply, peer_turn_budget
@@ -1047,16 +1047,20 @@ export class EkhoDb {
 
   /**
    * Fleet topology for the command-centre map: every live agent as a node (reusing
-   * the health snapshot so node state has a single source of truth) plus the
-   * undirected agent↔agent collaboration graph — who actually exchanged messages in
-   * the window. Edges come from message_deliveries, so broadcast and room fan-out
-   * resolve to concrete recipients. The operator pseudo-agent and its feed/control
-   * traffic are excluded, so the map shows agents working with agents, not the hub.
+   * the health snapshot — sized over the SAME window as the edges — so node state
+   * has a single source of truth) plus the undirected agent↔agent collaboration
+   * graph: the directed messages sent between two agents in the window, folded into
+   * one weighted edge. Edges come from message_deliveries (room fan-out resolves to
+   * concrete recipients). Excluded so the map shows pairwise collaboration, not the
+   * hub or one-to-many noise: the operator pseudo-agent, feed/control traffic, and
+   * broadcast fan-out (recipient_kind='broadcast' — the reliable discriminator,
+   * since a broadcast can carry any message_type). Counts attempted sends (a
+   * delivery row), matching the health board's recv count.
    */
   getTopology(fleetId: string, options?: { windowMinutes?: number }) {
     const windowMinutes = options?.windowMinutes ?? 60;
     const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
-    const nodes = this.getFleetHealth(fleetId);
+    const nodes = this.getFleetHealth(fleetId, windowMinutes);
 
     const directed = this.db.prepare(
       `SELECT m.sender_agent_id AS src, d.recipient_agent_id AS dst,
@@ -1072,6 +1076,7 @@ export class EkhoDb {
           AND ra.runtime != 'operator'
           AND sa.revoked_at IS NULL
           AND ra.revoked_at IS NULL
+          AND m.recipient_kind != 'broadcast'
           AND m.message_type NOT IN ('feed', 'control')
         GROUP BY m.sender_agent_id, d.recipient_agent_id`
     ).all(fleetId, since) as Array<{ src: string; dst: string; c: number; last_at: string }>;

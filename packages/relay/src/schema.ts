@@ -286,6 +286,9 @@ CREATE INDEX IF NOT EXISTS idx_attachments_fleet_created ON attachments(fleet_id
 CREATE INDEX IF NOT EXISTS idx_heartbeats_agent_recency ON heartbeats(agent_id, received_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(fleet_id, sender_agent_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_queued ON message_deliveries(recipient_agent_id, queued_at);
+-- Drives the topology collaboration-edge join (messages -> deliveries by message_id).
+-- Without it the edge query full-scans message_deliveries on every console poll.
+CREATE INDEX IF NOT EXISTS idx_deliveries_message ON message_deliveries(message_id, recipient_agent_id);
 
 CREATE TABLE IF NOT EXISTS feeds (
   id TEXT PRIMARY KEY,
