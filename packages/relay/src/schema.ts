@@ -286,4 +286,33 @@ CREATE INDEX IF NOT EXISTS idx_attachments_fleet_created ON attachments(fleet_id
 CREATE INDEX IF NOT EXISTS idx_heartbeats_agent_recency ON heartbeats(agent_id, received_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(fleet_id, sender_agent_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_queued ON message_deliveries(recipient_agent_id, queued_at);
+
+CREATE TABLE IF NOT EXISTS feeds (
+  id TEXT PRIMARY KEY,
+  fleet_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  poll_interval_minutes INTEGER NOT NULL DEFAULT 30,
+  last_polled_at TEXT,
+  created_at TEXT NOT NULL,
+  created_by_operator_id TEXT,
+  FOREIGN KEY (fleet_id) REFERENCES fleets(id)
+);
+CREATE TABLE IF NOT EXISTS feed_subscribers (
+  feed_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  PRIMARY KEY (feed_id, agent_id),
+  FOREIGN KEY (feed_id) REFERENCES feeds(id)
+);
+CREATE TABLE IF NOT EXISTS feed_seen (
+  feed_id TEXT NOT NULL,
+  guid TEXT NOT NULL,
+  title TEXT,
+  link TEXT,
+  delivered_at TEXT NOT NULL,
+  PRIMARY KEY (feed_id, guid),
+  FOREIGN KEY (feed_id) REFERENCES feeds(id)
+);
+CREATE INDEX IF NOT EXISTS idx_feeds_fleet ON feeds(fleet_id);
+CREATE INDEX IF NOT EXISTS idx_feed_seen_recent ON feed_seen(feed_id, delivered_at);
 `;

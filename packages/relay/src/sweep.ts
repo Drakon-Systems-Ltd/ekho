@@ -1,5 +1,6 @@
 import type { EkhoDb } from "./db";
 import { config } from "./config";
+import { fetchFeedUrl } from "./feeds";
 
 export function startSweepJob(db: EkhoDb): { stop: () => void } {
   const handle = setInterval(() => {
@@ -43,6 +44,22 @@ export function startSweepJob(db: EkhoDb): { stop: () => void } {
       }
     } catch (err) {
       console.error("[sweep] nonce cleanup failed:", err);
+    }
+
+    // Feeds: poll any source whose interval has elapsed. Fire-and-forget — the
+    // network fetch is async; pollFeed stamps last_polled_at up-front so a feed
+    // can't be double-polled across ticks.
+    try {
+      for (const f of db.feedsDueForPoll(Date.now())) {
+        void db
+          .pollFeed(f.id, fetchFeedUrl)
+          .then((r) => {
+            if (r.delivered > 0) console.log(`[sweep] feed ${f.id}: delivered ${r.delivered} new item(s)`);
+          })
+          .catch((err) => console.error("[sweep] feed poll failed:", err));
+      }
+    } catch (err) {
+      console.error("[sweep] feed scan failed:", err);
     }
   }, config.sweepIntervalMs);
 

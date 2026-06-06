@@ -81,6 +81,17 @@ export const createRoomSchema = z.object({
   member_agent_ids: z.array(z.string().min(1)).max(50).default([])
 });
 
+export const createFeedSchema = z.object({
+  name: z.string().min(1).max(120),
+  url: z.string().url().max(2000),
+  poll_interval_minutes: z.number().int().min(5).max(1440).default(30),
+  subscriber_agent_ids: z.array(z.string().min(1)).max(50).default([])
+});
+
+export const feedSubscribersSchema = z.object({
+  agent_ids: z.array(z.string().min(1)).max(50).default([])
+});
+
 export const operatorControlSchema = z.object({
   reason: z.string().min(1),
   expires_at: z.string().datetime().optional(),

@@ -3,7 +3,8 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { attachmentUploadSchema, createPolicySchema, createRoomSchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, feedSubscribersSchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
 import { sign } from "./utils";
@@ -298,6 +299,67 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     const ok = db.deleteRoom(request.operator.fleetId, params.roomId, request.operator.id);
     if (!ok) return reply.code(404).send({ error: "room not found" });
     return reply.send({ ok: true });
+  });
+
+  // Feeds — operator-configured sources delivered to subscribed agents as
+  // non-waking context.
+  app.get("/v1/operator/feeds", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    return reply.send({ feeds: db.listFeeds(request.operator.fleetId) });
+  });
+
+  app.post("/v1/operator/feeds", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = createFeedSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    if (!isAllowedFeedUrl(parsed.data.url)) {
+      return reply.code(400).send({ error: "feed url must be a public http(s) address" });
+    }
+    const feed = db.createFeed(
+      request.operator.fleetId,
+      request.operator.id,
+      parsed.data.name,
+      parsed.data.url,
+      parsed.data.poll_interval_minutes,
+      parsed.data.subscriber_agent_ids
+    );
+    return reply.code(201).send(feed);
+  });
+
+  app.delete("/v1/operator/feeds/:feedId", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const params = request.params as { feedId: string };
+    const ok = db.deleteFeed(request.operator.fleetId, params.feedId, request.operator.id);
+    if (!ok) return reply.code(404).send({ error: "feed not found" });
+    return reply.send({ ok: true });
+  });
+
+  app.post("/v1/operator/feeds/:feedId/subscribers", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = feedSubscribersSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const params = request.params as { feedId: string };
+    const ok = db.setFeedSubscribers(request.operator.fleetId, params.feedId, request.operator.id, parsed.data.agent_ids);
+    if (!ok) return reply.code(404).send({ error: "feed not found" });
+    return reply.send({ ok: true });
+  });
+
+  app.post("/v1/operator/feeds/:feedId/poll", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const params = request.params as { feedId: string };
+    // Scope the feed to the operator's fleet before polling.
+    const items = db.getFeedItems(request.operator.fleetId, params.feedId, 1);
+    if (items === null) return reply.code(404).send({ error: "feed not found" });
+    const result = await db.pollFeed(params.feedId, fetchFeedUrl);
+    return reply.send(result);
+  });
+
+  app.get("/v1/operator/feeds/:feedId/items", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const params = request.params as { feedId: string };
+    const items = db.getFeedItems(request.operator.fleetId, params.feedId, 50);
+    if (items === null) return reply.code(404).send({ error: "feed not found" });
+    return reply.send({ items });
   });
 
   app.post("/v1/operator/agents/:agentId/:action", { preHandler: requireOperatorAuth }, async (request, reply) => {

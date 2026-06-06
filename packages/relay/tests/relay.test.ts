@@ -488,6 +488,50 @@ describe("Relay integration", () => {
       expect(filtered.body.events.every((e: { event_type: string }) => e.event_type.startsWith("message"))).toBe(true);
     });
 
+    it("seeds a feed on first poll, then delivers only new items to subscribers (dedup, non-waking)", async () => {
+      const a = await relay.enrollAgent("feed-a");
+      const outsider = await relay.enrollAgent("feed-out");
+      const feed = (await relay.operatorRequest("POST", "/v1/operator/feeds", {
+        name: "News", url: "https://example.com/rss.xml", subscriber_agent_ids: [a.agent_id]
+      })).body;
+      expect(feed.id).toMatch(/^feed_/);
+
+      const rss = (items: string) => `<rss><channel>${items}</channel></rss>`;
+      const item = (g: string, t: string) => `<item><title>${t}</title><link>https://x/${g}</link><guid>${g}</guid></item>`;
+
+      // First poll = seed the baseline (mark current items seen, deliver none).
+      const r1 = await relay.db.pollFeed(feed.id, async () => rss(item("g1", "One")));
+      expect(r1.delivered).toBe(0);
+      let inboxA = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      expect(inboxA.body.messages.length).toBe(0);
+
+      // Second poll with a NEW item -> delivered to the subscriber as a 'feed' msg.
+      const r2 = await relay.db.pollFeed(feed.id, async () => rss(item("g1", "One") + item("g2", "Two")));
+      expect(r2.delivered).toBe(1);
+      inboxA = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      const feedMsgs = inboxA.body.messages.filter((m: { message_type: string }) => m.message_type === "feed");
+      expect(feedMsgs.length).toBe(1);
+      expect(feedMsgs[0].body.text).toContain("Two");
+      // Non-subscriber gets nothing.
+      const inboxOut = await relay.agentRequest(outsider.agent_id, outsider.secret, "GET", "/v1/inbox");
+      expect(inboxOut.body.messages.length).toBe(0);
+
+      // Third poll, same items -> deduped, nothing new.
+      const r3 = await relay.db.pollFeed(feed.id, async () => rss(item("g1", "One") + item("g2", "Two")));
+      expect(r3.delivered).toBe(0);
+
+      // Recent items list shows both (g1 seeded + g2 delivered).
+      const items = await relay.operatorRequest("GET", `/v1/operator/feeds/${feed.id}/items`);
+      expect(items.body.items.length).toBe(2);
+    });
+
+    it("rejects a feed URL pointing at a private/loopback address", async () => {
+      const res = await relay.operatorRequest("POST", "/v1/operator/feeds", {
+        name: "evil", url: "http://169.254.169.254/latest/meta-data/"
+      });
+      expect(res.status).toBe(400);
+    });
+
     it("reports fleet health with latest metrics + throughput", async () => {
       const a = await relay.enrollAgent("health-a");
       const b = await relay.enrollAgent("health-b");

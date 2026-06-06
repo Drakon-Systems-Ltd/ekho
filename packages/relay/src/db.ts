@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { config } from "./config";
 import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
+import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashSecret, id, nowIso } from "./utils";
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
@@ -833,6 +834,162 @@ export class EkhoDb {
    * carries), current activity, the trust/delegation flags, and relay-derived
    * throughput over the last hour. One pane of glass for the fleet.
    */
+  // --- Feeds (operator-configured sources delivered non-waking) -------------
+
+  createFeed(fleetId: string, operatorId: string, name: string, url: string, pollIntervalMinutes: number, subscriberAgentIds: string[]) {
+    const feedId = id("feed");
+    const createdAt = nowIso();
+    const valid = new Set(
+      (this.db.prepare("SELECT id FROM agents WHERE fleet_id = ? AND runtime != 'operator' AND revoked_at IS NULL").all(fleetId) as Array<{ id: string }>).map((r) => r.id)
+    );
+    const subs = [...new Set(subscriberAgentIds)].filter((s) => valid.has(s));
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT INTO feeds (id, fleet_id, name, url, poll_interval_minutes, created_at, created_by_operator_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run(feedId, fleetId, name, url, pollIntervalMinutes, createdAt, operatorId);
+      const subStmt = this.db.prepare("INSERT OR IGNORE INTO feed_subscribers (feed_id, agent_id) VALUES (?, ?)");
+      for (const s of subs) subStmt.run(feedId, s);
+      this.recordEvent(fleetId, "feed.created", "operator", operatorId, "feed", feedId, null, { name, url, subscribers: subs });
+    });
+    tx();
+    return { id: feedId, name, url, poll_interval_minutes: pollIntervalMinutes, last_polled_at: null, created_at: createdAt, subscribers: subs };
+  }
+
+  listFeeds(fleetId: string) {
+    const feeds = this.db.prepare(
+      "SELECT id, name, url, poll_interval_minutes, last_polled_at, created_at FROM feeds WHERE fleet_id = ? ORDER BY created_at DESC"
+    ).all(fleetId) as Array<Record<string, unknown>>;
+    const subStmt = this.db.prepare(
+      `SELECT fs.agent_id, a.display_name FROM feed_subscribers fs
+       JOIN agents a ON a.id = fs.agent_id WHERE fs.feed_id = ? AND a.revoked_at IS NULL ORDER BY a.display_name`
+    );
+    const countStmt = this.db.prepare("SELECT COUNT(*) AS c FROM feed_seen WHERE feed_id = ?");
+    return feeds.map((f) => ({
+      ...f,
+      subscribers: subStmt.all(f.id) as Array<{ agent_id: string; display_name: string }>,
+      item_count: (countStmt.get(f.id) as { c: number }).c
+    }));
+  }
+
+  deleteFeed(fleetId: string, feedId: string, operatorId: string): boolean {
+    const feed = this.db.prepare("SELECT id FROM feeds WHERE id = ? AND fleet_id = ?").get(feedId, fleetId);
+    if (!feed) return false;
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM feed_subscribers WHERE feed_id = ?").run(feedId);
+      this.db.prepare("DELETE FROM feed_seen WHERE feed_id = ?").run(feedId);
+      this.db.prepare("DELETE FROM feeds WHERE id = ? AND fleet_id = ?").run(feedId, fleetId);
+      this.recordEvent(fleetId, "feed.deleted", "operator", operatorId, "feed", feedId, null, {});
+    });
+    tx();
+    return true;
+  }
+
+  setFeedSubscribers(fleetId: string, feedId: string, operatorId: string, agentIds: string[]): boolean {
+    const feed = this.db.prepare("SELECT id FROM feeds WHERE id = ? AND fleet_id = ?").get(feedId, fleetId);
+    if (!feed) return false;
+    const valid = new Set(
+      (this.db.prepare("SELECT id FROM agents WHERE fleet_id = ? AND runtime != 'operator' AND revoked_at IS NULL").all(fleetId) as Array<{ id: string }>).map((r) => r.id)
+    );
+    const subs = [...new Set(agentIds)].filter((s) => valid.has(s));
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM feed_subscribers WHERE feed_id = ?").run(feedId);
+      const stmt = this.db.prepare("INSERT OR IGNORE INTO feed_subscribers (feed_id, agent_id) VALUES (?, ?)");
+      for (const s of subs) stmt.run(feedId, s);
+      this.recordEvent(fleetId, "feed.subscribers_changed", "operator", operatorId, "feed", feedId, null, { subscribers: subs });
+    });
+    tx();
+    return true;
+  }
+
+  getFeedItems(fleetId: string, feedId: string, limit: number) {
+    const feed = this.db.prepare("SELECT id FROM feeds WHERE id = ? AND fleet_id = ?").get(feedId, fleetId);
+    if (!feed) return null;
+    return this.db.prepare(
+      "SELECT guid, title, link, delivered_at FROM feed_seen WHERE feed_id = ? ORDER BY delivered_at DESC LIMIT ?"
+    ).all(feedId, limit);
+  }
+
+  /** Feeds (across all fleets) whose poll interval has elapsed — for the sweep. */
+  feedsDueForPoll(nowMs: number): Array<{ id: string }> {
+    return (this.db.prepare(
+      "SELECT id, last_polled_at, poll_interval_minutes FROM feeds"
+    ).all() as Array<{ id: string; last_polled_at: string | null; poll_interval_minutes: number }>)
+      .filter((f) => !f.last_polled_at || nowMs - new Date(f.last_polled_at).getTime() >= f.poll_interval_minutes * 60_000)
+      .map((f) => ({ id: f.id }));
+  }
+
+  private deliverFeedItem(fleetId: string, feedId: string, feedName: string, item: FeedItem, subscriberIds: string[]) {
+    const senderId = this.ensureOperatorAgent(fleetId);
+    const messageId = id("msg");
+    const createdAt = nowIso();
+    const ttl = 21_600; // 6h — feeds are context, they can linger
+    const text = `📰 [${feedName}] ${item.title}${item.link ? `\n${item.link}` : ""}`;
+    this.db.prepare(
+      `INSERT INTO messages (id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+        message_type, priority, requires_approval, body_json, metadata_json, ttl_seconds, created_at, expires_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      messageId, fleetId, `feed-${feedId}`, id("cor"), senderId, "broadcast", null,
+      "feed", "low", 0,
+      JSON.stringify({ text, feed: feedName, link: item.link }),
+      JSON.stringify({ source: "feed", feed: feedName, link: item.link }),
+      ttl, createdAt, addSeconds(createdAt, ttl), "queued"
+    );
+    const dstmt = this.db.prepare("INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)");
+    for (const aid of subscriberIds) dstmt.run(id("dly"), messageId, aid, createdAt, "queued");
+  }
+
+  /**
+   * Poll a feed: fetch (via the injected fetchFn — real network in prod, a stub
+   * in tests), parse, and deliver NEW items to subscribers as non-waking 'feed'
+   * messages. The FIRST poll seeds the baseline (marks current items seen,
+   * delivers none) so adding a feed doesn't flood subscribers with its backlog.
+   */
+  async pollFeed(feedId: string, fetchFn: (url: string) => Promise<string | null>): Promise<{ delivered: number; total: number }> {
+    const feed = this.db.prepare("SELECT id, fleet_id, name, url FROM feeds WHERE id = ?").get(feedId) as
+      | { id: string; fleet_id: string; name: string; url: string }
+      | undefined;
+    if (!feed) return { delivered: 0, total: 0 };
+    const polledAt = nowIso();
+    // Mark polled up-front so a flaky source isn't hammered every sweep.
+    this.db.prepare("UPDATE feeds SET last_polled_at = ? WHERE id = ?").run(polledAt, feedId);
+
+    let xml: string | null = null;
+    try {
+      xml = await fetchFn(feed.url);
+    } catch {
+      return { delivered: 0, total: 0 };
+    }
+    if (!xml) return { delivered: 0, total: 0 };
+    const items = parseFeed(xml);
+    if (!items.length) return { delivered: 0, total: 0 };
+
+    const isSeeded = (this.db.prepare("SELECT COUNT(*) AS c FROM feed_seen WHERE feed_id = ?").get(feedId) as { c: number }).c > 0;
+    const subscribers = (this.db.prepare(
+      `SELECT fs.agent_id FROM feed_subscribers fs JOIN agents a ON a.id = fs.agent_id
+       WHERE fs.feed_id = ? AND a.revoked_at IS NULL`
+    ).all(feedId) as Array<{ agent_id: string }>).map((r) => r.agent_id);
+
+    const seenStmt = this.db.prepare("SELECT 1 FROM feed_seen WHERE feed_id = ? AND guid = ?");
+    const markStmt = this.db.prepare("INSERT OR IGNORE INTO feed_seen (feed_id, guid, title, link, delivered_at) VALUES (?, ?, ?, ?, ?)");
+    let delivered = 0;
+    const tx = this.db.transaction(() => {
+      for (const item of items.slice(0, 25)) {
+        if (seenStmt.get(feedId, item.guid)) continue;
+        markStmt.run(feedId, item.guid, item.title, item.link, polledAt);
+        if (isSeeded && subscribers.length) {
+          this.deliverFeedItem(feed.fleet_id, feedId, feed.name, item, subscribers);
+          delivered += 1;
+        }
+      }
+      if (delivered > 0) {
+        this.recordEvent(feed.fleet_id, "feed.delivered", "system", null, "feed", feedId, `feed-${feedId}`, { feed: feed.name, count: delivered });
+      }
+    });
+    tx();
+    return { delivered, total: items.length };
+  }
+
   getFleetHealth(fleetId: string) {
     const since = new Date(Date.now() - 3_600_000).toISOString();
     const agents = this.db.prepare(
