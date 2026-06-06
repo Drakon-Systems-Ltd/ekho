@@ -552,13 +552,30 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 
   /* Chat + composer comfort on small screens */
   .chat__body { padding: 14px 14px 6px; }
-  .bubble { max-width: 84%; }
+  .bubble-col { max-width: 90%; }
+  .bubble { max-width: 100%; }
   .composer { padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); }
-  .composer__recipient { max-width: 124px; padding: 10px 24px 10px 10px; }
-  .composer__send { padding: 0 16px; }
+  /* Recipient gets its own full-width line so agent / room names aren't clipped;
+     the input + attach + send wrap onto the second line. */
+  .composer__row { flex-wrap: wrap; align-items: center; }
+  .composer__recipient { order: -1; flex: 1 1 100%; width: 100%; max-width: 100%; padding: 11px 28px 11px 12px; }
+  /* attach + input + send share the second line; the input shrinks to fit. */
+  .composer__input { flex: 1 1 120px; min-width: 0; }
+  .composer__attach { flex: 0 0 auto; width: 44px; height: 44px; }
+  .composer__send { flex: 0 0 auto; height: 44px; min-width: 50px; padding: 0 14px; }
 
   /* Bigger touch targets in the lists */
   .agent-row, .conv-row { padding-top: 11px; padding-bottom: 11px; }
+
+  /* Right-rail drawer fits a 375px phone, with bigger controls in the pillar UIs */
+  .rail--right { width: min(340px, 88vw); }
+  .health-row__stats span, .health-stat { white-space: nowrap; }
+  .room-member { min-height: 40px; }
+  .room-member input { width: 20px; height: 20px; }
+
+  /* Modals become bottom sheets so the soft keyboard doesn't crush them */
+  .modal-overlay { align-items: end; padding: 0; }
+  .modal { max-width: 100%; max-height: 92dvh; border-radius: 18px 18px 0 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
