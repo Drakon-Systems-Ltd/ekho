@@ -563,6 +563,15 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
   .composer__input { flex: 1 1 120px; min-width: 0; }
   .composer__attach { flex: 0 0 auto; width: 44px; height: 44px; }
   .composer__send { flex: 0 0 auto; height: 44px; min-width: 50px; padding: 0 14px; }
+  /* The pending-attachment remove "×" is a fiddly 18px target on desktop. */
+  .att-pending__remove { width: 30px; height: 30px; font-size: 18px; }
+
+  /* KPI strip: a 2×2 grid eats a fifth of the list height on a phone. Lay the
+     stats out as a single compact, horizontally-scrolling stat bar instead. */
+  .kpi-strip { display: flex; gap: 8px; padding: 10px 12px; overflow-x: auto; scrollbar-width: none; scroll-snap-type: x proximity; }
+  .kpi-strip::-webkit-scrollbar { display: none; }
+  .stat-chip { flex: 0 0 auto; min-width: 116px; padding: 8px 12px; scroll-snap-align: start; }
+  .stat-chip__value { font-size: 18px; }
 
   /* Bigger touch targets in the lists */
   .agent-row, .conv-row { padding-top: 11px; padding-bottom: 11px; }
