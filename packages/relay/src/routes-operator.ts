@@ -49,6 +49,17 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ agents: db.getFleetHealth(request.operator.fleetId) });
   });
 
+  app.get("/v1/operator/activity", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const query = request.query as Record<string, unknown>;
+    const rawLimit = Number(query.limit ?? 50);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, Math.trunc(rawLimit))) : 50;
+    const type = typeof query.type === "string" && query.type ? query.type : undefined;
+    return reply.send({ events: db.getActivity(request.operator.fleetId, { limit, type }) });
+  });
+
   app.get("/v1/operator/agents", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });

@@ -93,6 +93,8 @@ export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, con
   });
 
 export const getFleetHealth = (token) => request("/v1/operator/fleet-health", { token });
+export const getActivity = (token, { limit = 50, type } = {}) =>
+  request(`/v1/operator/activity?${new URLSearchParams({ limit: String(limit), ...(type ? { type } : {}) }).toString()}`, { token });
 
 // Rooms — named conversations with a chosen set of member agents.
 export const getRooms = (token) => request("/v1/operator/rooms", { token });

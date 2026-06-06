@@ -888,6 +888,55 @@ export class EkhoDb {
     });
   }
 
+  /**
+   * Fleet-wide activity stream for the command-centre timeline: recent events
+   * (messages, handoffs, trust/room/delegation changes, …) newest-first, with
+   * agent ids resolved to display names and the payload parsed for rendering.
+   * ``type`` filters by event_type prefix (e.g. "message", "room", "agent").
+   */
+  getActivity(fleetId: string, options: { limit: number; type?: string }) {
+    // Heartbeats (one per agent every ~30s) would drown the stream — exclude them.
+    const where = ["fleet_id = ?", "event_type != 'agent.heartbeat'"];
+    const params: Array<string | number> = [fleetId];
+    if (options.type) {
+      where.push("event_type LIKE ?");
+      params.push(`${options.type}%`);
+    }
+    const rows = this.db.prepare(
+      `SELECT id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at
+       FROM events WHERE ${where.join(" AND ")} ORDER BY created_at DESC LIMIT ?`
+    ).all(...params, options.limit) as Array<Record<string, unknown>>;
+
+    const names = new Map(
+      (this.db.prepare("SELECT id, display_name FROM agents WHERE fleet_id = ?").all(fleetId) as Array<{ id: string; display_name: string }>)
+        .map((a) => [a.id, a.display_name])
+    );
+    const nameOf = (raw: unknown): string | null => {
+      if (typeof raw !== "string" || !raw) return null;
+      return names.get(raw) ?? raw;
+    };
+
+    return rows.map((r) => {
+      let payload: Record<string, unknown> = {};
+      if (typeof r.payload_json === "string") {
+        try { payload = JSON.parse(r.payload_json) as Record<string, unknown>; } catch { /* ignore */ }
+      }
+      return {
+        id: r.id,
+        event_type: r.event_type,
+        actor_kind: r.actor_kind,
+        actor_id: r.actor_id ?? null,
+        actor_name: nameOf(r.actor_id),
+        resource_kind: r.resource_kind,
+        resource_id: r.resource_id ?? null,
+        resource_name: nameOf(r.resource_id),
+        conversation_id: r.conversation_id ?? null,
+        payload,
+        created_at: r.created_at
+      };
+    });
+  }
+
   getFleetOverview(fleetId: string) {
     const agents = this.db.prepare(
       "SELECT id, display_name, runtime, status, last_seen_at FROM agents WHERE fleet_id = ? AND runtime != 'operator' ORDER BY created_at DESC LIMIT 10"

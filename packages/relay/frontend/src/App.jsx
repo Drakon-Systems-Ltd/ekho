@@ -20,6 +20,7 @@ import {
   resolveApproval,
   sendOperatorMessage,
   getFleetHealth,
+  getActivity,
   getRooms,
   createRoom,
   deleteRoom,
@@ -197,6 +198,8 @@ export default function App() {
   const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [roomSaving, setRoomSaving] = useState(false);
   const [fleetHealth, setFleetHealth] = useState([]);
+  const [activity, setActivity] = useState([]);
+  const [activityFilter, setActivityFilter] = useState("");
   const [optimistic, setOptimistic] = useState([]); // pending operator messages
   const [sending, setSending] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState([]); // [{id, filename, mime, size_bytes}]
@@ -299,6 +302,17 @@ export default function App() {
       const result = await getFleetHealth(session.token);
       setFleetHealth(result.agents || []);
       markInit("health");
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function refreshActivity() {
+    if (!session.token) return;
+    try {
+      const result = await getActivity(session.token, { limit: 60, type: activityFilter || undefined });
+      setActivity(result.events || []);
+      markInit("activity");
     } catch (error) {
       handleApiError(error, { allowSessionReset: true });
     }
@@ -738,7 +752,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshActivity()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -749,6 +763,12 @@ export default function App() {
     refreshAgents().catch((error) => handleApiError(error, { allowSessionReset: true }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentSearch, agentStatusFilter]);
+
+  useEffect(() => {
+    if (!session.token) return;
+    refreshActivity().catch((error) => handleApiError(error, { allowSessionReset: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activityFilter]);
 
   useAutoRefresh(
     Boolean(session.token),
@@ -761,6 +781,7 @@ export default function App() {
         refreshPolicies(),
         refreshDeadLetters(),
         refreshFleetHealth(),
+        refreshActivity(),
         selectedConversationId ? refreshTimeline(selectedConversationId) : Promise.resolve(),
         selectedAgentId ? refreshAgentDetail(selectedAgentId) : Promise.resolve(),
         selectedAgentId ? refreshAgentRateLimits(selectedAgentId) : Promise.resolve(),
@@ -1154,6 +1175,7 @@ export default function App() {
             {[
               ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
               ["health", "Health"],
+              ["activity", "Activity"],
               ["agent", "Agent"],
               ["access", "Access"],
               ["deadletters", "Dead"],
@@ -1178,6 +1200,17 @@ export default function App() {
 
             {rightTab === "health" && (
               <HealthTab agents={fleetHealth} initialized={initialized.current.health} />
+            )}
+
+            {rightTab === "activity" && (
+              <ActivityTab
+                events={activity}
+                agents={agents}
+                initialized={initialized.current.activity}
+                filter={activityFilter}
+                onFilter={setActivityFilter}
+                onOpenConversation={selectConversation}
+              />
             )}
 
             {rightTab === "agent" && (
@@ -1517,6 +1550,79 @@ function AgentTab({ agent, detail, rateLimits, onControl, onTrace }) {
         ))
       ) : (
         <div className="muted-note">No violations.</div>
+      )}
+    </div>
+  );
+}
+
+function truncText(s, n) {
+  return typeof s === "string" && s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+function formatActivity(e, nameOf) {
+  const p = e.payload || {};
+  const actor = e.actor_kind === "operator" ? "Operator" : e.actor_name || e.actor_id || "system";
+  const target = e.resource_name || e.resource_id || "";
+  switch (e.event_type) {
+    case "message.queued": {
+      let rcpt;
+      if (p.recipient_kind === "broadcast") rcpt = "the fleet";
+      else if (p.recipient_kind === "room") rcpt = "a room";
+      else rcpt = nameOf(p.recipient_id) || "a teammate";
+      const text = p.text ? ` — “${truncText(p.text, 90)}”` : "";
+      return { who: actor, line: `→ ${rcpt} (${p.message_type || "msg"})${text}` };
+    }
+    case "agent.trust_changed":
+      return { who: target, line: `operator trust ${p.operator_trusted ? "ON" : "OFF"}` };
+    case "agent.peer_autoreply_changed":
+      return { who: target, line: `delegation ${p.peer_autoreply ? `ON · budget ${p.peer_turn_budget}` : "OFF"}` };
+    case "room.created":
+      return { who: "Operator", line: `created room “${p.name || target}”${Array.isArray(p.members) ? ` · ${p.members.length} members` : ""}` };
+    case "room.deleted":
+      return { who: "Operator", line: "deleted a room" };
+    default:
+      return { who: actor, line: humanizeEvent(e.event_type, p) };
+  }
+}
+
+function ActivityTab({ events, agents, initialized, filter, onFilter, onOpenConversation }) {
+  const nameMap = useMemo(() => {
+    const m = new Map();
+    (agents || []).forEach((a) => m.set(a.id, a.display_name || a.id));
+    return m;
+  }, [agents]);
+  const nameOf = (id) => (id ? nameMap.get(id) || null : null);
+  const filters = [["", "All"], ["message", "Messages"], ["room", "Rooms"], ["agent", "Changes"]];
+  if (!initialized) return <Skeleton count={5} height="46px" />;
+  return (
+    <div className="activity">
+      <div className="activity__filters">
+        {filters.map(([val, label]) => (
+          <button key={val || "all"} className={`chip${filter === val ? " chip--active" : ""}`} onClick={() => onFilter(val)}>{label}</button>
+        ))}
+      </div>
+      {events.length ? (
+        <div className="activity__list">
+          {events.map((e) => {
+            const { who, line } = formatActivity(e, nameOf);
+            const clickable = Boolean(e.conversation_id && onOpenConversation);
+            return (
+              <div
+                key={e.id}
+                className={`activity__row${clickable ? " activity__row--link" : ""}`}
+                onClick={clickable ? () => onOpenConversation(e.conversation_id) : undefined}
+              >
+                <Avatar id={e.actor_id || e.event_type} label={who} size={26} />
+                <div className="activity__body">
+                  <div className="activity__line"><strong>{who}</strong> {line}</div>
+                  <div className="activity__time">{relativeTime(e.created_at)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState title="No activity yet">Fleet messages, hand-offs, and changes will stream here.</EmptyState>
       )}
     </div>
   );

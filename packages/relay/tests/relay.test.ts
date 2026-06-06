@@ -460,6 +460,34 @@ describe("Relay integration", () => {
       expect(inboxM2.body.messages.some((m: { body: { text: string } }) => m.body.text === "intruder injection")).toBe(false);
     });
 
+    it("returns a filterable fleet activity stream with resolved names", async () => {
+      const a = await relay.enrollAgent("act-a");
+      const b = await relay.enrollAgent("act-b");
+      await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: a.agent_id, text: "hello a" });
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: b.agent_id },
+        message_type: "direct",
+        body: { text: "hi b" },
+        conversation_id: "c1",
+        correlation_id: "cor1"
+      });
+
+      const res = await relay.operatorRequest("GET", "/v1/operator/activity?limit=40");
+      expect(res.status).toBe(200);
+      const msgs = res.body.events.filter((e: { event_type: string }) => e.event_type === "message.queued");
+      expect(msgs.length).toBeGreaterThanOrEqual(2);
+      // Operator message carries its text in the payload.
+      expect(msgs.some((e: { payload: { text?: string } }) => e.payload?.text === "hello a")).toBe(true);
+      // Agent actor id resolves to a display name.
+      const aEvent = msgs.find((e: { actor_id: string }) => e.actor_id === a.agent_id);
+      expect(aEvent.actor_name).toBe("act-a");
+
+      // Type filter (prefix).
+      const filtered = await relay.operatorRequest("GET", "/v1/operator/activity?type=message");
+      expect(filtered.body.events.length).toBeGreaterThan(0);
+      expect(filtered.body.events.every((e: { event_type: string }) => e.event_type.startsWith("message"))).toBe(true);
+    });
+
     it("reports fleet health with latest metrics + throughput", async () => {
       const a = await relay.enrollAgent("health-a");
       const b = await relay.enrollAgent("health-b");
