@@ -19,6 +19,7 @@ import {
   login,
   resolveApproval,
   sendOperatorMessage,
+  getFleetHealth,
   getRooms,
   createRoom,
   deleteRoom,
@@ -195,6 +196,7 @@ export default function App() {
   const [rooms, setRooms] = useState([]);
   const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [roomSaving, setRoomSaving] = useState(false);
+  const [fleetHealth, setFleetHealth] = useState([]);
   const [optimistic, setOptimistic] = useState([]); // pending operator messages
   const [sending, setSending] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState([]); // [{id, filename, mime, size_bytes}]
@@ -286,6 +288,17 @@ export default function App() {
     try {
       const result = await getRooms(session.token);
       setRooms(result.rooms || []);
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function refreshFleetHealth() {
+    if (!session.token) return;
+    try {
+      const result = await getFleetHealth(session.token);
+      setFleetHealth(result.agents || []);
+      markInit("health");
     } catch (error) {
       handleApiError(error, { allowSessionReset: true });
     }
@@ -725,7 +738,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -747,6 +760,7 @@ export default function App() {
         refreshApprovals(),
         refreshPolicies(),
         refreshDeadLetters(),
+        refreshFleetHealth(),
         selectedConversationId ? refreshTimeline(selectedConversationId) : Promise.resolve(),
         selectedAgentId ? refreshAgentDetail(selectedAgentId) : Promise.resolve(),
         selectedAgentId ? refreshAgentRateLimits(selectedAgentId) : Promise.resolve(),
@@ -1139,6 +1153,7 @@ export default function App() {
           <div className="tabs">
             {[
               ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
+              ["health", "Health"],
               ["agent", "Agent"],
               ["access", "Access"],
               ["deadletters", "Dead"],
@@ -1159,6 +1174,10 @@ export default function App() {
                 onReject={(id) => handleApproval(id, "reject")}
                 onTrace={selectConversation}
               />
+            )}
+
+            {rightTab === "health" && (
+              <HealthTab agents={fleetHealth} initialized={initialized.current.health} />
             )}
 
             {rightTab === "agent" && (
@@ -1499,6 +1518,56 @@ function AgentTab({ agent, detail, rateLimits, onControl, onTrace }) {
       ) : (
         <div className="muted-note">No violations.</div>
       )}
+    </div>
+  );
+}
+
+function HealthTab({ agents, initialized }) {
+  if (!initialized) return <Skeleton count={3} height="80px" />;
+  if (!agents.length) return <EmptyState title="No agents">Enroll an agent to see fleet health here.</EmptyState>;
+  return (
+    <div className="cards">
+      <div className="access-caption">
+        Live fleet health — model, current activity, and message throughput (last hour) per agent.
+      </div>
+      {agents.map((a) => {
+        const model = a.metrics?.model;
+        const provider = a.metrics?.provider;
+        const active = a.active_conversations?.length || 0;
+        const missed = a.consecutive_missed_heartbeats || 0;
+        return (
+          <article className="rcard health-row" key={a.id}>
+            <div className="access-row__head">
+              <Avatar id={a.id} label={a.display_name || a.id} size={34} />
+              <div className="access-row__id">
+                <div className="rcard__title">{a.display_name || a.id}</div>
+                <div className="rcard__meta">
+                  <span className="mono">{a.runtime || "custom"}</span>
+                  {model ? (
+                    <> · {model}{provider ? <span className="muted"> ({provider})</span> : null}</>
+                  ) : (
+                    <span className="muted"> · model —</span>
+                  )}
+                </div>
+              </div>
+              <StatusDot status={a.status} title={a.status} />
+            </div>
+            <div className="health-row__stats">
+              <span className="health-stat"><strong>{a.sent_1h}</strong> sent</span>
+              <span className="health-stat"><strong>{a.received_1h}</strong> recv</span>
+              <span className="muted">/1h</span>
+              <span className="health-row__spacer" />
+              <span className="health-stat">{active} active</span>
+              <span className="muted">beat {relativeTime(a.last_heartbeat_at)}</span>
+            </div>
+            <div className="health-row__flags">
+              {a.operator_trusted ? <Badge tone="ok">trusted</Badge> : null}
+              {a.peer_autoreply ? <Badge>delegation · {a.peer_turn_budget}</Badge> : <Badge>solo</Badge>}
+              {missed > 0 ? <Badge tone="warn">missed {missed}</Badge> : null}
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }

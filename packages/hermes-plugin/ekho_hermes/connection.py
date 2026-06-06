@@ -48,11 +48,25 @@ _heartbeat_stop = threading.Event()
 _autoreply_stop: Optional[Callable[[], None]] = None
 
 
+def _report_metrics() -> dict:
+    """Best-effort agent metrics for the operator health board. Sourced from env
+    so it's generic + robust (no fragile runtime introspection): set
+    EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER to surface them in the console."""
+    metrics: dict = {}
+    model = (os.environ.get("EKHO_REPORT_MODEL") or "").strip()
+    provider = (os.environ.get("EKHO_REPORT_PROVIDER") or "").strip()
+    if model:
+        metrics["model"] = model
+    if provider:
+        metrics["provider"] = provider
+    return metrics
+
+
 def _heartbeat_loop(client: EkhoAgentClient, interval_seconds: int) -> None:
     """Immediate beat, then every ``interval_seconds``. Survives all errors."""
     while not _heartbeat_stop.is_set():
         try:
-            client.heartbeat({"status": "healthy"})
+            client.heartbeat({"status": "healthy", "metrics": _report_metrics()})
         except Exception as exc:  # noqa: BLE001 — a relay blip must not kill the loop
             logger.debug("[ekho] heartbeat failed: %s", exc)
         # Wake promptly on shutdown() instead of sleeping the full interval.

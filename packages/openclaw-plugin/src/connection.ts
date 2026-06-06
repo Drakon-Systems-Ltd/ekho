@@ -67,7 +67,17 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
     });
 
     if (!heartbeatTimer) {
-      const beat = () => { void client.heartbeat({ status: "healthy" }).catch(() => {}); };
+      // Best-effort metrics for the operator health board, from env so it's
+      // generic (set EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER to surface them).
+      const reportMetrics = (): Record<string, string> => {
+        const m: Record<string, string> = {};
+        const model = (process.env.EKHO_REPORT_MODEL ?? "").trim();
+        const provider = (process.env.EKHO_REPORT_PROVIDER ?? "").trim();
+        if (model) m.model = model;
+        if (provider) m.provider = provider;
+        return m;
+      };
+      const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
       beat();
       heartbeatTimer = setInterval(beat, config.heartbeatIntervalMs ?? 30_000);
       if (typeof heartbeatTimer === "object" && "unref" in heartbeatTimer) heartbeatTimer.unref?.();

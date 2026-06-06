@@ -92,6 +92,8 @@ export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, con
     },
   });
 
+export const getFleetHealth = (token) => request("/v1/operator/fleet-health", { token });
+
 // Rooms — named conversations with a chosen set of member agents.
 export const getRooms = (token) => request("/v1/operator/rooms", { token });
 export const createRoom = (token, { name, memberAgentIds }) =>
