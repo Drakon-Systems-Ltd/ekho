@@ -212,10 +212,24 @@ export class EkhoDb {
    * (minus the sender, excluding the synthetic operator + revoked agents).
    * Otherwise null. This is what makes a room a shared space: any message
    * whose conversation_id is the room fans out to every member.
+   *
+   * ``requireSenderMembership`` (true for agent sends) prevents an IDOR: a
+   * non-member agent that learns/guesses a room id can NOT fan a message into
+   * that room — it falls through to normal delivery. The operator is the rooms'
+   * owner, so its sends pass false.
    */
-  private roomMemberIds(fleetId: string, conversationId: string, senderAgentId: string): string[] | null {
+  private roomMemberIds(
+    fleetId: string,
+    conversationId: string,
+    senderAgentId: string,
+    requireSenderMembership: boolean
+  ): string[] | null {
     const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId);
     if (!room) return null;
+    if (requireSenderMembership) {
+      const isMember = this.db.prepare("SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ?").get(conversationId, senderAgentId);
+      if (!isMember) return null; // not a member -> not a room fan-out
+    }
     const rows = this.db.prepare(
       `SELECT rm.agent_id AS id FROM room_members rm
        JOIN agents a ON a.id = rm.agent_id
@@ -287,8 +301,9 @@ export class EkhoDb {
         "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
       );
       // A message into a room fans out to its members (minus sender), whatever
-      // recipient the sender stated — that's what makes the room shared.
-      const roomRecipients = this.roomMemberIds(input.fleetId, input.conversationId, input.senderAgentId);
+      // recipient the sender stated — that's what makes the room shared. The
+      // sender must be a member (else a non-member could inject into the room).
+      const roomRecipients = this.roomMemberIds(input.fleetId, input.conversationId, input.senderAgentId, true);
       if (roomRecipients !== null) {
         for (const rid of roomRecipients) {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
@@ -415,7 +430,9 @@ export class EkhoDb {
       const deliveryStmt = this.db.prepare(
         "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
       );
-      const roomRecipients = this.roomMemberIds(input.fleetId, conversationId, senderId);
+      // The operator owns the fleet's rooms, so it may post into any of them
+      // (it is never a "member"); membership is not required for this path.
+      const roomRecipients = this.roomMemberIds(input.fleetId, conversationId, senderId, false);
       if (roomRecipients !== null) {
         for (const rid of roomRecipients) {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");

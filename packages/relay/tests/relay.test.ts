@@ -436,6 +436,30 @@ describe("Relay integration", () => {
       expect(inboxOut.body.messages.length).toBe(0); // not a member
     });
 
+    it("does not let a non-member fan a message into a room", async () => {
+      const m1 = await relay.enrollAgent("idor-m1");
+      const m2 = await relay.enrollAgent("idor-m2");
+      const intruder = await relay.enrollAgent("idor-intruder");
+      const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
+        name: "Private", member_agent_ids: [m1.agent_id, m2.agent_id]
+      })).body;
+
+      // The intruder (NOT a member) knows the room id and posts into it,
+      // addressing m1. If membership weren't enforced this would fan out to the
+      // whole room and m2 would receive it too.
+      await relay.agentRequest(intruder.agent_id, intruder.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: m1.agent_id },
+        message_type: "direct",
+        body: { text: "intruder injection" },
+        conversation_id: room.id,
+        correlation_id: "idor-c1"
+      });
+
+      // Delivered only to the stated recipient (m1), NOT fanned out to the room.
+      const inboxM2 = await relay.agentRequest(m2.agent_id, m2.secret, "GET", "/v1/inbox");
+      expect(inboxM2.body.messages.some((m: { body: { text: string } }) => m.body.text === "intruder injection")).toBe(false);
+    });
+
     it("deletes a room", async () => {
       const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
         name: "tmp", member_agent_ids: []
