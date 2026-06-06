@@ -42,6 +42,13 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send(db.getFleetOverview(request.operator.fleetId));
   });
 
+  app.get("/v1/operator/fleet-health", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    return reply.send({ agents: db.getFleetHealth(request.operator.fleetId) });
+  });
+
   app.get("/v1/operator/agents", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });

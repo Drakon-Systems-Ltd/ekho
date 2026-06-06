@@ -827,6 +827,67 @@ export class EkhoDb {
     return result;
   }
 
+  /**
+   * Per-agent health board: status + heartbeat freshness, the latest
+   * agent-reported metrics (model/provider/quota — whatever the heartbeat
+   * carries), current activity, the trust/delegation flags, and relay-derived
+   * throughput over the last hour. One pane of glass for the fleet.
+   */
+  getFleetHealth(fleetId: string) {
+    const since = new Date(Date.now() - 3_600_000).toISOString();
+    const agents = this.db.prepare(
+      `SELECT id, display_name, runtime, status, last_seen_at, consecutive_missed_heartbeats,
+              operator_trusted, peer_autoreply, peer_turn_budget
+       FROM agents WHERE fleet_id = ? AND runtime != 'operator'
+       ORDER BY display_name`
+    ).all(fleetId) as Array<Record<string, unknown>>;
+
+    const latestHb = this.db.prepare(
+      "SELECT metrics_json, received_at FROM heartbeats WHERE agent_id = ? ORDER BY received_at DESC LIMIT 1"
+    );
+    const sentStmt = this.db.prepare(
+      "SELECT COUNT(*) AS c FROM messages WHERE fleet_id = ? AND sender_agent_id = ? AND created_at >= ?"
+    );
+    const recvStmt = this.db.prepare(
+      `SELECT COUNT(*) AS c FROM message_deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE m.fleet_id = ? AND d.recipient_agent_id = ? AND d.queued_at >= ?`
+    );
+
+    return agents.map((a) => {
+      const id = String(a.id);
+      const hb = latestHb.get(id) as { metrics_json?: string; received_at?: string } | undefined;
+      let metrics: Record<string, unknown> = {};
+      let activeConversations: string[] = [];
+      if (hb?.metrics_json) {
+        try {
+          const parsed = JSON.parse(hb.metrics_json) as Record<string, unknown>;
+          metrics = (parsed.metrics as Record<string, unknown>) ?? {};
+          activeConversations = Array.isArray(parsed.active_conversation_ids)
+            ? (parsed.active_conversation_ids as string[])
+            : [];
+        } catch {
+          /* malformed heartbeat metrics — show none */
+        }
+      }
+      return {
+        id,
+        display_name: a.display_name,
+        runtime: a.runtime,
+        status: a.status,
+        last_seen_at: a.last_seen_at ?? null,
+        consecutive_missed_heartbeats: Number(a.consecutive_missed_heartbeats) || 0,
+        operator_trusted: Boolean(a.operator_trusted),
+        peer_autoreply: Boolean(a.peer_autoreply),
+        peer_turn_budget: Number(a.peer_turn_budget) || 6,
+        last_heartbeat_at: hb?.received_at ?? null,
+        metrics,
+        active_conversations: activeConversations,
+        sent_1h: (sentStmt.get(fleetId, id, since) as { c: number }).c,
+        received_1h: (recvStmt.get(fleetId, id, since) as { c: number }).c
+      };
+    });
+  }
+
   getFleetOverview(fleetId: string) {
     const agents = this.db.prepare(
       "SELECT id, display_name, runtime, status, last_seen_at FROM agents WHERE fleet_id = ? AND runtime != 'operator' ORDER BY created_at DESC LIMIT 10"

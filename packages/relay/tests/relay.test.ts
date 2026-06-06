@@ -460,6 +460,38 @@ describe("Relay integration", () => {
       expect(inboxM2.body.messages.some((m: { body: { text: string } }) => m.body.text === "intruder injection")).toBe(false);
     });
 
+    it("reports fleet health with latest metrics + throughput", async () => {
+      const a = await relay.enrollAgent("health-a");
+      const b = await relay.enrollAgent("health-b");
+
+      // a reports a heartbeat carrying model/provider + an active conversation.
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/heartbeats", {
+        status: "healthy",
+        active_conversation_ids: ["conv-x"],
+        metrics: { model: "claude-opus-4-8", provider: "anthropic" }
+      });
+      // a sends b a message (throughput: a sent 1, b received 1).
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: b.agent_id },
+        message_type: "direct",
+        body: { text: "hi" },
+        conversation_id: "c1",
+        correlation_id: "cor1"
+      });
+
+      const res = await relay.operatorRequest("GET", "/v1/operator/fleet-health");
+      expect(res.status).toBe(200);
+      const ha = res.body.agents.find((x: { id: string }) => x.id === a.agent_id);
+      expect(ha.metrics.model).toBe("claude-opus-4-8");
+      expect(ha.metrics.provider).toBe("anthropic");
+      expect(ha.active_conversations).toContain("conv-x");
+      expect(ha.last_heartbeat_at).toBeTruthy();
+      expect(ha.sent_1h).toBe(1);
+      const hb = res.body.agents.find((x: { id: string }) => x.id === b.agent_id);
+      expect(hb.received_1h).toBe(1);
+      expect(hb.metrics).toEqual({}); // no heartbeat metrics reported yet
+    });
+
     it("deletes a room", async () => {
       const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
         name: "tmp", member_agent_ids: []
