@@ -67,10 +67,24 @@ import {
   resolveAttachmentMime,
   saveSettings,
 } from "./components";
-import { useAutoRefresh, useNow } from "./hooks";
+import { useAutoRefresh, useEdgeSwipeBack, useNow } from "./hooks";
 
 const POLL_INTERVAL_MS = 5000;
 const TIMELINE_LIMIT = 100;
+
+// Short labels for the right-rail Ops tabs, used by the mobile "back to where you
+// were" breadcrumb when a chat was opened by tracing from one of them.
+const RAIL_TAB_LABELS = {
+  approvals: "Approvals",
+  health: "Health",
+  topology: "Map",
+  activity: "Activity",
+  feeds: "Feeds",
+  agent: "Agent",
+  access: "Access",
+  deadletters: "Dead letters",
+  policies: "Policies",
+};
 
 /* Map a raw conversation event into a renderable chat item. Operator messages
    carry their text in the event payload; agent/system events are rendered as
@@ -197,6 +211,9 @@ export default function App() {
   // 'list' shows the fleet/conversations rail; 'chat' shows the conversation.
   const [mobileView, setMobileView] = useState("list");
   const [opsOpen, setOpsOpen] = useState(false); // right-rail drawer (mobile)
+  // When a chat is opened by tracing from an Ops-drawer tab (Approvals/Agent/…),
+  // remember that tab so mobile can offer a one-tap "back to where you were".
+  const [traceReturn, setTraceReturn] = useState(null);
   const [composerText, setComposerText] = useState("");
   const [composerRecipient, setComposerRecipient] = useState("broadcast");
   const [rooms, setRooms] = useState([]);
@@ -613,6 +630,29 @@ export default function App() {
     setOpsOpen(false);
     refreshTimeline(conversationId).catch((error) => handleApiError(error, { allowSessionReset: true }));
   }
+
+  // Trace a conversation FROM an Ops-drawer tab: remember which tab so mobile can
+  // offer a one-tap return (selectConversation closes the drawer + opens the chat).
+  function traceFromOps(conversationId) {
+    setTraceReturn(rightTab);
+    selectConversation(conversationId);
+  }
+
+  // Mobile "‹ Fleet": back to the conversation list, dropping any trace breadcrumb.
+  function backToList() {
+    setMobileView("list");
+    setTraceReturn(null);
+  }
+
+  // Mobile breadcrumb: reopen the Ops drawer on the tab the trace came from.
+  function returnFromTrace() {
+    if (!traceReturn) return;
+    setRightTab(traceReturn);
+    setTraceReturn(null);
+    setOpsOpen(true);
+  }
+
+  const swipeBack = useEdgeSwipeBack(backToList);
 
   /* ---------------- attachments ---------------- */
 
@@ -1100,11 +1140,21 @@ export default function App() {
         </aside>
 
         {/* CENTER — CHAT */}
-        <main className="chat">
+        <main className="chat" {...swipeBack}>
           <div className="chat__header">
-            <button className="chat__back" onClick={() => setMobileView("list")} aria-label="Back to fleet">
+            <button className="chat__back" onClick={backToList} aria-label="Back to fleet">
               ‹ Fleet
             </button>
+            {traceReturn && (
+              <button
+                className="chat__trace-return"
+                onClick={returnFromTrace}
+                aria-label={`Back to ${RAIL_TAB_LABELS[traceReturn] || traceReturn}`}
+                title={`Back to ${RAIL_TAB_LABELS[traceReturn] || traceReturn}`}
+              >
+                ↩ {RAIL_TAB_LABELS[traceReturn] || traceReturn}
+              </button>
+            )}
             <div className="chat__heading">
               {selectedConversationId ? (
                 <>
@@ -1261,7 +1311,7 @@ export default function App() {
                 initialized={initialized.current.approvals}
                 onApprove={(id) => handleApproval(id, "approve")}
                 onReject={(id) => handleApproval(id, "reject")}
-                onTrace={selectConversation}
+                onTrace={traceFromOps}
               />
             )}
 
@@ -1280,7 +1330,7 @@ export default function App() {
                 initialized={initialized.current.activity}
                 filter={activityFilter}
                 onFilter={setActivityFilter}
-                onOpenConversation={selectConversation}
+                onOpenConversation={traceFromOps}
               />
             )}
 
@@ -1302,7 +1352,7 @@ export default function App() {
                 detail={agentDetail}
                 rateLimits={agentRateLimits}
                 onControl={handleControl}
-                onTrace={selectConversation}
+                onTrace={traceFromOps}
               />
             )}
 
@@ -1331,7 +1381,7 @@ export default function App() {
                     handleApiError(error, { allowSessionReset: true });
                   }
                 }}
-                onTrace={selectConversation}
+                onTrace={traceFromOps}
               />
             )}
 
