@@ -120,6 +120,12 @@ export const createFeedSource = (token, { name, url, pollIntervalMinutes, subscr
   });
 export const deleteFeedSource = (token, feedId) =>
   request(`/v1/operator/feeds/${encodeURIComponent(feedId)}`, { token, method: "DELETE" });
+export const setFeedSubscribers = (token, feedId, agentIds) =>
+  request(`/v1/operator/feeds/${encodeURIComponent(feedId)}/subscribers`, {
+    token,
+    method: "POST",
+    body: { agent_ids: agentIds },
+  });
 export const pollFeedSource = (token, feedId) =>
   request(`/v1/operator/feeds/${encodeURIComponent(feedId)}/poll`, { token, method: "POST" });
 export const getFeedItems = (token, feedId) =>

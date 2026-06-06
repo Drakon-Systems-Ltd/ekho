@@ -28,6 +28,7 @@ import {
   getFeeds,
   createFeedSource,
   deleteFeedSource,
+  setFeedSubscribers,
   pollFeedSource,
   setAgentTrust,
   setPeerAutoreply,
@@ -396,6 +397,19 @@ export default function App() {
       await refreshFeeds();
     } catch (error) {
       handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function handleSetFeedSubscribers(feedId, agentIds) {
+    setFeedBusy(`subs-${feedId}`);
+    try {
+      await setFeedSubscribers(session.token, feedId, agentIds);
+      await refreshFeeds();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+      throw error;
+    } finally {
+      setFeedBusy("");
     }
   }
 
@@ -1345,6 +1359,7 @@ export default function App() {
                 onCreate={handleCreateFeed}
                 onPoll={handlePollFeed}
                 onDelete={handleDeleteFeed}
+                onSetSubscribers={handleSetFeedSubscribers}
               />
             )}
 
@@ -1695,7 +1710,7 @@ function truncText(s, n) {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-function FeedsTab({ feeds, agents, initialized, busy, onCreate, onPoll, onDelete }) {
+function FeedsTab({ feeds, agents, initialized, busy, onCreate, onPoll, onDelete, onSetSubscribers }) {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [subs, setSubs] = useState([]);
@@ -1706,6 +1721,15 @@ function FeedsTab({ feeds, agents, initialized, busy, onCreate, onPoll, onDelete
       await onCreate({ name: name.trim(), url: url.trim(), subscriberAgentIds: subs });
       setName(""); setUrl(""); setSubs([]);
     } catch { /* error surfaced by parent */ }
+  };
+
+  // Editing the subscriber set of an already-saved feed.
+  const [editingId, setEditingId] = useState(null);
+  const [editSubs, setEditSubs] = useState([]);
+  const startEdit = (f) => { setEditingId(f.id); setEditSubs((f.subscribers || []).map((s) => s.agent_id)); };
+  const toggleEdit = (id) => setEditSubs((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  const saveEdit = async (id) => {
+    try { await onSetSubscribers(id, editSubs); setEditingId(null); } catch { /* surfaced by parent */ }
   };
   if (!initialized) return <Skeleton count={3} height="72px" />;
   return (
@@ -1748,6 +1772,12 @@ function FeedsTab({ feeds, agents, initialized, busy, onCreate, onPoll, onDelete
                   <div className="rcard__meta mono feed-row__url">{f.url}</div>
                 </div>
                 <div className="feed-row__actions">
+                  <button
+                    className={`button button--sm ${editingId === f.id ? "button--primary" : "button--ghost"}`}
+                    onClick={() => (editingId === f.id ? setEditingId(null) : startEdit(f))}
+                  >
+                    Subscribers
+                  </button>
                   <button className="button button--sm button--ghost" disabled={busy === f.id} onClick={() => onPoll(f.id)}>{busy === f.id ? "…" : "Poll"}</button>
                   <button className="button button--sm button--danger" onClick={() => onDelete(f.id)} aria-label="Delete feed">×</button>
                 </div>
@@ -1755,6 +1785,36 @@ function FeedsTab({ feeds, agents, initialized, busy, onCreate, onPoll, onDelete
               <div className="feed-row__stats">
                 {f.subscribers?.length ?? 0} subscriber{(f.subscribers?.length ?? 0) === 1 ? "" : "s"} · {f.item_count ?? 0} items · {f.last_polled_at ? `polled ${relativeTime(f.last_polled_at)}` : "not polled yet"}
               </div>
+              {editingId === f.id ? (
+                <div className="feed-row__edit">
+                  <div className="room-members">
+                    {agents.length ? agents.map((a) => (
+                      <label className="room-member" key={a.id}>
+                        <input type="checkbox" checked={editSubs.includes(a.id)} onChange={() => toggleEdit(a.id)} />
+                        <span>{a.display_name || a.id}</span>
+                      </label>
+                    )) : <span className="muted">No agents enrolled yet.</span>}
+                  </div>
+                  <div className="feed-row__edit-actions">
+                    <button className="button button--sm button--ghost" onClick={() => setEditingId(null)}>Cancel</button>
+                    <button
+                      className="button button--sm button--primary"
+                      disabled={busy === `subs-${f.id}`}
+                      onClick={() => saveEdit(f.id)}
+                    >
+                      {busy === `subs-${f.id}` ? "Saving…" : "Save subscribers"}
+                    </button>
+                  </div>
+                </div>
+              ) : f.subscribers?.length ? (
+                <div className="feed-row__subs">
+                  {f.subscribers.map((s) => (
+                    <span className="feed-sub-chip" key={s.agent_id}>{s.display_name || s.agent_id}</span>
+                  ))}
+                </div>
+              ) : (
+                <div className="feed-row__subs feed-row__subs--empty muted">No subscribers — add some so agents receive it.</div>
+              )}
             </article>
           ))}
         </div>

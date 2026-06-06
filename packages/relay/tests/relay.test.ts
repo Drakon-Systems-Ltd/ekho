@@ -525,6 +525,39 @@ describe("Relay integration", () => {
       expect(items.body.items.length).toBe(2);
     });
 
+    it("edits a saved feed's subscribers (replace set, clear, 404 on unknown)", async () => {
+      const a = await relay.enrollAgent("subs-a");
+      const b = await relay.enrollAgent("subs-b");
+      const feed = (await relay.operatorRequest("POST", "/v1/operator/feeds", {
+        name: "Subs", url: "https://example.com/subs.xml", subscriber_agent_ids: [a.agent_id]
+      })).body;
+      expect(feed.subscribers).toEqual([a.agent_id]);
+
+      const subIdsOf = async (feedId: string) => {
+        const list = await relay.operatorRequest("GET", "/v1/operator/feeds");
+        const f = list.body.feeds.find((x: { id: string }) => x.id === feedId);
+        return (f.subscribers as Array<{ agent_id: string }>).map((s) => s.agent_id).sort();
+      };
+
+      // Replace the set: drop a, add b.
+      const set = await relay.operatorRequest("POST", `/v1/operator/feeds/${feed.id}/subscribers`, { agent_ids: [b.agent_id] });
+      expect(set.status).toBe(200);
+      expect(set.body.ok).toBe(true);
+      expect(await subIdsOf(feed.id)).toEqual([b.agent_id]);
+
+      // Add both back.
+      await relay.operatorRequest("POST", `/v1/operator/feeds/${feed.id}/subscribers`, { agent_ids: [a.agent_id, b.agent_id] });
+      expect(await subIdsOf(feed.id)).toEqual([a.agent_id, b.agent_id].sort());
+
+      // Clear to none.
+      await relay.operatorRequest("POST", `/v1/operator/feeds/${feed.id}/subscribers`, { agent_ids: [] });
+      expect(await subIdsOf(feed.id)).toEqual([]);
+
+      // Unknown feed → 404.
+      const missing = await relay.operatorRequest("POST", "/v1/operator/feeds/feed_nope/subscribers", { agent_ids: [] });
+      expect(missing.status).toBe(404);
+    });
+
     it("rejects a feed URL pointing at a private/loopback address", async () => {
       const res = await relay.operatorRequest("POST", "/v1/operator/feeds", {
         name: "evil", url: "http://169.254.169.254/latest/meta-data/"

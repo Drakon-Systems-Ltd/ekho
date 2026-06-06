@@ -463,6 +463,11 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .feed-row__url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed-row__actions { display: flex; gap: 6px; flex: 0 0 auto; }
 .feed-row__stats { font-size: 12px; color: var(--muted); }
+.feed-row__subs { display: flex; flex-wrap: wrap; gap: 5px; }
+.feed-row__subs--empty { font-size: 12px; }
+.feed-sub-chip { font-size: 11.5px; padding: 3px 9px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.feed-row__edit { display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
+.feed-row__edit-actions { display: flex; justify-content: flex-end; gap: 6px; }
 
 .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 10px; }
 .pagination__meta { color: var(--muted); font-size: 12px; }
