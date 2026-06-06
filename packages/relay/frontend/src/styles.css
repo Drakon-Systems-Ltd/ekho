@@ -411,6 +411,40 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .health-stat strong { font-variant-numeric: tabular-nums; }
 .health-row__spacer { flex: 1 1 auto; }
 .health-row__flags { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---------------- topology map ---------------- */
+.topo { display: flex; flex-direction: column; gap: 12px; }
+.topo-svg {
+  width: 100%; height: auto; display: block;
+  border: 1px solid var(--hair); border-radius: var(--radius);
+  background: radial-gradient(circle at 50% 50%, rgba(45, 212, 191, 0.06), transparent 62%), var(--raised);
+}
+.topo-spoke { stroke: var(--hair-strong); stroke-width: 1; transition: opacity var(--t); }
+.topo-edge { stroke: var(--accent); stroke-linecap: round; transition: opacity var(--t); }
+.topo-hub circle { fill: rgba(45, 212, 191, 0.14); stroke: var(--accent); stroke-width: 1.5; }
+.topo-hub text { fill: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.1em; }
+.topo-node { transition: opacity var(--t); }
+.topo-node__ring { fill: #0e1218; stroke-width: 2.5; transition: filter var(--t); }
+.topo-node:hover .topo-node__ring { filter: brightness(1.25); }
+.topo-node__ring--ok { stroke: var(--ok); }
+.topo-node__ring--warn { stroke: var(--warn); }
+.topo-node__ring--danger { stroke: var(--danger); }
+.topo-node__label { font-size: 12px; font-weight: 720; font-variant-numeric: tabular-nums; }
+.topo-roster { display: flex; flex-direction: column; gap: 2px; }
+.topo-roster__row {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 7px 9px; border: 0; border-radius: 9px; background: transparent;
+  color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background var(--t);
+}
+.topo-roster__row:hover, .topo-roster__row.is-hot { background: var(--raised); }
+.topo-dot { width: 8px; height: 8px; border-radius: 99px; flex: 0 0 auto; }
+.topo-dot--ok { background: var(--ok); }
+.topo-dot--warn { background: var(--warn); }
+.topo-dot--danger { background: var(--danger); }
+.topo-roster__name { font-weight: 560; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-roster__stat { font-size: 12px; font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.topo-roster__links { font-size: 12px; color: var(--accent); flex: 0 0 auto; }
+
 .activity { display: flex; flex-direction: column; gap: 10px; }
 .activity__filters { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { font-size: 12px; padding: 5px 11px; border-radius: 99px; border: 1px solid var(--hair-strong); background: transparent; color: var(--muted); cursor: pointer; transition: var(--t); }

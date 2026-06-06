@@ -50,6 +50,16 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ agents: db.getFleetHealth(request.operator.fleetId) });
   });
 
+  app.get("/v1/operator/topology", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const query = request.query as Record<string, unknown>;
+    const rawWindow = Number(query.window_minutes ?? 60);
+    const windowMinutes = Number.isFinite(rawWindow) ? Math.max(5, Math.min(1440, Math.trunc(rawWindow))) : 60;
+    return reply.send(db.getTopology(request.operator.fleetId, { windowMinutes }));
+  });
+
   app.get("/v1/operator/activity", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });

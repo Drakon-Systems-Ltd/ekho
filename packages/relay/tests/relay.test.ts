@@ -564,6 +564,49 @@ describe("Relay integration", () => {
       expect(hb.metrics).toEqual({}); // no heartbeat metrics reported yet
     });
 
+    it("maps fleet topology — nodes + undirected collaboration edges", async () => {
+      const a = await relay.enrollAgent("topo-a");
+      const b = await relay.enrollAgent("topo-b");
+      const c = await relay.enrollAgent("topo-c"); // isolated — no traffic
+
+      // a -> b twice, b -> a once: one undirected edge with combined weight 3.
+      const send = (from: { agent_id: string; secret: string }, to: string, conv: string) =>
+        relay.agentRequest(from.agent_id, from.secret, "POST", "/v1/messages", {
+          recipient: { kind: "agent", id: to },
+          message_type: "direct",
+          body: { text: "x" },
+          conversation_id: conv,
+          correlation_id: `cor-${conv}`
+        });
+      await send(a, b.agent_id, "tc1");
+      await send(a, b.agent_id, "tc2");
+      await send(b, a.agent_id, "tc3");
+
+      const res = await relay.operatorRequest("GET", "/v1/operator/topology");
+      expect(res.status).toBe(200);
+      expect(res.body.generated_at).toBeTruthy();
+      expect(res.body.window_minutes).toBeGreaterThan(0);
+
+      // All three enrolled agents are nodes; the operator pseudo-agent is not.
+      const ids = res.body.nodes.map((n: { id: string }) => n.id);
+      expect(ids).toContain(a.agent_id);
+      expect(ids).toContain(b.agent_id);
+      expect(ids).toContain(c.agent_id);
+      expect(res.body.nodes.every((n: { runtime: string }) => n.runtime !== "operator")).toBe(true);
+
+      // a<->b folds both directions into one weighted edge; c has none.
+      const ab = res.body.edges.find(
+        (e: { source: string; target: string }) =>
+          (e.source === a.agent_id && e.target === b.agent_id) ||
+          (e.source === b.agent_id && e.target === a.agent_id)
+      );
+      expect(ab).toBeTruthy();
+      expect(ab.count).toBe(3);
+      expect(
+        res.body.edges.some((e: { source: string; target: string }) => e.source === c.agent_id || e.target === c.agent_id)
+      ).toBe(false);
+    });
+
     it("deletes a room", async () => {
       const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
         name: "tmp", member_agent_ids: []

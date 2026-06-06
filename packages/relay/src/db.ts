@@ -1046,6 +1046,55 @@ export class EkhoDb {
   }
 
   /**
+   * Fleet topology for the command-centre map: every live agent as a node (reusing
+   * the health snapshot so node state has a single source of truth) plus the
+   * undirected agent↔agent collaboration graph — who actually exchanged messages in
+   * the window. Edges come from message_deliveries, so broadcast and room fan-out
+   * resolve to concrete recipients. The operator pseudo-agent and its feed/control
+   * traffic are excluded, so the map shows agents working with agents, not the hub.
+   */
+  getTopology(fleetId: string, options?: { windowMinutes?: number }) {
+    const windowMinutes = options?.windowMinutes ?? 60;
+    const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+    const nodes = this.getFleetHealth(fleetId);
+
+    const directed = this.db.prepare(
+      `SELECT m.sender_agent_id AS src, d.recipient_agent_id AS dst,
+              COUNT(*) AS c, MAX(m.created_at) AS last_at
+         FROM messages m
+         JOIN message_deliveries d ON d.message_id = m.id
+         JOIN agents sa ON sa.id = m.sender_agent_id
+         JOIN agents ra ON ra.id = d.recipient_agent_id
+        WHERE m.fleet_id = ?
+          AND m.created_at >= ?
+          AND m.sender_agent_id != d.recipient_agent_id
+          AND sa.runtime != 'operator'
+          AND ra.runtime != 'operator'
+          AND sa.revoked_at IS NULL
+          AND ra.revoked_at IS NULL
+          AND m.message_type NOT IN ('feed', 'control')
+        GROUP BY m.sender_agent_id, d.recipient_agent_id`
+    ).all(fleetId, since) as Array<{ src: string; dst: string; c: number; last_at: string }>;
+
+    // Fold the two directions of each pair into one weighted, undirected edge.
+    const pairs = new Map<string, { source: string; target: string; count: number; last_at: string }>();
+    for (const r of directed) {
+      const [source, target] = r.src < r.dst ? [r.src, r.dst] : [r.dst, r.src];
+      const key = `${source}|${target}`;
+      const existing = pairs.get(key);
+      if (existing) {
+        existing.count += r.c;
+        if (r.last_at > existing.last_at) existing.last_at = r.last_at;
+      } else {
+        pairs.set(key, { source, target, count: r.c, last_at: r.last_at });
+      }
+    }
+    const edges = [...pairs.values()].sort((a, b) => b.count - a.count);
+
+    return { generated_at: nowIso(), window_minutes: windowMinutes, nodes, edges };
+  }
+
+  /**
    * Fleet-wide activity stream for the command-centre timeline: recent events
    * (messages, handoffs, trust/room/delegation changes, …) newest-first, with
    * agent ids resolved to display names and the payload parsed for rendering.

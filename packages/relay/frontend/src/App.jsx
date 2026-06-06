@@ -20,6 +20,7 @@ import {
   resolveApproval,
   sendOperatorMessage,
   getFleetHealth,
+  getTopology,
   getActivity,
   getRooms,
   createRoom,
@@ -202,6 +203,7 @@ export default function App() {
   const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [roomSaving, setRoomSaving] = useState(false);
   const [fleetHealth, setFleetHealth] = useState([]);
+  const [topology, setTopology] = useState({ nodes: [], edges: [], window_minutes: 60 });
   const [activity, setActivity] = useState([]);
   const [activityFilter, setActivityFilter] = useState("");
   const [feeds, setFeeds] = useState([]);
@@ -308,6 +310,17 @@ export default function App() {
       const result = await getFleetHealth(session.token);
       setFleetHealth(result.agents || []);
       markInit("health");
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function refreshTopology() {
+    if (!session.token) return;
+    try {
+      const result = await getTopology(session.token);
+      setTopology({ nodes: result.nodes || [], edges: result.edges || [], window_minutes: result.window_minutes || 60 });
+      markInit("topology");
     } catch (error) {
       handleApiError(error, { allowSessionReset: true });
     }
@@ -803,7 +816,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshActivity(), refreshFeeds()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshTopology(), refreshActivity(), refreshFeeds()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -832,6 +845,7 @@ export default function App() {
         refreshPolicies(),
         refreshDeadLetters(),
         refreshFleetHealth(),
+        refreshTopology(),
         refreshActivity(),
         selectedConversationId ? refreshTimeline(selectedConversationId) : Promise.resolve(),
         selectedAgentId ? refreshAgentDetail(selectedAgentId) : Promise.resolve(),
@@ -1226,6 +1240,7 @@ export default function App() {
             {[
               ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
               ["health", "Health"],
+              ["topology", "Map"],
               ["activity", "Activity"],
               ["feeds", "Feeds"],
               ["agent", "Agent"],
@@ -1252,6 +1267,10 @@ export default function App() {
 
             {rightTab === "health" && (
               <HealthTab agents={fleetHealth} initialized={initialized.current.health} />
+            )}
+
+            {rightTab === "topology" && (
+              <TopologyTab data={topology} initialized={initialized.current.topology} onSelect={selectAgent} />
             )}
 
             {rightTab === "activity" && (
@@ -1811,6 +1830,171 @@ function HealthTab({ agents, initialized }) {
           </article>
         );
       })}
+    </div>
+  );
+}
+
+// Health bucket for a node ring: red if quarantined/revoked, amber if it's
+// missing heartbeats (or never sent one), green otherwise.
+function topoHealth(a) {
+  if (a.status === "quarantined" || a.status === "revoked") return "danger";
+  if ((a.consecutive_missed_heartbeats || 0) > 0 || !a.last_heartbeat_at) return "warn";
+  return "ok";
+}
+const topoInitials = (name) => String(name || "?").slice(0, 2).toUpperCase();
+
+/* Fleet topology map: a radial collaboration graph. The relay sits at the hub;
+   each agent is a node placed around it (initials inside, ring coloured by health,
+   size by throughput). Lines between agents are who actually messaged whom in the
+   window — thicker = more. Faint spokes anchor every agent to the hub so isolated
+   ones still read. Pure SVG, no chart dependency. Hovering a node isolates its
+   links; clicking focuses that agent. A roster below doubles as the label key. */
+function TopologyTab({ data, initialized, onSelect }) {
+  const [hovered, setHovered] = useState("");
+  const nodes = data?.nodes || [];
+  const edges = data?.edges || [];
+
+  // Stable radial layout keyed on the agent set, so polling updates counts/health
+  // without the map jumping around. Start at the top, go clockwise.
+  const W = 340;
+  const CX = 170;
+  const CY = 150;
+  const RING = 112;
+  const positions = useMemo(() => {
+    const ids = nodes.map((n) => n.id).sort();
+    const pos = new Map();
+    const n = ids.length || 1;
+    ids.forEach((id, i) => {
+      const angle = -Math.PI / 2 + (i * 2 * Math.PI) / n;
+      pos.set(id, { x: CX + RING * Math.cos(angle), y: CY + RING * Math.sin(angle) });
+    });
+    return pos;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes.map((n) => n.id).sort().join("|")]);
+
+  const degree = useMemo(() => {
+    const d = new Map();
+    for (const e of edges) {
+      d.set(e.source, (d.get(e.source) || 0) + e.count);
+      d.set(e.target, (d.get(e.target) || 0) + e.count);
+    }
+    return d;
+  }, [edges]);
+
+  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const adjacency = useMemo(() => {
+    const m = new Map();
+    for (const e of edges) {
+      if (!m.has(e.source)) m.set(e.source, new Set());
+      if (!m.has(e.target)) m.set(e.target, new Set());
+      m.get(e.source).add(e.target);
+      m.get(e.target).add(e.source);
+    }
+    return m;
+  }, [edges]);
+  // On hover, spotlight the agent AND its direct collaborators (so a lit link never
+  // dead-ends at a dimmed node); everything else fades back.
+  const incident = (id) => !hovered || hovered === id || Boolean(adjacency.get(hovered)?.has(id));
+  const edgeLit = (e) => !hovered || e.source === hovered || e.target === hovered;
+
+  if (!initialized) return <Skeleton count={1} height="320px" />;
+  if (!nodes.length) return <EmptyState title="No agents">Enroll agents to see the fleet map here.</EmptyState>;
+
+  return (
+    <div className="topo">
+      <div className="access-caption">
+        Who's working with whom — agent-to-agent message flow over the last {data.window_minutes || 60} min.
+        Thicker links = more traffic; ring colour = health; size = throughput.
+      </div>
+
+      <svg className="topo-svg" viewBox={`0 0 ${W} 300`} role="img" aria-label="Fleet collaboration map">
+        {/* faint hub spokes first, under everything */}
+        {nodes.map((a) => {
+          const p = positions.get(a.id);
+          if (!p) return null;
+          return (
+            <line
+              key={`spoke-${a.id}`}
+              className="topo-spoke"
+              x1={CX} y1={CY} x2={p.x} y2={p.y}
+              style={{ opacity: incident(a.id) ? 0.5 : 0.12 }}
+            />
+          );
+        })}
+
+        {/* collaboration edges */}
+        {edges.map((e) => {
+          const s = positions.get(e.source);
+          const t = positions.get(e.target);
+          if (!s || !t) return null;
+          const sa = byId.get(e.source);
+          const ta = byId.get(e.target);
+          return (
+            <line
+              key={`edge-${e.source}-${e.target}`}
+              className="topo-edge"
+              x1={s.x} y1={s.y} x2={t.x} y2={t.y}
+              strokeWidth={1.2 + Math.min(e.count, 12) * 0.6}
+              style={{ opacity: edgeLit(e) ? 0.85 : 0.1 }}
+            >
+              <title>{`${sa?.display_name || e.source} ↔ ${ta?.display_name || e.target} · ${e.count} msg${e.count === 1 ? "" : "s"}`}</title>
+            </line>
+          );
+        })}
+
+        {/* relay hub */}
+        <g className="topo-hub">
+          <circle cx={CX} cy={CY} r={22} />
+          <text x={CX} y={CY} dy="0.35em" textAnchor="middle">EKHO</text>
+        </g>
+
+        {/* agent nodes */}
+        {nodes.map((a) => {
+          const p = positions.get(a.id);
+          if (!p) return null;
+          const tput = (a.sent_1h ?? 0) + (a.received_1h ?? 0);
+          const r = 13 + Math.min(tput, 24) * 0.42;
+          const health = topoHealth(a);
+          return (
+            <g
+              key={`node-${a.id}`}
+              className="topo-node"
+              transform={`translate(${p.x}, ${p.y})`}
+              style={{ opacity: incident(a.id) ? 1 : 0.28, cursor: "pointer" }}
+              onMouseEnter={() => setHovered(a.id)}
+              onMouseLeave={() => setHovered("")}
+              onClick={() => onSelect?.(a.id)}
+            >
+              <circle className={`topo-node__ring topo-node__ring--${health}`} r={r} />
+              <text className="topo-node__label" dy="0.35em" textAnchor="middle" style={{ fill: colorForAgent(a.id) }}>
+                {topoInitials(a.display_name || a.id)}
+              </text>
+              <title>{`${a.display_name || a.id} · ${a.runtime || "custom"}${a.metrics?.model ? ` · ${a.metrics.model}` : ""}\n${a.sent_1h ?? 0} sent / ${a.received_1h ?? 0} recv (1h)`}</title>
+            </g>
+          );
+        })}
+      </svg>
+
+      <div className="topo-roster">
+        {nodes.map((a) => {
+          const links = degree.get(a.id) || 0;
+          const health = topoHealth(a);
+          return (
+            <button
+              key={`roster-${a.id}`}
+              className={`topo-roster__row${hovered === a.id ? " is-hot" : ""}`}
+              onMouseEnter={() => setHovered(a.id)}
+              onMouseLeave={() => setHovered("")}
+              onClick={() => onSelect?.(a.id)}
+            >
+              <span className={`topo-dot topo-dot--${health}`} />
+              <span className="topo-roster__name">{a.display_name || a.id}</span>
+              <span className="topo-roster__stat muted">{a.sent_1h ?? 0}↑ {a.received_1h ?? 0}↓</span>
+              <span className="topo-roster__links">{links ? `${links} link${links === 1 ? "" : "s"}` : "idle"}</span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
