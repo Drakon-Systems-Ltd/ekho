@@ -143,6 +143,14 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ keys: db.listOperatorKeys(request.operator.fleetId) });
   });
 
+  // Fleet agent identity keys — drives the Security screen's endorse-agents panel.
+  app.get("/v1/operator/agent-keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    return reply.send({ keys: db.getAgentIdentityKeys(request.operator.fleetId) });
+  });
+
   app.post("/v1/operator/keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });

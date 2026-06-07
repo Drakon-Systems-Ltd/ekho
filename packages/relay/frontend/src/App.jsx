@@ -69,6 +69,9 @@ import {
   saveSettings,
 } from "./components";
 import { useAutoRefresh, useEdgeSwipeBack, useNow } from "./hooks";
+import SecurityScreen from "./SecurityScreen.jsx";
+import { getUnlocked } from "./operatorKeyStore.js";
+import { buildOperatorCanonical, signCanonical, randomNonce } from "./operatorKey.js";
 
 const POLL_INTERVAL_MS = 5000;
 const TIMELINE_LIMIT = 100;
@@ -788,12 +791,40 @@ export default function App() {
     setComposerError("");
     setSending(true);
     try {
+      // Sign the message with the operator identity when one is unlocked, so the
+      // agent can verify it's genuinely you (independent of the relay).
+      let signature;
+      const unlocked = getUnlocked();
+      if (unlocked && session.fleetId) {
+        const operatorId = String(session.token).split(".")[0];
+        const recipientObj = isRoom
+          ? { kind: "room", id: roomId }
+          : recipient === "broadcast"
+            ? { kind: "broadcast" }
+            : { kind: "agent", id: recipient };
+        const canonical = buildOperatorCanonical({
+          fleetId: session.fleetId,
+          operatorId,
+          keyId: unlocked.keyId,
+          recipient: recipientObj,
+          conversationId: convId || "",
+          text,
+          nonce: randomNonce(),
+          sentAt: new Date().toISOString(),
+        });
+        signature = {
+          operator_sig: signCanonical(canonical, unlocked.seed),
+          key_id: unlocked.keyId,
+          sig_canonical: canonical,
+        };
+      }
       const res = await sendOperatorMessage(session.token, {
         recipientAgentId: isRoom ? undefined : recipient,
         roomId,
         text,
         conversationId: convId,
         attachmentIds: attachmentIds.length ? attachmentIds : undefined,
+        signature,
       });
       const newConvId = res.conversation_id;
       // bind the optimistic item to the resolved conversation id
@@ -1342,6 +1373,7 @@ export default function App() {
               ["feeds", "Feeds"],
               ["agent", "Agent"],
               ["access", "Access"],
+              ["security", "🛡 Sec"],
               ["deadletters", "Dead"],
               ["policies", "Policies"],
             ].map(([key, label]) => (
@@ -1380,6 +1412,8 @@ export default function App() {
                 onOpenConversation={traceFromOps}
               />
             )}
+
+            {rightTab === "security" && <SecurityScreen session={session} agents={agents} />}
 
             {rightTab === "feeds" && (
               <FeedsTab

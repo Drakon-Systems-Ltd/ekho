@@ -1278,4 +1278,17 @@ describe("agent self-registers its identity key", () => {
     });
     expect(res.statusCode).toBe(401);
   });
+
+  it("lists fleet agent identity keys for the operator (for endorsement)", async () => {
+    const agent = await relay.enrollAgent("E");
+    const ak = makeOperatorKey(95);
+    await relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/identity-key", {
+      public_key: ak.pubB64,
+    });
+    const res = await relay.operatorRequest("GET", "/v1/operator/agent-keys");
+    expect(res.status).toBe(200);
+    const row = res.body.keys.find((k: { agent_id: string }) => k.agent_id === agent.agent_id);
+    expect(row.public_key).toBe(ak.pubB64);
+    expect(row.endorsed_by_key_id ?? null).toBeNull();
+  });
 });
