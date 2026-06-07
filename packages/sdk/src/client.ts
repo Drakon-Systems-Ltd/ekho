@@ -64,6 +64,12 @@ export class EkhoAgentClient {
     return this.request<InboxResponse>("GET", `/v1/inbox?limit=${limit}`);
   }
 
+  /** Register (or rotate) this agent's Ed25519 identity public key for
+   *  agent-to-agent trust. Idempotent on the relay side. */
+  registerIdentityKey(publicKey: string) {
+    return this.request<{ key_id: string }>("POST", "/v1/identity-key", { public_key: publicKey });
+  }
+
   ackMessages(acks: Array<{ message_id: string; status: "received"; received_at: string }>) {
     return this.request<{ updated: number }>("POST", "/v1/acks", { acks });
   }
