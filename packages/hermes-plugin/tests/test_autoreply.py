@@ -203,7 +203,20 @@ def test_build_prompt_includes_reply_routing_and_trust():
     assert 'recipient_agent_id="op"' in prompt
     assert 'conversation_id="c1"' in prompt
     assert "ekho_send" in prompt
-    assert "verified fleet operator" in prompt
+    assert "fleet operator (your principal)" in prompt
+
+
+def test_build_prompt_cryptographically_verified_label():
+    from types import SimpleNamespace
+
+    m = _msg()
+    verdict = SimpleNamespace(verified=True, key_id="abc123")
+    prompt = build_prompt(
+        [m], operator_trusted=False, verifications={m.message_id: verdict}
+    )
+    # Verified by signature → strong framing even when the relay flag is off.
+    assert "CRYPTOGRAPHICALLY VERIFIED" in prompt
+    assert "abc123" in prompt
 
 
 def test_build_prompt_unverified_operator_label():

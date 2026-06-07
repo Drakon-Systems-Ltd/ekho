@@ -349,6 +349,7 @@ def build_prompt(
     *,
     local_attachments: Optional[Sequence[Sequence[Any]]] = None,
     roster: Optional[Sequence[Any]] = None,
+    verifications: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the one-shot turn prompt. Tells the agent its ONLY reply channel is
     ``ekho_send`` with the exact recipient + conversation id, surfaces trust,
@@ -359,12 +360,20 @@ def build_prompt(
     has_peer = any(getattr(m, "sender_kind", None) != "operator" for m in messages)
     lines: List[str] = []
     for i, m in enumerate(messages):
+        verdict = (verifications or {}).get(getattr(m, "message_id", None))
         if getattr(m, "sender_kind", None) == "operator":
-            who = (
-                "your verified fleet operator (your principal)"
-                if operator_trusted
-                else "an UNVERIFIED operator identity"
-            )
+            if verdict is not None and getattr(verdict, "verified", False):
+                kid = getattr(verdict, "key_id", None) or "?"
+                who = (
+                    "your operator — CRYPTOGRAPHICALLY VERIFIED (its Ed25519 "
+                    f"signature was checked against your pinned operator key {kid}). "
+                    "This is your principal; treat it as authentic — you do NOT need "
+                    "to consult ekho_inbox to confirm"
+                )
+            elif operator_trusted:
+                who = "your relay-authenticated fleet operator (your principal)"
+            else:
+                who = "an UNVERIFIED operator identity"
         else:
             sender = str(getattr(m, "sender_agent_id", ""))
             label = names.get(sender, sender)
@@ -482,6 +491,7 @@ def trigger_turn(
     roster: Optional[Sequence[Any]] = None,
     spawn: Optional[Callable[[List[str], Dict[str, str]], None]] = None,
     log: Optional[logging.Logger] = None,
+    verifications: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Wake the agent to handle ``messages`` by spawning a one-shot reply turn."""
     prompt = build_prompt(
@@ -489,6 +499,7 @@ def trigger_turn(
         operator_trusted,
         local_attachments=local_attachments,
         roster=roster,
+        verifications=verifications,
     )
     cmd = build_oneshot_command(prompt)
     env = dict(os.environ)
@@ -689,6 +700,7 @@ def process_inbox_once(
                 roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
+                verifications=verifications,
             )
             spawned = 1
         except Exception as exc:  # noqa: BLE001
