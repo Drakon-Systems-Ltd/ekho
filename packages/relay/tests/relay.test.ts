@@ -1,5 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { createTestRelay, type TestRelay } from "./setup";
+import {
+  b64url,
+  keyId,
+  signCanonical,
+  endorsementPayload,
+} from "../src/operator-identity";
+
+function makeOperatorKey(fill: number) {
+  const seed = new Uint8Array(32).fill(fill);
+  const pub = ed25519.getPublicKey(seed);
+  return { seed, pub, pubB64: b64url(pub), id: keyId(pub) };
+}
 
 describe("Relay integration", () => {
   let relay: TestRelay;
@@ -759,5 +772,73 @@ describe("Relay integration", () => {
       });
       expect(allowed.status).toBe(200);
     });
+  });
+});
+
+describe("operator keys (storage)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("registers a key and lists it under the derived key_id", () => {
+    const k = makeOperatorKey(11);
+    const { keyId: kid } = relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "macbook");
+    expect(kid).toBe(k.id);
+    const keys = relay.db.listOperatorKeys(relay.fleetId);
+    const row = keys.find((x) => x.key_id === k.id);
+    expect(row?.label).toBe("macbook");
+    expect(row?.public_key).toBe(k.pubB64);
+  });
+
+  it("revokes a key: dropped from active, retained in the full list", () => {
+    const k = makeOperatorKey(12);
+    relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "phone");
+    expect(relay.db.revokeOperatorKey(relay.fleetId, k.id)).toBe(true);
+    expect(relay.db.getActiveOperatorKeys(relay.fleetId).map((x) => x.key_id)).not.toContain(k.id);
+    expect(relay.db.listOperatorKeys(relay.fleetId).map((x) => x.key_id)).toContain(k.id);
+  });
+
+  it("revokeOperatorKey returns false for an unknown key", () => {
+    expect(relay.db.revokeOperatorKey(relay.fleetId, "nonexistent")).toBe(false);
+  });
+
+  it("accepts a second key endorsed by an existing active key", () => {
+    const first = makeOperatorKey(11);
+    relay.db.registerOperatorKey(relay.fleetId, first.pubB64, "macbook");
+    const second = makeOperatorKey(12);
+    const sig = signCanonical(
+      endorsementPayload(relay.fleetId, second.id, second.pubB64),
+      first.seed
+    );
+    const { keyId: kid } = relay.db.registerOperatorKey(relay.fleetId, second.pubB64, "phone", {
+      endorsedByKeyId: first.id,
+      signature: sig,
+    });
+    expect(kid).toBe(second.id);
+    const row = relay.db.listOperatorKeys(relay.fleetId).find((x) => x.key_id === second.id);
+    expect(row?.endorsed_by_key_id).toBe(first.id);
+  });
+
+  it("rejects a second key whose endorsement signature is invalid", () => {
+    const first = makeOperatorKey(11);
+    relay.db.registerOperatorKey(relay.fleetId, first.pubB64, "macbook");
+    const second = makeOperatorKey(12);
+    // Signed by the new key itself, not by the (trusted) endorser → invalid.
+    const badSig = signCanonical(
+      endorsementPayload(relay.fleetId, second.id, second.pubB64),
+      second.seed
+    );
+    expect(() =>
+      relay.db.registerOperatorKey(relay.fleetId, second.pubB64, "phone", {
+        endorsedByKeyId: first.id,
+        signature: badSig,
+      })
+    ).toThrow(/endorsement/i);
+  });
+
+  it("isolates keys by fleet", () => {
+    const k = makeOperatorKey(13);
+    relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "macbook");
+    expect(relay.db.listOperatorKeys("flt_other_fleet")).toHaveLength(0);
   });
 });

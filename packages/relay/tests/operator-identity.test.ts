@@ -7,6 +7,7 @@ import {
   verifyCanonical,
   fromB64url,
   keyId,
+  endorsementPayload,
 } from "../src/operator-identity";
 
 const SEED = new Uint8Array(32).fill(7); // fixed seed -> deterministic vector
@@ -94,5 +95,19 @@ describe("keyId", () => {
     const pubB = ed25519.getPublicKey(new Uint8Array(32).fill(2));
     expect(keyId(pubA)).toBe(keyId(pubA));
     expect(keyId(pubA)).not.toBe(keyId(pubB));
+  });
+});
+
+describe("endorsementPayload", () => {
+  it("binds a new key to a fleet in a stable, typed structure", () => {
+    expect(canonicalize(endorsementPayload("flt_x", "kid_new", "pub_b64"))).toBe(
+      canonicalize({
+        v: 1,
+        t: "op-key-endorsement",
+        fleet_id: "flt_x",
+        key_id: "kid_new",
+        public_key: "pub_b64",
+      })
+    );
   });
 });

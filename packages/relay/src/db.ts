@@ -6,8 +6,26 @@ import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashSecret, id, nowIso } from "./utils";
+import {
+  keyId as deriveKeyId,
+  verifyCanonical,
+  fromB64url,
+  endorsementPayload,
+} from "./operator-identity";
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+export interface OperatorKeyRow {
+  fleet_id: string;
+  key_id: string;
+  public_key: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  endorsed_by_key_id: string | null;
+  endorsement_sig: string | null;
+}
 
 export class EkhoDb {
   private db: Database.Database;
@@ -55,6 +73,86 @@ export class EkhoDb {
 
   raw() {
     return this.db;
+  }
+
+  // ---- Operator signing keys (verifiable operator identity) ----------------
+
+  /**
+   * Register an operator public key for a fleet. Returns its derived key_id.
+   * If an endorsement is supplied it must be a valid signature by an existing,
+   * non-revoked key over endorsementPayload(...) — an early reject so the
+   * Security screen surfaces a bad endorsement immediately (agents re-verify).
+   */
+  registerOperatorKey(
+    fleetId: string,
+    publicKeyB64url: string,
+    label: string,
+    endorsement?: { endorsedByKeyId: string; signature: string }
+  ): { keyId: string } {
+    const kid = deriveKeyId(fromB64url(publicKeyB64url));
+    if (endorsement) {
+      const endorser = this.db
+        .prepare(
+          "SELECT public_key FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+        )
+        .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
+      if (!endorser) throw new Error("endorsement references an unknown or revoked key");
+      const ok = verifyCanonical(
+        endorsementPayload(fleetId, kid, publicKeyB64url),
+        endorsement.signature,
+        fromB64url(endorser.public_key)
+      );
+      if (!ok) throw new Error("invalid key endorsement signature");
+    }
+    const exists = this.db
+      .prepare("SELECT 1 FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+      .get(fleetId, kid);
+    if (exists) throw new Error("operator key already registered");
+    this.db
+      .prepare(
+        `INSERT INTO fleet_operator_keys
+           (fleet_id, key_id, public_key, label, created_at, endorsed_by_key_id, endorsement_sig)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        fleetId,
+        kid,
+        publicKeyB64url,
+        label,
+        nowIso(),
+        endorsement?.endorsedByKeyId ?? null,
+        endorsement?.signature ?? null
+      );
+    return { keyId: kid };
+  }
+
+  listOperatorKeys(fleetId: string): OperatorKeyRow[] {
+    return this.db
+      .prepare(
+        `SELECT fleet_id, key_id, public_key, label, created_at, last_used_at, revoked_at,
+                endorsed_by_key_id, endorsement_sig
+           FROM fleet_operator_keys WHERE fleet_id = ? ORDER BY created_at ASC`
+      )
+      .all(fleetId) as OperatorKeyRow[];
+  }
+
+  getActiveOperatorKeys(fleetId: string): OperatorKeyRow[] {
+    return this.db
+      .prepare(
+        `SELECT fleet_id, key_id, public_key, label, created_at, last_used_at, revoked_at,
+                endorsed_by_key_id, endorsement_sig
+           FROM fleet_operator_keys WHERE fleet_id = ? AND revoked_at IS NULL ORDER BY created_at ASC`
+      )
+      .all(fleetId) as OperatorKeyRow[];
+  }
+
+  revokeOperatorKey(fleetId: string, targetKeyId: string): boolean {
+    const res = this.db
+      .prepare(
+        "UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+      )
+      .run(nowIso(), fleetId, targetKeyId);
+    return res.changes > 0;
   }
 
   private escapeLike(value: string) {

@@ -43,6 +43,23 @@ export function keyId(publicKey: Uint8Array): string {
   return b64url(sha256(publicKey)).slice(0, 16);
 }
 
+/**
+ * Canonical structure an existing operator key signs to endorse a NEW key.
+ * Lets already-enrolled agents (and the relay) accept an added device key only
+ * if it's vouched for by a key they already trust — so a compromised relay
+ * cannot inject a rogue operator key. The first key has no endorser (it's
+ * trusted via enrollment pinning instead).
+ */
+export function endorsementPayload(fleetId: string, newKeyId: string, newPublicKeyB64url: string) {
+  return {
+    v: 1,
+    t: "op-key-endorsement",
+    fleet_id: fleetId,
+    key_id: newKeyId,
+    public_key: newPublicKeyB64url,
+  };
+}
+
 /** Sign the canonical form of `payload` with a 32-byte Ed25519 seed. */
 export function signCanonical(payload: unknown, secret: Uint8Array): string {
   return b64url(ed25519.sign(enc.encode(canonicalize(payload)), secret));
