@@ -82,6 +82,8 @@ _last_batch_meta: Dict[str, Any] = {
     "operator_trusted": False,
     "roster": [],
     "controls": [],
+    # message_id -> VerificationResult, so ekho_inbox can show truthful labels.
+    "verifications": {},
 }
 
 
@@ -92,6 +94,15 @@ def reset_cache() -> None:
         _last_batch_meta["operator_trusted"] = False
         _last_batch_meta["roster"] = []
         _last_batch_meta["controls"] = []
+        _last_batch_meta["verifications"] = {}
+
+
+def record_verifications(verifications: Dict[str, Any]) -> None:
+    """Cache per-message verdicts (skipping None) for ekho_inbox to surface."""
+    with _cache_lock:
+        _last_batch_meta["verifications"] = {
+            mid: v for mid, v in (verifications or {}).items() if mid and v is not None
+        }
 
 
 def record_batch(inbox: Any) -> None:
@@ -128,6 +139,7 @@ def get_cached_inbox() -> Dict[str, Any]:
             "operator_trusted": _last_batch_meta["operator_trusted"],
             "roster": list(_last_batch_meta["roster"]),
             "controls": list(_last_batch_meta["controls"]),
+            "verifications": dict(_last_batch_meta["verifications"]),
         }
 
 
@@ -552,6 +564,7 @@ def process_inbox_once(
             seen_nonces=state.seen_nonces,
             now=wall_now or datetime.now(timezone.utc),
         )
+        record_verifications(verifications)
 
     # The console is the live source of truth for delegation: when the relay
     # surfaces peer_autoreply / peer_turn_budget, they override the bootstrap

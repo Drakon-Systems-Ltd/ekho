@@ -182,3 +182,43 @@ def test_format_inbox_accepts_sdk_dataclasses():
     assert out["messages"][0]["from"] == "agent-z"
     assert out["roster"][0]["agent_id"] == "a2"
     assert out["roster"][0]["display_name"] == "Two"
+
+
+# --- cryptographic trust labels (verifications) ---
+def _opmsg():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        message_id="m1", sender_kind="operator", message_type="direct",
+        body={"text": "x"}, conversation_id="c", created_at="t", sender_agent_id="op",
+    )
+
+
+def test_format_inbox_verified_operator_label():
+    from types import SimpleNamespace
+    out = format_inbox(
+        [_opmsg()], operator_trusted=False,
+        verifications={"m1": SimpleNamespace(verified=True, reason=None)},
+    )
+    msg = out["messages"][0]
+    assert msg["trust"] == "verified-operator"
+    assert "cryptographically verified" in msg["from"]
+
+
+def test_format_inbox_impersonation_label_overrides_relay_flag():
+    from types import SimpleNamespace
+    out = format_inbox(
+        [_opmsg()], operator_trusted=True,
+        verifications={"m1": SimpleNamespace(verified=False, reason="bad-signature")},
+    )
+    assert out["messages"][0]["trust"] == "impersonation"
+
+
+def test_format_inbox_unsigned_falls_back_to_relay_label():
+    from types import SimpleNamespace
+    out = format_inbox(
+        [_opmsg()], operator_trusted=True,
+        verifications={"m1": SimpleNamespace(verified=False, reason="unsigned")},
+    )
+    # reason == "unsigned" → no signature → relay-attested label, not impersonation.
+    assert out["messages"][0]["trust"] == "verified-operator"
+    assert "cryptographically" not in out["messages"][0]["from"]

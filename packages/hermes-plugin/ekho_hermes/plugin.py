@@ -211,6 +211,7 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
     for message, locals_for_msg in zip(messages, local_attachments):
         enriched.append(
             {
+                "message_id": message.message_id,
                 "message_type": message.message_type,
                 "body": message.body,
                 "conversation_id": message.conversation_id,
@@ -225,6 +226,7 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
         enriched,
         operator_trusted=cached["operator_trusted"],
         roster=cached["roster"],
+        verifications=cached.get("verifications"),
     )
     return _tool_result(result)
 
