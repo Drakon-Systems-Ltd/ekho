@@ -214,4 +214,9 @@
 .cmd-deck .bootscan::before { content: ""; position: absolute; left: 0; right: 0; height: 42%; top: -42%; background: linear-gradient(180deg, transparent, rgba(255,176,0,0.13), rgba(255,30,60,0.10), transparent); animation: dk-boot 1.0s ease-out forwards; }
 @keyframes dk-boot { 0% { top: -42%; opacity: 0; } 14% { opacity: 1; } 100% { top: 110%; opacity: 0; } }
 
-@media (prefers-reduced-motion: reduce) { .cmd-deck * { animation: none !important; } }
+.cmd-deck .ctl--armed { color: #fff; background: var(--crim); border-color: transparent; box-shadow: var(--glow-c); font-weight: 700; }
+
+/* visible keyboard focus on this dark theme */
+.cmd-deck button:focus-visible, .cmd-deck textarea:focus-visible, .cmd-deck a:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) { .cmd-deck *:not(.ctl--armed) { animation: none !important; } }
