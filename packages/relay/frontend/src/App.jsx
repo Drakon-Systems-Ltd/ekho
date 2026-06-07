@@ -1098,6 +1098,9 @@ export default function App() {
           <button className="icon-button appbar__icon" onClick={() => setHelpOpen(true)} aria-label="Help" title="Help & setup">
             <HelpIcon />
           </button>
+          <button className="button button--sm" title="Open the Command Deck (full-screen HUD) in a new window" onClick={() => window.open("#deck", "_blank", "noopener")}>
+            ◎ Deck
+          </button>
           <button className="button button--ghost button--sm" onClick={() => Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), selectedConversationId ? refreshTimeline() : Promise.resolve()]).catch((e) => handleApiError(e, { allowSessionReset: true }))}>
             Refresh
           </button>
