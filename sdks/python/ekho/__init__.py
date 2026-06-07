@@ -15,6 +15,7 @@ from .identity import (
     sign_canonical,
     verify_canonical,
 )
+from .verify import VerificationResult, verify_inbound
 from .types import (
     AckInput,
     ActionDecision,
@@ -66,6 +67,8 @@ __all__ = [
     "public_key_b64url_from_seed",
     "endorsement_payload",
     "agent_key_endorsement_payload",
+    "verify_inbound",
+    "VerificationResult",
     "AckInput",
     "AttachmentMeta",
     # Heartbeats / actions
