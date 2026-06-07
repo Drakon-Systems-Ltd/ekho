@@ -70,7 +70,12 @@ export const operatorMessageSchema = z
     room_id: z.string().min(1).optional(),
     text: z.string().min(1).max(8000),
     conversation_id: z.string().min(1).optional(),
-    attachment_ids: z.array(z.string().min(1)).max(50).optional()
+    attachment_ids: z.array(z.string().min(1)).max(50).optional(),
+    // Verifiable operator identity (optional): the client signs the canonical
+    // payload with its operator key; the relay stores/relays all three verbatim.
+    operator_sig: z.string().min(1).max(128).optional(),
+    key_id: z.string().min(1).max(32).optional(),
+    sig_canonical: z.record(z.string(), z.unknown()).optional()
   })
   .refine((d) => Boolean(d.recipient_agent_id) || Boolean(d.room_id), {
     message: "recipient_agent_id or room_id is required"

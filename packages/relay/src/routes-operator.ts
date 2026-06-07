@@ -186,6 +186,11 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
     let result: { messageId: string; conversationId: string; createdAt: string };
     try {
+      const { operator_sig, key_id, sig_canonical } = parsed.data;
+      const signature =
+        operator_sig && key_id && sig_canonical
+          ? { sig: operator_sig, keyId: key_id, canonical: sig_canonical }
+          : undefined;
       result = db.createOperatorMessage({
         fleetId: request.operator.fleetId,
         operatorId: request.operator.id,
@@ -193,7 +198,8 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
         roomId: parsed.data.room_id,
         text: parsed.data.text,
         conversationId: parsed.data.conversation_id,
-        attachmentIds: parsed.data.attachment_ids
+        attachmentIds: parsed.data.attachment_ids,
+        signature
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -474,6 +474,8 @@ export class EkhoDb {
     text: string;
     conversationId?: string;
     attachmentIds?: string[];
+    // Verifiable operator identity: stored and relayed verbatim (never recomputed).
+    signature?: { sig: string; keyId: string; canonical: Record<string, unknown> };
   }) {
     const messageId = id("msg");
     const createdAt = nowIso();
@@ -532,7 +534,17 @@ export class EkhoDb {
         "normal",
         0,
         JSON.stringify(body),
-        JSON.stringify({ sender_label: "Operator", operator_id: input.operatorId }),
+        JSON.stringify({
+          sender_label: "Operator",
+          operator_id: input.operatorId,
+          ...(input.signature
+            ? {
+                operator_sig: input.signature.sig,
+                key_id: input.signature.keyId,
+                sig_canonical: input.signature.canonical
+              }
+            : {})
+        }),
         ttlSeconds,
         createdAt,
         expiresAt,
@@ -728,6 +740,7 @@ export class EkhoDb {
         const attachments = attIds
           .map((aid) => attachmentMetaById.get(aid))
           .filter((m): m is { id: string; filename: string; mime: string; size_bytes: number } => Boolean(m));
+        const meta = row.metadata_json ? JSON.parse(String(row.metadata_json)) : {};
         return {
           message_id: row.id,
           conversation_id: row.conversation_id,
@@ -738,7 +751,11 @@ export class EkhoDb {
           priority: row.priority,
           body,
           attachments,   // [{id, filename, mime, size_bytes}] — NEVER bytes
-          metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : {},
+          metadata: meta,
+          // Verifiable operator identity (null unless the operator signed this message).
+          operator_sig: meta.operator_sig ?? null,
+          key_id: meta.key_id ?? null,
+          sig_canonical: meta.sig_canonical ?? null,
           created_at: row.created_at,
           deadline_at: row.expires_at
         };

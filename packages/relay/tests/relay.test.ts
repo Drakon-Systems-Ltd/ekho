@@ -5,6 +5,7 @@ import {
   b64url,
   keyId,
   signCanonical,
+  verifyCanonical,
   endorsementPayload,
 } from "../src/operator-identity";
 
@@ -898,5 +899,64 @@ describe("operator keys (API)", () => {
       endorsement: { endorsed_by_key_id: first.id, signature: badSig },
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("operator message signatures", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("relays the operator signature verbatim to the recipient's inbox", async () => {
+    const k = makeOperatorKey(31);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const agent = await relay.enrollAgent("Receiver");
+
+    const canonical = {
+      v: 1,
+      fleet_id: relay.fleetId,
+      operator_id: relay.operatorId,
+      key_id: k.id,
+      recipient: { kind: "agent", id: agent.agent_id },
+      conversation_id: "conv-sig-1",
+      body_sha256: "deadbeefcafe",
+      sent_at: "2026-06-07T00:00:00Z",
+      nonce: "Zm9vYmFy",
+    };
+    const sig = signCanonical(canonical, k.seed);
+
+    const send = await relay.operatorRequest("POST", "/v1/operator/messages", {
+      recipient_agent_id: agent.agent_id,
+      text: "hello",
+      conversation_id: "conv-sig-1",
+      operator_sig: sig,
+      key_id: k.id,
+      sig_canonical: canonical,
+    });
+    expect(send.status).toBe(201);
+
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "conv-sig-1");
+    expect(msg).toBeTruthy();
+    expect(msg.sender_kind).toBe("operator");
+    expect(msg.operator_sig).toBe(sig);
+    expect(msg.key_id).toBe(k.id);
+    expect(msg.sig_canonical).toEqual(canonical);
+    // End-to-end: the relayed signature still verifies (the relay didn't mangle it).
+    expect(verifyCanonical(msg.sig_canonical, msg.operator_sig, k.pub)).toBe(true);
+  });
+
+  it("omits signature fields for an unsigned operator message", async () => {
+    const agent = await relay.enrollAgent("Receiver2");
+    const send = await relay.operatorRequest("POST", "/v1/operator/messages", {
+      recipient_agent_id: agent.agent_id,
+      text: "unsigned",
+      conversation_id: "conv-unsigned",
+    });
+    expect(send.status).toBe(201);
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "conv-unsigned");
+    expect(msg.operator_sig ?? null).toBeNull();
+    expect(msg.key_id ?? null).toBeNull();
   });
 });
