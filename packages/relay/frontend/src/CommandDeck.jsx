@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { loadSession, clearSession, getTopology, getActivity, controlAgent, setAgentTrust, setPeerAutoreply, sendOperatorMessage } from "./api";
+import { usePageVisible } from "./hooks";
 import "./deck.css";
 
 const POLL_MS = 5000;
@@ -35,8 +36,14 @@ function usePrefersReducedMotion() {
 
 // Self-ticking readouts, so the 1s clock/bearing don't re-render the whole deck.
 function DeckClock() {
+  const visible = usePageVisible();
   const [t, setT] = useState(() => new Date());
-  useEffect(() => { const i = setInterval(() => setT(new Date()), 1000); return () => clearInterval(i); }, []);
+  useEffect(() => {
+    if (!visible) return undefined; // don't tick a clock no one's watching
+    setT(new Date());               // catch up on return
+    const i = setInterval(() => setT(new Date()), 1000);
+    return () => clearInterval(i);
+  }, [visible]);
   return <span className="clock">{t.toLocaleTimeString("en-GB")}</span>;
 }
 function Bearing({ animate }) {
@@ -122,7 +129,10 @@ function intelLine(e, nameOf) {
 export default function CommandDeck() {
   const session = loadSession();
   const reduced = usePrefersReducedMotion();
-  const motion = !reduced;
+  const visible = usePageVisible();
+  // Hidden tab → unmount every animated layer (sweep, ping, nanofield, tracers,
+  // SVG sweeps, bearing) and stop the data poll. Nothing repaints in the background.
+  const motion = !reduced && visible;
   const [topo, setTopo] = useState({ nodes: [], edges: [], window_minutes: 60 });
   const [activity, setActivity] = useState([]);
   const [view, setView] = useState(viewFromHash);
@@ -163,13 +173,13 @@ export default function CommandDeck() {
   }, [session.token]);
 
   useEffect(() => {
-    if (!session.token) return;
+    if (!session.token || !visible) return; // background tab: stop polling the relay
     let live = true;
     const run = () => { if (live) pull(); };
-    run();
+    run(); // immediate pull on mount + whenever the tab is shown again
     const t = setInterval(run, POLL_MS);
     return () => { live = false; clearInterval(t); };
-  }, [session.token, pull]);
+  }, [session.token, pull, visible]);
   useEffect(() => () => { clearTimeout(ctlErrTimer.current); clearTimeout(hailTimer.current); }, []);
 
   const agents = useMemo(() => plotAgents(topo.nodes), [topo.nodes]);

@@ -6,12 +6,49 @@ export function useAutoRefresh(enabled, intervalMs, callback, deps = []) {
       return undefined;
     }
 
-    const timer = window.setInterval(() => {
-      callback();
-    }, intervalMs);
+    let timer = null;
+    const start = () => {
+      if (timer == null) timer = window.setInterval(() => callback(), intervalMs);
+    };
+    const stop = () => {
+      if (timer != null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    // A backgrounded tab stops hitting the relay; on return we catch up once
+    // immediately, then resume the interval. Saves battery on a left-open console.
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        stop();
+      } else {
+        callback();
+        start();
+      }
+    };
 
-    return () => window.clearInterval(timer);
+    if (document.visibilityState !== "hidden") start();
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [enabled, intervalMs, callback, ...deps]);
+}
+
+// Tracks page visibility so heavy views can pause polling + animations when the
+// tab is hidden. Returns true while visible, false while backgrounded.
+export function usePageVisible() {
+  const [visible, setVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState !== "hidden"
+  );
+  useEffect(() => {
+    const onChange = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  return visible;
 }
 
 export function useQueryState(initialState) {
