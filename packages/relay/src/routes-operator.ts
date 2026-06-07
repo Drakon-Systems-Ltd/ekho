@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, feedSubscribersSchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -132,6 +132,48 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
     const token = db.issueEnrollmentToken(request.operator.fleetId, request.operator.id);
     return reply.send({ token });
+  });
+
+  // ---- Operator signing keys (verifiable operator identity) ----------------
+
+  app.get("/v1/operator/keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    return reply.send({ keys: db.listOperatorKeys(request.operator.fleetId) });
+  });
+
+  app.post("/v1/operator/keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = operatorKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { public_key, label, endorsement } = parsed.data;
+    try {
+      const { keyId } = db.registerOperatorKey(request.operator.fleetId, public_key, label, endorsement && {
+        endorsedByKeyId: endorsement.endorsed_by_key_id,
+        signature: endorsement.signature
+      });
+      return reply.code(201).send({ key_id: keyId });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("already registered")) return reply.code(409).send({ error: msg });
+      // endorsement / unknown-key / bad-signature are all client errors.
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  app.delete("/v1/operator/keys/:keyId", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const { keyId } = request.params as { keyId: string };
+    const revoked = db.revokeOperatorKey(request.operator.fleetId, keyId);
+    if (!revoked) return reply.code(404).send({ error: "key not found" });
+    return reply.send({ revoked: true });
   });
 
   app.post("/v1/operator/messages", { preHandler: requireOperatorAuth }, async (request, reply) => {

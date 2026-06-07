@@ -842,3 +842,61 @@ describe("operator keys (storage)", () => {
     expect(relay.db.listOperatorKeys("flt_other_fleet")).toHaveLength(0);
   });
 });
+
+describe("operator keys (API)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("requires operator auth", async () => {
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/operator/keys",
+      payload: { public_key: "x", label: "y" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("registers a key and returns its key_id", async () => {
+    const k = makeOperatorKey(21);
+    const res = await relay.operatorRequest("POST", "/v1/operator/keys", {
+      public_key: k.pubB64,
+      label: "macbook",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.key_id).toBe(k.id);
+    const list = await relay.operatorRequest("GET", "/v1/operator/keys");
+    expect(list.body.keys.map((x: { key_id: string }) => x.key_id)).toContain(k.id);
+  });
+
+  it("revokes a key via DELETE", async () => {
+    const k = makeOperatorKey(22);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "phone" });
+    const del = await relay.operatorRequest("DELETE", `/v1/operator/keys/${k.id}`);
+    expect(del.status).toBe(200);
+    const list = await relay.operatorRequest("GET", "/v1/operator/keys");
+    const row = list.body.keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row.revoked_at).toBeTruthy();
+  });
+
+  it("returns 404 revoking an unknown key", async () => {
+    const del = await relay.operatorRequest("DELETE", "/v1/operator/keys/unknownkey00");
+    expect(del.status).toBe(404);
+  });
+
+  it("rejects an invalid endorsement with 400", async () => {
+    const first = makeOperatorKey(21);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: first.pubB64, label: "mb" });
+    const second = makeOperatorKey(22);
+    const badSig = signCanonical(
+      endorsementPayload(relay.fleetId, second.id, second.pubB64),
+      second.seed // signed by itself, not the endorser
+    );
+    const res = await relay.operatorRequest("POST", "/v1/operator/keys", {
+      public_key: second.pubB64,
+      label: "ph",
+      endorsement: { endorsed_by_key_id: first.id, signature: badSig },
+    });
+    expect(res.status).toBe(400);
+  });
+});

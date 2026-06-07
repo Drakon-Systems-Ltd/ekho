@@ -102,6 +102,18 @@ export const operatorTrustSchema = z.object({
   trusted: z.boolean()
 });
 
+export const operatorKeySchema = z.object({
+  public_key: z.string().min(1).max(128),
+  label: z.string().min(1).max(80),
+  // Present when adding a device key: an existing trusted key vouches for it.
+  endorsement: z
+    .object({
+      endorsed_by_key_id: z.string().min(1).max(32),
+      signature: z.string().min(1).max(128)
+    })
+    .optional()
+});
+
 export const peerAutoreplySchema = z.object({
   autoreply: z.boolean(),
   // Optional — when omitted, the existing per-agent budget is left untouched.
