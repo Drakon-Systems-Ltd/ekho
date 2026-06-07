@@ -39,7 +39,10 @@ export const enrollSchema = z.object({
   display_name: z.string().min(1),
   runtime: z.enum(["custom", "openclaw", "langgraph", "autogen"]),
   hostname: z.string().optional(),
-  capabilities: z.array(z.string()).optional().default([])
+  capabilities: z.array(z.string()).optional().default([]),
+  // The agent's own Ed25519 identity public key (agent-to-agent trust). Optional
+  // for back-compat; agents that omit it simply can't be peer-verified yet.
+  identity_public_key: z.string().min(1).max(128).optional()
 });
 
 export const proposeActionSchema = z.object({

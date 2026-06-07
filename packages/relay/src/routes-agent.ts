@@ -46,6 +46,11 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       hostname: parsed.data.hostname
     });
 
+    // Register the agent's own identity key (peer trust); endorsed later by the operator.
+    if (parsed.data.identity_public_key) {
+      db.setAgentIdentityKey(created.agentId, parsed.data.fleet_id, parsed.data.identity_public_key);
+    }
+
     return reply.send({
       agent_id: created.agentId,
       secret: created.secret,

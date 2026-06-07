@@ -1058,3 +1058,61 @@ describe("agent identity keys (storage)", () => {
     ).toThrow(/endorsement/i);
   });
 });
+
+describe("agent identity keys (distribution)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("registers the agent's identity public key at enrollment", async () => {
+    const ak = makeOperatorKey(61);
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: {
+        fleet_id: relay.fleetId,
+        token,
+        display_name: "Signer",
+        runtime: "custom",
+        identity_public_key: ak.pubB64,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === body.agent_id);
+    expect(row?.public_key).toBe(ak.pubB64);
+  });
+
+  it("distributes agent identity keys + endorsements via the roster", async () => {
+    const opk = makeOperatorKey(62);
+    relay.db.registerOperatorKey(relay.fleetId, opk.pubB64, "mb");
+    const ak = makeOperatorKey(63);
+    const tokenA = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const resA = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: {
+        fleet_id: relay.fleetId,
+        token: tokenA,
+        display_name: "A",
+        runtime: "custom",
+        identity_public_key: ak.pubB64,
+      },
+    });
+    const a = JSON.parse(resA.body);
+    const sig = signCanonical(
+      agentKeyEndorsementPayload(relay.fleetId, a.agent_id, ak.id, ak.pubB64),
+      opk.seed
+    );
+    relay.db.endorseAgentKey(relay.fleetId, a.agent_id, ak.id, { endorsedByKeyId: opk.id, signature: sig });
+
+    const b = await relay.enrollAgent("B");
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox?limit=10");
+    const entry = inbox.body.roster.find((r: { agent_id: string }) => r.agent_id === a.agent_id);
+    expect(entry.identity_public_key).toBe(ak.pubB64);
+    expect(entry.key_id).toBe(ak.id);
+    expect(entry.endorsed_by_key_id).toBe(opk.id);
+    expect(entry.endorsement_sig).toBe(sig);
+  });
+});

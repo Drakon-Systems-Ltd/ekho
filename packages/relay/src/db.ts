@@ -779,6 +779,19 @@ export class EkhoDb {
       for (const s of senders) senderRuntime.set(String(s.id), String(s.runtime));
     }
 
+    // Each teammate's identity key + operator endorsement, so a peer can verify a
+    // sender's signature and that its key chains back to the operator. Prefer an
+    // endorsed key when an agent has more than one active key.
+    const idKeysByAgent = new Map<string, AgentIdentityKeyRow>();
+    if (fleetId) {
+      for (const k of this.getAgentIdentityKeys(fleetId)) {
+        const existing = idKeysByAgent.get(k.agent_id);
+        if (!existing || (k.endorsed_by_key_id && !existing.endorsed_by_key_id)) {
+          idKeysByAgent.set(k.agent_id, k);
+        }
+      }
+    }
+
     // Lightweight teammate roster: other agents in the same fleet, excluding
     // the synthetic operator identity and self, capped so the inbox stays small.
     const roster = fleetId
@@ -788,12 +801,19 @@ export class EkhoDb {
            WHERE fleet_id = ? AND runtime != 'operator' AND id != ?
            ORDER BY last_seen_at DESC NULLS LAST, created_at DESC
            LIMIT 50`
-        ).all(fleetId, agentId) as Array<Record<string, unknown>>).map((row) => ({
-          agent_id: row.id,
-          display_name: row.display_name,
-          runtime: row.runtime,
-          status: row.status
-        }))
+        ).all(fleetId, agentId) as Array<Record<string, unknown>>).map((row) => {
+          const ik = idKeysByAgent.get(String(row.id));
+          return {
+            agent_id: row.id,
+            display_name: row.display_name,
+            runtime: row.runtime,
+            status: row.status,
+            identity_public_key: ik?.public_key ?? null,
+            key_id: ik?.key_id ?? null,
+            endorsed_by_key_id: ik?.endorsed_by_key_id ?? null,
+            endorsement_sig: ik?.endorsement_sig ?? null
+          };
+        })
       : [];
 
     // Parse bodies once, collect every attachment id across the batch, and
