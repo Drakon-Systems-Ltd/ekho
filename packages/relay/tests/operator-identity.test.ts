@@ -8,6 +8,7 @@ import {
   fromB64url,
   keyId,
   endorsementPayload,
+  agentKeyEndorsementPayload,
 } from "../src/operator-identity";
 
 const SEED = new Uint8Array(32).fill(7); // fixed seed -> deterministic vector
@@ -106,6 +107,23 @@ describe("endorsementPayload", () => {
         t: "op-key-endorsement",
         fleet_id: "flt_x",
         key_id: "kid_new",
+        public_key: "pub_b64",
+      })
+    );
+  });
+});
+
+describe("agentKeyEndorsementPayload", () => {
+  it("binds an agent's identity key to its agent_id in a stable structure", () => {
+    expect(
+      canonicalize(agentKeyEndorsementPayload("flt_x", "agent_1", "kid", "pub_b64"))
+    ).toBe(
+      canonicalize({
+        v: 1,
+        t: "agent-key-endorsement",
+        fleet_id: "flt_x",
+        agent_id: "agent_1",
+        key_id: "kid",
         public_key: "pub_b64",
       })
     );

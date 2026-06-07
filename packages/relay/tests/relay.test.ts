@@ -7,6 +7,7 @@ import {
   signCanonical,
   verifyCanonical,
   endorsementPayload,
+  agentKeyEndorsementPayload,
 } from "../src/operator-identity";
 
 function makeOperatorKey(fill: number) {
@@ -999,5 +1000,61 @@ describe("operator key distribution (pinning)", () => {
     const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
     const row = inbox.body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
     expect(row.revoked).toBe(true);
+  });
+});
+
+describe("agent identity keys (storage)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("stores an agent identity key and lists it (unendorsed) for the fleet", async () => {
+    const agent = await relay.enrollAgent("A");
+    const ak = makeOperatorKey(51);
+    const { keyId: kid } = relay.db.setAgentIdentityKey(agent.agent_id, relay.fleetId, ak.pubB64);
+    expect(kid).toBe(ak.id);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === agent.agent_id);
+    expect(row?.public_key).toBe(ak.pubB64);
+    expect(row?.endorsed_by_key_id).toBeNull();
+  });
+
+  it("endorses an agent key with the operator key (operator-rooted)", async () => {
+    const opk = makeOperatorKey(52);
+    relay.db.registerOperatorKey(relay.fleetId, opk.pubB64, "mb");
+    const agent = await relay.enrollAgent("A");
+    const ak = makeOperatorKey(53);
+    relay.db.setAgentIdentityKey(agent.agent_id, relay.fleetId, ak.pubB64);
+    const sig = signCanonical(
+      agentKeyEndorsementPayload(relay.fleetId, agent.agent_id, ak.id, ak.pubB64),
+      opk.seed
+    );
+    expect(
+      relay.db.endorseAgentKey(relay.fleetId, agent.agent_id, ak.id, {
+        endorsedByKeyId: opk.id,
+        signature: sig,
+      })
+    ).toBe(true);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === agent.agent_id);
+    expect(row?.endorsed_by_key_id).toBe(opk.id);
+    expect(row?.endorsement_sig).toBe(sig);
+  });
+
+  it("rejects an agent-key endorsement not signed by a valid operator key", async () => {
+    const opk = makeOperatorKey(52);
+    relay.db.registerOperatorKey(relay.fleetId, opk.pubB64, "mb");
+    const agent = await relay.enrollAgent("A");
+    const ak = makeOperatorKey(53);
+    relay.db.setAgentIdentityKey(agent.agent_id, relay.fleetId, ak.pubB64);
+    // Signed by the agent key itself, not the operator → invalid.
+    const badSig = signCanonical(
+      agentKeyEndorsementPayload(relay.fleetId, agent.agent_id, ak.id, ak.pubB64),
+      ak.seed
+    );
+    expect(() =>
+      relay.db.endorseAgentKey(relay.fleetId, agent.agent_id, ak.id, {
+        endorsedByKeyId: opk.id,
+        signature: badSig,
+      })
+    ).toThrow(/endorsement/i);
   });
 });

@@ -11,6 +11,7 @@ import {
   verifyCanonical,
   fromB64url,
   endorsementPayload,
+  agentKeyEndorsementPayload,
 } from "./operator-identity";
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
@@ -25,6 +26,18 @@ export interface OperatorKeyRow {
   revoked_at: string | null;
   endorsed_by_key_id: string | null;
   endorsement_sig: string | null;
+}
+
+export interface AgentIdentityKeyRow {
+  agent_id: string;
+  fleet_id: string;
+  key_id: string;
+  public_key: string;
+  created_at: string;
+  revoked_at: string | null;
+  endorsed_by_key_id: string | null;
+  endorsement_sig: string | null;
+  endorsed_at: string | null;
 }
 
 export class EkhoDb {
@@ -153,6 +166,70 @@ export class EkhoDb {
       )
       .run(nowIso(), fleetId, targetKeyId);
     return res.changes > 0;
+  }
+
+  // ---- Agent identity keys (agent-to-agent trust) --------------------------
+
+  /** Register an agent's own Ed25519 identity public key (unendorsed at first). */
+  setAgentIdentityKey(agentId: string, fleetId: string, publicKeyB64url: string): { keyId: string } {
+    const kid = deriveKeyId(fromB64url(publicKeyB64url));
+    this.db
+      .prepare(
+        `INSERT INTO agent_identity_keys (agent_id, fleet_id, key_id, public_key, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id, key_id) DO NOTHING`
+      )
+      .run(agentId, fleetId, kid, publicKeyB64url, nowIso());
+    return { keyId: kid };
+  }
+
+  /**
+   * Record the operator's endorsement of an agent's identity key. The endorsement
+   * must be a valid signature by an active operator key over
+   * agentKeyEndorsementPayload(...) — this is what roots peer trust at the operator.
+   */
+  endorseAgentKey(
+    fleetId: string,
+    agentId: string,
+    targetKeyId: string,
+    endorsement: { endorsedByKeyId: string; signature: string }
+  ): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT public_key FROM agent_identity_keys WHERE fleet_id = ? AND agent_id = ? AND key_id = ?"
+      )
+      .get(fleetId, agentId, targetKeyId) as { public_key: string } | undefined;
+    if (!row) throw new Error("agent identity key not found");
+    const endorser = this.db
+      .prepare(
+        "SELECT public_key FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+      )
+      .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
+    if (!endorser) throw new Error("endorsement references an unknown or revoked operator key");
+    const ok = verifyCanonical(
+      agentKeyEndorsementPayload(fleetId, agentId, targetKeyId, row.public_key),
+      endorsement.signature,
+      fromB64url(endorser.public_key)
+    );
+    if (!ok) throw new Error("invalid agent-key endorsement signature");
+    const res = this.db
+      .prepare(
+        `UPDATE agent_identity_keys
+           SET endorsed_by_key_id = ?, endorsement_sig = ?, endorsed_at = ?
+         WHERE fleet_id = ? AND agent_id = ? AND key_id = ?`
+      )
+      .run(endorsement.endorsedByKeyId, endorsement.signature, nowIso(), fleetId, agentId, targetKeyId);
+    return res.changes > 0;
+  }
+
+  getAgentIdentityKeys(fleetId: string): AgentIdentityKeyRow[] {
+    return this.db
+      .prepare(
+        `SELECT agent_id, fleet_id, key_id, public_key, created_at, revoked_at,
+                endorsed_by_key_id, endorsement_sig, endorsed_at
+           FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL`
+      )
+      .all(fleetId) as AgentIdentityKeyRow[];
   }
 
   private escapeLike(value: string) {

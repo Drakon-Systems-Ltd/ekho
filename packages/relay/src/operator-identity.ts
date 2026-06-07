@@ -60,6 +60,28 @@ export function endorsementPayload(fleetId: string, newKeyId: string, newPublicK
   };
 }
 
+/**
+ * Canonical structure the OPERATOR signs to endorse an AGENT's identity key —
+ * the root of agent-to-agent trust. A peer that has pinned the operator's public
+ * key can verify this endorsement and so trust the sender's key without trusting
+ * the relay (a web of trust rooted at the operator).
+ */
+export function agentKeyEndorsementPayload(
+  fleetId: string,
+  agentId: string,
+  agentKeyId: string,
+  agentPublicKeyB64url: string
+) {
+  return {
+    v: 1,
+    t: "agent-key-endorsement",
+    fleet_id: fleetId,
+    agent_id: agentId,
+    key_id: agentKeyId,
+    public_key: agentPublicKeyB64url,
+  };
+}
+
 /** Sign the canonical form of `payload` with a 32-byte Ed25519 seed. */
 export function signCanonical(payload: unknown, secret: Uint8Array): string {
   return b64url(ed25519.sign(enc.encode(canonicalize(payload)), secret));
