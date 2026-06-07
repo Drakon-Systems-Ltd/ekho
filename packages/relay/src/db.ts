@@ -865,6 +865,7 @@ export class EkhoDb {
         action: row.action,
         reason: row.payload_json ? JSON.parse(String(row.payload_json)).reason ?? "operator control" : "operator control"
       })),
+      fleet_id: fleetId,
       operator_trusted: operatorTrusted,
       peer_autoreply: peerAutoreply,
       peer_turn_budget: peerTurnBudget,

@@ -161,6 +161,8 @@ class OperatorKeyEntry:
 class InboxResponse:
     messages: List[InboxMessage]
     controls: List[ControlMessage]
+    # The polling agent's own fleet — binds verified signatures to a fleet.
+    fleet_id: Optional[str] = None
     # Whether this agent recognizes the console operator as its verified principal.
     operator_trusted: bool = False
     # Other agents in the same fleet (excludes the operator identity and self).
@@ -183,6 +185,7 @@ class InboxResponse:
                 ControlMessage.from_dict(c)
                 for c in data.get("controls", [])
             ],
+            fleet_id=data.get("fleet_id"),
             operator_trusted=bool(data.get("operator_trusted", False)),
             roster=[
                 RosterEntry.from_dict(r)

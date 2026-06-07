@@ -1240,4 +1240,10 @@ describe("agent message signatures (peer)", () => {
     // sender is an agent, so operator_sig must NOT be surfaced from its metadata.
     expect(msg.operator_sig).toBeNull();
   });
+
+  it("includes the agent's own fleet_id in the inbox (for signature fleet-binding)", async () => {
+    const agent = await relay.enrollAgent("F");
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=5");
+    expect(inbox.body.fleet_id).toBe(relay.fleetId);
+  });
 });
