@@ -60,6 +60,14 @@ class InboxMessage:
     # Resolved attachment metadata (never bytes). Fetch via
     # download_attachment.
     attachments: List[AttachmentMeta] = field(default_factory=list)
+    # Verifiable identity (None unless the sender signed). operator_sig is only
+    # populated for operator senders, agent_sig only for agent senders (the relay
+    # gates these on the server-derived sender kind). The agent verifies them
+    # itself against pinned/endorsed keys — see ekho.identity.
+    operator_sig: Optional[str] = None
+    agent_sig: Optional[str] = None
+    key_id: Optional[str] = None
+    sig_canonical: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxMessage":
@@ -79,6 +87,10 @@ class InboxMessage:
                 AttachmentMeta.from_dict(a)
                 for a in data.get("attachments", [])
             ],
+            operator_sig=data.get("operator_sig"),
+            agent_sig=data.get("agent_sig"),
+            key_id=data.get("key_id"),
+            sig_canonical=data.get("sig_canonical"),
         )
 
 
@@ -103,6 +115,12 @@ class RosterEntry:
     display_name: str
     runtime: str
     status: str
+    # The teammate's identity key + operator endorsement, so a peer can verify a
+    # signed message and that the sender's key chains back to the operator.
+    identity_public_key: Optional[str] = None
+    key_id: Optional[str] = None
+    endorsed_by_key_id: Optional[str] = None
+    endorsement_sig: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RosterEntry":
@@ -111,6 +129,31 @@ class RosterEntry:
             display_name=data.get("display_name", ""),
             runtime=data.get("runtime", ""),
             status=data.get("status", ""),
+            identity_public_key=data.get("identity_public_key"),
+            key_id=data.get("key_id"),
+            endorsed_by_key_id=data.get("endorsed_by_key_id"),
+            endorsement_sig=data.get("endorsement_sig"),
+        )
+
+
+@dataclass
+class OperatorKeyEntry:
+    """A pinned operator signing key delivered to agents for verification."""
+
+    key_id: str
+    public_key: str
+    revoked: bool = False
+    endorsed_by_key_id: Optional[str] = None
+    endorsement_sig: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "OperatorKeyEntry":
+        return cls(
+            key_id=data["key_id"],
+            public_key=data["public_key"],
+            revoked=bool(data.get("revoked", False)),
+            endorsed_by_key_id=data.get("endorsed_by_key_id"),
+            endorsement_sig=data.get("endorsement_sig"),
         )
 
 
@@ -126,6 +169,8 @@ class InboxResponse:
     # predates the feature — the client then falls back to its local default).
     peer_autoreply: Optional[bool] = None
     peer_turn_budget: Optional[int] = None
+    # Pinned operator signing keys (incl. revoked, so the agent can drop them).
+    operator_keys: List[OperatorKeyEntry] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxResponse":
@@ -145,6 +190,10 @@ class InboxResponse:
             ],
             peer_autoreply=data.get("peer_autoreply"),
             peer_turn_budget=data.get("peer_turn_budget"),
+            operator_keys=[
+                OperatorKeyEntry.from_dict(k)
+                for k in data.get("operator_keys", [])
+            ],
         )
 
 
@@ -168,6 +217,11 @@ class SendMessageInput(TypedDict, total=False):
     metadata: Dict[str, Any]
     conversation_id: str
     correlation_id: str
+    # Verifiable peer identity (optional): the agent signs the canonical payload
+    # with its own identity key; the relay relays these verbatim.
+    agent_sig: str
+    key_id: str
+    sig_canonical: Dict[str, Any]
 
 
 class HeartbeatInput(TypedDict, total=False):
