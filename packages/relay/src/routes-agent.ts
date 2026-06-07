@@ -113,6 +113,14 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       }
     }
 
+    // Fold a peer signature into metadata (relayed verbatim). operator_sig is NOT
+    // accepted here — the inbox only surfaces it for genuine operator senders.
+    const sigMeta =
+      parsed.data.agent_sig && parsed.data.key_id && parsed.data.sig_canonical
+        ? { agent_sig: parsed.data.agent_sig, key_id: parsed.data.key_id, sig_canonical: parsed.data.sig_canonical }
+        : {};
+    const mergedMeta = { ...(parsed.data.metadata ?? {}), ...sigMeta };
+
     let result: { messageId: string; createdAt: string };
     try {
       result = db.createMessage({
@@ -125,7 +133,7 @@ export async function registerAgentRoutes(app: FastifyInstance) {
         ttlSeconds: parsed.data.ttl_seconds,
         requiresApproval: parsed.data.requires_approval,
         body: parsed.data.body,
-        metadata: parsed.data.metadata,
+        metadata: Object.keys(mergedMeta).length ? mergedMeta : undefined,
         conversationId: parsed.data.conversation_id,
         correlationId: parsed.data.correlation_id
       });

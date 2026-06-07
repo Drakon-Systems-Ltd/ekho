@@ -16,7 +16,12 @@ export const sendMessageSchema = z.object({
   body: z.record(z.string(), z.unknown()).or(z.object({ text: z.string() })),
   metadata: z.record(z.string(), z.unknown()).optional(),
   conversation_id: z.string().min(1),
-  correlation_id: z.string().min(1)
+  correlation_id: z.string().min(1),
+  // Verifiable peer identity (optional): the agent signs the canonical payload
+  // with its own identity key; relayed verbatim for the recipient to verify.
+  agent_sig: z.string().min(1).max(128).optional(),
+  key_id: z.string().min(1).max(32).optional(),
+  sig_canonical: z.record(z.string(), z.unknown()).optional()
 });
 
 export const ackSchema = z.object({

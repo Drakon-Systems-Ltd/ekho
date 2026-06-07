@@ -1171,3 +1171,73 @@ describe("operator endorse-key API", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("agent message signatures (peer)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("relays an agent's peer-message signature verbatim", async () => {
+    const ak = makeOperatorKey(81);
+    const tokenA = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const resA = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: { fleet_id: relay.fleetId, token: tokenA, display_name: "A", runtime: "custom", identity_public_key: ak.pubB64 },
+    });
+    const a = JSON.parse(resA.body);
+    const b = await relay.enrollAgent("B");
+
+    const canonical = {
+      v: 1,
+      fleet_id: relay.fleetId,
+      sender_agent_id: a.agent_id,
+      key_id: ak.id,
+      recipient: { kind: "agent", id: b.agent_id },
+      conversation_id: "peer-1",
+      body_sha256: "abc123",
+      sent_at: "2026-06-07T00:00:00Z",
+      nonce: "bm9uY2U",
+    };
+    const sig = signCanonical(canonical, ak.seed);
+
+    const send = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id },
+      message_type: "direct",
+      body: { text: "peer hello" },
+      conversation_id: "peer-1",
+      correlation_id: "peer-c1",
+      agent_sig: sig,
+      key_id: ak.id,
+      sig_canonical: canonical,
+    });
+    expect(send.status).toBe(200);
+
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "peer-1");
+    expect(msg.sender_kind).toBe("agent");
+    expect(msg.agent_sig).toBe(sig);
+    expect(msg.key_id).toBe(ak.id);
+    expect(msg.sig_canonical).toEqual(canonical);
+    expect(msg.operator_sig).toBeNull();
+    expect(verifyCanonical(msg.sig_canonical, msg.agent_sig, ak.pub)).toBe(true);
+  });
+
+  it("does not lift a forged operator_sig from an agent's metadata", async () => {
+    const a = await relay.enrollAgent("A");
+    const b = await relay.enrollAgent("B");
+    const send = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id },
+      message_type: "direct",
+      body: { text: "spoof attempt" },
+      conversation_id: "peer-spoof",
+      correlation_id: "peer-c2",
+      metadata: { operator_sig: "FORGED", key_id: "x" },
+    });
+    expect(send.status).toBe(200);
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "peer-spoof");
+    // sender is an agent, so operator_sig must NOT be surfaced from its metadata.
+    expect(msg.operator_sig).toBeNull();
+  });
+});

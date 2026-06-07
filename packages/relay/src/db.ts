@@ -838,19 +838,22 @@ export class EkhoDb {
           .map((aid) => attachmentMetaById.get(aid))
           .filter((m): m is { id: string; filename: string; mime: string; size_bytes: number } => Boolean(m));
         const meta = row.metadata_json ? JSON.parse(String(row.metadata_json)) : {};
+        const senderKind = senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent";
         return {
           message_id: row.id,
           conversation_id: row.conversation_id,
           correlation_id: row.correlation_id,
           sender_agent_id: row.sender_agent_id,
-          sender_kind: senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent",
+          sender_kind: senderKind,
           message_type: row.message_type,
           priority: row.priority,
           body,
           attachments,   // [{id, filename, mime, size_bytes}] — NEVER bytes
           metadata: meta,
-          // Verifiable operator identity (null unless the operator signed this message).
-          operator_sig: meta.operator_sig ?? null,
+          // Verifiable identity, gated on the SERVER-derived sender kind so an agent
+          // can't inject a fake operator_sig (nor an operator an agent_sig).
+          operator_sig: senderKind === "operator" ? (meta.operator_sig ?? null) : null,
+          agent_sig: senderKind === "agent" ? (meta.agent_sig ?? null) : null,
           key_id: meta.key_id ?? null,
           sig_canonical: meta.sig_canonical ?? null,
           created_at: row.created_at,
