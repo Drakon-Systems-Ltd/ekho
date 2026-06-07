@@ -170,4 +170,48 @@
 @keyframes dk-drift { 0% { transform: translateY(20px) scale(0.6); opacity: 0; } 12% { opacity: 0.8; } 88% { opacity: 0.7; } 100% { transform: translateY(-120px) scale(1); opacity: 0; } }
 @keyframes dk-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; } }
 .cmd-deck .reveal { animation: dk-rise .6s both; } .cmd-deck .reveal.d1 { animation-delay: .05s; } .cmd-deck .reveal.d2 { animation-delay: .14s; } .cmd-deck .reveal.d3 { animation-delay: .22s; }
+/* selectable units / blips (now buttons) */
+.cmd-deck .unitbtn { width: 100%; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.cmd-deck .unit.sel { background: rgba(255,176,0,0.10); border-color: var(--gold); }
+.cmd-deck .blipbtn { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.cmd-deck .blip.sel .blip__dot { transform: scale(1.22); }
+.cmd-deck .blip.sel .blip__label { border-color: var(--gold); box-shadow: var(--glow); }
+
+/* control buttons (ops cards + dossier) */
+.cmd-deck .ctl { font-family: "Share Tech Mono"; font-size: 10px; letter-spacing: 0.08em; padding: 6px 9px; background: rgba(0,0,0,0.3); border: 1px solid var(--hair); color: var(--gold); cursor: pointer; clip-path: polygon(4px 0,100% 0,100% calc(100% - 4px),calc(100% - 4px) 100%,0 100%,0 4px); transition: background .15s, filter .15s; }
+.cmd-deck .ctl:hover:not(:disabled) { background: rgba(255,176,0,0.12); }
+.cmd-deck .ctl:disabled { opacity: 0.5; cursor: default; }
+.cmd-deck .ctl--warn { color: var(--ember); border-color: rgba(255,90,24,0.4); }
+.cmd-deck .ctl--danger { color: var(--crim-hi); border-color: var(--hair-c); }
+.cmd-deck .ctl--ok { color: #9be8a0; border-color: rgba(120,230,140,0.35); }
+.cmd-deck .ctl--ghost { color: var(--muted); }
+.cmd-deck .ctl--hail { color: #1a0500; background: linear-gradient(180deg, var(--gold-hi), var(--ember)); border-color: transparent; font-weight: 700; box-shadow: var(--glow); }
+.cmd-deck .ctl--hail:hover:not(:disabled) { filter: brightness(1.08); }
+.cmd-deck .ctlrow { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.cmd-deck .opscard__h { width: 100%; background: none; border: 0; cursor: pointer; color: inherit; text-align: left; font: inherit; }
+.cmd-deck .opscard.alert { border-color: var(--hair-c); box-shadow: inset 0 0 30px rgba(255,30,60,0.12); animation: dk-alertpulse 1.6s ease-in-out infinite; }
+@keyframes dk-alertpulse { 0%,100% { box-shadow: inset 0 0 24px rgba(255,30,60,0.10); } 50% { box-shadow: inset 0 0 40px rgba(255,30,60,0.22); } }
+
+/* unit dossier (slide-in command panel over the intel rail) */
+.cmd-deck .dossier { position: absolute; top: 14px; right: 14px; bottom: 14px; width: 364px; z-index: 5; border: 1px solid var(--crim); background: linear-gradient(180deg, rgba(40,10,8,0.95), rgba(12,4,2,0.97)); box-shadow: -12px 0 44px rgba(0,0,0,0.66), var(--glow-c); display: flex; flex-direction: column; clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 16px 100%, 0 calc(100% - 16px)); animation: dk-slidein .28s ease-out both; }
+@keyframes dk-slidein { from { opacity: 0; transform: translateX(26px); } to { opacity: 1; transform: none; } }
+.cmd-deck .dossier__cap { display: flex; align-items: center; justify-content: space-between; padding: 12px 13px; border-bottom: 1px solid var(--hair); background: linear-gradient(180deg, rgba(255,30,60,0.07), transparent); }
+.cmd-deck .dossier__id { display: flex; align-items: center; gap: 11px; }
+.cmd-deck .dossier__name { font-weight: 700; font-size: 18px; letter-spacing: 0.1em; }
+.cmd-deck .dossier__rt { font-size: 11px; color: var(--gold-hi); }
+.cmd-deck .dossier__body { padding: 13px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+.cmd-deck .dossier__stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.cmd-deck .dossier__stat { font-weight: 700; font-size: 15px; color: var(--gold-hi); font-family: "Share Tech Mono"; margin-top: 2px; }
+.cmd-deck .dossier__controls { display: flex; gap: 6px; flex-wrap: wrap; }
+.cmd-deck .hailbox { display: flex; flex-direction: column; gap: 7px; border-top: 1px solid var(--hair); padding-top: 12px; }
+.cmd-deck .hailbox__in { background: rgba(0,0,0,0.4); border: 1px solid var(--hair); color: var(--ink); font-family: "Chakra Petch", sans-serif; font-size: 13px; padding: 9px; resize: none; }
+.cmd-deck .hailbox__in:focus { outline: none; border-color: var(--gold); box-shadow: var(--glow); }
+.cmd-deck .hailbox__send { width: 100%; text-align: center; padding: 10px; font-size: 11px; }
+.cmd-deck .dossier__log { border-top: 1px solid var(--hair); padding-top: 12px; }
+
+/* one-shot boot scan on mount */
+.cmd-deck .bootscan { position: absolute; inset: 0; z-index: 6; pointer-events: none; overflow: hidden; }
+.cmd-deck .bootscan::before { content: ""; position: absolute; left: 0; right: 0; height: 42%; top: -42%; background: linear-gradient(180deg, transparent, rgba(255,176,0,0.13), rgba(255,30,60,0.10), transparent); animation: dk-boot 1.0s ease-out forwards; }
+@keyframes dk-boot { 0% { top: -42%; opacity: 0; } 14% { opacity: 1; } 100% { top: 110%; opacity: 0; } }
+
 @media (prefers-reduced-motion: reduce) { .cmd-deck * { animation: none !important; } }
