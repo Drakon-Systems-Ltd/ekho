@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { createTestRelay, type TestRelay } from "./setup";
+import { config } from "../src/config";
 import {
   b64url,
   keyId,
@@ -1290,5 +1291,63 @@ describe("agent self-registers its identity key", () => {
     const row = res.body.keys.find((k: { agent_id: string }) => k.agent_id === agent.agent_id);
     expect(row.public_key).toBe(ak.pubB64);
     expect(row.endorsed_by_key_id ?? null).toBeNull();
+  });
+});
+
+describe("tailnet gate (integration)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => {
+    config.operatorRequireTailnet = false;
+    config.operatorTailnetUser = "";
+    relay.cleanup();
+  });
+
+  const overview = (headers: Record<string, string>) =>
+    relay.app.inject({ method: "GET", url: "/v1/operator/overview", headers });
+
+  it("blocks operator login without a tailnet identity when required", async () => {
+    config.operatorRequireTailnet = true;
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/operator/login",
+      payload: { fleet_name: "x", email: "a@b.c", password: "p" },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("blocks an operator API request off-tailnet even with a valid token", async () => {
+    config.operatorRequireTailnet = true;
+    const res = await overview({ authorization: `Bearer ${relay.operatorToken}` });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("allows a request carrying the tailnet identity header", async () => {
+    config.operatorRequireTailnet = true;
+    const res = await overview({
+      authorization: `Bearer ${relay.operatorToken}`,
+      "tailscale-user-login": "me@example.com",
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("enforces the tailnet user allowlist", async () => {
+    config.operatorRequireTailnet = true;
+    config.operatorTailnetUser = "me@example.com";
+    const ok = await overview({
+      authorization: `Bearer ${relay.operatorToken}`,
+      "tailscale-user-login": "me@example.com",
+    });
+    expect(ok.statusCode).toBe(200);
+    const bad = await overview({
+      authorization: `Bearer ${relay.operatorToken}`,
+      "tailscale-user-login": "intruder@example.com",
+    });
+    expect(bad.statusCode).toBe(403);
+  });
+
+  it("is off by default (no header needed)", async () => {
+    const res = await overview({ authorization: `Bearer ${relay.operatorToken}` });
+    expect(res.statusCode).toBe(200);
   });
 });

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
+import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
 import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -19,6 +20,16 @@ function parsePagination(query: Record<string, unknown>) {
 
 export async function registerOperatorRoutes(app: FastifyInstance) {
   app.post("/v1/operator/login", async (request, reply) => {
+    // Tailnet gate first: don't even process credentials off-tailnet.
+    const gate = evaluateTailnetGate({
+      require: config.operatorRequireTailnet,
+      allowedUser: config.operatorTailnetUser,
+      login: tailnetLoginFromHeaders(request.headers as Record<string, unknown>)
+    });
+    if (!gate.allowed) {
+      return reply.code(403).send({ error: gate.reason });
+    }
+
     const parsed = operatorLoginSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.flatten() });
