@@ -14,12 +14,43 @@ Bridges the SDK verifier (ekho.verify_inbound) to the autoreply loop:
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, Optional, Sequence, Set
 
 from ekho import identity as _identity
 from ekho import verify_inbound
 from ekho.verify import VerificationResult
+
+
+def build_signed_send_fields(
+    *,
+    identity_obj: Any,
+    fleet_id: str,
+    self_agent_id: str,
+    recipient: Dict[str, Any],
+    conversation_id: str,
+    body_text: str,
+    nonce: str,
+    sent_at: str,
+) -> Dict[str, Any]:
+    """Sign an outbound peer message so recipients can verify it came from us.
+    Returns {agent_sig, key_id, sig_canonical} to merge into the send payload."""
+    public_key = identity_obj.public_key_b64url()
+    kid = _identity.key_id(public_key)
+    canonical = {
+        "v": 1,
+        "fleet_id": fleet_id,
+        "sender_agent_id": self_agent_id,
+        "key_id": kid,
+        "recipient": recipient,
+        "conversation_id": conversation_id,
+        "body_sha256": hashlib.sha256(body_text.encode("utf-8")).hexdigest(),
+        "sent_at": sent_at,
+        "nonce": nonce,
+    }
+    sig = _identity.sign_canonical(canonical, bytes.fromhex(identity_obj.seed_hex))
+    return {"agent_sig": sig, "key_id": kid, "sig_canonical": canonical}
 
 
 def sync_pinned_operator_keys(identity_obj: Any, operator_keys: Sequence[Any], *, fleet_id: Optional[str]) -> bool:

@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from ekho import identity
-from ekho.types import InboxMessage, InboxResponse, OperatorKeyEntry, RosterEntry
+from ekho.types import InboxMessage, InboxResponse, OperatorKeyEntry
 from ekho_hermes.autoreply import AutoReplyState, process_inbox_once
 from ekho_hermes.credentials import EkhoIdentity
+from ekho import verify_canonical
 from ekho_hermes.verification import (
+    build_signed_send_fields,
     should_autowake,
     sync_pinned_operator_keys,
     verify_batch,
@@ -179,3 +181,20 @@ def test_tick_forged_operator_signature_blocked_even_when_flag_true():
     )
     # Signed but invalid → impersonation; blocked despite operator_trusted=True.
     assert len(spawned) == 0
+
+
+# --- outbound signing (the symmetric half) ---
+def test_build_signed_send_fields_round_trips():
+    ident = EkhoIdentity(seed_hex="0a" * 32)
+    fields = build_signed_send_fields(
+        identity_obj=ident, fleet_id="flt", self_agent_id="me",
+        recipient={"kind": "agent", "id": "peer"}, conversation_id="c",
+        body_text="hello", nonce="n1", sent_at="2026-06-07T00:00:00Z",
+    )
+    assert fields["key_id"] == identity.key_id(ident.public_key_b64url())
+    assert fields["sig_canonical"]["sender_agent_id"] == "me"
+    assert fields["sig_canonical"]["body_sha256"] == hashlib.sha256(b"hello").hexdigest()
+    # A recipient can verify it against our public key.
+    assert verify_canonical(
+        fields["sig_canonical"], fields["agent_sig"], ident.public_key_b64url()
+    ) is True
