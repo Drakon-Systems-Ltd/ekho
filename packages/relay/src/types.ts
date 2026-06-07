@@ -38,6 +38,10 @@ export const heartbeatSchema = z.object({
   metrics: z.record(z.string(), z.unknown()).optional().default({})
 });
 
+export const identityKeySchema = z.object({
+  public_key: z.string().min(1).max(128)
+});
+
 export const enrollSchema = z.object({
   fleet_id: z.string().min(1),
   token: z.string().min(1),

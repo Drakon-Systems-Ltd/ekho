@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
 import { db } from "./db";
-import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -66,6 +66,21 @@ export async function registerAgentRoutes(app: FastifyInstance) {
         endorsement_sig: k.endorsement_sig
       }))
     });
+  });
+
+  // An enrolled agent registers (or rotates) its own identity public key. Works
+  // for already-enrolled agents that predate enrollment-time registration; the
+  // operator then endorses it. Idempotent (re-posting the same key is a no-op).
+  app.post("/v1/identity-key", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = identityKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { keyId } = db.setAgentIdentityKey(request.agent.id, request.agent.fleetId, parsed.data.public_key);
+    return reply.send({ key_id: keyId });
   });
 
   app.post("/v1/messages", { preHandler: requireAgentAuth }, async (request, reply) => {

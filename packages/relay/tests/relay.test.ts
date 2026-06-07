@@ -1247,3 +1247,35 @@ describe("agent message signatures (peer)", () => {
     expect(inbox.body.fleet_id).toBe(relay.fleetId);
   });
 });
+
+describe("agent self-registers its identity key", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("registers the agent's own identity key (post-enrollment, idempotent)", async () => {
+    const agent = await relay.enrollAgent("R"); // enrolled without a key
+    const ak = makeOperatorKey(91);
+    const res = await relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/identity-key", {
+      public_key: ak.pubB64,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.key_id).toBe(ak.id);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === agent.agent_id);
+    expect(row?.public_key).toBe(ak.pubB64);
+    // Idempotent: posting the same key again still succeeds.
+    const again = await relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/identity-key", {
+      public_key: ak.pubB64,
+    });
+    expect(again.status).toBe(200);
+  });
+
+  it("requires agent auth", async () => {
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/identity-key",
+      payload: { public_key: "x" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+});

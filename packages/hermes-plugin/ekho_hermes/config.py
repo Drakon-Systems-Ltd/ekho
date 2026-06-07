@@ -51,6 +51,11 @@ class EkhoConfig:
     # gives an adopter surprise peer traffic; the operator opts in per fleet.
     peer_autoreply: bool = False
     peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET
+    # Operator signing public key(s) to bootstrap-pin as the trust root, for
+    # agents enrolled before signing existed. Format: "<b64url>" or
+    # "<key_id>:<b64url>", comma-separated. Optional — the trusted out-of-band
+    # channel (the Security screen shows the value to paste).
+    operator_pubkey: Optional[str] = None
 
     @property
     def has_relay(self) -> bool:
@@ -100,4 +105,5 @@ class EkhoConfig:
             heartbeat_interval_seconds=interval,
             peer_autoreply=_truthy(env.get("EKHO_PEER_AUTOREPLY")),
             peer_turn_budget=budget,
+            operator_pubkey=_clean(env.get("EKHO_OPERATOR_PUBKEY")),
         )
