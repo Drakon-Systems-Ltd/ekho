@@ -85,6 +85,15 @@ describe("bounded peer delegation", () => {
     expect(p).not.toContain("Michael");
   });
 
+  it("frames a cryptographically-verified operator message (even with relay flag off)", () => {
+    const m = msg({ message_id: "mop" });
+    const batch = { messages: [m], operator_trusted: false, roster: [] } as any;
+    const verifications = { mop: { verified: true, kind: "operator", reason: null, keyId: "anz_x" } } as any;
+    const p = buildPrompt([m], batch, verifications);
+    expect(p).toContain("CRYPTOGRAPHICALLY VERIFIED");
+    expect(p).toContain("anz_x");
+  });
+
   it("defaults the per-conversation budget to 6", () => {
     expect(DEFAULT_PEER_TURN_BUDGET).toBe(6);
   });

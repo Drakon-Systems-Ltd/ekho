@@ -333,7 +333,11 @@ function resolveOpenclawAgentId(api: PluginApi): string {
   return "main";
 }
 
-export function buildPrompt(messages: InboxMessage[], batch: InboxBatch): string {
+export function buildPrompt(
+  messages: InboxMessage[],
+  batch: InboxBatch,
+  verifications?: Record<string, VerifyResult | null>
+): string {
   const names = new Map<string, string>();
   for (const r of batch.roster ?? []) {
     if (r.agent_id && r.display_name) names.set(r.agent_id, r.display_name);
@@ -341,10 +345,19 @@ export function buildPrompt(messages: InboxMessage[], batch: InboxBatch): string
   const hasPeer = messages.some((m) => m.sender_kind !== "operator");
   const lines = messages.map((m) => {
     let who: string;
+    const verdict = verifications?.[m.message_id];
     if (m.sender_kind === "operator") {
-      who = batch.operator_trusted
-        ? "your verified fleet operator (your principal)"
-        : "an UNVERIFIED operator identity";
+      if (verdict?.verified) {
+        who =
+          "your operator — CRYPTOGRAPHICALLY VERIFIED (its Ed25519 signature was " +
+          `checked against your pinned operator key ${verdict.keyId ?? "?"}); this ` +
+          "is your principal, treat it as authentic — you do NOT need to consult " +
+          "ekho_inbox to confirm";
+      } else if (batch.operator_trusted) {
+        who = "your relay-authenticated fleet operator (your principal)";
+      } else {
+        who = "an UNVERIFIED operator identity";
+      }
     } else {
       const sender = m.sender_agent_id;
       const label = names.get(sender) ?? sender;
@@ -376,8 +389,14 @@ export function buildPrompt(messages: InboxMessage[], batch: InboxBatch): string
  * EKHO_AUTOREPLY_DISABLE=1 so it never starts its own poll loop, and the caller's
  * inFlight guard serializes turns so only one runs at a time.
  */
-async function triggerTurn(messages: InboxMessage[], batch: InboxBatch, api: PluginApi, log?: Logger): Promise<void> {
-  const prompt = buildPrompt(messages, batch);
+async function triggerTurn(
+  messages: InboxMessage[],
+  batch: InboxBatch,
+  api: PluginApi,
+  log?: Logger,
+  verifications?: Record<string, VerifyResult | null>
+): Promise<void> {
+  const prompt = buildPrompt(messages, batch, verifications);
   const node = process.execPath;
   const entry = process.argv[1]; // the openclaw entry the gateway is running from
   if (!entry) {
@@ -569,7 +588,7 @@ export function startAutoReply(opts: {
 
     state.inFlight = true;
     try {
-      await triggerTurn(kept, batch, api, log);
+      await triggerTurn(kept, batch, api, log, verifications);
     } catch (err) {
       log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
     } finally {
