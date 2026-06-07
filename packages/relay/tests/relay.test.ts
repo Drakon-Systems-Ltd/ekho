@@ -1116,3 +1116,58 @@ describe("agent identity keys (distribution)", () => {
     expect(entry.endorsement_sig).toBe(sig);
   });
 });
+
+describe("operator endorse-key API", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  async function enrollWithKey(name: string, ak: ReturnType<typeof makeOperatorKey>) {
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: { fleet_id: relay.fleetId, token, display_name: name, runtime: "custom", identity_public_key: ak.pubB64 },
+    });
+    return JSON.parse(res.body) as { agent_id: string };
+  }
+
+  it("requires operator auth", async () => {
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/operator/agents/x/endorse-key",
+      payload: { key_id: "k", endorsed_by_key_id: "o", signature: "s" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("endorses an agent key via the API", async () => {
+    const opk = makeOperatorKey(71);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: opk.pubB64, label: "mb" });
+    const ak = makeOperatorKey(72);
+    const a = await enrollWithKey("A", ak);
+    const sig = signCanonical(agentKeyEndorsementPayload(relay.fleetId, a.agent_id, ak.id, ak.pubB64), opk.seed);
+    const res = await relay.operatorRequest("POST", `/v1/operator/agents/${a.agent_id}/endorse-key`, {
+      key_id: ak.id,
+      endorsed_by_key_id: opk.id,
+      signature: sig,
+    });
+    expect(res.status).toBe(200);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === a.agent_id);
+    expect(row?.endorsed_by_key_id).toBe(opk.id);
+  });
+
+  it("rejects an invalid endorsement with 400", async () => {
+    const opk = makeOperatorKey(71);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: opk.pubB64, label: "mb" });
+    const ak = makeOperatorKey(72);
+    const a = await enrollWithKey("A", ak);
+    const badSig = signCanonical(agentKeyEndorsementPayload(relay.fleetId, a.agent_id, ak.id, ak.pubB64), ak.seed);
+    const res = await relay.operatorRequest("POST", `/v1/operator/agents/${a.agent_id}/endorse-key`, {
+      key_id: ak.id,
+      endorsed_by_key_id: opk.id,
+      signature: badSig,
+    });
+    expect(res.status).toBe(400);
+  });
+});

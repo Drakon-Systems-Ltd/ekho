@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -174,6 +174,30 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     const revoked = db.revokeOperatorKey(request.operator.fleetId, keyId);
     if (!revoked) return reply.code(404).send({ error: "key not found" });
     return reply.send({ revoked: true });
+  });
+
+  // Operator endorses an agent's identity key — roots peer trust at the operator.
+  app.post("/v1/operator/agents/:agentId/endorse-key", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = endorseAgentKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { agentId } = request.params as { agentId: string };
+    try {
+      const ok = db.endorseAgentKey(request.operator.fleetId, agentId, parsed.data.key_id, {
+        endorsedByKeyId: parsed.data.endorsed_by_key_id,
+        signature: parsed.data.signature
+      });
+      if (!ok) return reply.code(404).send({ error: "agent identity key not found" });
+      return reply.send({ endorsed: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      return reply.code(400).send({ error: msg });
+    }
   });
 
   app.post("/v1/operator/messages", { preHandler: requireOperatorAuth }, async (request, reply) => {

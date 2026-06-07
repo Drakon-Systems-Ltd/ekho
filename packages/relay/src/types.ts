@@ -122,6 +122,12 @@ export const operatorKeySchema = z.object({
     .optional()
 });
 
+export const endorseAgentKeySchema = z.object({
+  key_id: z.string().min(1).max(32),
+  endorsed_by_key_id: z.string().min(1).max(32),
+  signature: z.string().min(1).max(128)
+});
+
 export const peerAutoreplySchema = z.object({
   autoreply: z.boolean(),
   // Optional — when omitted, the existing per-agent budget is left untouched.
