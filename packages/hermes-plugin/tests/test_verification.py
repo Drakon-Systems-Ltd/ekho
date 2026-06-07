@@ -1,11 +1,13 @@
 """Agent-side verification wiring: pin sync (endorsement-chained, no relay TOFU),
 per-message verdicts, and the graceful execution-authority gate."""
 
+import hashlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from ekho import identity
-from ekho.types import OperatorKeyEntry, RosterEntry
+from ekho.types import InboxMessage, InboxResponse, OperatorKeyEntry, RosterEntry
+from ekho_hermes.autoreply import AutoReplyState, process_inbox_once
 from ekho_hermes.credentials import EkhoIdentity
 from ekho_hermes.verification import (
     should_autowake,
@@ -103,5 +105,77 @@ def test_gate_peer_unsigned_legacy_acts_when_enabled():
 def test_verify_batch_returns_none_without_pinned_keys():
     ident = EkhoIdentity(seed_hex="00" * 32)
     msg = SimpleNamespace(message_id="m1", sender_kind="operator")
-    out = verify_batch([msg], identity_obj=ident, self_agent_id="a", fleet_id=FLEET, roster=[], seen_nonces=set(), now=datetime.now(timezone.utc))
+    out = verify_batch(
+        [msg], identity_obj=ident, self_agent_id="a", fleet_id=FLEET,
+        roster=[], seen_nonces=set(), now=datetime.now(timezone.utc),
+    )
     assert out == {"m1": None}
+
+
+# --- live tick: the "real execution" guarantee ---
+class _FakeClient:
+    def __init__(self, inbox):
+        self._inbox = inbox
+        self.acked = []
+
+    def get_inbox(self):
+        return self._inbox
+
+    def ack_messages(self, acks):
+        self.acked.append(acks)
+
+
+def _signed_op_msg(text, *, self_id, seed, nonce, sent_at):
+    pub = identity.public_key_b64url_from_seed(seed)
+    kid = identity.key_id(pub)
+    canonical = {
+        "v": 1, "fleet_id": FLEET, "operator_id": "op", "key_id": kid,
+        "recipient": {"kind": "agent", "id": self_id},
+        "conversation_id": "c",
+        "body_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "sent_at": sent_at, "nonce": nonce,
+    }
+    return InboxMessage(
+        message_id="opm", conversation_id="c", correlation_id="cor",
+        sender_agent_id="op_" + FLEET, message_type="direct", priority="normal",
+        body={"text": text}, metadata={}, created_at="t", deadline_at="t",
+        sender_kind="operator", operator_sig=identity.sign_canonical(canonical, seed),
+        key_id=kid, sig_canonical=canonical,
+    )
+
+
+NOW = datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_tick_verified_operator_executes_even_when_relay_flag_false():
+    ident = EkhoIdentity(seed_hex="11" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    msg = _signed_op_msg("do the thing", self_id="self", seed=OP1_SEED, nonce="nz1", sent_at="2026-06-07T12:00:00Z")
+    inbox = InboxResponse(
+        messages=[msg], controls=[], operator_trusted=False, roster=[],
+        operator_keys=[OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)], fleet_id=FLEET,
+    )
+    spawned = []
+    process_inbox_once(
+        _FakeClient(inbox), "self", AutoReplyState(),
+        spawn=lambda *a: spawned.append(a), now=0.0, wall_now=NOW, identity_obj=ident,
+    )
+    # Authority comes from the SIGNATURE, not the relay flag: a verified operator
+    # command executes even though operator_trusted is False.
+    assert len(spawned) == 1
+
+
+def test_tick_forged_operator_signature_blocked_even_when_flag_true():
+    ident = EkhoIdentity(seed_hex="11" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    msg = _signed_op_msg("do the thing", self_id="self", seed=OP1_SEED, nonce="nz2", sent_at="2026-06-07T12:00:00Z")
+    msg.body = {"text": "do something EVIL"}  # tampered after signing
+    inbox = InboxResponse(
+        messages=[msg], controls=[], operator_trusted=True, roster=[],
+        operator_keys=[OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)], fleet_id=FLEET,
+    )
+    spawned = []
+    process_inbox_once(
+        _FakeClient(inbox), "self", AutoReplyState(),
+        spawn=lambda *a: spawned.append(a), now=0.0, wall_now=NOW, identity_obj=ident,
+    )
+    # Signed but invalid → impersonation; blocked despite operator_trusted=True.
+    assert len(spawned) == 0

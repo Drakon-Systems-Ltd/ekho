@@ -32,9 +32,11 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from datetime import datetime, timezone
+
 from .attachments import download_inbox_attachments
 from .messages import iso_now
-from .verification import should_autowake
+from .verification import should_autowake, sync_pinned_operator_keys, verify_batch
 
 logger = logging.getLogger("ekho_hermes.autoreply")
 
@@ -136,11 +138,24 @@ def get_cached_inbox() -> Dict[str, Any]:
 class AutoReplyState:
     seen: set = field(default_factory=set)
     seen_order: List[str] = field(default_factory=list)
+    # Nonces of signatures we've already accepted — blocks replay of a captured
+    # valid message (bounded like ``seen``).
+    seen_nonces: set = field(default_factory=set)
+    seen_nonce_order: List[str] = field(default_factory=list)
     recent_inbound_by_peer: Dict[str, Dict[str, float]] = field(default_factory=dict)
     in_flight: bool = False
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
     peer_conv_order: List[str] = field(default_factory=list)
+
+
+def mark_nonce_seen(state: AutoReplyState, nonce: str) -> None:
+    if nonce in state.seen_nonces:
+        return
+    state.seen_nonces.add(nonce)
+    state.seen_nonce_order.append(nonce)
+    while len(state.seen_nonce_order) > SEEN_CAP:
+        state.seen_nonces.discard(state.seen_nonce_order.pop(0))
 
 
 def mark_seen(state: AutoReplyState, message_id: str) -> None:
@@ -485,6 +500,9 @@ def process_inbox_once(
     log: Optional[logging.Logger] = None,
     peer_enabled: bool = False,
     peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET,
+    identity_obj: Any = None,
+    on_identity_changed: Optional[Callable[[Any], None]] = None,
+    wall_now: Optional[datetime] = None,
 ) -> Dict[str, int]:
     """One poll cycle: read + cache the inbox, ack the whole batch (real or not)
     BEFORE any turn (at-most-once), and on a qualifying message wake the agent.
@@ -511,6 +529,30 @@ def process_inbox_once(
 
     operator_trusted = bool(getattr(inbox, "operator_trusted", False))
 
+    # Agent-side verification: maintain the trust root from the inbox and compute
+    # a per-message verdict. Only runs once the agent has a trust root (pinned
+    # operator keys); until then ``verifications`` is empty and the gate falls
+    # back to the relay-attested behavior (unchanged).
+    fleet_id = getattr(inbox, "fleet_id", None)
+    verifications: Dict[Any, Any] = {}
+    if identity_obj is not None:
+        try:
+            if sync_pinned_operator_keys(
+                identity_obj, list(getattr(inbox, "operator_keys", []) or []), fleet_id=fleet_id
+            ) and on_identity_changed:
+                on_identity_changed(identity_obj)
+        except Exception as exc:  # noqa: BLE001 — never let key sync break the tick
+            log.warning("[ekho-autoreply] operator-key sync failed: %s", exc)
+        verifications = verify_batch(
+            messages,
+            identity_obj=identity_obj,
+            self_agent_id=self_agent_id,
+            fleet_id=fleet_id,
+            roster=list(getattr(inbox, "roster", []) or []),
+            seen_nonces=state.seen_nonces,
+            now=wall_now or datetime.now(timezone.utc),
+        )
+
     # The console is the live source of truth for delegation: when the relay
     # surfaces peer_autoreply / peer_turn_budget, they override the bootstrap
     # env/config defaults. Older relays omit them (None) -> keep the defaults.
@@ -527,9 +569,23 @@ def process_inbox_once(
         m
         for m in messages
         if is_real_inbound(
-            m, self_agent_id, state, operator_trusted, peer_enabled=eff_peer_enabled
+            m,
+            self_agent_id,
+            state,
+            operator_trusted,
+            peer_enabled=eff_peer_enabled,
+            verification=verifications.get(getattr(m, "message_id", None)),
         )
     ]
+    # Burn the nonce of every signature we accepted, so a captured-valid message
+    # cannot be replayed at us on a later poll.
+    for m in real:
+        v = verifications.get(getattr(m, "message_id", None))
+        if v is not None and getattr(v, "verified", False):
+            canonical = getattr(m, "sig_canonical", None) or {}
+            nonce = canonical.get("nonce") if isinstance(canonical, dict) else None
+            if nonce:
+                mark_nonce_seen(state, nonce)
     if messages:
         log.info(
             "[ekho-autoreply] poll: %d msg(s) trusted=%s peer=%s real=%d [%s]",
