@@ -715,6 +715,21 @@ describe("Relay integration", () => {
       expect((await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: mine.agent_id, text: "hi" })).status).toBe(201);
     });
 
+    it("lets an agent reply to the operator (op_<fleetId> recipient is deliverable)", async () => {
+      const a = await relay.enrollAgent("replier");
+      // operator messages the agent first → ensures the op_<fleetId> recipient exists
+      await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: a.agent_id, text: "ping" });
+      // the agent replies back TO the operator — must not be rejected by recipient validation
+      const reply = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: `op_${relay.fleetId}` },
+        message_type: "direct",
+        body: { text: "pong" },
+        conversation_id: "reply-conv",
+        correlation_id: "reply-cor"
+      });
+      expect(reply.status).toBe(200);
+    });
+
     it("quarantines and resumes agent", async () => {
       const agent = await relay.enrollAgent("q-agent");
 

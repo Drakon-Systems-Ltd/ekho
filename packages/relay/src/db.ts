@@ -208,9 +208,13 @@ export class EkhoDb {
     return rows.map((r) => r.id);
   }
 
-  // True only if `agentId` is a live, non-operator agent IN this fleet — so a
-  // direct message can't be delivered to a foreign fleet's agent by id.
+  // True if `agentId` is a valid direct-message recipient in this fleet — so a
+  // message can't be delivered to a foreign fleet's agent by id. The fleet's
+  // synthetic operator recipient (op_<fleetId>, runtime='operator', revoked by
+  // design) is always allowed: that's how agents reply TO the operator. The id is
+  // fleet-scoped, so this never resolves another fleet's operator.
   private isDeliverableAgent(fleetId: string, agentId: string): boolean {
+    if (agentId === `op_${fleetId}`) return true;
     return !!this.db.prepare(
       "SELECT 1 FROM agents WHERE id = ? AND fleet_id = ? AND runtime != 'operator' AND revoked_at IS NULL"
     ).get(agentId, fleetId);
