@@ -24,6 +24,7 @@ import {
   endorseAgentKey,
   revokeOperatorKey,
 } from "./api.js";
+import { endorserStatus, dependentsOf, trustHealth } from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
 
@@ -69,7 +70,10 @@ export default function SecurityScreen({ session, agents = [] }) {
       setStored(true);
       await registerOperatorKey(token, { publicKey: pub, label: label.trim() || "this device" });
       setPassphrase("");
-      note("ok", "Operator identity created. Console sends are now signed. Download a backup below.");
+      note(
+        "warn",
+        "Identity created and signing. ⚠ Your agents don't trust this key yet — endorse them in ③ (or use the banner) so they can verify your commands. Back it up below."
+      );
       await refresh();
     } catch (e) {
       note("danger", `Generate failed: ${e.message || e}`);
@@ -119,14 +123,52 @@ export default function SecurityScreen({ session, agents = [] }) {
   };
 
   const onRevoke = async (kid) => {
-    if (!window.confirm(`Revoke operator key ${kid}? Agents will stop trusting it on their next poll.`)) return;
+    const deps = dependentsOf(kid, agentKeys);
+    if (deps > 0) {
+      const ok = window.confirm(
+        `⚠ ${deps} agent${deps > 1 ? "s are" : " is"} endorsed by ${kid} — it is their trust root.\n\n` +
+          `Revoking it now BREAKS their verification until you re-endorse them under another active key. ` +
+          `Re-endorse them first (panel ③), then revoke.\n\nRevoke anyway?`
+      );
+      if (!ok) return;
+    } else if (!window.confirm(`Revoke operator key ${kid}? Agents will stop trusting it on their next poll.`)) {
+      return;
+    }
     try {
       await revokeOperatorKey(token, kid);
-      note("muted", `Revoked ${kid}.`);
+      note("muted", `Revoked ${kid}.${deps > 0 ? ` Re-endorse the ${deps} affected agent(s) now.` : ""}`);
       await refresh();
     } catch (e) {
       note("danger", `Revoke failed: ${e.message || e}`);
     }
+  };
+
+  // Re-endorse every agent whose endorser is missing/revoked under the unlocked device key.
+  // This is the one-click recovery after a key rotation: it re-roots peer trust at a live key.
+  const onReendorseAll = async () => {
+    if (!unlocked) return note("warn", "Unlock your operator identity first.");
+    const targets = agentKeys.filter((ak) => endorserStatus(ak, keys, unlocked.keyId).needsAction);
+    if (!targets.length) return note("ok", "Every agent already trusts this device.");
+    setBusy(true);
+    let done = 0;
+    const failed = [];
+    for (const ak of targets) {
+      try {
+        const payload = agentKeyEndorsementPayload(fleetId, ak.agent_id, ak.key_id, ak.public_key);
+        const signature = signCanonical(payload, unlocked.seed);
+        await endorseAgentKey(token, ak.agent_id, { keyId: ak.key_id, endorsedByKeyId: unlocked.keyId, signature });
+        done += 1;
+      } catch {
+        failed.push(nameFor(ak.agent_id));
+      }
+    }
+    note(
+      failed.length ? "warn" : "ok",
+      `Re-endorsed ${done} agent${done !== 1 ? "s" : ""} under ${unlocked.keyId}` +
+        (failed.length ? ` · failed: ${failed.join(", ")}` : ".")
+    );
+    await refresh();
+    setBusy(false);
   };
 
   const onEndorse = async (ak) => {
@@ -147,6 +189,7 @@ export default function SecurityScreen({ session, agents = [] }) {
   };
 
   const nameFor = (id) => agents.find((a) => a.id === id)?.display_name || id;
+  const health = trustHealth(keys, agentKeys, unlocked?.keyId);
 
   return (
     <div className="sec">
@@ -159,6 +202,24 @@ export default function SecurityScreen({ session, agents = [] }) {
       </div>
 
       {msg && <div className={`sec__msg sec__msg--${msg.tone}`}>{msg.text}</div>}
+
+      {/* Trust-health banner — surfaces a broken chain (e.g. agents left on a revoked key
+          after a rotation) and offers the one-click fix, instead of failing silently. */}
+      {!health.ok && agentKeys.length > 0 && (
+        <div className="sec__alert">
+          <div className="sec__alert-h">⚠ Agent trust needs attention</div>
+          <div className="sec__alert-b">
+            {health.problems.join(" · ")}. Endorsing re-roots each agent's trust at your current device key.
+          </div>
+          {unlocked ? (
+            <button className="sec__btn sec__btn--go" disabled={busy} onClick={onReendorseAll}>
+              Re-endorse all under this device · {unlocked.keyId}
+            </button>
+          ) : (
+            <div className="sec__hint">Unlock your operator identity above, then re-endorse the affected agents.</div>
+          )}
+        </div>
+      )}
 
       {/* ① Identity */}
       <section className="sec__panel">
@@ -205,38 +266,70 @@ export default function SecurityScreen({ session, agents = [] }) {
       <section className="sec__panel">
         <h4>② Registered keys <span className="sec__count">{keys.length}</span></h4>
         {keys.length === 0 && <p className="sec__hint">No operator keys registered yet.</p>}
-        {keys.map((k) => (
-          <div key={k.key_id} className="sec__item">
-            <code className="sec__kid">{k.key_id}</code>
-            <span className="sec__lbl">{k.label}</span>
-            {k.revoked_at ? (
-              <span className="sec__tag sec__tag--off">revoked</span>
-            ) : (
-              <>
-                <span className="sec__tag sec__tag--live">active</span>
-                <button className="sec__btn sec__btn--danger" onClick={() => onRevoke(k.key_id)}>Revoke</button>
-              </>
-            )}
-          </div>
-        ))}
+        {keys.map((k) => {
+          const deps = dependentsOf(k.key_id, agentKeys);
+          return (
+            <div key={k.key_id} className="sec__item">
+              <code className="sec__kid">{k.key_id}</code>
+              <span className="sec__lbl">{k.label}</span>
+              {deps > 0 && !k.revoked_at && (
+                <span className="sec__dep" title={`${deps} agent(s) verify against this key`}>
+                  trust root · {deps}
+                </span>
+              )}
+              {k.revoked_at ? (
+                <span className="sec__tag sec__tag--off">revoked</span>
+              ) : (
+                <>
+                  <span className="sec__tag sec__tag--live">active</span>
+                  <button className="sec__btn sec__btn--danger" onClick={() => onRevoke(k.key_id)}>Revoke</button>
+                </>
+              )}
+            </div>
+          );
+        })}
       </section>
 
       {/* ③ Endorse agents */}
       <section className="sec__panel">
         <h4>③ Agent identities <span className="sec__count">{agentKeys.length}</span></h4>
-        <p className="sec__hint">Endorse an agent's key so peers can verify it chains back to you. Requires an unlocked identity.</p>
+        <p className="sec__hint">
+          Endorsing an agent's key roots peer (agent↔agent) trust at your device. For agents to
+          verify <b>your</b> commands too, each agent host also pins your key (<code>EKHO_OPERATOR_PUBKEY</code>)
+          at enrollment.
+        </p>
         {agentKeys.length === 0 && <p className="sec__hint">No agent identity keys registered yet.</p>}
-        {agentKeys.map((ak) => (
-          <div key={`${ak.agent_id}:${ak.key_id}`} className="sec__item">
-            <span className="sec__lbl">{nameFor(ak.agent_id)}</span>
-            <code className="sec__kid">{ak.key_id}</code>
-            {ak.endorsed_by_key_id ? (
-              <span className="sec__tag sec__tag--live" title={`by ${ak.endorsed_by_key_id}`}>✓ endorsed</span>
-            ) : (
-              <button className="sec__btn sec__btn--go" disabled={!unlocked} onClick={() => onEndorse(ak)}>Endorse</button>
-            )}
-          </div>
-        ))}
+        {agentKeys.map((ak) => {
+          const st = endorserStatus(ak, keys, unlocked?.keyId);
+          return (
+            <div key={`${ak.agent_id}:${ak.key_id}`} className="sec__item">
+              <span className="sec__lbl">{nameFor(ak.agent_id)}</span>
+              <code className="sec__kid">{ak.key_id}</code>
+              {st.state === "current" && <span className="sec__tag sec__tag--live">✓ this device</span>}
+              {st.state === "foreign" && (
+                <>
+                  <span className="sec__tag sec__tag--live" title={`endorsed by ${st.endorserId}`}>
+                    ✓ {st.endorserLabel || st.endorserId}
+                  </span>
+                  {unlocked && (
+                    <button className="sec__btn" onClick={() => onEndorse(ak)} title="Re-endorse under this device">↻</button>
+                  )}
+                </>
+              )}
+              {st.state === "revoked" && (
+                <>
+                  <span className="sec__tag sec__tag--warn" title={`endorser ${st.endorserId} is revoked/unknown`}>
+                    ⚠ trusts a revoked key
+                  </span>
+                  <button className="sec__btn sec__btn--go" disabled={!unlocked} onClick={() => onEndorse(ak)}>Re-endorse</button>
+                </>
+              )}
+              {st.state === "unendorsed" && (
+                <button className="sec__btn sec__btn--go" disabled={!unlocked} onClick={() => onEndorse(ak)}>Endorse</button>
+              )}
+            </div>
+          );
+        })}
       </section>
     </div>
   );
@@ -272,6 +365,12 @@ function SecStyle() {
       .sec__item .sec__btn { flex:0 0 auto; padding:5px 10px; }
       .sec__tag--live { color:var(--ok); border:1px solid rgba(52,211,153,.3); }
       .sec__tag--off { color:var(--faint); border:1px solid var(--hair-strong); }
+      .sec__tag--warn { color:var(--warn); border:1px solid rgba(251,191,36,.4); background:rgba(251,191,36,.08); }
+      .sec__dep { flex:0 0 auto; font-size:10px; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); border:1px solid var(--hair-strong); border-radius:6px; padding:2px 7px; }
+      .sec__alert { border:1px solid rgba(251,191,36,.4); background:rgba(251,191,36,.08); border-left:3px solid var(--warn); border-radius:var(--radius-sm); padding:11px 13px; margin-bottom:10px; }
+      .sec__alert-h { color:var(--warn); font-weight:600; font-size:12px; letter-spacing:.04em; margin-bottom:3px; }
+      .sec__alert-b { color:var(--text); font-size:12px; line-height:1.45; margin-bottom:9px; }
+      .sec__alert .sec__btn--go { background:var(--warn); border-color:var(--warn); color:#1a1206; }
       .sec__msg { padding:8px 11px; border-radius:8px; margin-bottom:10px; font-size:12px; }
       .sec__msg--ok { color:var(--ok); background:rgba(52,211,153,.1); }
       .sec__msg--danger { color:var(--danger); background:rgba(248,113,113,.1); }
