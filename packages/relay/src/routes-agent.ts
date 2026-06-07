@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
 import { db } from "./db";
-import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -46,14 +46,41 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       hostname: parsed.data.hostname
     });
 
+    // Register the agent's own identity key (peer trust); endorsed later by the operator.
+    if (parsed.data.identity_public_key) {
+      db.setAgentIdentityKey(created.agentId, parsed.data.fleet_id, parsed.data.identity_public_key);
+    }
+
     return reply.send({
       agent_id: created.agentId,
       secret: created.secret,
       relay_base_url: config.baseUrl,
       heartbeat_interval_seconds: config.heartbeatIntervalSeconds,
       poll_interval_seconds: config.pollIntervalSeconds,
-      policy_profile: "default"
+      policy_profile: "default",
+      // Pin the operator's signing keys at enrollment — the trust bootstrap.
+      operator_keys: db.getActiveOperatorKeys(parsed.data.fleet_id).map((k) => ({
+        key_id: k.key_id,
+        public_key: k.public_key,
+        endorsed_by_key_id: k.endorsed_by_key_id,
+        endorsement_sig: k.endorsement_sig
+      }))
     });
+  });
+
+  // An enrolled agent registers (or rotates) its own identity public key. Works
+  // for already-enrolled agents that predate enrollment-time registration; the
+  // operator then endorses it. Idempotent (re-posting the same key is a no-op).
+  app.post("/v1/identity-key", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = identityKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { keyId } = db.setAgentIdentityKey(request.agent.id, request.agent.fleetId, parsed.data.public_key);
+    return reply.send({ key_id: keyId });
   });
 
   app.post("/v1/messages", { preHandler: requireAgentAuth }, async (request, reply) => {
@@ -101,6 +128,14 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       }
     }
 
+    // Fold a peer signature into metadata (relayed verbatim). operator_sig is NOT
+    // accepted here — the inbox only surfaces it for genuine operator senders.
+    const sigMeta =
+      parsed.data.agent_sig && parsed.data.key_id && parsed.data.sig_canonical
+        ? { agent_sig: parsed.data.agent_sig, key_id: parsed.data.key_id, sig_canonical: parsed.data.sig_canonical }
+        : {};
+    const mergedMeta = { ...(parsed.data.metadata ?? {}), ...sigMeta };
+
     let result: { messageId: string; createdAt: string };
     try {
       result = db.createMessage({
@@ -113,7 +148,7 @@ export async function registerAgentRoutes(app: FastifyInstance) {
         ttlSeconds: parsed.data.ttl_seconds,
         requiresApproval: parsed.data.requires_approval,
         body: parsed.data.body,
-        metadata: parsed.data.metadata,
+        metadata: Object.keys(mergedMeta).length ? mergedMeta : undefined,
         conversationId: parsed.data.conversation_id,
         correlationId: parsed.data.correlation_id
       });

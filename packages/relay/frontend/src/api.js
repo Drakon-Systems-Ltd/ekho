@@ -80,7 +80,7 @@ export const getConversationEvents = (token, conversationId, params = {}) =>
   request(`/v1/operator/conversations/${encodeURIComponent(conversationId)}?${new URLSearchParams(params).toString()}`, { token });
 export const issueEnrollmentToken = (token) =>
   request("/v1/operator/enrollment-tokens", { token, method: "POST" });
-export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, conversationId, attachmentIds }) =>
+export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, conversationId, attachmentIds, signature }) =>
   request("/v1/operator/messages", {
     token,
     method: "POST",
@@ -89,7 +89,32 @@ export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, con
       text,
       ...(conversationId ? { conversation_id: conversationId } : {}),
       ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}),
+      ...(signature
+        ? {
+            operator_sig: signature.operator_sig,
+            key_id: signature.key_id,
+            sig_canonical: signature.sig_canonical,
+          }
+        : {}),
     },
+  });
+
+// --- Verifiable operator identity (Security screen) ------------------------
+export const listOperatorKeys = (token) => request("/v1/operator/keys", { token });
+export const getAgentKeys = (token) => request("/v1/operator/agent-keys", { token });
+export const registerOperatorKey = (token, { publicKey, label, endorsement }) =>
+  request("/v1/operator/keys", {
+    token,
+    method: "POST",
+    body: { public_key: publicKey, label, ...(endorsement ? { endorsement } : {}) },
+  });
+export const revokeOperatorKey = (token, keyId) =>
+  request(`/v1/operator/keys/${encodeURIComponent(keyId)}`, { token, method: "DELETE" });
+export const endorseAgentKey = (token, agentId, { keyId, endorsedByKeyId, signature }) =>
+  request(`/v1/operator/agents/${encodeURIComponent(agentId)}/endorse-key`, {
+    token,
+    method: "POST",
+    body: { key_id: keyId, endorsed_by_key_id: endorsedByKeyId, signature },
   });
 
 export const getFleetHealth = (token) => request("/v1/operator/fleet-health", { token });

@@ -1,5 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { createTestRelay, type TestRelay } from "./setup";
+import { config } from "../src/config";
+import {
+  b64url,
+  keyId,
+  signCanonical,
+  verifyCanonical,
+  endorsementPayload,
+  agentKeyEndorsementPayload,
+} from "../src/operator-identity";
+
+function makeOperatorKey(fill: number) {
+  const seed = new Uint8Array(32).fill(fill);
+  const pub = ed25519.getPublicKey(seed);
+  return { seed, pub, pubB64: b64url(pub), id: keyId(pub) };
+}
 
 describe("Relay integration", () => {
   let relay: TestRelay;
@@ -759,5 +775,579 @@ describe("Relay integration", () => {
       });
       expect(allowed.status).toBe(200);
     });
+  });
+});
+
+describe("operator keys (storage)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("registers a key and lists it under the derived key_id", () => {
+    const k = makeOperatorKey(11);
+    const { keyId: kid } = relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "macbook");
+    expect(kid).toBe(k.id);
+    const keys = relay.db.listOperatorKeys(relay.fleetId);
+    const row = keys.find((x) => x.key_id === k.id);
+    expect(row?.label).toBe("macbook");
+    expect(row?.public_key).toBe(k.pubB64);
+  });
+
+  it("revokes a key: dropped from active, retained in the full list", () => {
+    const k = makeOperatorKey(12);
+    relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "phone");
+    expect(relay.db.revokeOperatorKey(relay.fleetId, k.id)).toBe(true);
+    expect(relay.db.getActiveOperatorKeys(relay.fleetId).map((x) => x.key_id)).not.toContain(k.id);
+    expect(relay.db.listOperatorKeys(relay.fleetId).map((x) => x.key_id)).toContain(k.id);
+  });
+
+  it("revokeOperatorKey returns false for an unknown key", () => {
+    expect(relay.db.revokeOperatorKey(relay.fleetId, "nonexistent")).toBe(false);
+  });
+
+  it("accepts a second key endorsed by an existing active key", () => {
+    const first = makeOperatorKey(11);
+    relay.db.registerOperatorKey(relay.fleetId, first.pubB64, "macbook");
+    const second = makeOperatorKey(12);
+    const sig = signCanonical(
+      endorsementPayload(relay.fleetId, second.id, second.pubB64),
+      first.seed
+    );
+    const { keyId: kid } = relay.db.registerOperatorKey(relay.fleetId, second.pubB64, "phone", {
+      endorsedByKeyId: first.id,
+      signature: sig,
+    });
+    expect(kid).toBe(second.id);
+    const row = relay.db.listOperatorKeys(relay.fleetId).find((x) => x.key_id === second.id);
+    expect(row?.endorsed_by_key_id).toBe(first.id);
+  });
+
+  it("rejects a second key whose endorsement signature is invalid", () => {
+    const first = makeOperatorKey(11);
+    relay.db.registerOperatorKey(relay.fleetId, first.pubB64, "macbook");
+    const second = makeOperatorKey(12);
+    // Signed by the new key itself, not by the (trusted) endorser → invalid.
+    const badSig = signCanonical(
+      endorsementPayload(relay.fleetId, second.id, second.pubB64),
+      second.seed
+    );
+    expect(() =>
+      relay.db.registerOperatorKey(relay.fleetId, second.pubB64, "phone", {
+        endorsedByKeyId: first.id,
+        signature: badSig,
+      })
+    ).toThrow(/endorsement/i);
+  });
+
+  it("isolates keys by fleet", () => {
+    const k = makeOperatorKey(13);
+    relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "macbook");
+    expect(relay.db.listOperatorKeys("flt_other_fleet")).toHaveLength(0);
+  });
+});
+
+describe("operator keys (API)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("requires operator auth", async () => {
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/operator/keys",
+      payload: { public_key: "x", label: "y" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("registers a key and returns its key_id", async () => {
+    const k = makeOperatorKey(21);
+    const res = await relay.operatorRequest("POST", "/v1/operator/keys", {
+      public_key: k.pubB64,
+      label: "macbook",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.key_id).toBe(k.id);
+    const list = await relay.operatorRequest("GET", "/v1/operator/keys");
+    expect(list.body.keys.map((x: { key_id: string }) => x.key_id)).toContain(k.id);
+  });
+
+  it("revokes a key via DELETE", async () => {
+    const k = makeOperatorKey(22);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "phone" });
+    const del = await relay.operatorRequest("DELETE", `/v1/operator/keys/${k.id}`);
+    expect(del.status).toBe(200);
+    const list = await relay.operatorRequest("GET", "/v1/operator/keys");
+    const row = list.body.keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row.revoked_at).toBeTruthy();
+  });
+
+  it("returns 404 revoking an unknown key", async () => {
+    const del = await relay.operatorRequest("DELETE", "/v1/operator/keys/unknownkey00");
+    expect(del.status).toBe(404);
+  });
+
+  it("rejects an invalid endorsement with 400", async () => {
+    const first = makeOperatorKey(21);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: first.pubB64, label: "mb" });
+    const second = makeOperatorKey(22);
+    const badSig = signCanonical(
+      endorsementPayload(relay.fleetId, second.id, second.pubB64),
+      second.seed // signed by itself, not the endorser
+    );
+    const res = await relay.operatorRequest("POST", "/v1/operator/keys", {
+      public_key: second.pubB64,
+      label: "ph",
+      endorsement: { endorsed_by_key_id: first.id, signature: badSig },
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("operator message signatures", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("relays the operator signature verbatim to the recipient's inbox", async () => {
+    const k = makeOperatorKey(31);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const agent = await relay.enrollAgent("Receiver");
+
+    const canonical = {
+      v: 1,
+      fleet_id: relay.fleetId,
+      operator_id: relay.operatorId,
+      key_id: k.id,
+      recipient: { kind: "agent", id: agent.agent_id },
+      conversation_id: "conv-sig-1",
+      body_sha256: "deadbeefcafe",
+      sent_at: "2026-06-07T00:00:00Z",
+      nonce: "Zm9vYmFy",
+    };
+    const sig = signCanonical(canonical, k.seed);
+
+    const send = await relay.operatorRequest("POST", "/v1/operator/messages", {
+      recipient_agent_id: agent.agent_id,
+      text: "hello",
+      conversation_id: "conv-sig-1",
+      operator_sig: sig,
+      key_id: k.id,
+      sig_canonical: canonical,
+    });
+    expect(send.status).toBe(201);
+
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "conv-sig-1");
+    expect(msg).toBeTruthy();
+    expect(msg.sender_kind).toBe("operator");
+    expect(msg.operator_sig).toBe(sig);
+    expect(msg.key_id).toBe(k.id);
+    expect(msg.sig_canonical).toEqual(canonical);
+    // End-to-end: the relayed signature still verifies (the relay didn't mangle it).
+    expect(verifyCanonical(msg.sig_canonical, msg.operator_sig, k.pub)).toBe(true);
+  });
+
+  it("omits signature fields for an unsigned operator message", async () => {
+    const agent = await relay.enrollAgent("Receiver2");
+    const send = await relay.operatorRequest("POST", "/v1/operator/messages", {
+      recipient_agent_id: agent.agent_id,
+      text: "unsigned",
+      conversation_id: "conv-unsigned",
+    });
+    expect(send.status).toBe(201);
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "conv-unsigned");
+    expect(msg.operator_sig ?? null).toBeNull();
+    expect(msg.key_id ?? null).toBeNull();
+  });
+});
+
+describe("operator key distribution (pinning)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("includes active operator keys in the enrollment response (pin at enrollment)", async () => {
+    const k = makeOperatorKey(41);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: { fleet_id: relay.fleetId, token, display_name: "Pinner", runtime: "custom" },
+    });
+    const body = JSON.parse(res.body);
+    const row = body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row).toBeTruthy();
+    expect(row.public_key).toBe(k.pubB64);
+  });
+
+  it("serves operator keys in the inbox for ongoing sync", async () => {
+    const k = makeOperatorKey(42);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const agent = await relay.enrollAgent("Pinner2");
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const row = inbox.body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row.public_key).toBe(k.pubB64);
+    expect(row.revoked).toBe(false);
+  });
+
+  it("marks a revoked operator key as revoked in the inbox", async () => {
+    const k = makeOperatorKey(43);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "phone" });
+    await relay.operatorRequest("DELETE", `/v1/operator/keys/${k.id}`);
+    const agent = await relay.enrollAgent("Pinner3");
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const row = inbox.body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row.revoked).toBe(true);
+  });
+});
+
+describe("agent identity keys (storage)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("stores an agent identity key and lists it (unendorsed) for the fleet", async () => {
+    const agent = await relay.enrollAgent("A");
+    const ak = makeOperatorKey(51);
+    const { keyId: kid } = relay.db.setAgentIdentityKey(agent.agent_id, relay.fleetId, ak.pubB64);
+    expect(kid).toBe(ak.id);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === agent.agent_id);
+    expect(row?.public_key).toBe(ak.pubB64);
+    expect(row?.endorsed_by_key_id).toBeNull();
+  });
+
+  it("endorses an agent key with the operator key (operator-rooted)", async () => {
+    const opk = makeOperatorKey(52);
+    relay.db.registerOperatorKey(relay.fleetId, opk.pubB64, "mb");
+    const agent = await relay.enrollAgent("A");
+    const ak = makeOperatorKey(53);
+    relay.db.setAgentIdentityKey(agent.agent_id, relay.fleetId, ak.pubB64);
+    const sig = signCanonical(
+      agentKeyEndorsementPayload(relay.fleetId, agent.agent_id, ak.id, ak.pubB64),
+      opk.seed
+    );
+    expect(
+      relay.db.endorseAgentKey(relay.fleetId, agent.agent_id, ak.id, {
+        endorsedByKeyId: opk.id,
+        signature: sig,
+      })
+    ).toBe(true);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === agent.agent_id);
+    expect(row?.endorsed_by_key_id).toBe(opk.id);
+    expect(row?.endorsement_sig).toBe(sig);
+  });
+
+  it("rejects an agent-key endorsement not signed by a valid operator key", async () => {
+    const opk = makeOperatorKey(52);
+    relay.db.registerOperatorKey(relay.fleetId, opk.pubB64, "mb");
+    const agent = await relay.enrollAgent("A");
+    const ak = makeOperatorKey(53);
+    relay.db.setAgentIdentityKey(agent.agent_id, relay.fleetId, ak.pubB64);
+    // Signed by the agent key itself, not the operator → invalid.
+    const badSig = signCanonical(
+      agentKeyEndorsementPayload(relay.fleetId, agent.agent_id, ak.id, ak.pubB64),
+      ak.seed
+    );
+    expect(() =>
+      relay.db.endorseAgentKey(relay.fleetId, agent.agent_id, ak.id, {
+        endorsedByKeyId: opk.id,
+        signature: badSig,
+      })
+    ).toThrow(/endorsement/i);
+  });
+});
+
+describe("agent identity keys (distribution)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("registers the agent's identity public key at enrollment", async () => {
+    const ak = makeOperatorKey(61);
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: {
+        fleet_id: relay.fleetId,
+        token,
+        display_name: "Signer",
+        runtime: "custom",
+        identity_public_key: ak.pubB64,
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === body.agent_id);
+    expect(row?.public_key).toBe(ak.pubB64);
+  });
+
+  it("distributes agent identity keys + endorsements via the roster", async () => {
+    const opk = makeOperatorKey(62);
+    relay.db.registerOperatorKey(relay.fleetId, opk.pubB64, "mb");
+    const ak = makeOperatorKey(63);
+    const tokenA = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const resA = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: {
+        fleet_id: relay.fleetId,
+        token: tokenA,
+        display_name: "A",
+        runtime: "custom",
+        identity_public_key: ak.pubB64,
+      },
+    });
+    const a = JSON.parse(resA.body);
+    const sig = signCanonical(
+      agentKeyEndorsementPayload(relay.fleetId, a.agent_id, ak.id, ak.pubB64),
+      opk.seed
+    );
+    relay.db.endorseAgentKey(relay.fleetId, a.agent_id, ak.id, { endorsedByKeyId: opk.id, signature: sig });
+
+    const b = await relay.enrollAgent("B");
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox?limit=10");
+    const entry = inbox.body.roster.find((r: { agent_id: string }) => r.agent_id === a.agent_id);
+    expect(entry.identity_public_key).toBe(ak.pubB64);
+    expect(entry.key_id).toBe(ak.id);
+    expect(entry.endorsed_by_key_id).toBe(opk.id);
+    expect(entry.endorsement_sig).toBe(sig);
+  });
+});
+
+describe("operator endorse-key API", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  async function enrollWithKey(name: string, ak: ReturnType<typeof makeOperatorKey>) {
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: { fleet_id: relay.fleetId, token, display_name: name, runtime: "custom", identity_public_key: ak.pubB64 },
+    });
+    return JSON.parse(res.body) as { agent_id: string };
+  }
+
+  it("requires operator auth", async () => {
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/operator/agents/x/endorse-key",
+      payload: { key_id: "k", endorsed_by_key_id: "o", signature: "s" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("endorses an agent key via the API", async () => {
+    const opk = makeOperatorKey(71);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: opk.pubB64, label: "mb" });
+    const ak = makeOperatorKey(72);
+    const a = await enrollWithKey("A", ak);
+    const sig = signCanonical(agentKeyEndorsementPayload(relay.fleetId, a.agent_id, ak.id, ak.pubB64), opk.seed);
+    const res = await relay.operatorRequest("POST", `/v1/operator/agents/${a.agent_id}/endorse-key`, {
+      key_id: ak.id,
+      endorsed_by_key_id: opk.id,
+      signature: sig,
+    });
+    expect(res.status).toBe(200);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === a.agent_id);
+    expect(row?.endorsed_by_key_id).toBe(opk.id);
+  });
+
+  it("rejects an invalid endorsement with 400", async () => {
+    const opk = makeOperatorKey(71);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: opk.pubB64, label: "mb" });
+    const ak = makeOperatorKey(72);
+    const a = await enrollWithKey("A", ak);
+    const badSig = signCanonical(agentKeyEndorsementPayload(relay.fleetId, a.agent_id, ak.id, ak.pubB64), ak.seed);
+    const res = await relay.operatorRequest("POST", `/v1/operator/agents/${a.agent_id}/endorse-key`, {
+      key_id: ak.id,
+      endorsed_by_key_id: opk.id,
+      signature: badSig,
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("agent message signatures (peer)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("relays an agent's peer-message signature verbatim", async () => {
+    const ak = makeOperatorKey(81);
+    const tokenA = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const resA = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: { fleet_id: relay.fleetId, token: tokenA, display_name: "A", runtime: "custom", identity_public_key: ak.pubB64 },
+    });
+    const a = JSON.parse(resA.body);
+    const b = await relay.enrollAgent("B");
+
+    const canonical = {
+      v: 1,
+      fleet_id: relay.fleetId,
+      sender_agent_id: a.agent_id,
+      key_id: ak.id,
+      recipient: { kind: "agent", id: b.agent_id },
+      conversation_id: "peer-1",
+      body_sha256: "abc123",
+      sent_at: "2026-06-07T00:00:00Z",
+      nonce: "bm9uY2U",
+    };
+    const sig = signCanonical(canonical, ak.seed);
+
+    const send = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id },
+      message_type: "direct",
+      body: { text: "peer hello" },
+      conversation_id: "peer-1",
+      correlation_id: "peer-c1",
+      agent_sig: sig,
+      key_id: ak.id,
+      sig_canonical: canonical,
+    });
+    expect(send.status).toBe(200);
+
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "peer-1");
+    expect(msg.sender_kind).toBe("agent");
+    expect(msg.agent_sig).toBe(sig);
+    expect(msg.key_id).toBe(ak.id);
+    expect(msg.sig_canonical).toEqual(canonical);
+    expect(msg.operator_sig).toBeNull();
+    expect(verifyCanonical(msg.sig_canonical, msg.agent_sig, ak.pub)).toBe(true);
+  });
+
+  it("does not lift a forged operator_sig from an agent's metadata", async () => {
+    const a = await relay.enrollAgent("A");
+    const b = await relay.enrollAgent("B");
+    const send = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id },
+      message_type: "direct",
+      body: { text: "spoof attempt" },
+      conversation_id: "peer-spoof",
+      correlation_id: "peer-c2",
+      metadata: { operator_sig: "FORGED", key_id: "x" },
+    });
+    expect(send.status).toBe(200);
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox?limit=10");
+    const msg = inbox.body.messages.find((m: { conversation_id: string }) => m.conversation_id === "peer-spoof");
+    // sender is an agent, so operator_sig must NOT be surfaced from its metadata.
+    expect(msg.operator_sig).toBeNull();
+  });
+
+  it("includes the agent's own fleet_id in the inbox (for signature fleet-binding)", async () => {
+    const agent = await relay.enrollAgent("F");
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=5");
+    expect(inbox.body.fleet_id).toBe(relay.fleetId);
+  });
+});
+
+describe("agent self-registers its identity key", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("registers the agent's own identity key (post-enrollment, idempotent)", async () => {
+    const agent = await relay.enrollAgent("R"); // enrolled without a key
+    const ak = makeOperatorKey(91);
+    const res = await relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/identity-key", {
+      public_key: ak.pubB64,
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.key_id).toBe(ak.id);
+    const row = relay.db.getAgentIdentityKeys(relay.fleetId).find((k) => k.agent_id === agent.agent_id);
+    expect(row?.public_key).toBe(ak.pubB64);
+    // Idempotent: posting the same key again still succeeds.
+    const again = await relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/identity-key", {
+      public_key: ak.pubB64,
+    });
+    expect(again.status).toBe(200);
+  });
+
+  it("requires agent auth", async () => {
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/identity-key",
+      payload: { public_key: "x" },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("lists fleet agent identity keys for the operator (for endorsement)", async () => {
+    const agent = await relay.enrollAgent("E");
+    const ak = makeOperatorKey(95);
+    await relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/identity-key", {
+      public_key: ak.pubB64,
+    });
+    const res = await relay.operatorRequest("GET", "/v1/operator/agent-keys");
+    expect(res.status).toBe(200);
+    const row = res.body.keys.find((k: { agent_id: string }) => k.agent_id === agent.agent_id);
+    expect(row.public_key).toBe(ak.pubB64);
+    expect(row.endorsed_by_key_id ?? null).toBeNull();
+  });
+});
+
+describe("tailnet gate (integration)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => {
+    config.operatorRequireTailnet = false;
+    config.operatorTailnetUser = "";
+    relay.cleanup();
+  });
+
+  const overview = (headers: Record<string, string>) =>
+    relay.app.inject({ method: "GET", url: "/v1/operator/overview", headers });
+
+  it("blocks operator login without a tailnet identity when required", async () => {
+    config.operatorRequireTailnet = true;
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/operator/login",
+      payload: { fleet_name: "x", email: "a@b.c", password: "p" },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("blocks an operator API request off-tailnet even with a valid token", async () => {
+    config.operatorRequireTailnet = true;
+    const res = await overview({ authorization: `Bearer ${relay.operatorToken}` });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("allows a request carrying the tailnet identity header", async () => {
+    config.operatorRequireTailnet = true;
+    const res = await overview({
+      authorization: `Bearer ${relay.operatorToken}`,
+      "tailscale-user-login": "me@example.com",
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
+  it("enforces the tailnet user allowlist", async () => {
+    config.operatorRequireTailnet = true;
+    config.operatorTailnetUser = "me@example.com";
+    const ok = await overview({
+      authorization: `Bearer ${relay.operatorToken}`,
+      "tailscale-user-login": "me@example.com",
+    });
+    expect(ok.statusCode).toBe(200);
+    const bad = await overview({
+      authorization: `Bearer ${relay.operatorToken}`,
+      "tailscale-user-login": "intruder@example.com",
+    });
+    expect(bad.statusCode).toBe(403);
+  });
+
+  it("is off by default (no header needed)", async () => {
+    const res = await overview({ authorization: `Bearer ${relay.operatorToken}` });
+    expect(res.statusCode).toBe(200);
   });
 });

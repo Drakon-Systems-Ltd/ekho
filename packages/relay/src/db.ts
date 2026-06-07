@@ -6,8 +6,39 @@ import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashSecret, id, nowIso } from "./utils";
+import {
+  keyId as deriveKeyId,
+  verifyCanonical,
+  fromB64url,
+  endorsementPayload,
+  agentKeyEndorsementPayload,
+} from "./operator-identity";
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+export interface OperatorKeyRow {
+  fleet_id: string;
+  key_id: string;
+  public_key: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  endorsed_by_key_id: string | null;
+  endorsement_sig: string | null;
+}
+
+export interface AgentIdentityKeyRow {
+  agent_id: string;
+  fleet_id: string;
+  key_id: string;
+  public_key: string;
+  created_at: string;
+  revoked_at: string | null;
+  endorsed_by_key_id: string | null;
+  endorsement_sig: string | null;
+  endorsed_at: string | null;
+}
 
 export class EkhoDb {
   private db: Database.Database;
@@ -55,6 +86,150 @@ export class EkhoDb {
 
   raw() {
     return this.db;
+  }
+
+  // ---- Operator signing keys (verifiable operator identity) ----------------
+
+  /**
+   * Register an operator public key for a fleet. Returns its derived key_id.
+   * If an endorsement is supplied it must be a valid signature by an existing,
+   * non-revoked key over endorsementPayload(...) — an early reject so the
+   * Security screen surfaces a bad endorsement immediately (agents re-verify).
+   */
+  registerOperatorKey(
+    fleetId: string,
+    publicKeyB64url: string,
+    label: string,
+    endorsement?: { endorsedByKeyId: string; signature: string }
+  ): { keyId: string } {
+    const kid = deriveKeyId(fromB64url(publicKeyB64url));
+    if (endorsement) {
+      const endorser = this.db
+        .prepare(
+          "SELECT public_key FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+        )
+        .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
+      if (!endorser) throw new Error("endorsement references an unknown or revoked key");
+      const ok = verifyCanonical(
+        endorsementPayload(fleetId, kid, publicKeyB64url),
+        endorsement.signature,
+        fromB64url(endorser.public_key)
+      );
+      if (!ok) throw new Error("invalid key endorsement signature");
+    }
+    const exists = this.db
+      .prepare("SELECT 1 FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+      .get(fleetId, kid);
+    if (exists) throw new Error("operator key already registered");
+    this.db
+      .prepare(
+        `INSERT INTO fleet_operator_keys
+           (fleet_id, key_id, public_key, label, created_at, endorsed_by_key_id, endorsement_sig)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        fleetId,
+        kid,
+        publicKeyB64url,
+        label,
+        nowIso(),
+        endorsement?.endorsedByKeyId ?? null,
+        endorsement?.signature ?? null
+      );
+    return { keyId: kid };
+  }
+
+  listOperatorKeys(fleetId: string): OperatorKeyRow[] {
+    return this.db
+      .prepare(
+        `SELECT fleet_id, key_id, public_key, label, created_at, last_used_at, revoked_at,
+                endorsed_by_key_id, endorsement_sig
+           FROM fleet_operator_keys WHERE fleet_id = ? ORDER BY created_at ASC`
+      )
+      .all(fleetId) as OperatorKeyRow[];
+  }
+
+  getActiveOperatorKeys(fleetId: string): OperatorKeyRow[] {
+    return this.db
+      .prepare(
+        `SELECT fleet_id, key_id, public_key, label, created_at, last_used_at, revoked_at,
+                endorsed_by_key_id, endorsement_sig
+           FROM fleet_operator_keys WHERE fleet_id = ? AND revoked_at IS NULL ORDER BY created_at ASC`
+      )
+      .all(fleetId) as OperatorKeyRow[];
+  }
+
+  revokeOperatorKey(fleetId: string, targetKeyId: string): boolean {
+    const res = this.db
+      .prepare(
+        "UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+      )
+      .run(nowIso(), fleetId, targetKeyId);
+    return res.changes > 0;
+  }
+
+  // ---- Agent identity keys (agent-to-agent trust) --------------------------
+
+  /** Register an agent's own Ed25519 identity public key (unendorsed at first). */
+  setAgentIdentityKey(agentId: string, fleetId: string, publicKeyB64url: string): { keyId: string } {
+    const kid = deriveKeyId(fromB64url(publicKeyB64url));
+    this.db
+      .prepare(
+        `INSERT INTO agent_identity_keys (agent_id, fleet_id, key_id, public_key, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id, key_id) DO NOTHING`
+      )
+      .run(agentId, fleetId, kid, publicKeyB64url, nowIso());
+    return { keyId: kid };
+  }
+
+  /**
+   * Record the operator's endorsement of an agent's identity key. The endorsement
+   * must be a valid signature by an active operator key over
+   * agentKeyEndorsementPayload(...) — this is what roots peer trust at the operator.
+   */
+  endorseAgentKey(
+    fleetId: string,
+    agentId: string,
+    targetKeyId: string,
+    endorsement: { endorsedByKeyId: string; signature: string }
+  ): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT public_key FROM agent_identity_keys WHERE fleet_id = ? AND agent_id = ? AND key_id = ?"
+      )
+      .get(fleetId, agentId, targetKeyId) as { public_key: string } | undefined;
+    if (!row) throw new Error("agent identity key not found");
+    const endorser = this.db
+      .prepare(
+        "SELECT public_key FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+      )
+      .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
+    if (!endorser) throw new Error("endorsement references an unknown or revoked operator key");
+    const ok = verifyCanonical(
+      agentKeyEndorsementPayload(fleetId, agentId, targetKeyId, row.public_key),
+      endorsement.signature,
+      fromB64url(endorser.public_key)
+    );
+    if (!ok) throw new Error("invalid agent-key endorsement signature");
+    const res = this.db
+      .prepare(
+        `UPDATE agent_identity_keys
+           SET endorsed_by_key_id = ?, endorsement_sig = ?, endorsed_at = ?
+         WHERE fleet_id = ? AND agent_id = ? AND key_id = ?`
+      )
+      .run(endorsement.endorsedByKeyId, endorsement.signature, nowIso(), fleetId, agentId, targetKeyId);
+    return res.changes > 0;
+  }
+
+  getAgentIdentityKeys(fleetId: string): AgentIdentityKeyRow[] {
+    return this.db
+      .prepare(
+        `SELECT agent_id, fleet_id, key_id, public_key, created_at, revoked_at,
+                endorsed_by_key_id, endorsement_sig, endorsed_at
+           FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL`
+      )
+      .all(fleetId) as AgentIdentityKeyRow[];
   }
 
   private escapeLike(value: string) {
@@ -376,6 +551,8 @@ export class EkhoDb {
     text: string;
     conversationId?: string;
     attachmentIds?: string[];
+    // Verifiable operator identity: stored and relayed verbatim (never recomputed).
+    signature?: { sig: string; keyId: string; canonical: Record<string, unknown> };
   }) {
     const messageId = id("msg");
     const createdAt = nowIso();
@@ -434,7 +611,17 @@ export class EkhoDb {
         "normal",
         0,
         JSON.stringify(body),
-        JSON.stringify({ sender_label: "Operator", operator_id: input.operatorId }),
+        JSON.stringify({
+          sender_label: "Operator",
+          operator_id: input.operatorId,
+          ...(input.signature
+            ? {
+                operator_sig: input.signature.sig,
+                key_id: input.signature.keyId,
+                sig_canonical: input.signature.canonical
+              }
+            : {})
+        }),
         ttlSeconds,
         createdAt,
         expiresAt,
@@ -592,6 +779,19 @@ export class EkhoDb {
       for (const s of senders) senderRuntime.set(String(s.id), String(s.runtime));
     }
 
+    // Each teammate's identity key + operator endorsement, so a peer can verify a
+    // sender's signature and that its key chains back to the operator. Prefer an
+    // endorsed key when an agent has more than one active key.
+    const idKeysByAgent = new Map<string, AgentIdentityKeyRow>();
+    if (fleetId) {
+      for (const k of this.getAgentIdentityKeys(fleetId)) {
+        const existing = idKeysByAgent.get(k.agent_id);
+        if (!existing || (k.endorsed_by_key_id && !existing.endorsed_by_key_id)) {
+          idKeysByAgent.set(k.agent_id, k);
+        }
+      }
+    }
+
     // Lightweight teammate roster: other agents in the same fleet, excluding
     // the synthetic operator identity and self, capped so the inbox stays small.
     const roster = fleetId
@@ -601,12 +801,19 @@ export class EkhoDb {
            WHERE fleet_id = ? AND runtime != 'operator' AND id != ?
            ORDER BY last_seen_at DESC NULLS LAST, created_at DESC
            LIMIT 50`
-        ).all(fleetId, agentId) as Array<Record<string, unknown>>).map((row) => ({
-          agent_id: row.id,
-          display_name: row.display_name,
-          runtime: row.runtime,
-          status: row.status
-        }))
+        ).all(fleetId, agentId) as Array<Record<string, unknown>>).map((row) => {
+          const ik = idKeysByAgent.get(String(row.id));
+          return {
+            agent_id: row.id,
+            display_name: row.display_name,
+            runtime: row.runtime,
+            status: row.status,
+            identity_public_key: ik?.public_key ?? null,
+            key_id: ik?.key_id ?? null,
+            endorsed_by_key_id: ik?.endorsed_by_key_id ?? null,
+            endorsement_sig: ik?.endorsement_sig ?? null
+          };
+        })
       : [];
 
     // Parse bodies once, collect every attachment id across the batch, and
@@ -630,17 +837,25 @@ export class EkhoDb {
         const attachments = attIds
           .map((aid) => attachmentMetaById.get(aid))
           .filter((m): m is { id: string; filename: string; mime: string; size_bytes: number } => Boolean(m));
+        const meta = row.metadata_json ? JSON.parse(String(row.metadata_json)) : {};
+        const senderKind = senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent";
         return {
           message_id: row.id,
           conversation_id: row.conversation_id,
           correlation_id: row.correlation_id,
           sender_agent_id: row.sender_agent_id,
-          sender_kind: senderRuntime.get(String(row.sender_agent_id)) === "operator" ? "operator" : "agent",
+          sender_kind: senderKind,
           message_type: row.message_type,
           priority: row.priority,
           body,
           attachments,   // [{id, filename, mime, size_bytes}] — NEVER bytes
-          metadata: row.metadata_json ? JSON.parse(String(row.metadata_json)) : {},
+          metadata: meta,
+          // Verifiable identity, gated on the SERVER-derived sender kind so an agent
+          // can't inject a fake operator_sig (nor an operator an agent_sig).
+          operator_sig: senderKind === "operator" ? (meta.operator_sig ?? null) : null,
+          agent_sig: senderKind === "agent" ? (meta.agent_sig ?? null) : null,
+          key_id: meta.key_id ?? null,
+          sig_canonical: meta.sig_canonical ?? null,
           created_at: row.created_at,
           deadline_at: row.expires_at
         };
@@ -650,10 +865,21 @@ export class EkhoDb {
         action: row.action,
         reason: row.payload_json ? JSON.parse(String(row.payload_json)).reason ?? "operator control" : "operator control"
       })),
+      fleet_id: fleetId,
       operator_trusted: operatorTrusted,
       peer_autoreply: peerAutoreply,
       peer_turn_budget: peerTurnBudget,
-      roster
+      roster,
+      // Pinned operator signing keys (incl. revoked, so agents can drop them).
+      operator_keys: fleetId
+        ? this.listOperatorKeys(fleetId).map((k) => ({
+            key_id: k.key_id,
+            public_key: k.public_key,
+            revoked: Boolean(k.revoked_at),
+            endorsed_by_key_id: k.endorsed_by_key_id,
+            endorsement_sig: k.endorsement_sig
+          }))
+        : []
     };
   }
 

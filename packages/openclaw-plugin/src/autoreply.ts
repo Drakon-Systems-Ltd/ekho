@@ -2,6 +2,15 @@ import { spawn } from "node:child_process";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 
+import type { EkhoIdentity } from "./credentials.js";
+import {
+  shouldAutowake,
+  syncPinnedOperatorKeys,
+  verifyBatch,
+  type OperatorKeyEntryLike
+} from "./verification.js";
+import type { VerifyResult } from "./verify.js";
+
 type Logger = {
   info?: (...a: unknown[]) => void;
   warn?: (...a: unknown[]) => void;
@@ -33,6 +42,11 @@ interface InboxMessage {
   metadata?: Record<string, unknown>;
   created_at?: string;
   deadline_at?: string;
+  // Verifiable identity (relayed verbatim; null unless the sender signed).
+  operator_sig?: string | null;
+  agent_sig?: string | null;
+  key_id?: string | null;
+  sig_canonical?: Record<string, unknown> | null;
 }
 
 interface RosterEntry {
@@ -56,6 +70,9 @@ interface InboxBatch {
   // Operator-controlled bounded delegation (live). Absent on older relays.
   peer_autoreply?: boolean | null;
   peer_turn_budget?: number | null;
+  // Verifiable identity (absent on older relays).
+  fleet_id?: string | null;
+  operator_keys?: OperatorKeyEntryLike[];
 }
 
 /**
@@ -104,17 +121,24 @@ export const EKHO_ORIGIN_STAMP = "openclaw-agent";
  * a turn can never double-consume rows the loop is mid-processing (Part B1).
  */
 const lastBatch = new Map<string, InboxMessage>();
-let lastBatchMeta: { operator_trusted: boolean; roster: RosterEntry[]; controls: ControlEntry[] } = {
+let lastBatchMeta: {
+  operator_trusted: boolean;
+  roster: RosterEntry[];
+  controls: ControlEntry[];
+  verifications: Record<string, VerifyResult | null>;
+} = {
   operator_trusted: false,
   roster: [],
-  controls: []
+  controls: [],
+  verifications: {}
 };
 
 function recordBatch(batch: InboxBatch) {
   lastBatchMeta = {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
-    controls: Array.isArray(batch.controls) ? batch.controls : []
+    controls: Array.isArray(batch.controls) ? batch.controls : [],
+    verifications: lastBatchMeta.verifications
   };
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
@@ -139,18 +163,23 @@ export function getCachedInbox(): {
   operator_trusted: boolean;
   roster: RosterEntry[];
   controls: ControlEntry[];
+  verifications: Record<string, VerifyResult | null>;
 } {
   return {
     messages: Array.from(lastBatch.values()),
     operator_trusted: lastBatchMeta.operator_trusted,
     roster: lastBatchMeta.roster,
-    controls: lastBatchMeta.controls
+    controls: lastBatchMeta.controls,
+    verifications: lastBatchMeta.verifications
   };
 }
 
 export interface AutoReplyState {
   seen: Set<string>;
   seenOrder: string[];
+  // Nonces of signatures we've accepted — blocks replay of a captured valid message.
+  seenNonces: Set<string>;
+  seenNonceOrder: string[];
   recentInboundByPeer: Map<string, { count: number; windowStart: number }>;
   inFlight: boolean;
   // conversation_id -> count of times a peer has woken this agent in it.
@@ -161,6 +190,8 @@ export function createAutoReplyState(): AutoReplyState {
   return {
     seen: new Set(),
     seenOrder: [],
+    seenNonces: new Set(),
+    seenNonceOrder: [],
     recentInboundByPeer: new Map(),
     inFlight: false,
     peerTurnsByConversation: new Map()
@@ -174,6 +205,16 @@ function markSeen(state: AutoReplyState, messageId: string) {
   while (state.seenOrder.length > SEEN_CAP) {
     const evicted = state.seenOrder.shift();
     if (evicted !== undefined) state.seen.delete(evicted);
+  }
+}
+
+function markNonceSeen(state: AutoReplyState, nonce: string) {
+  if (state.seenNonces.has(nonce)) return;
+  state.seenNonces.add(nonce);
+  state.seenNonceOrder.push(nonce);
+  while (state.seenNonceOrder.length > SEEN_CAP) {
+    const evicted = state.seenNonceOrder.shift();
+    if (evicted !== undefined) state.seenNonces.delete(evicted);
   }
 }
 
@@ -217,7 +258,8 @@ export function isRealInbound(
   selfAgentId: string,
   state: AutoReplyState,
   operatorTrusted: boolean,
-  peerEnabled = false
+  peerEnabled = false,
+  verification?: VerifyResult | null
 ): boolean {
   if (!msg || typeof msg.message_id !== "string") return false;
   // 1. Never react to our own outbound.
@@ -229,10 +271,9 @@ export function isRealInbound(
   if (!text) return false;
   // 4. Dedupe.
   if (state.seen.has(msg.message_id)) return false;
-  // 5. Principal gate: operator (trust-gated) or teammate (delegation-gated).
+  // 5. Principal gate + execution authority (graceful crypto verification).
   // Peers are additionally latched per conversation in the tick.
-  if (msg.sender_kind === "operator") return Boolean(operatorTrusted);
-  return Boolean(peerEnabled);
+  return shouldAutowake(msg, verification, operatorTrusted, peerEnabled);
 }
 
 /**
@@ -395,6 +436,10 @@ export function startAutoReply(opts: {
   pollIntervalMs?: number;
   peerEnabled?: boolean;
   peerTurnBudget?: number;
+  // The agent's identity enables cryptographic verification; onIdentityChanged
+  // persists it when the pinned operator keys change.
+  identity?: EkhoIdentity;
+  onIdentityChanged?: (identity: EkhoIdentity) => void;
 }): () => void {
   const { client, api, selfAgentId, log } = opts;
   const pollIntervalMs = opts.pollIntervalMs ?? 5000;
@@ -417,6 +462,33 @@ export function startAutoReply(opts: {
     // Expose the freshly delivered batch to ekho_inbox (Part B1).
     recordBatch(batch);
 
+    // Agent-side verification: maintain the trust root from the inbox and compute
+    // a per-message verdict. Dormant (empty verdicts) until the agent has pinned
+    // operator keys — the gate then falls back to relay-attested behavior.
+    let verifications: Record<string, VerifyResult | null> = {};
+    if (opts.identity) {
+      const fleetId = batch.fleet_id ?? null;
+      try {
+        const operatorKeys: OperatorKeyEntryLike[] = Array.isArray(batch.operator_keys) ? batch.operator_keys : [];
+        if (syncPinnedOperatorKeys(opts.identity, operatorKeys, fleetId) && opts.onIdentityChanged) {
+          opts.onIdentityChanged(opts.identity);
+        }
+      } catch (err) {
+        log?.warn?.(`[ekho-autoreply] operator-key sync failed: ${String(err)}`);
+      }
+      verifications = verifyBatch(batch.messages, {
+        identity: opts.identity,
+        selfAgentId,
+        fleetId,
+        roster: batch.roster ?? [],
+        seenNonces: state.seenNonces,
+        now: new Date()
+      });
+      const nonNull: Record<string, VerifyResult | null> = {};
+      for (const [mid, v] of Object.entries(verifications)) if (v) nonNull[mid] = v;
+      lastBatchMeta.verifications = nonNull;
+    }
+
     // We ack the WHOLE batch (real or not) so nothing redelivers.
     const ackAll = batch.messages
       .filter((m) => typeof m?.message_id === "string")
@@ -426,7 +498,18 @@ export function startAutoReply(opts: {
     // The console (relay) is the live source of truth; fall back to the
     // plugin-config bootstrap defaults when the relay omits the fields.
     const eff = effectivePeerSettings(batch, { peerEnabled, peerTurnBudget });
-    const real = batch.messages.filter((m) => isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled));
+    const real = batch.messages.filter((m) =>
+      isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id])
+    );
+    // Burn the nonce of every signature we accepted (replay guard).
+    for (const m of real) {
+      const v = verifications[m.message_id];
+      const nonce =
+        v && v.verified && m.sig_canonical && typeof (m.sig_canonical as Record<string, unknown>).nonce === "string"
+          ? String((m.sig_canonical as Record<string, unknown>).nonce)
+          : null;
+      if (nonce) markNonceSeen(state, nonce);
+    }
     if (batch.messages.length > 0) {
       log?.info?.(
         `[ekho-autoreply] poll: ${batch.messages.length} msg(s) trusted=${operatorTrusted} peer=${eff.peerEnabled} real=${real.length} [` +

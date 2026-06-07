@@ -2,7 +2,15 @@ import os from "node:os";
 import path from "node:path";
 import { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
-import { enrollOrLoad, type EkhoCredentials } from "./credentials.js";
+import {
+  enrollOrLoad,
+  loadOrCreateIdentity,
+  saveIdentity,
+  identityPublicKey,
+  type EkhoCredentials,
+  type EkhoIdentity
+} from "./credentials.js";
+import { fromB64url, keyId as deriveKeyId } from "./identity.js";
 import { startAutoReply } from "./autoreply.js";
 
 export interface EkhoPluginConfig {
@@ -16,6 +24,10 @@ export interface EkhoPluginConfig {
   // Bounded agent-to-agent delegation (default off — opt-in per fleet).
   peerAutoreply?: boolean;
   peerTurnBudget?: number;
+  // Operator signing public key(s) to bootstrap-pin as the trust root (the
+  // trusted out-of-band channel for agents that predate signing).
+  // "<b64url>" or "<key_id>:<b64url>", comma-separated.
+  operatorPubkey?: string;
 }
 
 export interface EkhoConnection {
@@ -29,6 +41,44 @@ let connection: EkhoConnection | null = null;
 let connecting: Promise<EkhoConnection> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let stopAutoReply: (() => void) | null = null;
+let identity: EkhoIdentity | null = null;
+let identityConfigDir = "";
+
+/**
+ * Register the agent's identity key with the relay and bootstrap-pin the operator
+ * key(s) from config (the trusted out-of-band channel for agents that predate
+ * signing). Best-effort: a relay blip must never break connecting.
+ */
+export async function registerAndBootstrapIdentity(
+  client: EkhoAgentClient,
+  opts: { operatorPubkey?: string; configDir: string; log?: Logger }
+): Promise<EkhoIdentity> {
+  const id = loadOrCreateIdentity(opts.configDir);
+  try {
+    await client.registerIdentityKey(identityPublicKey(id));
+  } catch (err) {
+    opts.log?.warn?.(`[ekho] identity-key registration failed: ${String(err)}`);
+  }
+  let changed = false;
+  for (const raw of (opts.operatorPubkey ?? "").split(",")) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const pub = entry.includes(":") ? entry.slice(entry.indexOf(":") + 1).trim() : entry;
+    if (!pub) continue;
+    let kid: string;
+    try {
+      kid = deriveKeyId(fromB64url(pub));
+    } catch {
+      continue; // skip a malformed key
+    }
+    if (id.pinnedOperatorKeys[kid] !== pub) {
+      id.pinnedOperatorKeys[kid] = pub;
+      changed = true;
+    }
+  }
+  if (changed) saveIdentity(opts.configDir, id);
+  return id;
+}
 
 // Model/provider surfaced to the operator health board on each heartbeat. Two
 // auto-detected layers plus an explicit env override, resolved by precedence in
@@ -38,6 +88,11 @@ let stopAutoReply: (() => void) | null = null;
 // nextModelState) so a stale provider can never sit next to a different model.
 let observed: { model: string; provider: string } = { model: "", provider: "" };
 let configured: { model: string; provider: string } = { model: "", provider: "" };
+
+/** The agent's loaded identity (for signing outbound messages); null pre-connect. */
+export function getEkhoIdentity(): EkhoIdentity | null {
+  return identity;
+}
 
 /** Split a "provider/model" ref into parts; tolerates bare ids, leading/extra slashes, and whitespace. */
 export function splitModelRef(ref: string): { provider: string; model: string } {
@@ -161,6 +216,18 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
       relayBaseUrl: credentials.relayBaseUrl
     });
 
+    // Register our identity key + bootstrap-pin the operator key (best-effort).
+    identityConfigDir = configDir;
+    try {
+      identity = await registerAndBootstrapIdentity(client, {
+        operatorPubkey: config.operatorPubkey,
+        configDir,
+        log
+      });
+    } catch (err) {
+      log?.warn?.(`[ekho] identity bootstrap failed: ${String(err)}`);
+    }
+
     if (!heartbeatTimer) {
       // Best-effort model/provider for the operator health board. Auto-detected
       // from the host (live model_call hook + config seed, see register), with
@@ -214,7 +281,11 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     selfAgentId: connection.credentials.agentId,
     log,
     peerEnabled: config?.peerAutoreply ?? false,
-    peerTurnBudget: config?.peerTurnBudget
+    peerTurnBudget: config?.peerTurnBudget,
+    identity: identity ?? undefined,
+    onIdentityChanged: (id) => {
+      if (identityConfigDir) saveIdentity(identityConfigDir, id);
+    }
   });
 }
 

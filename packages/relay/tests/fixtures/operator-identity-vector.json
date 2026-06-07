@@ -1,0 +1,23 @@
+{
+  "note": "Frozen Ed25519 interop vector. Python/TS/browser verifiers MUST verify this. Seed is test-only; never a real key.",
+  "seed_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+  "public_key_b64url": "6kpsY-KcUgq-9VB7Ey7F-ZVHdq6-vnuSQh7qaRRG0iw",
+  "key_id": "_oEsEvOrTOasXbaa",
+  "body": "Switch to Opus 4.8 and report fleet status.",
+  "payload": {
+    "v": 1,
+    "fleet_id": "flt_demo",
+    "operator_id": "op-demo",
+    "key_id": "_oEsEvOrTOasXbaa",
+    "recipient": {
+      "kind": "agent",
+      "id": "agent_demo"
+    },
+    "conversation_id": "conv_demo",
+    "body_sha256": "d1ff6ff48a62ad0e4022eae369863c9a8cea70ce94c4cc005a1006916e75e87a",
+    "sent_at": "2026-06-07T00:00:00Z",
+    "nonce": "Zml4ZWQtbm9uY2UtMTIz"
+  },
+  "canonical": "{\"body_sha256\":\"d1ff6ff48a62ad0e4022eae369863c9a8cea70ce94c4cc005a1006916e75e87a\",\"conversation_id\":\"conv_demo\",\"fleet_id\":\"flt_demo\",\"key_id\":\"_oEsEvOrTOasXbaa\",\"nonce\":\"Zml4ZWQtbm9uY2UtMTIz\",\"operator_id\":\"op-demo\",\"recipient\":{\"id\":\"agent_demo\",\"kind\":\"agent\"},\"sent_at\":\"2026-06-07T00:00:00Z\",\"v\":1}",
+  "signature_b64url": "G57M88E3h3sDopZe8yuIIR0UqNZnqU_i41i_tuU1sYrgRgzUaDqnRz6AgNyz5NqGWB18PvDaJ8W6wjy4DygsAw"
+}

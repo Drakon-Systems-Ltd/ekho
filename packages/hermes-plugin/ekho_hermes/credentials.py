@@ -16,14 +16,78 @@ from __future__ import annotations
 import json
 import os
 import socket
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
-from ekho import AgentCredentials, EkhoAgentClient
+from ekho import AgentCredentials, EkhoAgentClient, public_key_b64url_from_seed
 
 from .config import EkhoConfig
 
 CREDENTIALS_FILE = "credentials.json"
+IDENTITY_FILE = "identity.json"
+
+
+@dataclass
+class EkhoIdentity:
+    """The agent's own Ed25519 identity (private) + the operator keys it pins.
+
+    seed_hex is the 32-byte Ed25519 seed — the private key, which never leaves the
+    host. pinned_operator_keys (key_id -> public_key b64url) is the trust root the
+    agent verifies operator messages and peer-key endorsements against.
+    """
+
+    seed_hex: str
+    pinned_operator_keys: Dict[str, str] = field(default_factory=dict)
+
+    def public_key_b64url(self) -> str:
+        return public_key_b64url_from_seed(bytes.fromhex(self.seed_hex))
+
+
+def _identity_path(config_dir: str) -> Path:
+    return Path(config_dir) / IDENTITY_FILE
+
+
+def load_or_create_identity(config_dir: str) -> EkhoIdentity:
+    """Load the agent's identity, generating a fresh keypair on first run."""
+    path = _identity_path(config_dir)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("seed_hex"):
+                return EkhoIdentity(
+                    seed_hex=str(data["seed_hex"]),
+                    pinned_operator_keys=dict(data.get("pinned_operator_keys") or {}),
+                )
+        except (OSError, ValueError):
+            pass
+    identity = EkhoIdentity(seed_hex=os.urandom(32).hex())
+    save_identity(config_dir, identity)
+    return identity
+
+
+def save_identity(config_dir: str, identity: EkhoIdentity) -> None:
+    """Persist the identity as JSON, 0600 (the seed is a private key)."""
+    directory = Path(config_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    path = _identity_path(config_dir)
+    payload = {
+        "seed_hex": identity.seed_hex,
+        "pinned_operator_keys": identity.pinned_operator_keys,
+    }
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    finally:
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
 
 def _credentials_path(config_dir: str) -> Path:

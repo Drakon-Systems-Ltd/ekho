@@ -2,6 +2,7 @@ import { FastifyReply, FastifyRequest } from "fastify";
 import { config } from "./config";
 import { db } from "./db";
 import { hashSecret, sha256, sign } from "./utils";
+import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -65,6 +66,16 @@ export async function requireAgentAuth(request: FastifyRequest, reply: FastifyRe
 }
 
 export async function requireOperatorAuth(request: FastifyRequest, reply: FastifyReply) {
+  // Tailnet gate (defense in depth): even a valid token is rejected off-tailnet.
+  const gate = evaluateTailnetGate({
+    require: config.operatorRequireTailnet,
+    allowedUser: config.operatorTailnetUser,
+    login: tailnetLoginFromHeaders(request.headers as Record<string, unknown>)
+  });
+  if (!gate.allowed) {
+    return reply.code(403).send({ error: gate.reason });
+  }
+
   const session = request.headers.authorization;
   if (!session?.startsWith("Bearer ")) {
     return unauthorized(reply, "missing operator session");

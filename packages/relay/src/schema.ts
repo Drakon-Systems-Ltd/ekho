@@ -318,4 +318,43 @@ CREATE TABLE IF NOT EXISTS feed_seen (
 );
 CREATE INDEX IF NOT EXISTS idx_feeds_fleet ON feeds(fleet_id);
 CREATE INDEX IF NOT EXISTS idx_feed_seen_recent ON feed_seen(feed_id, delivered_at);
+
+-- Operator signing keys (verifiable operator identity). The operator signs each
+-- operator->agent message with a portable Ed25519 key; agents pin the public key
+-- at enrollment and verify signatures themselves. Only public keys live here —
+-- the private key never leaves the operator's device.
+CREATE TABLE IF NOT EXISTS fleet_operator_keys (
+  fleet_id TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  public_key TEXT NOT NULL,
+  label TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  endorsed_by_key_id TEXT,
+  endorsement_sig TEXT,
+  PRIMARY KEY (fleet_id, key_id),
+  FOREIGN KEY (fleet_id) REFERENCES fleets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_keys_fleet_active ON fleet_operator_keys(fleet_id, revoked_at);
+
+-- Agent identity keys (agent-to-agent trust). Each agent holds its own Ed25519
+-- private key locally and registers the public key here. The operator endorses it
+-- (endorsement_sig over agentKeyEndorsementPayload, by an operator key) so peers
+-- can verify a sender's key chains back to the operator they already trust.
+CREATE TABLE IF NOT EXISTS agent_identity_keys (
+  agent_id TEXT NOT NULL,
+  fleet_id TEXT NOT NULL,
+  key_id TEXT NOT NULL,
+  public_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  endorsed_by_key_id TEXT,
+  endorsement_sig TEXT,
+  endorsed_at TEXT,
+  PRIMARY KEY (agent_id, key_id),
+  FOREIGN KEY (agent_id) REFERENCES agents(id),
+  FOREIGN KEY (fleet_id) REFERENCES fleets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_identity_keys_fleet ON agent_identity_keys(fleet_id);
 `;

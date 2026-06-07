@@ -1,9 +1,11 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { ensureConnected, noteObservedModel, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
+import { ensureConnected, getEkhoIdentity, noteObservedModel, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
 import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
+import { buildSignedSendFields } from "./verification.js";
 import {
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_MAX_PER_MESSAGE,
@@ -130,7 +132,7 @@ const plugin = defineToolPlugin({
         )
       }),
       execute: async ({ recipient_agent_id, message, conversation_id, attachment_paths }, config: EkhoPluginConfig) => {
-        const { client } = await ensureConnected(config);
+        const { client, credentials } = await ensureConnected(config);
         const conversationId = conversation_id ?? `oc-${Date.now()}`;
         const stamp = `oc-${Date.now()}`;
 
@@ -149,8 +151,10 @@ const plugin = defineToolPlugin({
           attachmentIds.push(up.id);
         }
 
-        const result = await client.sendMessage({
-          recipient: recipient_agent_id === "broadcast" ? { kind: "broadcast" } : { kind: "agent", id: recipient_agent_id },
+        const recipient =
+          recipient_agent_id === "broadcast" ? { kind: "broadcast" } : { kind: "agent", id: recipient_agent_id };
+        const sendPayload: Record<string, unknown> = {
+          recipient,
           message_type: "direct",
           // body.attachments rides inside the signed body — the relay binds it to
           // the message and validates ownership against this agent.
@@ -160,7 +164,31 @@ const plugin = defineToolPlugin({
           metadata: { ekho_origin: EKHO_ORIGIN_STAMP },
           conversation_id: conversationId,
           correlation_id: stamp
-        });
+        };
+
+        // Best-effort: sign the outbound message so recipients can verify it's us.
+        try {
+          const ident = getEkhoIdentity();
+          if (ident && credentials.fleetId) {
+            Object.assign(
+              sendPayload,
+              buildSignedSendFields({
+                identity: ident,
+                fleetId: credentials.fleetId,
+                selfAgentId: credentials.agentId,
+                recipient,
+                conversationId,
+                bodyText: message,
+                nonce: crypto.randomBytes(16).toString("base64url"),
+                sentAt: new Date().toISOString()
+              })
+            );
+          }
+        } catch {
+          /* unsigned send is still valid (graceful) */
+        }
+
+        const result = await client.sendMessage(sendPayload as Parameters<typeof client.sendMessage>[0]);
         return {
           sent: true,
           message_id: result.message_id,

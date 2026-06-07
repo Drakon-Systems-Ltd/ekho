@@ -3,7 +3,13 @@
   "compilerOptions": {
     "types": ["node"],
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    // The relay runs via tsx (server) and vite (console) — both bundler/ESM.
+    // tsc here is --noEmit (typecheck only, never emits), so bundler resolution
+    // just aligns the check with how the code actually loads, and lets us import
+    // pure-ESM deps (e.g. @noble/curves) that Node16/CJS resolution rejects.
+    "module": "ESNext",
+    "moduleResolution": "bundler"
   },
   "include": ["src/**/*.ts"]
 }

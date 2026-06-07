@@ -13,14 +13,19 @@ unit-tested without Hermes present.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
+from datetime import datetime, timezone
 
 from .attachments import download_inbox_attachments, upload_paths
 from .autoreply import get_cached_inbox
 from .config import EkhoConfig
 from .connection import ensure_connected, start_autoreply_once
+from .credentials import load_or_create_identity
 from .messages import build_send_input, format_inbox
+from .verification import build_signed_send_fields
 
 logger = logging.getLogger("ekho_hermes.plugin")
 
@@ -140,6 +145,29 @@ def _handle_ekho_send(args: dict, **_kw) -> str:
         attachment_ids=attachment_ids,
     )
 
+    # Best-effort: sign the outbound message so recipients can verify it's us.
+    # An unsigned send is still valid (graceful) — skip on any missing prereq.
+    try:
+        config_dir = getattr(conn, "config_dir", None)
+        if config_dir and config.fleet_id:
+            ident = load_or_create_identity(config_dir)
+            nonce = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
+            sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            payload.update(
+                build_signed_send_fields(
+                    identity_obj=ident,
+                    fleet_id=config.fleet_id,
+                    self_agent_id=conn.credentials.agent_id,
+                    recipient=payload.get("recipient", {}),
+                    conversation_id=payload.get("conversation_id", ""),
+                    body_text=message,
+                    nonce=nonce,
+                    sent_at=sent_at,
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 — unsigned send is still valid
+        logger.debug("[ekho] outbound signing skipped: %s", exc)
+
     try:
         result = conn.client.send_message(payload)
     except Exception as exc:  # noqa: BLE001
@@ -183,6 +211,7 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
     for message, locals_for_msg in zip(messages, local_attachments):
         enriched.append(
             {
+                "message_id": message.message_id,
                 "message_type": message.message_type,
                 "body": message.body,
                 "conversation_id": message.conversation_id,
@@ -197,6 +226,7 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
         enriched,
         operator_trusted=cached["operator_trusted"],
         roster=cached["roster"],
+        verifications=cached.get("verifications"),
     )
     return _tool_result(result)
 

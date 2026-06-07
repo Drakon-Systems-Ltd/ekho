@@ -21,6 +21,10 @@ export const config = {
   baseUrl: process.env.EKHO_BASE_URL ?? "http://127.0.0.1:4000",
   dbPath,
   operatorSessionSecret: process.env.EKHO_OPERATOR_SESSION_SECRET ?? "change-me",
+  // Tailnet gate (off by default). Require operator access to originate from the
+  // tailnet (via the header tailscale serve injects), optionally a specific user.
+  operatorRequireTailnet: (process.env.EKHO_OPERATOR_REQUIRE_TAILNET ?? "") === "1",
+  operatorTailnetUser: (process.env.EKHO_OPERATOR_TAILNET_USER ?? "").trim(),
   timestampSkewSeconds: resolveNumber(process.env.EKHO_TIMESTAMP_SKEW_SECONDS, 300),
   pollIntervalSeconds: resolveNumber(process.env.EKHO_POLL_INTERVAL_SECONDS, 5),
   heartbeatIntervalSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_INTERVAL_SECONDS, 30),

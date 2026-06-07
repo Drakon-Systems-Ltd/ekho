@@ -178,6 +178,11 @@ class EkhoAgentClient:
             self._request("GET", f"/v1/inbox?limit={limit}")
         )
 
+    def register_identity_key(self, public_key: str) -> Dict[str, Any]:
+        """Register (or rotate) this agent's Ed25519 identity public key for
+        agent-to-agent trust. Idempotent on the relay side."""
+        return self._request("POST", "/v1/identity-key", {"public_key": public_key})
+
     def ack_messages(self, acks: List[AckInput]) -> Dict[str, Any]:
         return self._request(
             "POST",

@@ -16,7 +16,12 @@ export const sendMessageSchema = z.object({
   body: z.record(z.string(), z.unknown()).or(z.object({ text: z.string() })),
   metadata: z.record(z.string(), z.unknown()).optional(),
   conversation_id: z.string().min(1),
-  correlation_id: z.string().min(1)
+  correlation_id: z.string().min(1),
+  // Verifiable peer identity (optional): the agent signs the canonical payload
+  // with its own identity key; relayed verbatim for the recipient to verify.
+  agent_sig: z.string().min(1).max(128).optional(),
+  key_id: z.string().min(1).max(32).optional(),
+  sig_canonical: z.record(z.string(), z.unknown()).optional()
 });
 
 export const ackSchema = z.object({
@@ -33,13 +38,20 @@ export const heartbeatSchema = z.object({
   metrics: z.record(z.string(), z.unknown()).optional().default({})
 });
 
+export const identityKeySchema = z.object({
+  public_key: z.string().min(1).max(128)
+});
+
 export const enrollSchema = z.object({
   fleet_id: z.string().min(1),
   token: z.string().min(1),
   display_name: z.string().min(1),
   runtime: z.enum(["custom", "openclaw", "langgraph", "autogen"]),
   hostname: z.string().optional(),
-  capabilities: z.array(z.string()).optional().default([])
+  capabilities: z.array(z.string()).optional().default([]),
+  // The agent's own Ed25519 identity public key (agent-to-agent trust). Optional
+  // for back-compat; agents that omit it simply can't be peer-verified yet.
+  identity_public_key: z.string().min(1).max(128).optional()
 });
 
 export const proposeActionSchema = z.object({
@@ -70,7 +82,12 @@ export const operatorMessageSchema = z
     room_id: z.string().min(1).optional(),
     text: z.string().min(1).max(8000),
     conversation_id: z.string().min(1).optional(),
-    attachment_ids: z.array(z.string().min(1)).max(50).optional()
+    attachment_ids: z.array(z.string().min(1)).max(50).optional(),
+    // Verifiable operator identity (optional): the client signs the canonical
+    // payload with its operator key; the relay stores/relays all three verbatim.
+    operator_sig: z.string().min(1).max(128).optional(),
+    key_id: z.string().min(1).max(32).optional(),
+    sig_canonical: z.record(z.string(), z.unknown()).optional()
   })
   .refine((d) => Boolean(d.recipient_agent_id) || Boolean(d.room_id), {
     message: "recipient_agent_id or room_id is required"
@@ -100,6 +117,24 @@ export const operatorControlSchema = z.object({
 
 export const operatorTrustSchema = z.object({
   trusted: z.boolean()
+});
+
+export const operatorKeySchema = z.object({
+  public_key: z.string().min(1).max(128),
+  label: z.string().min(1).max(80),
+  // Present when adding a device key: an existing trusted key vouches for it.
+  endorsement: z
+    .object({
+      endorsed_by_key_id: z.string().min(1).max(32),
+      signature: z.string().min(1).max(128)
+    })
+    .optional()
+});
+
+export const endorseAgentKeySchema = z.object({
+  key_id: z.string().min(1).max(32),
+  endorsed_by_key_id: z.string().min(1).max(32),
+  signature: z.string().min(1).max(128)
 });
 
 export const peerAutoreplySchema = z.object({

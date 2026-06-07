@@ -3,7 +3,8 @@ import fs from "node:fs";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, feedSubscribersSchema, operatorControlSchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -19,6 +20,16 @@ function parsePagination(query: Record<string, unknown>) {
 
 export async function registerOperatorRoutes(app: FastifyInstance) {
   app.post("/v1/operator/login", async (request, reply) => {
+    // Tailnet gate first: don't even process credentials off-tailnet.
+    const gate = evaluateTailnetGate({
+      require: config.operatorRequireTailnet,
+      allowedUser: config.operatorTailnetUser,
+      login: tailnetLoginFromHeaders(request.headers as Record<string, unknown>)
+    });
+    if (!gate.allowed) {
+      return reply.code(403).send({ error: gate.reason });
+    }
+
     const parsed = operatorLoginSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.flatten() });
@@ -134,6 +145,80 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ token });
   });
 
+  // ---- Operator signing keys (verifiable operator identity) ----------------
+
+  app.get("/v1/operator/keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    return reply.send({ keys: db.listOperatorKeys(request.operator.fleetId) });
+  });
+
+  // Fleet agent identity keys — drives the Security screen's endorse-agents panel.
+  app.get("/v1/operator/agent-keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    return reply.send({ keys: db.getAgentIdentityKeys(request.operator.fleetId) });
+  });
+
+  app.post("/v1/operator/keys", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = operatorKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { public_key, label, endorsement } = parsed.data;
+    try {
+      const { keyId } = db.registerOperatorKey(request.operator.fleetId, public_key, label, endorsement && {
+        endorsedByKeyId: endorsement.endorsed_by_key_id,
+        signature: endorsement.signature
+      });
+      return reply.code(201).send({ key_id: keyId });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("already registered")) return reply.code(409).send({ error: msg });
+      // endorsement / unknown-key / bad-signature are all client errors.
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  app.delete("/v1/operator/keys/:keyId", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const { keyId } = request.params as { keyId: string };
+    const revoked = db.revokeOperatorKey(request.operator.fleetId, keyId);
+    if (!revoked) return reply.code(404).send({ error: "key not found" });
+    return reply.send({ revoked: true });
+  });
+
+  // Operator endorses an agent's identity key — roots peer trust at the operator.
+  app.post("/v1/operator/agents/:agentId/endorse-key", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const parsed = endorseAgentKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const { agentId } = request.params as { agentId: string };
+    try {
+      const ok = db.endorseAgentKey(request.operator.fleetId, agentId, parsed.data.key_id, {
+        endorsedByKeyId: parsed.data.endorsed_by_key_id,
+        signature: parsed.data.signature
+      });
+      if (!ok) return reply.code(404).send({ error: "agent identity key not found" });
+      return reply.send({ endorsed: true });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
   app.post("/v1/operator/messages", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });
@@ -144,6 +229,11 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
     let result: { messageId: string; conversationId: string; createdAt: string };
     try {
+      const { operator_sig, key_id, sig_canonical } = parsed.data;
+      const signature =
+        operator_sig && key_id && sig_canonical
+          ? { sig: operator_sig, keyId: key_id, canonical: sig_canonical }
+          : undefined;
       result = db.createOperatorMessage({
         fleetId: request.operator.fleetId,
         operatorId: request.operator.id,
@@ -151,7 +241,8 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
         roomId: parsed.data.room_id,
         text: parsed.data.text,
         conversationId: parsed.data.conversation_id,
-        attachmentIds: parsed.data.attachment_ids
+        attachmentIds: parsed.data.attachment_ids,
+        signature
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

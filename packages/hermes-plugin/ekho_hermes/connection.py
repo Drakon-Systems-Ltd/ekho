@@ -18,10 +18,11 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from ekho import AgentCredentials, EkhoAgentClient
+from ekho.identity import key_id as _derive_key_id
 
 from . import autoreply
 from .config import EkhoConfig
-from .credentials import enroll_or_load
+from .credentials import enroll_or_load, load_or_create_identity, save_identity
 
 logger = logging.getLogger("ekho_hermes.connection")
 
@@ -36,6 +37,7 @@ class Connection:
 
     client: EkhoAgentClient
     credentials: AgentCredentials
+    config_dir: Optional[str] = None
 
 
 # Module singletons — guarded by _lock so concurrent tool calls build at most
@@ -73,6 +75,42 @@ def _heartbeat_loop(client: EkhoAgentClient, interval_seconds: int) -> None:
         _heartbeat_stop.wait(max(1, int(interval_seconds)))
 
 
+def register_and_bootstrap_identity(
+    client: Any,
+    *,
+    operator_pubkey: Optional[str],
+    config_dir: str,
+    log: logging.Logger = logger,
+) -> Any:
+    """Register the agent's identity key with the relay and bootstrap-pin the
+    operator key(s) from config (the trusted out-of-band channel for agents that
+    predate signing). Best-effort: a relay blip must never break connecting.
+    ``operator_pubkey`` is comma-separated "<b64url>" or "<key_id>:<b64url>"."""
+    identity = load_or_create_identity(config_dir)
+    try:
+        client.register_identity_key(identity.public_key_b64url())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[ekho] identity-key registration failed: %s", exc)
+    changed = False
+    for entry in (operator_pubkey or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        pub = entry.split(":", 1)[1].strip() if ":" in entry else entry
+        if not pub:
+            continue
+        try:
+            kid = _derive_key_id(pub)
+        except Exception:  # noqa: BLE001 — skip a malformed key, don't crash
+            continue
+        if identity.pinned_operator_keys.get(kid) != pub:
+            identity.pinned_operator_keys[kid] = pub
+            changed = True
+    if changed:
+        save_identity(config_dir, identity)
+    return identity
+
+
 def ensure_connected(
     config: EkhoConfig,
     *,
@@ -99,7 +137,15 @@ def ensure_connected(
 
         credentials = enroll_or_load(config, config_dir)
         client = EkhoAgentClient(credentials)
-        connection = Connection(client=client, credentials=credentials)
+        connection = Connection(client=client, credentials=credentials, config_dir=config_dir)
+
+        # Register our identity key + bootstrap-pin the operator key (best-effort).
+        try:
+            register_and_bootstrap_identity(
+                client, operator_pubkey=getattr(config, "operator_pubkey", None), config_dir=config_dir
+            )
+        except Exception as exc:  # noqa: BLE001 — never block connecting
+            logger.warning("[ekho] identity bootstrap failed: %s", exc)
 
         if start_heartbeat and _heartbeat_thread is None:
             _heartbeat_stop.clear()
@@ -149,6 +195,20 @@ def start_autoreply_once(
     with _lock:
         if _autoreply_stop is not None:
             return _autoreply_stop
+        # Load the agent's identity so the loop can verify signatures. Guarded:
+        # a test Connection without config_dir simply runs without verification.
+        identity_obj = None
+        on_identity_changed = None
+        config_dir = getattr(conn, "config_dir", None)
+        if config_dir:
+            try:
+                identity_obj = load_or_create_identity(config_dir)
+                on_identity_changed = (
+                    lambda ident, _dir=config_dir: save_identity(_dir, ident)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[ekho] identity load failed; verification off: %s", exc)
+
         starter = start_fn or autoreply.start_autoreply
         _autoreply_stop = starter(
             client=conn.client,
@@ -156,6 +216,8 @@ def start_autoreply_once(
             log=logger,
             peer_enabled=peer_enabled,
             peer_turn_budget=peer_turn_budget,
+            identity_obj=identity_obj,
+            on_identity_changed=on_identity_changed,
         )
         return _autoreply_stop
 
