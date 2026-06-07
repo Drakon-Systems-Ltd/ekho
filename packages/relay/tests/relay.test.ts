@@ -689,6 +689,32 @@ describe("Relay integration", () => {
       expect(list.body.rooms.find((r: { id: string }) => r.id === room.id)).toBeUndefined();
     });
 
+    it("enforces fleet isolation on control + direct message (cross-fleet IDOR)", async () => {
+      // Stand up a SECOND fleet with its own agent.
+      const fb = relay.db.createBootstrap("fleet-iso-b", "iso-b@test.com", "testpassword1");
+      const tokenB = relay.db.issueEnrollmentToken(fb.fleetId, fb.operatorId);
+      const enrollB = await relay.app.inject({
+        method: "POST", url: "/v1/enroll",
+        payload: { fleet_id: fb.fleetId, token: tokenB, display_name: "Foreigner", runtime: "custom" }
+      });
+      const foreign = JSON.parse(enrollB.body) as { agent_id: string; secret: string };
+
+      // Operator A (default fleet) must NOT be able to control fleet B's agent…
+      const ctl = await relay.operatorRequest("POST", `/v1/operator/agents/${foreign.agent_id}/quarantine`, { reason: "x" });
+      expect(ctl.status).toBe(404);
+      // …nor direct-message it.
+      const msg = await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: foreign.agent_id, text: "cross-fleet" });
+      expect(msg.status).toBe(404);
+      // The foreign agent received nothing.
+      const inbox = await relay.agentRequest(foreign.agent_id, foreign.secret, "GET", "/v1/inbox");
+      expect(inbox.body.messages.length).toBe(0);
+
+      // Sanity: the same operator CAN control + message an agent in its own fleet.
+      const mine = await relay.enrollAgent("iso-mine");
+      expect((await relay.operatorRequest("POST", `/v1/operator/agents/${mine.agent_id}/pause`, { reason: "x" })).status).toBe(200);
+      expect((await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: mine.agent_id, text: "hi" })).status).toBe(201);
+    });
+
     it("quarantines and resumes agent", async () => {
       const agent = await relay.enrollAgent("q-agent");
 

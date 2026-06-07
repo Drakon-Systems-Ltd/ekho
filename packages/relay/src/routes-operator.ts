@@ -387,11 +387,14 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "unsupported action" });
     }
 
-    const ok = db.controlAgent(params.agentId, request.operator.id, params.action, {
+    const ok = db.controlAgent(request.operator.fleetId, params.agentId, request.operator.id, params.action, {
       reason: parsed.data.reason,
       expires_at: parsed.data.expires_at ?? null,
       redirect_agent_id: parsed.data.redirect_agent_id ?? null
     });
+    if (!ok) {
+      return reply.code(404).send({ error: "agent not found" });
+    }
 
     return reply.send({ ok });
   });

@@ -208,6 +208,14 @@ export class EkhoDb {
     return rows.map((r) => r.id);
   }
 
+  // True only if `agentId` is a live, non-operator agent IN this fleet — so a
+  // direct message can't be delivered to a foreign fleet's agent by id.
+  private isDeliverableAgent(fleetId: string, agentId: string): boolean {
+    return !!this.db.prepare(
+      "SELECT 1 FROM agents WHERE id = ? AND fleet_id = ? AND runtime != 'operator' AND revoked_at IS NULL"
+    ).get(agentId, fleetId);
+  }
+
   /**
    * If conversationId is a room in this fleet, return its member agent ids
    * (minus the sender, excluding the synthetic operator + revoked agents).
@@ -310,6 +318,7 @@ export class EkhoDb {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
         }
       } else if (input.recipientKind === "agent" && input.recipientId) {
+        if (!this.isDeliverableAgent(input.fleetId, input.recipientId)) throw new Error("recipient not found");
         deliveryStmt.run(id("dly"), messageId, input.recipientId, createdAt, "queued");
       } else if (input.recipientKind === "broadcast") {
         for (const recipientId of this.broadcastRecipientIds(input.fleetId, input.senderAgentId)) {
@@ -439,6 +448,7 @@ export class EkhoDb {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
         }
       } else if (recipientKind === "agent" && recipientId) {
+        if (!this.isDeliverableAgent(input.fleetId, recipientId)) throw new Error("recipient not found");
         deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
       } else if (recipientKind === "broadcast") {
         for (const rid of this.broadcastRecipientIds(input.fleetId, senderId)) {
@@ -763,8 +773,13 @@ export class EkhoDb {
     return true;
   }
 
-  controlAgent(agentId: string, operatorId: string, action: "pause" | "resume" | "quarantine", payload: JsonValue) {
-    const agent = this.db.prepare("SELECT fleet_id FROM agents WHERE id = ?").get(agentId) as Record<string, unknown> | undefined;
+  controlAgent(fleetId: string, agentId: string, operatorId: string, action: "pause" | "resume" | "quarantine", payload: JsonValue) {
+    // Scope to the operator's own fleet (and never the operator pseudo-agent) so a
+    // foreign agent id can't be paused/quarantined cross-fleet — matching the
+    // fleet-scoped sibling controls (setAgentTrust / setPeerAutoreply).
+    const agent = this.db.prepare(
+      "SELECT id FROM agents WHERE id = ? AND fleet_id = ? AND runtime != 'operator'"
+    ).get(agentId, fleetId) as Record<string, unknown> | undefined;
     if (!agent) {
       return false;
     }
@@ -775,9 +790,9 @@ export class EkhoDb {
     const tx = this.db.transaction(() => {
       this.db.prepare(
         "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-      ).run(controlId, agent.fleet_id, "agent", agentId, action, JSON.stringify(payload), operatorId, now);
-      this.db.prepare("UPDATE agents SET status = ? WHERE id = ?").run(nextStatus, agentId);
-      this.recordEvent(String(agent.fleet_id), `agent.${action}`, "operator", operatorId, "agent", agentId, null, payload);
+      ).run(controlId, fleetId, "agent", agentId, action, JSON.stringify(payload), operatorId, now);
+      this.db.prepare("UPDATE agents SET status = ? WHERE id = ? AND fleet_id = ?").run(nextStatus, agentId, fleetId);
+      this.recordEvent(fleetId, `agent.${action}`, "operator", operatorId, "agent", agentId, null, payload);
     });
     tx();
     return true;
