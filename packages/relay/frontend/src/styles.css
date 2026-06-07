@@ -162,17 +162,27 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .layout--right-collapsed .rail--right { overflow: hidden; border-left: 0; }
 .layout--left-collapsed  .rail--left  > *,
 .layout--right-collapsed .rail--right > * { visibility: hidden; }
-/* in-rail collapse chevrons (small, low-profile, top corner) */
+/* Collapse handles — straddle the rail/center divider, revealed on rail hover so they
+   never sit on top of the KPI cards or the tab strip. Pinned to the layout, not the rail. */
 .rail-collapse {
-  position: absolute; top: 8px; z-index: 4;
-  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
-  background: var(--raised); border: 1px solid var(--hair); border-radius: 6px;
-  color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer;
-  transition: color var(--t), border-color var(--t), background var(--t);
+  position: absolute; top: 50%; z-index: 6;
+  width: 18px; height: 48px; display: flex; align-items: center; justify-content: center;
+  background: var(--raised); border: 1px solid var(--hair); border-radius: 8px;
+  color: var(--muted); font-size: 13px; line-height: 1; cursor: pointer;
+  opacity: 0; pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+  transition: opacity var(--t), color var(--t), border-color var(--t), background var(--t);
 }
-.rail-collapse:hover { color: var(--text); border-color: var(--hair-strong); }
-.rail-collapse--left  { right: 8px; }
-.rail-collapse--right { left: 8px; }
+.rail-collapse--left  { left: 304px;  transform: translate(-50%, -50%); }
+.rail-collapse--right { right: 340px; transform: translate(50%, -50%); }
+.rail-collapse:hover { color: var(--text); border-color: var(--hair-strong); background: var(--panel); }
+/* reveal when the adjacent rail (or the handle itself) is hovered */
+.rail--left:hover  ~ .rail-collapse--left,
+.rail--right:hover ~ .rail-collapse--right,
+.rail-collapse:hover { opacity: 1; pointer-events: auto; }
+/* a collapsed rail hides its own handle — the re-open strip takes over */
+.layout--left-collapsed  .rail-collapse--left,
+.layout--right-collapsed .rail-collapse--right { display: none; }
 /* thin re-open affordance — full-height click strip pinned to the layout edge */
 .rail-reopen {
   position: absolute; top: 0; bottom: 0; width: 16px; z-index: 5;

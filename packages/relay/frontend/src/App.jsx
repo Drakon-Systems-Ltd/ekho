@@ -1158,7 +1158,6 @@ export default function App() {
         <button className="rail-reopen rail-reopen--right" onClick={toggleRightRail} aria-label="Expand operations rail" title="Expand operations">‹</button>
         {/* LEFT RAIL */}
         <aside className="rail rail--left">
-          <button className="rail-collapse rail-collapse--left" onClick={toggleLeftRail} aria-label="Collapse fleet sidebar" title="Collapse">‹</button>
           <div className="kpi-strip">
             <StatChip label="Agents" value={overview.agents?.length ?? 0} />
             <StatChip label="Healthy" value={healthyCount} tone="ok" />
@@ -1233,6 +1232,8 @@ export default function App() {
             </div>
           </div>
         </aside>
+        {/* Collapse handle — sits on the rail/center divider, revealed on rail hover. */}
+        <button className="rail-collapse rail-collapse--left" onClick={toggleLeftRail} aria-label="Collapse fleet sidebar" title="Collapse fleet sidebar">‹</button>
 
         {/* CENTER — CHAT */}
         <main className="chat" {...swipeBack}>
@@ -1377,7 +1378,6 @@ export default function App() {
         {/* RIGHT RAIL */}
         <div className="rail-backdrop" onClick={() => setOpsOpen(false)} aria-hidden="true" />
         <aside className="rail rail--right">
-          <button className="rail-collapse rail-collapse--right" onClick={toggleRightRail} aria-label="Collapse operations rail" title="Collapse">›</button>
           <div className="rail__mobilebar">
             <span>Operations</span>
             <button className="icon-button" onClick={() => setOpsOpen(false)} aria-label="Close operations panel">✕</button>
@@ -1517,6 +1517,8 @@ export default function App() {
             <button className="help-hint" onClick={() => setHelpOpen(true)}>Need help? Click the ? icon</button>
           </div>
         </aside>
+        {/* Collapse handle — sits on the operations/center divider, revealed on rail hover. */}
+        <button className="rail-collapse rail-collapse--right" onClick={toggleRightRail} aria-label="Collapse operations rail" title="Collapse operations rail">›</button>
       </div>
 
       {/* modals */}
