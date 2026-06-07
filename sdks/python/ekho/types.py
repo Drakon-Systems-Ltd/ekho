@@ -161,8 +161,6 @@ class OperatorKeyEntry:
 class InboxResponse:
     messages: List[InboxMessage]
     controls: List[ControlMessage]
-    # The polling agent's own fleet — binds verified signatures to a fleet.
-    fleet_id: Optional[str] = None
     # Whether this agent recognizes the console operator as its verified principal.
     operator_trusted: bool = False
     # Other agents in the same fleet (excludes the operator identity and self).
@@ -173,6 +171,9 @@ class InboxResponse:
     peer_turn_budget: Optional[int] = None
     # Pinned operator signing keys (incl. revoked, so the agent can drop them).
     operator_keys: List[OperatorKeyEntry] = field(default_factory=list)
+    # The polling agent's own fleet — binds verified signatures to a fleet.
+    # Last field so positional InboxResponse(...) construction stays stable.
+    fleet_id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxResponse":

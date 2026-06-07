@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .attachments import download_inbox_attachments
 from .messages import iso_now
+from .verification import should_autowake
 
 logger = logging.getLogger("ekho_hermes.autoreply")
 
@@ -187,11 +188,14 @@ def is_real_inbound(
     operator_trusted: bool,
     *,
     peer_enabled: bool = False,
+    verification: Any = None,
 ) -> bool:
     """Qualifying filter — an inbound message auto-wakes the agent only when ALL
-    hold. The OPERATOR path is always trust-gated; the PEER path is gated on
-    ``peer_enabled`` (bounded delegation) and additionally latched per
-    conversation in ``process_inbox_once``."""
+    hold. The OPERATOR path is trust-gated (cryptographically, when signed; else
+    relay-attested); the PEER path is gated on ``peer_enabled`` (bounded
+    delegation) and additionally latched per conversation in
+    ``process_inbox_once``. ``verification`` is this message's agent-computed
+    verdict (None when the agent has no trust root yet)."""
     message_id = getattr(msg, "message_id", None)
     if not isinstance(message_id, str):
         return False
@@ -207,10 +211,10 @@ def is_real_inbound(
     # 4. Dedupe.
     if message_id in state.seen:
         return False
-    # 5. Principal gate: operator (trust-gated) or teammate (delegation-gated).
-    if getattr(msg, "sender_kind", None) == "operator":
-        return bool(operator_trusted)
-    return bool(peer_enabled)
+    # 5. Principal gate + execution authority (graceful crypto verification).
+    return should_autowake(
+        msg, verification, operator_trusted=operator_trusted, peer_enabled=peer_enabled
+    )
 
 
 def apply_peer_rate_gate(
