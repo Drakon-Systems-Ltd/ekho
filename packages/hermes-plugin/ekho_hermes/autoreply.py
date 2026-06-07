@@ -702,10 +702,14 @@ def start_autoreply(
     spawn: Optional[Callable[[List[str], Dict[str, str]], None]] = None,
     peer_enabled: bool = False,
     peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET,
+    identity_obj: Any = None,
+    on_identity_changed: Optional[Callable[[Any], None]] = None,
 ) -> Callable[[], None]:
     """Start the background poll loop in a daemon thread. Spends zero LLM tokens
     unless a real message arrives. ``peer_enabled`` turns on bounded
     agent-to-agent delegation (latched at ``peer_turn_budget`` per conversation).
+    ``identity_obj`` (the agent's EkhoIdentity) enables cryptographic verification;
+    ``on_identity_changed`` persists it when the pinned operator keys change.
     Returns a ``stop()`` callable."""
     log = log or logger
     state = AutoReplyState()
@@ -734,6 +738,8 @@ def start_autoreply(
                     log=log,
                     peer_enabled=peer_enabled,
                     peer_turn_budget=peer_turn_budget,
+                    identity_obj=identity_obj,
+                    on_identity_changed=on_identity_changed,
                 )
             except Exception as exc:  # noqa: BLE001 — a relay blip must not kill the loop
                 log.debug("[ekho-autoreply] tick failed: %s", exc)

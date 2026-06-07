@@ -21,7 +21,7 @@ from ekho import AgentCredentials, EkhoAgentClient
 
 from . import autoreply
 from .config import EkhoConfig
-from .credentials import enroll_or_load
+from .credentials import enroll_or_load, load_or_create_identity, save_identity
 
 logger = logging.getLogger("ekho_hermes.connection")
 
@@ -36,6 +36,7 @@ class Connection:
 
     client: EkhoAgentClient
     credentials: AgentCredentials
+    config_dir: Optional[str] = None
 
 
 # Module singletons — guarded by _lock so concurrent tool calls build at most
@@ -99,7 +100,7 @@ def ensure_connected(
 
         credentials = enroll_or_load(config, config_dir)
         client = EkhoAgentClient(credentials)
-        connection = Connection(client=client, credentials=credentials)
+        connection = Connection(client=client, credentials=credentials, config_dir=config_dir)
 
         if start_heartbeat and _heartbeat_thread is None:
             _heartbeat_stop.clear()
@@ -149,6 +150,20 @@ def start_autoreply_once(
     with _lock:
         if _autoreply_stop is not None:
             return _autoreply_stop
+        # Load the agent's identity so the loop can verify signatures. Guarded:
+        # a test Connection without config_dir simply runs without verification.
+        identity_obj = None
+        on_identity_changed = None
+        config_dir = getattr(conn, "config_dir", None)
+        if config_dir:
+            try:
+                identity_obj = load_or_create_identity(config_dir)
+
+                def on_identity_changed(ident, _dir=config_dir):  # noqa: E306
+                    save_identity(_dir, ident)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[ekho] identity load failed; verification off: %s", exc)
+
         starter = start_fn or autoreply.start_autoreply
         _autoreply_stop = starter(
             client=conn.client,
@@ -156,6 +171,8 @@ def start_autoreply_once(
             log=logger,
             peer_enabled=peer_enabled,
             peer_turn_budget=peer_turn_budget,
+            identity_obj=identity_obj,
+            on_identity_changed=on_identity_changed,
         )
         return _autoreply_stop
 
