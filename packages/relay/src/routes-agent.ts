@@ -52,7 +52,14 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       relay_base_url: config.baseUrl,
       heartbeat_interval_seconds: config.heartbeatIntervalSeconds,
       poll_interval_seconds: config.pollIntervalSeconds,
-      policy_profile: "default"
+      policy_profile: "default",
+      // Pin the operator's signing keys at enrollment — the trust bootstrap.
+      operator_keys: db.getActiveOperatorKeys(parsed.data.fleet_id).map((k) => ({
+        key_id: k.key_id,
+        public_key: k.public_key,
+        endorsed_by_key_id: k.endorsed_by_key_id,
+        endorsement_sig: k.endorsement_sig
+      }))
     });
   });
 

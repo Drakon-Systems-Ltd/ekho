@@ -768,7 +768,17 @@ export class EkhoDb {
       operator_trusted: operatorTrusted,
       peer_autoreply: peerAutoreply,
       peer_turn_budget: peerTurnBudget,
-      roster
+      roster,
+      // Pinned operator signing keys (incl. revoked, so agents can drop them).
+      operator_keys: fleetId
+        ? this.listOperatorKeys(fleetId).map((k) => ({
+            key_id: k.key_id,
+            public_key: k.public_key,
+            revoked: Boolean(k.revoked_at),
+            endorsed_by_key_id: k.endorsed_by_key_id,
+            endorsement_sig: k.endorsement_sig
+          }))
+        : []
     };
   }
 

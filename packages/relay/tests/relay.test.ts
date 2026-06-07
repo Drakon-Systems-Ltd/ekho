@@ -960,3 +960,44 @@ describe("operator message signatures", () => {
     expect(msg.key_id ?? null).toBeNull();
   });
 });
+
+describe("operator key distribution (pinning)", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("includes active operator keys in the enrollment response (pin at enrollment)", async () => {
+    const k = makeOperatorKey(41);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const res = await relay.app.inject({
+      method: "POST",
+      url: "/v1/enroll",
+      payload: { fleet_id: relay.fleetId, token, display_name: "Pinner", runtime: "custom" },
+    });
+    const body = JSON.parse(res.body);
+    const row = body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row).toBeTruthy();
+    expect(row.public_key).toBe(k.pubB64);
+  });
+
+  it("serves operator keys in the inbox for ongoing sync", async () => {
+    const k = makeOperatorKey(42);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const agent = await relay.enrollAgent("Pinner2");
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const row = inbox.body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row.public_key).toBe(k.pubB64);
+    expect(row.revoked).toBe(false);
+  });
+
+  it("marks a revoked operator key as revoked in the inbox", async () => {
+    const k = makeOperatorKey(43);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "phone" });
+    await relay.operatorRequest("DELETE", `/v1/operator/keys/${k.id}`);
+    const agent = await relay.enrollAgent("Pinner3");
+    const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
+    const row = inbox.body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);
+    expect(row.revoked).toBe(true);
+  });
+});
