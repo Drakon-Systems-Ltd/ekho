@@ -7,6 +7,7 @@
 // browser (console) verifiers byte-for-byte, so a frozen test vector pins it.
 
 import { ed25519 } from "@noble/curves/ed25519.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 /**
  * Deterministic JSON: object keys sorted ascending, no insignificant whitespace.
@@ -32,6 +33,14 @@ export function b64url(bytes: Uint8Array): string {
 
 export function fromB64url(s: string): Uint8Array {
   return new Uint8Array(Buffer.from(s, "base64url"));
+}
+
+/**
+ * Stable short identifier for a public key: base64url(sha256(pub))[:16].
+ * Used to name a registered operator key and to select it on verification.
+ */
+export function keyId(publicKey: Uint8Array): string {
+  return b64url(sha256(publicKey)).slice(0, 16);
 }
 
 /** Sign the canonical form of `payload` with a 32-byte Ed25519 seed. */

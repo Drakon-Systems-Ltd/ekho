@@ -6,6 +6,7 @@ import {
   signCanonical,
   verifyCanonical,
   fromB64url,
+  keyId,
 } from "../src/operator-identity";
 
 const SEED = new Uint8Array(32).fill(7); // fixed seed -> deterministic vector
@@ -78,5 +79,20 @@ describe("frozen interop vector", () => {
     const pub = fromB64url(VECTOR.public_key_b64url);
     const tampered = { ...VECTOR.payload, conversation_id: "conv_evil" };
     expect(verifyCanonical(tampered, VECTOR.signature_b64url, pub)).toBe(false);
+  });
+});
+
+describe("keyId", () => {
+  it("derives base64url(sha256(pub))[:16] and matches the frozen vector", () => {
+    const pub = fromB64url(VECTOR.public_key_b64url);
+    expect(keyId(pub)).toBe(VECTOR.key_id);
+    expect(keyId(pub)).toHaveLength(16);
+  });
+
+  it("is stable and unique per key", () => {
+    const pubA = ed25519.getPublicKey(new Uint8Array(32).fill(1));
+    const pubB = ed25519.getPublicKey(new Uint8Array(32).fill(2));
+    expect(keyId(pubA)).toBe(keyId(pubA));
+    expect(keyId(pubA)).not.toBe(keyId(pubB));
   });
 });
