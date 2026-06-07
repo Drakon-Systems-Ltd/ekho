@@ -308,9 +308,12 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 
 .composer { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; gap: 9px; padding: 12px 18px 16px; border-top: 1px solid var(--hair); background: var(--panel); transition: background var(--t), box-shadow var(--t); }
 .composer--drag { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px rgba(45, 212, 191, 0.5); }
-.composer__row { display: flex; align-items: flex-end; gap: 9px; }
-.composer__recipient { width: auto; max-width: 180px; padding: 10px 28px 10px 11px; font-size: 12.5px; flex: 0 0 auto; }
-.composer__input { resize: none; max-height: 160px; line-height: 1.5; padding: 11px 13px; flex: 1 1 auto; }
+.composer__row { display: flex; align-items: flex-end; gap: 9px; flex-wrap: wrap; }
+.composer__recipient { width: auto; max-width: 180px; padding: 10px 28px 10px 11px; font-size: 12.5px; flex: 0 1 auto; min-width: 0; }
+/* min-width:0 lets the textarea shrink below its long placeholder so Send never
+   gets shoved off the row; flex-basis keeps it the line's flexible element, wrapping
+   to its own line (with Send) only when the centre column is genuinely too narrow. */
+.composer__input { resize: none; max-height: 160px; line-height: 1.5; padding: 11px 13px; flex: 1 1 140px; min-width: 0; }
 .composer__send { flex: 0 0 auto; height: 42px; padding: 0 20px; }
 .composer__file { display: none; }
 .composer__attach {
