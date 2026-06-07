@@ -148,10 +148,44 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
   display: grid;
   grid-template-columns: 304px minmax(0, 1fr) 340px;
   grid-template-rows: minmax(0, 1fr); /* fill the shell; panes scroll internally, page never does */
+  position: relative; /* anchor for the re-open stubs */
+  transition: grid-template-columns 220ms var(--ease);
 }
-.rail { min-height: 0; display: flex; flex-direction: column; background: var(--panel); }
+.layout--left-collapsed  { grid-template-columns: 0 minmax(0, 1fr) 340px; }
+.layout--right-collapsed { grid-template-columns: 304px minmax(0, 1fr) 0; }
+.layout--left-collapsed.layout--right-collapsed { grid-template-columns: 0 minmax(0, 1fr) 0; }
+.rail { min-height: 0; display: flex; flex-direction: column; background: var(--panel); position: relative; }
 .rail--left { border-right: 1px solid var(--hair); }
 .rail--right { border-left: 1px solid var(--hair); }
+/* a collapsed rail clips its content and drops its border so 0-width is truly 0 */
+.layout--left-collapsed  .rail--left  { overflow: hidden; border-right: 0; }
+.layout--right-collapsed .rail--right { overflow: hidden; border-left: 0; }
+.layout--left-collapsed  .rail--left  > *,
+.layout--right-collapsed .rail--right > * { visibility: hidden; }
+/* in-rail collapse chevrons (small, low-profile, top corner) */
+.rail-collapse {
+  position: absolute; top: 8px; z-index: 4;
+  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  background: var(--raised); border: 1px solid var(--hair); border-radius: 6px;
+  color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer;
+  transition: color var(--t), border-color var(--t), background var(--t);
+}
+.rail-collapse:hover { color: var(--text); border-color: var(--hair-strong); }
+.rail-collapse--left  { right: 8px; }
+.rail-collapse--right { left: 8px; }
+/* thin re-open affordance — full-height click strip pinned to the layout edge */
+.rail-reopen {
+  position: absolute; top: 0; bottom: 0; width: 16px; z-index: 5;
+  display: none; align-items: center; justify-content: center;
+  background: var(--panel); color: var(--faint);
+  font-size: 13px; cursor: pointer; padding: 0; border: 0;
+  transition: background var(--t), color var(--t);
+}
+.rail-reopen:hover { background: var(--raised); color: var(--text); }
+.rail-reopen--left  { left: 0;  border-right: 1px solid var(--hair); }
+.rail-reopen--right { right: 0; border-left: 1px solid var(--hair); }
+.layout--left-collapsed  .rail-reopen--left  { display: flex; }
+.layout--right-collapsed .rail-reopen--right { display: flex; }
 
 /* left rail */
 .kpi-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 14px; border-bottom: 1px solid var(--hair); }
@@ -338,6 +372,11 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .tab { flex: 0 0 auto; padding: 8px 8px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font-size: 12.5px; font-weight: 540; cursor: pointer; transition: color var(--t), border-color var(--t); white-space: nowrap; }
 .tab:hover { color: var(--text); }
 .tab--active { color: var(--text); border-bottom-color: var(--accent); }
+.tabs--grouped { gap: 0; align-items: flex-end; }
+.tab-group { display: flex; align-items: flex-end; gap: 2px; padding-right: 11px; position: relative; }
+.tab-group + .tab-group { padding-left: 11px; }
+.tab-group + .tab-group::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 9px; width: 1px; background: var(--hair); }
+.tab-group__label { align-self: flex-end; margin: 0 4px 9px 0; font-size: 9px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--faint); white-space: nowrap; -webkit-user-select: none; user-select: none; }
 .rail__scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
 .rail__foot { flex: 0 0 auto; padding: 12px 14px; border-top: 1px solid var(--hair); display: grid; gap: 8px; }
 .token-out { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; padding: 8px 10px; border-radius: 8px; background: var(--raised); border: 1px solid var(--hair); color: var(--accent); }
@@ -562,6 +601,14 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .chat__back, .chat__ops, .chat__trace-return, .rail__mobilebar, .rail-backdrop { display: none; }
 
 @media (max-width: 960px) {
+  /* Desktop rail-collapse is neutralized on mobile (layout is flex + a drawer). */
+  .rail-collapse, .rail-reopen { display: none !important; }
+  .layout--left-collapsed, .layout--right-collapsed,
+  .layout--left-collapsed.layout--right-collapsed { grid-template-columns: none; }
+  .layout--left-collapsed  .rail--left,
+  .layout--right-collapsed .rail--right { overflow: visible; }
+  .layout--left-collapsed  .rail--left  > *,
+  .layout--right-collapsed .rail--right > * { visibility: visible; }
   /* Compact app bar */
   .appbar { height: 52px; padding: 0 max(10px, env(safe-area-inset-left)) 0 max(10px, env(safe-area-inset-right)); }
   .appbar__sub, .brand-by, .sync-pill { display: none; }

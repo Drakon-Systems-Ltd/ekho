@@ -186,6 +186,15 @@ function isHeartbeatEvent(type) {
   return type === "agent.heartbeat" || type === "message.delivered" || type === "message.acked";
 }
 
+const RAIL_LEFT_KEY = "ekho.rail.left.collapsed.v1";
+const RAIL_RIGHT_KEY = "ekho.rail.right.collapsed.v1";
+const loadRailCollapsed = (key) => {
+  try { return localStorage.getItem(key) === "1"; } catch { return false; }
+};
+const saveRailCollapsed = (key, val) => {
+  try { localStorage.setItem(key, val ? "1" : "0"); } catch { /* storage unavailable */ }
+};
+
 export default function App() {
   const [session, setSession] = useState(loadSession());
   const now = useNow();
@@ -215,6 +224,10 @@ export default function App() {
   // 'list' shows the fleet/conversations rail; 'chat' shows the conversation.
   const [mobileView, setMobileView] = useState("list");
   const [opsOpen, setOpsOpen] = useState(false); // right-rail drawer (mobile)
+  const [leftCollapsed, setLeftCollapsed] = useState(() => loadRailCollapsed(RAIL_LEFT_KEY));
+  const [rightCollapsed, setRightCollapsed] = useState(() => loadRailCollapsed(RAIL_RIGHT_KEY));
+  const toggleLeftRail = () => setLeftCollapsed((v) => { const n = !v; saveRailCollapsed(RAIL_LEFT_KEY, n); return n; });
+  const toggleRightRail = () => setRightCollapsed((v) => { const n = !v; saveRailCollapsed(RAIL_RIGHT_KEY, n); return n; });
   // When a chat is opened by tracing from an Ops-drawer tab (Approvals/Agent/…),
   // remember that tab so mobile can offer a one-tap "back to where you were".
   const [traceReturn, setTraceReturn] = useState(null);
@@ -1139,9 +1152,13 @@ export default function App() {
         </div>
       </header>
 
-      <div className="layout">
+      <div className={`layout${leftCollapsed ? " layout--left-collapsed" : ""}${rightCollapsed ? " layout--right-collapsed" : ""}`}>
+        {/* Re-open affordances — thin strips shown only when a rail is collapsed. */}
+        <button className="rail-reopen rail-reopen--left" onClick={toggleLeftRail} aria-label="Expand fleet sidebar" title="Expand fleet">›</button>
+        <button className="rail-reopen rail-reopen--right" onClick={toggleRightRail} aria-label="Expand operations rail" title="Expand operations">‹</button>
         {/* LEFT RAIL */}
         <aside className="rail rail--left">
+          <button className="rail-collapse rail-collapse--left" onClick={toggleLeftRail} aria-label="Collapse fleet sidebar" title="Collapse">‹</button>
           <div className="kpi-strip">
             <StatChip label="Agents" value={overview.agents?.length ?? 0} />
             <StatChip label="Healthy" value={healthyCount} tone="ok" />
@@ -1360,26 +1377,40 @@ export default function App() {
         {/* RIGHT RAIL */}
         <div className="rail-backdrop" onClick={() => setOpsOpen(false)} aria-hidden="true" />
         <aside className="rail rail--right">
+          <button className="rail-collapse rail-collapse--right" onClick={toggleRightRail} aria-label="Collapse operations rail" title="Collapse">›</button>
           <div className="rail__mobilebar">
             <span>Operations</span>
             <button className="icon-button" onClick={() => setOpsOpen(false)} aria-label="Close operations panel">✕</button>
           </div>
-          <div className="tabs">
+          <div className="tabs tabs--grouped">
             {[
-              ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
-              ["health", "Health"],
-              ["topology", "Map"],
-              ["activity", "Activity"],
-              ["feeds", "Feeds"],
-              ["agent", "Agent"],
-              ["access", "Access"],
-              ["security", "🛡 Sec"],
-              ["deadletters", "Dead"],
-              ["policies", "Policies"],
-            ].map(([key, label]) => (
-              <button key={key} className={`tab${rightTab === key ? " tab--active" : ""}`} onClick={() => setRightTab(key)}>
-                {label}
-              </button>
+              ["Monitor", [
+                ["health", "Health"],
+                ["topology", "Map"],
+                ["activity", "Activity"],
+              ]],
+              ["Control", [
+                ["approvals", `Approvals${overview.pendingApprovals ? ` (${overview.pendingApprovals})` : ""}`],
+                ["deadletters", "Dead"],
+              ]],
+              ["Configure", [
+                ["feeds", "Feeds"],
+                ["agent", "Agent"],
+                ["access", "Access"],
+                ["policies", "Policies"],
+              ]],
+              ["Security", [
+                ["security", "🛡 Sec"],
+              ]],
+            ].map(([group, items]) => (
+              <div className="tab-group" key={group}>
+                <span className="tab-group__label">{group}</span>
+                {items.map(([key, label]) => (
+                  <button key={key} className={`tab${rightTab === key ? " tab--active" : ""}`} onClick={() => setRightTab(key)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
             ))}
           </div>
 
