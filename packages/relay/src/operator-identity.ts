@@ -6,6 +6,8 @@
 // implementation: its canonical serialization MUST match the Python (Hermes) and
 // browser (console) verifiers byte-for-byte, so a frozen test vector pins it.
 
+import { ed25519 } from "@noble/curves/ed25519.js";
+
 /**
  * Deterministic JSON: object keys sorted ascending, no insignificant whitespace.
  * This is the exact byte sequence that gets signed and verified everywhere.
@@ -20,4 +22,32 @@ export function canonicalize(value: unknown): string {
     keys.map((k) => JSON.stringify(k) + ":" + canonicalize(obj[k])).join(",") +
     "}"
   );
+}
+
+const enc = new TextEncoder();
+
+export function b64url(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64url");
+}
+
+export function fromB64url(s: string): Uint8Array {
+  return new Uint8Array(Buffer.from(s, "base64url"));
+}
+
+/** Sign the canonical form of `payload` with a 32-byte Ed25519 seed. */
+export function signCanonical(payload: unknown, secret: Uint8Array): string {
+  return b64url(ed25519.sign(enc.encode(canonicalize(payload)), secret));
+}
+
+/** Verify `sig` over the canonical form of `payload` against a public key. */
+export function verifyCanonical(
+  payload: unknown,
+  sig: string,
+  publicKey: Uint8Array
+): boolean {
+  try {
+    return ed25519.verify(fromB64url(sig), enc.encode(canonicalize(payload)), publicKey);
+  } catch {
+    return false;
+  }
 }
