@@ -1352,7 +1352,8 @@ export default function App() {
               </button>
               <textarea
                 className="composer__input"
-                placeholder="Message the fleet…  (Enter to send · Shift+Enter for newline)"
+                placeholder="Message the fleet…"
+                title="Enter to send · Shift+Enter for newline"
                 value={composerText}
                 rows={1}
                 onChange={(e) => setComposerText(e.target.value)}
