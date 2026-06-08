@@ -72,6 +72,7 @@ import { useAutoRefresh, useEdgeSwipeBack, useNow } from "./hooks";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { getUnlocked } from "./operatorKeyStore.js";
 import { buildOperatorCanonical, signCanonical, randomNonce } from "./operatorKey.js";
+import { mentionContext, insertMention, parseMentions, filterAgents } from "./mentions.js";
 
 const POLL_INTERVAL_MS = 5000;
 const TIMELINE_LIMIT = 100;
@@ -248,7 +249,10 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [composerError, setComposerError] = useState("");
+  const [replyTarget, setReplyTarget] = useState(null); // { messageId, text, label } | null
+  const [mentionMenu, setMentionMenu] = useState(null); // { query, items, index } | null
   const fileInputRef = useRef(null);
+  const composerInputRef = useRef(null);
   const [trustPending, setTrustPending] = useState(""); // agentId whose trust toggle is in-flight
   const [peerPending, setPeerPending] = useState(""); // agentId whose peer-delegation control is in-flight
 
@@ -771,6 +775,66 @@ export default function App() {
     setComposerError("");
   }
 
+  // Roster the @-autocomplete + parser resolve against (operator agent rows use
+  // `id`; the mention helpers expect `agent_id`).
+  const mentionable = useMemo(
+    () => agents.map((a) => ({ agent_id: a.id, display_name: a.display_name || a.id })),
+    [agents]
+  );
+  const mentionNames = useMemo(
+    () => new Set(mentionable.map((a) => String(a.display_name).toLowerCase())),
+    [mentionable]
+  );
+
+  function syncMentionMenu(text, caret) {
+    const ctx = mentionContext(text, caret ?? text.length);
+    if (!ctx.active) return setMentionMenu(null);
+    const items = filterAgents(mentionable, ctx.query);
+    setMentionMenu(items.length ? { query: ctx.query, items, index: 0 } : null);
+  }
+  function onComposerChange(e) {
+    setComposerText(e.target.value);
+    syncMentionMenu(e.target.value, e.target.selectionStart);
+  }
+  function chooseMention(agent) {
+    const el = composerInputRef.current;
+    const caret = el ? el.selectionStart : composerText.length;
+    const r = insertMention(composerText, caret, agent.display_name);
+    setComposerText(r.text);
+    setMentionMenu(null);
+    requestAnimationFrame(() => {
+      if (el) {
+        el.focus();
+        el.setSelectionRange(r.caret, r.caret);
+      }
+    });
+  }
+  // Keystrokes while the @-menu is open: navigate/select; otherwise Enter sends.
+  function onComposerKeyDown(e) {
+    if (mentionMenu) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        return setMentionMenu((m) => ({ ...m, index: (m.index + 1) % m.items.length }));
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        return setMentionMenu((m) => ({ ...m, index: (m.index - 1 + m.items.length) % m.items.length }));
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        return chooseMention(mentionMenu.items[mentionMenu.index]);
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        return setMentionMenu(null);
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  }
+
   async function handleSend() {
     const text = composerText.trim();
     const attachmentIds = pendingAttachments.map((a) => a.id);
@@ -785,6 +849,8 @@ export default function App() {
       return;
     }
     if (sending || uploading) return;
+    const mentions = parseMentions(text, mentionable);
+    const replyTo = replyTarget?.messageId;
     const recipient = composerRecipient || "broadcast";
     const isRoom = recipient.startsWith("room:");
     const roomId = isRoom ? recipient.slice("room:".length) : undefined;
@@ -802,6 +868,8 @@ export default function App() {
     setComposerText("");
     setPendingAttachments([]);
     setComposerError("");
+    setReplyTarget(null);
+    setMentionMenu(null);
     setSending(true);
     try {
       // Sign the message with the operator identity when one is unlocked, so the
@@ -837,6 +905,8 @@ export default function App() {
         text,
         conversationId: convId,
         attachmentIds: attachmentIds.length ? attachmentIds : undefined,
+        mentions: mentions.length ? mentions : undefined,
+        replyTo,
         signature,
       });
       const newConvId = res.conversation_id;
@@ -1280,6 +1350,8 @@ export default function App() {
             animatedIds={animatedIds}
             typingNow={typingNow}
             token={session.token}
+            onReply={setReplyTarget}
+            mentionNames={mentionNames}
           />
 
           <div
@@ -1325,6 +1397,34 @@ export default function App() {
 
             {composerError ? <div className="composer__error">{composerError}</div> : null}
 
+            {replyTarget ? (
+              <div className="composer__reply">
+                <span className="composer__reply-bar" aria-hidden="true" />
+                <div className="composer__reply-body">
+                  <span className="composer__reply-label">Replying to {replyTarget.label}</span>
+                  <span className="composer__reply-text">{replyTarget.text}</span>
+                </div>
+                <button type="button" className="composer__reply-x" onClick={() => setReplyTarget(null)} aria-label="Cancel reply">✕</button>
+              </div>
+            ) : null}
+
+            {mentionMenu ? (
+              <div className="composer__mentions" role="listbox">
+                {mentionMenu.items.map((a, i) => (
+                  <button
+                    key={a.agent_id}
+                    type="button"
+                    role="option"
+                    aria-selected={i === mentionMenu.index}
+                    className={`composer__mention${i === mentionMenu.index ? " composer__mention--active" : ""}`}
+                    onMouseDown={(e) => { e.preventDefault(); chooseMention(a); }}
+                  >
+                    <span className="composer__mention-at">@</span>{a.display_name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             <div className="composer__row">
               <select className="composer__recipient" value={composerRecipient} onChange={(e) => { const v = e.target.value; if (v === "__manage_rooms__") { setRoomModalOpen(true); } else { setComposerRecipient(v); } }}>
                 {recipientOptions.map((o) => (
@@ -1351,18 +1451,16 @@ export default function App() {
                 <PaperclipIcon />
               </button>
               <textarea
+                ref={composerInputRef}
                 className="composer__input"
-                placeholder="Message the fleet…"
-                title="Enter to send · Shift+Enter for newline"
+                placeholder="Message the fleet…  (@ to mention)"
+                title="Enter to send · Shift+Enter for newline · @ to mention an agent"
                 value={composerText}
                 rows={1}
-                onChange={(e) => setComposerText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
+                onChange={onComposerChange}
+                onClick={(e) => syncMentionMenu(e.target.value, e.target.selectionStart)}
+                onBlur={() => requestAnimationFrame(() => setMentionMenu(null))}
+                onKeyDown={onComposerKeyDown}
               />
               <button
                 className="button composer__send"
@@ -1592,6 +1690,24 @@ const NEW_MESSAGE_MS = 45_000; // window in which an incoming agent message anim
 
 // WhatsApp-style delivery ticks on the operator's own messages, so per-recipient
 // "delivered/acknowledged" receipts don't each take a whole bubble.
+// Render message text with @handles that resolve to a real agent highlighted.
+// `names` is a Set of lowercased display names; an @token not in it (e.g. an
+// email's @host) stays plain text.
+function MentionText({ text, names }) {
+  const src = String(text ?? "");
+  if (!names || names.size === 0) return src;
+  const parts = src.split(/(@[\w-]+)/g);
+  return (
+    <>
+      {parts.map((seg, i) =>
+        /^@[\w-]+$/.test(seg) && names.has(seg.slice(1).toLowerCase())
+          ? <span className="mention" key={i}>{seg}</span>
+          : seg
+      )}
+    </>
+  );
+}
+
 function DeliveryTicks({ status, deliveredN = 0, ackedN = 0 }) {
   const title =
     status === "pending" ? "Sending…"
@@ -1606,7 +1722,7 @@ function DeliveryTicks({ status, deliveredN = 0, ackedN = 0 }) {
   );
 }
 
-function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow, token }) {
+function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow, token, onReply, mentionNames }) {
   const ref = useRef(null);
   const nearBottomRef = useRef(true);
 
@@ -1702,7 +1818,7 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
                         }}
                       />
                     ) : (
-                      item.text
+                      <MentionText text={item.text} names={mentionNames} />
                     )}
                   </div>
                 ) : null}
@@ -1716,6 +1832,17 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
                 ) : null}
               </div>
             </div>
+            {item.messageId ? (
+              <button
+                type="button"
+                className="bubble-reply"
+                title="Reply to this message"
+                aria-label="Reply"
+                onClick={() => onReply({ messageId: item.messageId, text: item.text || "(attachment)", label })}
+              >
+                ↩
+              </button>
+            ) : null}
           </div>
         );
       })}

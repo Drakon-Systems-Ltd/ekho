@@ -80,7 +80,7 @@ export const getConversationEvents = (token, conversationId, params = {}) =>
   request(`/v1/operator/conversations/${encodeURIComponent(conversationId)}?${new URLSearchParams(params).toString()}`, { token });
 export const issueEnrollmentToken = (token) =>
   request("/v1/operator/enrollment-tokens", { token, method: "POST" });
-export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, conversationId, attachmentIds, signature }) =>
+export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, conversationId, attachmentIds, mentions, replyTo, signature }) =>
   request("/v1/operator/messages", {
     token,
     method: "POST",
@@ -89,6 +89,8 @@ export const sendOperatorMessage = (token, { recipientAgentId, roomId, text, con
       text,
       ...(conversationId ? { conversation_id: conversationId } : {}),
       ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}),
+      ...(mentions?.length ? { mentions } : {}),
+      ...(replyTo ? { reply_to: replyTo } : {}),
       ...(signature
         ? {
             operator_sig: signature.operator_sig,

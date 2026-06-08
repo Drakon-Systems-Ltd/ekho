@@ -258,7 +258,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .chat__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 22px 8px; display: flex; flex-direction: column; gap: 3px; }
 .chat__body--empty { align-items: center; justify-content: center; }
 
-.bubble-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
+.bubble-row { position: relative; display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
 .bubble-row--grouped { margin-top: 2px; }
 .bubble-row--op { flex-direction: row-reverse; }
 .bubble-spacer { width: 30px; flex: 0 0 auto; }
@@ -333,6 +333,30 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .composer__dropveil svg { display: block; }
 .composer__error { font-size: 12px; color: var(--danger); line-height: 1.4; padding: 0 2px; word-break: break-word; }
 .composer__attachments { display: flex; flex-wrap: wrap; gap: 7px; }
+
+/* @-mention autocomplete — pops above the composer, anchored to its edges. */
+.composer__mentions { position: absolute; bottom: 100%; left: 18px; right: 18px; margin-bottom: 8px; background: var(--panel); border: 1px solid var(--hair-strong); border-radius: 12px; box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45); overflow-y: auto; max-height: 220px; z-index: 30; }
+.composer__mention { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 13px; background: none; border: 0; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background var(--t); }
+.composer__mention--active, .composer__mention:hover { background: var(--accent-soft); }
+.composer__mention-at { color: var(--accent); font-weight: 700; }
+
+/* Reply chip — what the next message will quote; sits above the input row. */
+.composer__reply { display: flex; align-items: stretch; gap: 9px; padding: 7px 10px; background: var(--accent-soft); border-radius: 10px; }
+.composer__reply-bar { flex: 0 0 3px; background: var(--accent); border-radius: 2px; }
+.composer__reply-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.composer__reply-label { font-size: 11.5px; color: var(--accent); font-weight: 600; }
+.composer__reply-text { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.composer__reply-x { flex: 0 0 auto; align-self: center; background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; padding: 4px 6px; border-radius: 6px; }
+.composer__reply-x:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+/* Resolved @handle in a transcript bubble. */
+.mention { color: var(--accent); font-weight: 600; }
+
+/* Per-message reply affordance — revealed on row hover. */
+.bubble-reply { position: absolute; top: 0; right: 0; opacity: 0; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; background: var(--panel); border: 1px solid var(--hair); border-radius: 7px; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; transition: opacity var(--t), color var(--t), border-color var(--t); }
+.bubble-row:hover .bubble-reply, .bubble-reply:focus-visible { opacity: 1; }
+.bubble-reply:hover { color: var(--accent); border-color: var(--accent); }
+.bubble-row--op .bubble-reply { right: auto; left: 0; }
 .att-pending {
   display: inline-flex; align-items: center; gap: 8px;
   max-width: 240px; padding: 6px 8px 6px 11px; border-radius: 99px;
