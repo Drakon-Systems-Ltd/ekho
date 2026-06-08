@@ -15,6 +15,16 @@ export type AttachmentMeta = { id: string; filename: string; mime: string; size_
 export type AttachmentRef = AttachmentMeta;
 export type AttachmentUploadInput = { filename: string; mime: string; dataBase64: string };
 
+/** A quoted snapshot of another message — a reply target or a history entry. */
+export type MessageSnapshot = {
+  message_id: string;
+  sender_agent_id: string;
+  sender_kind: "operator" | "agent";
+  sender_label: string;
+  text: string;
+  created_at: string;
+};
+
 export type InboxMessage = {
   message_id: string;
   conversation_id: string;
@@ -28,6 +38,10 @@ export type InboxMessage = {
   /** Resolved attachment metadata (never bytes). Fetch bytes via downloadAttachment. */
   attachments?: AttachmentMeta[];
   metadata: Record<string, unknown>;
+  /** Agent ids this message is addressed to (@mentions). Empty = everyone. */
+  mentions?: string[];
+  /** Quoted snapshot of the message this replies to, or null. Same-conversation only. */
+  reply_to?: MessageSnapshot | null;
   created_at: string;
   deadline_at: string;
 };
@@ -56,6 +70,8 @@ export type InboxResponse = {
   peer_autoreply?: boolean;
   /** Per-conversation peer-turn budget set by the operator. */
   peer_turn_budget?: number;
+  /** Recent thread per room conversation (id -> chronological snapshots); {} for direct. */
+  conversation_history?: Record<string, MessageSnapshot[]>;
 };
 
 export type SendMessagePayload = {

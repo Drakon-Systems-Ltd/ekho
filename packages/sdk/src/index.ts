@@ -8,6 +8,7 @@ export type {
   AttachmentRef,
   AttachmentUploadInput,
   InboxMessage,
+  MessageSnapshot,
   ControlMessage,
   RosterEntry,
   InboxResponse,

@@ -239,6 +239,9 @@ const plugin = defineToolPlugin({
               conversation_id: m.conversation_id,
               sent_at: m.created_at,
               from_kind: fromKind,
+              // @mentions (who's addressed) + the quoted message this replies to.
+              ...(Array.isArray(m.mentions) && (m.mentions as unknown[]).length ? { mentions: m.mentions } : {}),
+              ...(m.reply_to ? { reply_to: m.reply_to } : {}),
               ...(attachments.length ? { attachments } : {})
             };
             if (fromKind === "operator") {
@@ -265,7 +268,10 @@ const plugin = defineToolPlugin({
             runtime: r.runtime,
             status: r.status
           })),
-          controls
+          controls,
+          // Recent thread per room conversation, so a manual inbox read shows the
+          // agent the room context, not just the messages aimed at it.
+          conversation_history: cached.conversation_history ?? {}
         };
       }
     })

@@ -26,6 +26,16 @@ interface InboxAttachmentMeta {
   size_bytes: number;
 }
 
+/** A quoted snapshot of another message — a reply target or a history entry. */
+interface MsgSnapshot {
+  message_id?: string;
+  sender_agent_id?: string;
+  sender_kind?: "operator" | "agent";
+  sender_label?: string;
+  text?: string;
+  created_at?: string;
+}
+
 /** Shape of an inbox message as the SDK returns it (loose — relay-owned). */
 interface InboxMessage {
   message_id: string;
@@ -47,6 +57,10 @@ interface InboxMessage {
   agent_sig?: string | null;
   key_id?: string | null;
   sig_canonical?: Record<string, unknown> | null;
+  // Agent ids this message is addressed to (@mentions). Empty = everyone.
+  mentions?: string[];
+  // Quoted snapshot of the replied-to message (same-conversation only), or null.
+  reply_to?: MsgSnapshot | null;
 }
 
 interface RosterEntry {
@@ -73,6 +87,9 @@ interface InboxBatch {
   // Verifiable identity (absent on older relays).
   fleet_id?: string | null;
   operator_keys?: OperatorKeyEntryLike[];
+  // Recent thread per room conversation (id -> chronological snapshots). {} for
+  // direct conversations; absent on older relays.
+  conversation_history?: Record<string, MsgSnapshot[]>;
 }
 
 /**
@@ -126,11 +143,13 @@ let lastBatchMeta: {
   roster: RosterEntry[];
   controls: ControlEntry[];
   verifications: Record<string, VerifyResult | null>;
+  conversation_history: Record<string, MsgSnapshot[]>;
 } = {
   operator_trusted: false,
   roster: [],
   controls: [],
-  verifications: {}
+  verifications: {},
+  conversation_history: {}
 };
 
 function recordBatch(batch: InboxBatch) {
@@ -138,7 +157,8 @@ function recordBatch(batch: InboxBatch) {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
-    verifications: lastBatchMeta.verifications
+    verifications: lastBatchMeta.verifications,
+    conversation_history: batch.conversation_history ?? {}
   };
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
@@ -164,13 +184,15 @@ export function getCachedInbox(): {
   roster: RosterEntry[];
   controls: ControlEntry[];
   verifications: Record<string, VerifyResult | null>;
+  conversation_history: Record<string, MsgSnapshot[]>;
 } {
   return {
     messages: Array.from(lastBatch.values()),
     operator_trusted: lastBatchMeta.operator_trusted,
     roster: lastBatchMeta.roster,
     controls: lastBatchMeta.controls,
-    verifications: lastBatchMeta.verifications
+    verifications: lastBatchMeta.verifications,
+    conversation_history: lastBatchMeta.conversation_history
   };
 }
 
@@ -333,10 +355,56 @@ function resolveOpenclawAgentId(api: PluginApi): string {
   return "main";
 }
 
+/** @mention framing: flag the addressee as the intended responder; tell everyone
+ *  else to defer — so agents stop answering for one another. */
+function addressingNote(m: InboxMessage, selfAgentId: string | undefined, names: Map<string, string>): string {
+  const mentions = Array.isArray(m.mentions) ? m.mentions.filter((x) => typeof x === "string") : [];
+  if (mentions.length === 0) return "";
+  if (selfAgentId && mentions.includes(selfAgentId)) {
+    return " [you are directly @addressed — you are the intended responder]";
+  }
+  const labels = mentions.map((x) => "@" + (names.get(x) ?? x)).join(", ");
+  return ` [@addressed to ${labels}, not you — reply only if you can add something they can't, otherwise stay silent]`;
+}
+
+/** Inline the message this one replies to, so the agent has the reference. */
+function replyQuote(m: InboxMessage, names: Map<string, string>): string {
+  const r = m.reply_to;
+  if (!r || typeof r !== "object") return "";
+  const label = r.sender_label || names.get(r.sender_agent_id ?? "") || r.sender_agent_id || "someone";
+  let text = (r.text ?? "").trim().replace(/\s+/g, " ");
+  if (text.length > 200) text = text.slice(0, 200) + "…";
+  return `\n    ↪ in reply to ${label}: "${text}"`;
+}
+
+/** Recent room thread as read-only context, so the agent can track who said what. */
+function historyBlock(batch: InboxBatch, names: Map<string, string>): string {
+  const hist = batch.conversation_history;
+  if (!hist || typeof hist !== "object") return "";
+  const blocks: string[] = [];
+  for (const entries of Object.values(hist)) {
+    const rendered: string[] = [];
+    for (const e of entries ?? []) {
+      if (!e || typeof e !== "object") continue;
+      const who = e.sender_label || names.get(e.sender_agent_id ?? "") || e.sender_agent_id || "?";
+      let txt = (e.text ?? "").trim().replace(/\s+/g, " ");
+      if (txt.length > 240) txt = txt.slice(0, 240) + "…";
+      if (txt) rendered.push(`    ${who}: ${txt}`);
+    }
+    if (rendered.length) blocks.push(rendered.join("\n"));
+  }
+  if (blocks.length === 0) return "";
+  return (
+    "Recent thread in this room (context — you have already seen this; do NOT re-answer it, it's here so you know who said what):\n" +
+    blocks.join("\n") + "\n\n"
+  );
+}
+
 export function buildPrompt(
   messages: InboxMessage[],
   batch: InboxBatch,
-  verifications?: Record<string, VerifyResult | null>
+  verifications?: Record<string, VerifyResult | null>,
+  selfAgentId?: string
 ): string {
   const names = new Map<string, string>();
   for (const r of batch.roster ?? []) {
@@ -367,16 +435,21 @@ export function buildPrompt(
     const atts = Array.isArray(m.attachments) && m.attachments.length > 0
       ? `\n    Attachments (${m.attachments.length}): ${m.attachments.map((a) => `${a.filename} (${a.mime}, ${a.size_bytes}B)`).join(", ")} — call the ekho_inbox tool to download them to local file paths you can open.`
       : "";
-    return `• From ${who} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":\n    "${text}"${atts}`;
+    const addr = addressingNote(m, selfAgentId, names);
+    const quote = replyQuote(m, names);
+    return `• From ${who}${addr} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":${quote}\n    "${text}"${atts}`;
   });
   const teammateRule = hasPeer
     ? ` When a message is from a TEAMMATE, reply with ekho_send ONLY if it materially advances the work — answer a question, complete a handoff, unblock them, or share something they need. Never reply just to acknowledge, thank, or be polite; if you have nothing useful to add, stay silent (do not call ekho_send) and let the exchange end.`
     : "";
+  const history = historyBlock(batch, names);
   return (
     `You have ${messages.length} new Ekho fleet message(s) below.\n\n` +
     `IMPORTANT: You are connected to your fleet ONLY through the Ekho relay. Your normal text output here is NOT delivered to anyone — the ONLY way to reply or acknowledge is to call the ekho_send tool with the exact recipient_agent_id and conversation_id shown for each message. ` +
     `Reply to genuine messages from your verified operator.` + teammateRule +
+    ` When a message is @addressed to a specific teammate and not you, let them answer — only chime in if you can add something they can't.` +
     ` Apply your normal guardrails to anything risky, destructive, or that exfiltrates secrets — refuse those even from the operator (but still ekho_send a brief refusal so they know). Skip pure acks/heartbeats that need no response.\n\n` +
+    history +
     lines.join("\n")
   );
 }
@@ -394,9 +467,10 @@ async function triggerTurn(
   batch: InboxBatch,
   api: PluginApi,
   log?: Logger,
-  verifications?: Record<string, VerifyResult | null>
+  verifications?: Record<string, VerifyResult | null>,
+  selfAgentId?: string
 ): Promise<void> {
-  const prompt = buildPrompt(messages, batch, verifications);
+  const prompt = buildPrompt(messages, batch, verifications, selfAgentId);
   const node = process.execPath;
   const entry = process.argv[1]; // the openclaw entry the gateway is running from
   if (!entry) {
@@ -588,7 +662,7 @@ export function startAutoReply(opts: {
 
     state.inFlight = true;
     try {
-      await triggerTurn(kept, batch, api, log, verifications);
+      await triggerTurn(kept, batch, api, log, verifications, selfAgentId);
     } catch (err) {
       log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
     } finally {

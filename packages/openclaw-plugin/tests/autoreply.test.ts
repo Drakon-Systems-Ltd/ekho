@@ -94,6 +94,61 @@ describe("bounded peer delegation", () => {
     expect(p).toContain("anz_x");
   });
 
+  it("flags the agent as the intended responder when @addressed", () => {
+    const m = msg({ mentions: ["self"], body: { text: "where did you get to?" } });
+    const batch = { messages: [m], operator_trusted: true, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self");
+    expect(p).toContain("intended responder");
+  });
+
+  it("tells the agent to defer when a teammate is @addressed and it is not", () => {
+    const m = msg({ mentions: ["agent_jarvis"], body: { text: "status?" } });
+    const batch = {
+      messages: [m],
+      operator_trusted: true,
+      roster: [{ agent_id: "agent_jarvis", display_name: "Jarvis" }]
+    } as any;
+    const p = buildPrompt([m], batch, undefined, "self");
+    expect(p).toContain("not you");
+    expect(p).toContain("Jarvis");
+  });
+
+  it("quotes the replied-to message", () => {
+    const m = msg({
+      body: { text: "follow-up" },
+      reply_to: {
+        message_id: "m0",
+        sender_agent_id: "op",
+        sender_kind: "operator",
+        sender_label: "Operator",
+        text: "the original question",
+        created_at: "t"
+      }
+    });
+    const batch = { messages: [m], operator_trusted: true, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self");
+    expect(p.toLowerCase()).toContain("in reply to");
+    expect(p).toContain("the original question");
+  });
+
+  it("includes the recent room thread as context", () => {
+    const m = msg({ conversation_id: "room_1", body: { text: "what's next?" } });
+    const batch = {
+      messages: [m],
+      operator_trusted: true,
+      roster: [],
+      conversation_history: {
+        room_1: [
+          { message_id: "h1", sender_agent_id: "op", sender_kind: "operator", sender_label: "Operator", text: "kickoff brief", created_at: "t0" },
+          { message_id: "h2", sender_agent_id: "agent_tars", sender_kind: "agent", sender_label: "Tars", text: "on it", created_at: "t1" }
+        ]
+      }
+    } as any;
+    const p = buildPrompt([m], batch, undefined, "self");
+    expect(p).toContain("kickoff brief");
+    expect(p).toContain("on it");
+  });
+
   it("defaults the per-conversation budget to 6", () => {
     expect(DEFAULT_PEER_TURN_BUDGET).toBe(6);
   });
