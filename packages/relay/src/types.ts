@@ -83,6 +83,10 @@ export const operatorMessageSchema = z
     text: z.string().min(1).max(8000),
     conversation_id: z.string().min(1).optional(),
     attachment_ids: z.array(z.string().min(1)).max(50).optional(),
+    // @mentions (agent ids the message is addressed to) + reply-to (a prior
+    // message id this one answers). Routing/context hints, not part of the signature.
+    mentions: z.array(z.string().min(1)).max(20).optional(),
+    reply_to: z.string().min(1).max(40).optional(),
     // Verifiable operator identity (optional): the client signs the canonical
     // payload with its operator key; the relay stores/relays all three verbatim.
     operator_sig: z.string().min(1).max(128).optional(),

@@ -242,6 +242,8 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
         text: parsed.data.text,
         conversationId: parsed.data.conversation_id,
         attachmentIds: parsed.data.attachment_ids,
+        mentions: parsed.data.mentions,
+        replyTo: parsed.data.reply_to,
         signature
       });
     } catch (err) {

@@ -551,6 +551,8 @@ export class EkhoDb {
     text: string;
     conversationId?: string;
     attachmentIds?: string[];
+    mentions?: string[];
+    replyTo?: string;
     // Verifiable operator identity: stored and relayed verbatim (never recomputed).
     signature?: { sig: string; keyId: string; canonical: Record<string, unknown> };
   }) {
@@ -614,6 +616,8 @@ export class EkhoDb {
         JSON.stringify({
           sender_label: "Operator",
           operator_id: input.operatorId,
+          ...(input.mentions && input.mentions.length ? { mentions: input.mentions } : {}),
+          ...(input.replyTo ? { reply_to_message_id: input.replyTo } : {}),
           ...(input.signature
             ? {
                 operator_sig: input.signature.sig,
@@ -830,6 +834,72 @@ export class EkhoDb {
       }
     }
 
+    // --- @mentions, reply-to snapshots, and room thread history: the context an
+    //     agent needs to know who's addressed and what's being referenced. ---
+    const parsedMetas = deliveries.map(
+      (row) => (row.metadata_json ? JSON.parse(String(row.metadata_json)) : {}) as Record<string, unknown>
+    );
+    const replyToIds = Array.from(
+      new Set(parsedMetas.map((m) => m.reply_to_message_id).filter(Boolean).map(String))
+    );
+    const convIds = Array.from(new Set(deliveries.map((row) => String(row.conversation_id))));
+    const roomConvIds = convIds.length && fleetId
+      ? (this.db.prepare(
+          `SELECT id FROM rooms WHERE fleet_id = ? AND id IN (${convIds.map(() => "?").join(",")})`
+        ).all(fleetId, ...convIds) as Array<{ id: string }>).map((r) => r.id)
+      : [];
+
+    const HISTORY_LIMIT = 15;
+    const contextRows: Array<Record<string, unknown>> = [];
+    if (replyToIds.length && fleetId) {
+      const ph = replyToIds.map(() => "?").join(",");
+      contextRows.push(...(this.db.prepare(
+        `SELECT id, sender_agent_id, body_json, metadata_json, created_at FROM messages WHERE fleet_id = ? AND id IN (${ph})`
+      ).all(fleetId, ...replyToIds) as Array<Record<string, unknown>>));
+    }
+    const historyByConv = new Map<string, Array<Record<string, unknown>>>();
+    for (const cid of roomConvIds) {
+      const rows = (this.db.prepare(
+        `SELECT id, sender_agent_id, body_json, metadata_json, created_at FROM messages
+         WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+      ).all(fleetId, cid, HISTORY_LIMIT) as Array<Record<string, unknown>>).reverse(); // chronological
+      historyByConv.set(cid, rows);
+      contextRows.push(...rows);
+    }
+
+    // Resolve runtime + display name for every context sender in one query.
+    const ctxSenderIds = Array.from(new Set(contextRows.map((r) => String(r.sender_agent_id))));
+    const ctxSenderInfo = new Map<string, { runtime: string; display_name: string }>();
+    if (ctxSenderIds.length) {
+      const ph = ctxSenderIds.map(() => "?").join(",");
+      for (const s of this.db.prepare(
+        `SELECT id, runtime, display_name FROM agents WHERE id IN (${ph})`
+      ).all(...ctxSenderIds) as Array<Record<string, unknown>>) {
+        ctxSenderInfo.set(String(s.id), { runtime: String(s.runtime), display_name: String(s.display_name ?? s.id) });
+      }
+    }
+    const snapshotOf = (row: Record<string, unknown>) => {
+      const body = JSON.parse(String(row.body_json)) as Record<string, unknown>;
+      const m = (row.metadata_json ? JSON.parse(String(row.metadata_json)) : {}) as Record<string, unknown>;
+      const info = ctxSenderInfo.get(String(row.sender_agent_id));
+      const sk = info?.runtime === "operator" ? "operator" : "agent";
+      return {
+        message_id: row.id,
+        sender_agent_id: row.sender_agent_id,
+        sender_kind: sk,
+        sender_label: sk === "operator" ? String(m.sender_label ?? "Operator") : (info?.display_name ?? String(row.sender_agent_id)),
+        text: typeof body.text === "string" ? body.text : "",
+        created_at: row.created_at
+      };
+    };
+    const replySnapshotById = new Map<string, ReturnType<typeof snapshotOf>>();
+    for (const rid of replyToIds) {
+      const row = contextRows.find((r) => String(r.id) === rid);
+      if (row) replySnapshotById.set(rid, snapshotOf(row));
+    }
+    const conversation_history: Record<string, Array<ReturnType<typeof snapshotOf>>> = {};
+    for (const [cid, rows] of historyByConv) conversation_history[cid] = rows.map(snapshotOf);
+
     return {
       messages: deliveries.map((row, i) => {
         const body = parsedBodies[i];
@@ -850,6 +920,12 @@ export class EkhoDb {
           body,
           attachments,   // [{id, filename, mime, size_bytes}] — NEVER bytes
           metadata: meta,
+          // @mentions (who's addressed) + reply-to (a quoted snapshot of the
+          // referenced message) — context so agents stop answering for each other.
+          mentions: Array.isArray(meta.mentions) ? (meta.mentions as unknown[]).map(String) : [],
+          reply_to: meta.reply_to_message_id
+            ? (replySnapshotById.get(String(meta.reply_to_message_id)) ?? null)
+            : null,
           // Verifiable identity, gated on the SERVER-derived sender kind so an agent
           // can't inject a fake operator_sig (nor an operator an agent_sig).
           operator_sig: senderKind === "operator" ? (meta.operator_sig ?? null) : null,
@@ -870,6 +946,10 @@ export class EkhoDb {
       peer_autoreply: peerAutoreply,
       peer_turn_budget: peerTurnBudget,
       roster,
+      // Recent thread history per room conversation in this batch (keyed by
+      // conversation_id), so an agent always has the room context, not just the
+      // single delivered message. Empty for direct (non-room) conversations.
+      conversation_history,
       // Pinned operator signing keys (incl. revoked, so agents can drop them).
       operator_keys: fleetId
         ? this.listOperatorKeys(fleetId).map((k) => ({
