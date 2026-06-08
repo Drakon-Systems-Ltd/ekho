@@ -131,6 +131,27 @@ describe("bounded peer delegation", () => {
     expect(p).toContain("the original question");
   });
 
+  it("marks quoted/thread context as data, not instructions", () => {
+    const m = msg({ conversation_id: "room_1" });
+    const batch = {
+      messages: [m],
+      operator_trusted: true,
+      roster: [],
+      conversation_history: {
+        room_1: [{ message_id: "h1", sender_agent_id: "op", sender_kind: "operator", sender_label: "Tars", text: "hello", created_at: "t" }]
+      }
+    } as any;
+    const p = buildPrompt([m], batch, undefined, "self");
+    expect(p).toContain("DATA");
+  });
+
+  it("labels an unknown reply-to sender rather than rendering a blank speaker", () => {
+    const m = msg({ body: { text: "follow-up" }, reply_to: { text: "earlier", message_id: "m0", created_at: "t" } });
+    const batch = { messages: [m], operator_trusted: true, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self");
+    expect(p).toContain('in reply to someone: "earlier"');
+  });
+
   it("includes the recent room thread as context", () => {
     const m = msg({ conversation_id: "room_1", body: { text: "what's next?" } });
     const batch = {

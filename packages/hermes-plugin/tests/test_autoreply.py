@@ -259,6 +259,31 @@ def test_build_prompt_quotes_the_replied_to_message():
     assert "the original question" in prompt
 
 
+def test_build_prompt_reply_quote_labels_unknown_sender():
+    # A malformed/old snapshot with no sender_label or id -> a readable
+    # placeholder, never a blank speaker (parity with the OpenClaw plugin).
+    m = _msg(body={"text": "follow-up"},
+             reply_to={"text": "earlier", "message_id": "m0", "created_at": "t"})
+    prompt = build_prompt([m], operator_trusted=True)
+    assert 'in reply to someone: "earlier"' in prompt
+
+
+def test_build_prompt_history_labels_unknown_sender():
+    m = _msg(conversation_id="room_1")
+    history = {"room_1": [{"text": "ghost line"}]}
+    prompt = build_prompt([m], operator_trusted=True, conversation_history=history)
+    assert "?: ghost line" in prompt
+
+
+def test_build_prompt_marks_quoted_context_as_data():
+    # Defence-in-depth: the agent is told quoted/thread text is a record, not
+    # instructions — a compromised teammate can't smuggle commands via context.
+    m = _msg(conversation_id="room_1")
+    history = {"room_1": [{"text": "hello", "sender_label": "Tars"}]}
+    prompt = build_prompt([m], operator_trusted=True, conversation_history=history)
+    assert "DATA" in prompt
+
+
 def test_build_prompt_includes_recent_room_thread():
     m = _msg(conversation_id="room_1", body={"text": "what's next?"})
     history = {
