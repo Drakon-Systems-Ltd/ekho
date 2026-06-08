@@ -1028,24 +1028,26 @@ export default function App() {
   /* ---------------- derived: conversation list + chat items ---------------- */
 
   const conversationList = useMemo(() => {
-    // derive recent conversations from overview events + agent detail messages
     const map = new Map();
-    const consider = (convId, ts, preview) => {
-      if (!convId) return;
-      const existing = map.get(convId);
-      if (!existing || (ts && ts > existing.ts)) {
-        map.set(convId, { id: convId, ts: ts || existing?.ts || "", preview: preview || existing?.preview || "" });
-      }
+    // Primary source: latest message per conversation (from the messages table,
+    // immune to the heartbeat noise that floods recentEvents on a busy fleet).
+    (overview.recentConversations || []).forEach((c) => {
+      if (c.conversation_id) map.set(c.conversation_id, { id: c.conversation_id, ts: c.last_at || "", preview: c.preview || "" });
+    });
+    // Fallbacks only fill in conversations the messages query didn't return —
+    // they never override a real message preview.
+    const considerIfNew = (convId, ts, preview) => {
+      if (convId && !map.has(convId)) map.set(convId, { id: convId, ts: ts || "", preview: preview || "" });
     };
     (overview.recentEvents || []).forEach((e) => {
-      if (e.conversation_id) consider(e.conversation_id, e.created_at, humanizeEvent(e.event_type, {}));
+      if (e.conversation_id) considerIfNew(e.conversation_id, e.created_at, humanizeEvent(e.event_type, {}));
     });
-    (agentDetail?.recentMessages || []).forEach((m) => consider(m.conversation_id, m.created_at, `${m.message_type} message`));
+    (agentDetail?.recentMessages || []).forEach((m) => considerIfNew(m.conversation_id, m.created_at, `${m.message_type} message`));
     if (selectedConversationId && !map.has(selectedConversationId)) {
       map.set(selectedConversationId, { id: selectedConversationId, ts: "", preview: "" });
     }
     return Array.from(map.values()).sort((a, b) => (b.ts > a.ts ? 1 : -1)).slice(0, 25);
-  }, [overview.recentEvents, agentDetail, selectedConversationId]);
+  }, [overview.recentConversations, overview.recentEvents, agentDetail, selectedConversationId]);
 
   // agent_id → display_name, built from the live agents list. Used to label
   // chat bubbles and to enumerate the fleet for broadcast typing indicators.

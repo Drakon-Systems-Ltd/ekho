@@ -1498,6 +1498,28 @@ export class EkhoDb {
     const recentEvents = this.db.prepare(
       "SELECT event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, created_at FROM events WHERE fleet_id = ? ORDER BY created_at DESC LIMIT 20"
     ).all(fleetId);
+    // Recent conversations sourced from the messages table (the latest message
+    // per conversation), NOT the event firehose — so heartbeats from a busy
+    // fleet never bury the operator's threads. Powers the console's nav list.
+    const recentConversations = (this.db.prepare(
+      `SELECT conversation_id, body_json, created_at, sender_agent_id FROM (
+         SELECT conversation_id, body_json, created_at, sender_agent_id,
+                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC, id DESC) AS rn
+         FROM messages WHERE fleet_id = ?
+       ) WHERE rn = 1 ORDER BY created_at DESC LIMIT 25`
+    ).all(fleetId) as Array<Record<string, unknown>>).map((r) => {
+      let preview = "";
+      try {
+        const body = JSON.parse(String(r.body_json) || "{}") as Record<string, unknown>;
+        if (typeof body.text === "string") preview = body.text.slice(0, 100);
+      } catch { /* malformed body — empty preview */ }
+      return {
+        conversation_id: r.conversation_id,
+        last_at: r.created_at,
+        sender_agent_id: r.sender_agent_id,
+        preview
+      };
+    });
     return {
       agents,
       pendingApprovals: pendingApprovals.count,
@@ -1505,7 +1527,8 @@ export class EkhoDb {
       deadLetterCount,
       quarantinedAgentCount,
       rateLimitViolationsLast24h,
-      recentEvents
+      recentEvents,
+      recentConversations
     };
   }
 
