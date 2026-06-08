@@ -224,6 +224,58 @@ def test_build_prompt_unverified_operator_label():
     assert "UNVERIFIED" in prompt
 
 
+def test_build_prompt_flags_the_direct_addressee():
+    m = _msg(body={"text": "where did you get to?"}, mentions=["self"])
+    prompt = build_prompt([m], operator_trusted=True, self_agent_id="self")
+    assert "intended responder" in prompt
+
+
+def test_build_prompt_tells_non_addressee_to_defer():
+    m = _msg(body={"text": "where did you get to?"}, mentions=["other"])
+    prompt = build_prompt(
+        [m], operator_trusted=True, self_agent_id="self",
+        roster=[RosterEntry.from_dict({"agent_id": "other", "display_name": "Jarvis",
+                                       "runtime": "custom", "status": "healthy"})],
+    )
+    # Addressed to someone else -> the agent is told to defer, not answer for them.
+    assert "not you" in prompt
+    assert "Jarvis" in prompt
+
+
+def test_build_prompt_quotes_the_replied_to_message():
+    m = _msg(
+        body={"text": "follow-up"},
+        reply_to={
+            "message_id": "m0",
+            "sender_agent_id": "op",
+            "sender_kind": "operator",
+            "sender_label": "Operator",
+            "text": "the original question",
+            "created_at": "2026-06-05T00:00:00.000Z",
+        },
+    )
+    prompt = build_prompt([m], operator_trusted=True, self_agent_id="self")
+    assert "in reply to" in prompt.lower()
+    assert "the original question" in prompt
+
+
+def test_build_prompt_includes_recent_room_thread():
+    m = _msg(conversation_id="room_1", body={"text": "what's next?"})
+    history = {
+        "room_1": [
+            {"message_id": "h1", "sender_agent_id": "op", "sender_kind": "operator",
+             "sender_label": "Operator", "text": "kickoff brief", "created_at": "t0"},
+            {"message_id": "h2", "sender_agent_id": "agent_tars", "sender_kind": "agent",
+             "sender_label": "Tars", "text": "on it", "created_at": "t1"},
+        ]
+    }
+    prompt = build_prompt(
+        [m], operator_trusted=True, self_agent_id="self", conversation_history=history
+    )
+    assert "kickoff brief" in prompt
+    assert "on it" in prompt
+
+
 def test_build_prompt_notes_attachments():
     msg = _msg(
         body={"text": "see file"},

@@ -68,6 +68,14 @@ class InboxMessage:
     agent_sig: Optional[str] = None
     key_id: Optional[str] = None
     sig_canonical: Optional[Dict[str, Any]] = None
+    # Agent ids this message is addressed to (@mentions). Empty = addressed to
+    # everyone in the conversation. The relay defaults it to [].
+    mentions: List[str] = field(default_factory=list)
+    # Quoted snapshot of the message this one replies to ({message_id,
+    # sender_agent_id, sender_kind, sender_label, text, created_at}), or None.
+    # The relay only resolves same-conversation references, so it never leaks
+    # across threads.
+    reply_to: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "InboxMessage":
@@ -91,6 +99,10 @@ class InboxMessage:
             agent_sig=data.get("agent_sig"),
             key_id=data.get("key_id"),
             sig_canonical=data.get("sig_canonical"),
+            mentions=[
+                m for m in data.get("mentions") or [] if isinstance(m, str)
+            ],
+            reply_to=data.get("reply_to"),
         )
 
 
@@ -171,6 +183,13 @@ class InboxResponse:
     peer_turn_budget: Optional[int] = None
     # Pinned operator signing keys (incl. revoked, so the agent can drop them).
     operator_keys: List[OperatorKeyEntry] = field(default_factory=list)
+    # Recent thread per room conversation (conversation_id -> chronological list
+    # of {message_id, sender_agent_id, sender_kind, sender_label, text,
+    # created_at}). Empty for direct conversations. Gives an agent the room
+    # context, not just the single delivered message.
+    conversation_history: Dict[str, List[Dict[str, Any]]] = field(
+        default_factory=dict
+    )
     # The polling agent's own fleet — binds verified signatures to a fleet.
     # Last field so positional InboxResponse(...) construction stays stable.
     fleet_id: Optional[str] = None
@@ -198,6 +217,7 @@ class InboxResponse:
                 OperatorKeyEntry.from_dict(k)
                 for k in data.get("operator_keys", [])
             ],
+            conversation_history=data.get("conversation_history") or {},
         )
 
 
