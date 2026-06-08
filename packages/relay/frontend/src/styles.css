@@ -737,7 +737,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 
   /* KPI strip: a 2×2 grid eats a fifth of the list height on a phone. Lay the
      stats out as a single compact, horizontally-scrolling stat bar instead. */
-  .kpi-strip { display: flex; gap: 8px; padding: 10px 12px; overflow-x: auto; scrollbar-width: none; scroll-snap-type: x proximity; }
+  .kpi-strip { display: flex; flex: 0 0 auto; gap: 8px; padding: 10px 12px; overflow-x: auto; overflow-y: visible; scrollbar-width: none; scroll-snap-type: x proximity; }
   .kpi-strip::-webkit-scrollbar { display: none; }
   .stat-chip { flex: 0 0 auto; min-width: 116px; padding: 8px 12px; scroll-snap-align: start; }
   .stat-chip__value { font-size: 18px; }
