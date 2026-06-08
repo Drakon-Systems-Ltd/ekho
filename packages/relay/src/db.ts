@@ -843,10 +843,15 @@ export class EkhoDb {
       new Set(parsedMetas.map((m) => m.reply_to_message_id).filter(Boolean).map(String))
     );
     const convIds = Array.from(new Set(deliveries.map((row) => String(row.conversation_id))));
+    // Only rooms the polling agent is actually a MEMBER of get history — never
+    // infer access from a delivery alone (an agent can tag a message with any
+    // room's conversation_id, which would otherwise leak that room's thread).
     const roomConvIds = convIds.length && fleetId
       ? (this.db.prepare(
-          `SELECT id FROM rooms WHERE fleet_id = ? AND id IN (${convIds.map(() => "?").join(",")})`
-        ).all(fleetId, ...convIds) as Array<{ id: string }>).map((r) => r.id)
+          `SELECT rooms.id FROM rooms
+             JOIN room_members ON room_members.room_id = rooms.id
+           WHERE rooms.fleet_id = ? AND room_members.agent_id = ? AND rooms.id IN (${convIds.map(() => "?").join(",")})`
+        ).all(fleetId, agentId, ...convIds) as Array<{ id: string }>).map((r) => r.id)
       : [];
 
     const HISTORY_LIMIT = 15;
@@ -854,7 +859,7 @@ export class EkhoDb {
     if (replyToIds.length && fleetId) {
       const ph = replyToIds.map(() => "?").join(",");
       contextRows.push(...(this.db.prepare(
-        `SELECT id, sender_agent_id, body_json, metadata_json, created_at FROM messages WHERE fleet_id = ? AND id IN (${ph})`
+        `SELECT id, conversation_id, sender_agent_id, body_json, metadata_json, created_at FROM messages WHERE fleet_id = ? AND id IN (${ph})`
       ).all(fleetId, ...replyToIds) as Array<Record<string, unknown>>));
     }
     const historyByConv = new Map<string, Array<Record<string, unknown>>>();
@@ -892,10 +897,10 @@ export class EkhoDb {
         created_at: row.created_at
       };
     };
-    const replySnapshotById = new Map<string, ReturnType<typeof snapshotOf>>();
+    const replyRowById = new Map<string, Record<string, unknown>>();
     for (const rid of replyToIds) {
       const row = contextRows.find((r) => String(r.id) === rid);
-      if (row) replySnapshotById.set(rid, snapshotOf(row));
+      if (row) replyRowById.set(rid, row);
     }
     const conversation_history: Record<string, Array<ReturnType<typeof snapshotOf>>> = {};
     for (const [cid, rows] of historyByConv) conversation_history[cid] = rows.map(snapshotOf);
@@ -923,9 +928,14 @@ export class EkhoDb {
           // @mentions (who's addressed) + reply-to (a quoted snapshot of the
           // referenced message) — context so agents stop answering for each other.
           mentions: Array.isArray(meta.mentions) ? (meta.mentions as unknown[]).map(String) : [],
-          reply_to: meta.reply_to_message_id
-            ? (replySnapshotById.get(String(meta.reply_to_message_id)) ?? null)
-            : null,
+          reply_to: (() => {
+            const rid = meta.reply_to_message_id ? String(meta.reply_to_message_id) : null;
+            const refRow = rid ? replyRowById.get(rid) : undefined;
+            // Only a SAME-conversation reference resolves — never surface a body
+            // from a thread this recipient isn't part of (cross-conversation leak).
+            if (!refRow || String(refRow.conversation_id) !== String(row.conversation_id)) return null;
+            return snapshotOf(refRow);
+          })(),
           // Verifiable identity, gated on the SERVER-derived sender kind so an agent
           // can't inject a fake operator_sig (nor an operator an agent_sig).
           operator_sig: senderKind === "operator" ? (meta.operator_sig ?? null) : null,
