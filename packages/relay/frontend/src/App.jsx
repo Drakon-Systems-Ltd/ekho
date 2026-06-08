@@ -1032,7 +1032,7 @@ export default function App() {
     // Primary source: latest message per conversation (from the messages table,
     // immune to the heartbeat noise that floods recentEvents on a busy fleet).
     (overview.recentConversations || []).forEach((c) => {
-      if (c.conversation_id) map.set(c.conversation_id, { id: c.conversation_id, ts: c.last_at || "", preview: c.preview || "" });
+      if (c.conversation_id) map.set(c.conversation_id, { id: c.conversation_id, ts: c.last_at || "", preview: c.preview || "", title: c.title || "" });
     });
     // Fallbacks only fill in conversations the messages query didn't return —
     // they never override a real message preview.
@@ -1048,6 +1048,19 @@ export default function App() {
     }
     return Array.from(map.values()).sort((a, b) => (b.ts > a.ts ? 1 : -1)).slice(0, 25);
   }, [overview.recentConversations, overview.recentEvents, agentDetail, selectedConversationId]);
+
+  // Human title for a conversation id — room name / agent name / feed label —
+  // so the UI never shows a raw conversation id. Prefers the relay-resolved
+  // title, falls back to local rooms/agents, then a shortened id.
+  const convTitle = (convId) => {
+    if (!convId) return "";
+    const rc = (overview.recentConversations || []).find((c) => c.conversation_id === convId);
+    if (rc?.title) return rc.title;
+    const room = rooms.find((r) => r.id === convId);
+    if (room) return `# ${room.name}`;
+    if (String(convId).startsWith("feed-")) return "📰 News feed";
+    return convId.length > 22 ? `${convId.slice(0, 18)}…` : convId;
+  };
 
   // agent_id → display_name, built from the live agents list. Used to label
   // chat bubbles and to enumerate the fleet for broadcast typing indicators.
@@ -1292,7 +1305,7 @@ export default function App() {
                   >
                     <span className="conv-row__dot" style={{ background: colorForId(c.id) }} />
                     <span className="conv-row__main">
-                      <span className="conv-row__id mono">{c.id}</span>
+                      <span className="conv-row__id">{c.title || convTitle(c.id)}</span>
                       <span className="conv-row__preview">{c.preview || "Open conversation"}</span>
                     </span>
                     {c.ts ? <span className="conv-row__time">{relativeTime(c.ts)}</span> : null}
@@ -1327,7 +1340,7 @@ export default function App() {
               {selectedConversationId ? (
                 <>
                   <span className="conv-row__dot" style={{ background: colorForId(selectedConversationId) }} />
-                  <span className="mono chat__convid">{selectedConversationId}</span>
+                  <span className="chat__convid">{convTitle(selectedConversationId)}</span>
                 </>
               ) : (
                 <span className="chat__placeholder-title">No conversation selected</span>

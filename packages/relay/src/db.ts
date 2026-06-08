@@ -1501,9 +1501,20 @@ export class EkhoDb {
     // Recent conversations sourced from the messages table (the latest message
     // per conversation), NOT the event firehose — so heartbeats from a busy
     // fleet never bury the operator's threads. Powers the console's nav list.
+    // Human titles: a room shows its name, a direct conversation the agent's
+    // name, a feed a generic label — never a raw conversation id in the UI.
+    const opId = `op_${fleetId}`;
+    const roomTitles = new Map(
+      (this.db.prepare("SELECT id, name FROM rooms WHERE fleet_id = ?").all(fleetId) as Array<{ id: string; name: string }>)
+        .map((r) => [r.id, r.name])
+    );
+    const agentTitles = new Map(
+      (this.db.prepare("SELECT id, display_name FROM agents WHERE fleet_id = ? AND runtime != 'operator'").all(fleetId) as Array<{ id: string; display_name: string }>)
+        .map((a) => [a.id, a.display_name])
+    );
     const recentConversations = (this.db.prepare(
-      `SELECT conversation_id, body_json, created_at, sender_agent_id FROM (
-         SELECT conversation_id, body_json, created_at, sender_agent_id,
+      `SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id FROM (
+         SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id,
                 ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC, id DESC) AS rn
          FROM messages WHERE fleet_id = ?
        ) WHERE rn = 1 ORDER BY created_at DESC LIMIT 25`
@@ -1513,11 +1524,23 @@ export class EkhoDb {
         const body = JSON.parse(String(r.body_json) || "{}") as Record<string, unknown>;
         if (typeof body.text === "string") preview = body.text.slice(0, 100);
       } catch { /* malformed body — empty preview */ }
+      const cid = String(r.conversation_id);
+      let title: string;
+      if (roomTitles.has(cid)) {
+        title = "# " + roomTitles.get(cid);
+      } else if (cid.startsWith("feed-")) {
+        title = "📰 News feed";
+      } else {
+        // Direct conversation: title by the non-operator participant.
+        const other = String(r.sender_agent_id) === opId ? String(r.recipient_id ?? "") : String(r.sender_agent_id);
+        title = agentTitles.get(other) || agentTitles.get(String(r.recipient_id ?? "")) || "Direct message";
+      }
       return {
         conversation_id: r.conversation_id,
         last_at: r.created_at,
         sender_agent_id: r.sender_agent_id,
-        preview
+        preview,
+        title
       };
     });
     return {

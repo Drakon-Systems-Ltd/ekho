@@ -32,6 +32,20 @@ describe("overview recent conversations", () => {
     expect(b.last_at).toBeTruthy();
   });
 
+  it("titles a room by its name and a direct conversation by the agent", async () => {
+    const a = await relay.enrollAgent("ov-titled");
+    const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
+      name: "ProjectX", member_agent_ids: [a.agent_id]
+    })).body;
+    await relay.operatorRequest("POST", "/v1/operator/messages", { room_id: room.id, text: "in the room" });
+    await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: a.agent_id, text: "direct one", conversation_id: "dm-1" });
+
+    const ov = await relay.operatorRequest("GET", "/v1/operator/overview");
+    const byId = Object.fromEntries(ov.body.recentConversations.map((c: { conversation_id: string }) => [c.conversation_id, c]));
+    expect(byId[room.id].title).toBe("# ProjectX");
+    expect(byId["dm-1"].title).toContain("ov-titled");
+  });
+
   it("returns one entry per conversation (latest message wins)", async () => {
     const a = await relay.enrollAgent("ov-dup-a");
     await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: a.agent_id, text: "older", conversation_id: "conv-X" });
