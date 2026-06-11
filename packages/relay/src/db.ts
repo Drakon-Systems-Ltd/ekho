@@ -1910,7 +1910,7 @@ export class EkhoDb {
     if (search) params.push(search, search, search, search, search);
 
     const rows = this.db.prepare(
-      `SELECT event_type, actor_kind, actor_id, resource_kind, resource_id, payload_json, created_at
+      `SELECT id, event_type, actor_kind, actor_id, resource_kind, resource_id, payload_json, created_at
        FROM events
        WHERE ${where}
        ORDER BY ${sortBy} ${sortOrder}

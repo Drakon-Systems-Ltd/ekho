@@ -125,6 +125,9 @@ function describeEvent(event) {
   const attachments = isMessage && Array.isArray(event.message_attachments) ? event.message_attachments : [];
 
   return {
+    // The event's own primary key — a stable, unique React key for the timeline
+    // row (immune to list reordering across polls).
+    id: event.id,
     kind: isSystem ? "system" : "message",
     side: isOperator ? "operator" : "agent",
     senderId: event.actor_id || "system",
@@ -1112,7 +1115,7 @@ export default function App() {
     const visible = showSystem ? fromEvents : fromEvents.filter((i) => i.kind === "message" || !isHeartbeatEvent(i.type));
     const pending = optimistic
       .filter((o) => o.conversationId === selectedConversationId)
-      .map((o) => ({ kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, attachments: o.attachments || [], type: "message.queued", createdAt: o.createdAt, pending: true, status: "pending" }));
+      .map((o) => ({ id: o.id, kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, attachments: o.attachments || [], type: "message.queued", createdAt: o.createdAt, pending: true, status: "pending" }));
     return [...visible, ...pending];
   }, [timelineEvents, showSystem, optimistic, selectedConversationId]);
 
@@ -1787,7 +1790,9 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
       {items.map((item, idx) => {
         const prev = items[idx - 1];
         const grouped = prev && prev.kind === item.kind && prev.side === item.side && prev.senderId === item.senderId;
-        const key = `${item.type}-${item.createdAt}-${idx}`;
+        // Stable identity: the event id (server rows) or the optimistic id
+        // (pending sends). Both are unique; idx is only a last-ditch fallback.
+        const key = item.id || `${item.type}-${item.createdAt}-${idx}`;
         if (item.kind === "system") {
           return (
             <div className="sys-chip" key={key}>
