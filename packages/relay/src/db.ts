@@ -503,6 +503,11 @@ export class EkhoDb {
         for (const recipientId of this.broadcastRecipientIds(input.fleetId, input.senderAgentId)) {
           deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
         }
+      } else {
+        // No delivery path matched (e.g. an unimplemented "group" recipient, or a
+        // conversation that isn't a room). Reject loudly instead of inserting a
+        // message with zero deliveries that looks sent but reaches no one.
+        throw new Error(`unsupported recipient: ${input.recipientKind}`);
       }
 
       this.recordEvent(input.fleetId, "message.queued", "agent", input.senderAgentId, "message", messageId, input.conversationId, {

@@ -155,7 +155,7 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("not found")) return reply.code(404).send({ error: msg });
-      if (msg.includes("too many")) return reply.code(400).send({ error: msg });
+      if (msg.includes("too many") || msg.includes("unsupported recipient")) return reply.code(400).send({ error: msg });
       throw err;
     }
 
