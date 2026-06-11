@@ -69,6 +69,7 @@ import {
   saveSettings,
 } from "./components";
 import { useAutoRefresh, useEdgeSwipeBack, useNow } from "./hooks";
+import { reconcileOptimistic } from "./optimistic.js";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { getUnlocked } from "./operatorKeyStore.js";
 import { buildOperatorCanonical, signCanonical, randomNonce } from "./operatorKey.js";
@@ -488,8 +489,10 @@ export default function App() {
       limit: String(TIMELINE_LIMIT),
     });
     setTimelineEvents(result.events || []);
-    // drop optimistic items that the server has now echoed back
-    setOptimistic((items) => items.filter((o) => o.conversationId !== conversationId || !(result.events || []).some((e) => parsePayload(e.payload_json).text === o.text && e.actor_kind === "operator")));
+    // Drop optimistic items the server has now echoed back, matched by their real
+    // message id (bound at send time) — not by text, so identical-text messages
+    // reconcile independently. See optimistic.js.
+    setOptimistic((items) => reconcileOptimistic(items, result.events, conversationId));
   }
 
   async function refreshAgentDetail(agentId = selectedAgentId) {
@@ -910,8 +913,10 @@ export default function App() {
         signature,
       });
       const newConvId = res.conversation_id;
-      // bind the optimistic item to the resolved conversation id
-      setOptimistic((items) => items.map((o) => (o.id === optimisticItem.id ? { ...o, conversationId: newConvId } : o)));
+      // Bind the optimistic item to the resolved conversation id AND the real
+      // message id, so reconcileOptimistic can drop it by id when the server
+      // echoes it back (instead of a fragile text match).
+      setOptimistic((items) => items.map((o) => (o.id === optimisticItem.id ? { ...o, conversationId: newConvId, messageId: res.message_id } : o)));
       if (newConvId && newConvId !== selectedConversationId) {
         setSelectedConversationId(newConvId);
       }
