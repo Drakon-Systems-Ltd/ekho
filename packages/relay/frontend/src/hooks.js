@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 export function useAutoRefresh(enabled, intervalMs, callback, deps = []) {
+  // Keep the latest callback in a ref so a fresh inline callback every render does
+  // NOT tear down + recreate the interval (which reset the timer before it ever
+  // reached intervalMs, starving the poll while the console was actively in use).
+  const cbRef = useRef(callback);
+  cbRef.current = callback;
+
   useEffect(() => {
     if (!enabled) {
       return undefined;
@@ -8,7 +14,7 @@ export function useAutoRefresh(enabled, intervalMs, callback, deps = []) {
 
     let timer = null;
     const start = () => {
-      if (timer == null) timer = window.setInterval(() => callback(), intervalMs);
+      if (timer == null) timer = window.setInterval(() => cbRef.current(), intervalMs);
     };
     const stop = () => {
       if (timer != null) {
@@ -22,7 +28,7 @@ export function useAutoRefresh(enabled, intervalMs, callback, deps = []) {
       if (document.visibilityState === "hidden") {
         stop();
       } else {
-        callback();
+        cbRef.current();
         start();
       }
     };
@@ -34,7 +40,7 @@ export function useAutoRefresh(enabled, intervalMs, callback, deps = []) {
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [enabled, intervalMs, callback, ...deps]);
+  }, [enabled, intervalMs, ...deps]);
 }
 
 // Tracks page visibility so heavy views can pause polling + animations when the
