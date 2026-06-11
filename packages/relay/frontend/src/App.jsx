@@ -70,6 +70,7 @@ import {
 } from "./components";
 import { useAutoRefresh, useEdgeSwipeBack, useNow } from "./hooks";
 import { reconcileOptimistic } from "./optimistic.js";
+import { resolveOutgoingConversationId } from "./compose.js";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { getUnlocked } from "./operatorKeyStore.js";
 import { buildOperatorCanonical, signCanonical, randomNonce } from "./operatorKey.js";
@@ -860,8 +861,10 @@ export default function App() {
     const recipient = composerRecipient || "broadcast";
     const isRoom = recipient.startsWith("room:");
     const roomId = isRoom ? recipient.slice("room:".length) : undefined;
-    // A room message threads under the room id; otherwise the selected thread.
-    const convId = isRoom ? roomId : selectedConversationId || undefined;
+    // A room message threads under the room id; otherwise the selected thread —
+    // but never a feed thread (a one-way ingest), which would staple the message
+    // into the feed. See compose.js.
+    const convId = resolveOutgoingConversationId({ isRoom, roomId, selectedConversationId });
     const sentAttachments = pendingAttachments;
     const optimisticItem = {
       id: `optim-${Date.now()}`,
