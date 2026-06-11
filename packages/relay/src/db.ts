@@ -5,7 +5,7 @@ import { config } from "./config";
 import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
-import { addSeconds, hashSecret, id, nowIso, timingSafeEqualStr } from "./utils";
+import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -266,7 +266,7 @@ export class EkhoDb {
       this.db.prepare("INSERT INTO fleets (id, name, created_at) VALUES (?, ?, ?)").run(fleetId, fleetName, now);
       this.db.prepare(
         "INSERT INTO operators (id, fleet_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-      ).run(operatorId, fleetId, email, hashSecret(password), "owner", now);
+      ).run(operatorId, fleetId, email, hashPassword(password), "owner", now);
     });
 
     tx();
@@ -285,8 +285,14 @@ export class EkhoDb {
        WHERE fleets.name = ? AND operators.email = ?`
     ).get(fleetName, email) as Record<string, unknown> | undefined;
 
-    if (!row || !timingSafeEqualStr(String(row.password_hash), hashSecret(password))) {
-      return null;
+    if (!row) return null;
+    const { ok, legacy } = verifyPassword(password, String(row.password_hash));
+    if (!ok) return null;
+    if (legacy) {
+      // Transparent rehash-on-login: a row written with the old unsalted SHA-256
+      // is upgraded to salted scrypt in place, scoped to this exact operator id.
+      // Idempotent — a crash before this commits just upgrades on the next login.
+      this.db.prepare("UPDATE operators SET password_hash = ? WHERE id = ?").run(hashPassword(password), row.id);
     }
     return row;
   }
