@@ -68,6 +68,19 @@ describe("relay hardening", () => {
     expect(inbox.body.messages.some((m: { message_id: string }) => m.message_id === messageId)).toBe(true);
   });
 
+  it("rejects an oversized agent message body", async () => {
+    const a = await relay.enrollAgent("big-a");
+    const b = await relay.enrollAgent("big-b");
+    const res = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id },
+      message_type: "direct",
+      body: { text: "x".repeat(20000) },
+      conversation_id: "big1",
+      correlation_id: "bigc1"
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("rejects a 'group' message instead of silently dropping it (no delivery)", async () => {
     const a = await relay.enrollAgent("grp-a");
     const b = await relay.enrollAgent("grp-b");

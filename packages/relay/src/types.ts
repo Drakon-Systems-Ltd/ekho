@@ -13,7 +13,8 @@ export const sendMessageSchema = z.object({
   priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
   ttl_seconds: z.number().int().positive().max(86400).default(900),
   requires_approval: z.boolean().optional().default(false),
-  body: z.record(z.string(), z.unknown()).or(z.object({ text: z.string() })),
+  body: z.record(z.string(), z.unknown()).or(z.object({ text: z.string() }))
+    .refine((b) => JSON.stringify(b).length <= 16384, { message: "message body too large (max 16KB)" }),
   metadata: z.record(z.string(), z.unknown()).optional(),
   conversation_id: z.string().min(1),
   correlation_id: z.string().min(1),
