@@ -309,25 +309,40 @@ export class EkhoDb {
     return token;
   }
 
-  consumeEnrollmentToken(token: string, fleetId: string) {
-    const row = this.db.prepare(
-      "SELECT * FROM enrollment_tokens WHERE token_hash = ? AND fleet_id = ? AND used_at IS NULL AND expires_at > ?"
-    ).get(hashSecret(token), fleetId, nowIso()) as Record<string, unknown> | undefined;
-    return row;
-  }
-
+  /**
+   * Atomically claim a single-use enrollment token AND create the agent, in one
+   * transaction. The token is CLAIMED FIRST via a guarded conditional UPDATE
+   * (used_at IS NULL AND not expired AND right fleet); only if exactly one row is
+   * claimed do we create the agent + credential and backfill used_by_agent_id.
+   * Returns null when the token can't be claimed (already used / expired / wrong
+   * fleet / unknown) — and because the claim is the opening write of the
+   * transaction, a rejected reuse leaves NO orphan agent or credential rows.
+   * used_by_agent_id is backfilled (not set in the claim) because it has an FK
+   * to agents(id), which doesn't exist until the agent is inserted.
+   */
   createAgentFromEnrollment(input: {
     fleetId: string;
-    tokenId: string;
+    token: string;
     displayName: string;
     runtime: string;
     hostname?: string;
-  }) {
+  }): { agentId: string; secret: string } | null {
     const agentId = `agent_${id("agt").slice(-12)}`;
     const secret = `${id("secret")}${id("secret")}`;
     const now = nowIso();
+    const tokenHash = hashSecret(input.token);
 
+    let claimed = false;
     const tx = this.db.transaction(() => {
+      const claim = this.db.prepare(
+        "UPDATE enrollment_tokens SET used_at = ? WHERE token_hash = ? AND fleet_id = ? AND used_at IS NULL AND expires_at > ?"
+      ).run(now, tokenHash, input.fleetId, now);
+      if (claim.changes !== 1) return; // not claimable — commit a no-op, create nothing
+
+      const tokenId = (this.db.prepare(
+        "SELECT id FROM enrollment_tokens WHERE token_hash = ? AND fleet_id = ?"
+      ).get(tokenHash, input.fleetId) as { id: string }).id;
+
       this.db.prepare(
         "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now);
@@ -336,11 +351,12 @@ export class EkhoDb {
         "INSERT INTO agent_credentials (id, agent_id, secret_hash, status, created_at) VALUES (?, ?, ?, ?, ?)"
       ).run(id("cred"), agentId, hashSecret(secret), "active", now);
 
-      this.db.prepare("UPDATE enrollment_tokens SET used_at = ?, used_by_agent_id = ? WHERE id = ?").run(now, agentId, input.tokenId);
+      this.db.prepare("UPDATE enrollment_tokens SET used_by_agent_id = ? WHERE id = ?").run(agentId, tokenId);
+      claimed = true;
     });
 
     tx();
-    return { agentId, secret };
+    return claimed ? { agentId, secret } : null;
   }
 
   authenticateAgent(agentId: string, secret: string) {

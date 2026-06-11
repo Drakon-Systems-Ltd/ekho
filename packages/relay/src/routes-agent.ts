@@ -33,18 +33,18 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const token = db.consumeEnrollmentToken(parsed.data.token, parsed.data.fleet_id);
-    if (!token) {
-      return reply.code(400).send({ error: "invalid or expired token" });
-    }
-
+    // Atomic claim-and-create: a single guarded transaction rejects an already-
+    // used / expired / wrong-fleet token (null) before any agent row exists.
     const created = db.createAgentFromEnrollment({
       fleetId: parsed.data.fleet_id,
-      tokenId: String(token.id),
+      token: parsed.data.token,
       displayName: parsed.data.display_name,
       runtime: parsed.data.runtime,
       hostname: parsed.data.hostname
     });
+    if (!created) {
+      return reply.code(400).send({ error: "invalid or expired token" });
+    }
 
     // Register the agent's own identity key (peer trust); endorsed later by the operator.
     if (parsed.data.identity_public_key) {
