@@ -222,6 +222,33 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     return reply.send({ updated });
   });
 
+  // Floor control — an agent acquires a conversation's floor before replying so
+  // agents take turns instead of all answering at once. The response carries a
+  // fresh catch-up tail; the holder releases when its turn is done (or the TTL
+  // auto-releases on crash).
+  app.post("/v1/conversations/:id/floor", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const conversationId = String((request.params as { id: string }).id || "");
+    if (!conversationId) return reply.code(400).send({ error: "conversation id required" });
+    const rawTtl = Number((request.body as { ttl_seconds?: number } | undefined)?.ttl_seconds);
+    const ttl = Math.max(0, Math.min(Number.isFinite(rawTtl) ? rawTtl : config.floorTtlSeconds, config.floorTtlMaxSeconds));
+    const result = db.acquireFloor(request.agent.fleetId, conversationId, request.agent.id, ttl);
+    const conversation_tail = db.getConversationTail(request.agent.fleetId, conversationId, config.floorTailLimit);
+    return reply.send({
+      granted: result.granted,
+      holder_agent_id: result.holderAgentId,
+      expires_at: result.expiresAt,
+      conversation_tail
+    });
+  });
+
+  app.delete("/v1/conversations/:id/floor", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const conversationId = String((request.params as { id: string }).id || "");
+    const released = db.releaseFloor(request.agent.fleetId, conversationId, request.agent.id);
+    return reply.send({ released });
+  });
+
   app.post("/v1/heartbeats", { preHandler: requireAgentAuth }, async (request, reply) => {
     const parsed = heartbeatSchema.safeParse(request.body);
     if (!parsed.success || !request.agent) {

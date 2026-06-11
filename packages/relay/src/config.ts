@@ -39,6 +39,13 @@ export const config = {
   rateLimitWindowSeconds: resolveNumber(process.env.EKHO_RATE_LIMIT_WINDOW_SECONDS, 60),
   rateLimitMaxMessages: resolveNumber(process.env.EKHO_RATE_LIMIT_MAX_MESSAGES, 30),
 
+  // Conversation floor control (agent turn-taking). The floor auto-releases
+  // after floorTtlSeconds so a crashed holder never wedges a conversation; the
+  // catch-up tail handed to the floor holder is capped at floorTailLimit.
+  floorTtlSeconds: resolveNumber(process.env.EKHO_FLOOR_TTL_SECONDS, 240),
+  floorTtlMaxSeconds: resolveNumber(process.env.EKHO_FLOOR_TTL_MAX_SECONDS, 600),
+  floorTailLimit: resolveNumber(process.env.EKHO_FLOOR_TAIL_LIMIT, 20),
+
   // Quarantine automation
   heartbeatLivenessThreshold: resolveNumber(process.env.EKHO_HEARTBEAT_LIVENESS_THRESHOLD, 3),
   heartbeatTimeoutSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_TIMEOUT_SECONDS, 90),

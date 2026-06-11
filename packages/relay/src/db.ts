@@ -973,6 +973,77 @@ export class EkhoDb {
     };
   }
 
+  /**
+   * Floor control — at most one agent holds a conversation's floor at a time, so
+   * agents take turns instead of all replying at once. Granted if the floor is
+   * free, expired, or already held by this agent (idempotent re-acquire). Atomic
+   * via a synchronous better-sqlite3 transaction.
+   */
+  acquireFloor(fleetId: string, conversationId: string, agentId: string, ttlSeconds: number) {
+    const now = nowIso();
+    const expiresAt = addSeconds(now, Math.max(0, ttlSeconds));
+    const tx = this.db.transaction(() => {
+      const cur = this.db.prepare(
+        "SELECT holder_agent_id, expires_at FROM conversation_floors WHERE conversation_id = ? AND fleet_id = ?"
+      ).get(conversationId, fleetId) as { holder_agent_id: string; expires_at: string } | undefined;
+      const free = !cur || cur.expires_at <= now || cur.holder_agent_id === agentId;
+      if (!free) return { granted: false, holderAgentId: cur!.holder_agent_id, expiresAt: cur!.expires_at };
+      this.db.prepare(
+        `INSERT INTO conversation_floors (conversation_id, fleet_id, holder_agent_id, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(conversation_id) DO UPDATE SET
+           fleet_id = excluded.fleet_id, holder_agent_id = excluded.holder_agent_id,
+           acquired_at = excluded.acquired_at, expires_at = excluded.expires_at`
+      ).run(conversationId, fleetId, agentId, now, expiresAt);
+      return { granted: true, holderAgentId: agentId, expiresAt };
+    });
+    return tx();
+  }
+
+  /** Release a conversation floor — only the current holder can. */
+  releaseFloor(fleetId: string, conversationId: string, agentId: string): boolean {
+    const r = this.db.prepare(
+      "DELETE FROM conversation_floors WHERE conversation_id = ? AND fleet_id = ? AND holder_agent_id = ?"
+    ).run(conversationId, fleetId, agentId);
+    return r.changes > 0;
+  }
+
+  /**
+   * The recent thread of a conversation (chronological), resolved to
+   * {message_id, sender_agent_id, sender_kind, sender_label, text, created_at} —
+   * the fresh catch-up handed to a floor holder so it never reasons on stale state.
+   */
+  getConversationTail(fleetId: string, conversationId: string, limit: number) {
+    const rows = (this.db.prepare(
+      `SELECT id, sender_agent_id, body_json, metadata_json, created_at FROM messages
+       WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+    ).all(fleetId, conversationId, Math.max(1, limit)) as Array<Record<string, unknown>>).reverse();
+    if (rows.length === 0) return [];
+    const senderIds = Array.from(new Set(rows.map((r) => String(r.sender_agent_id))));
+    const info = new Map<string, { runtime: string; display_name: string }>();
+    const ph = senderIds.map(() => "?").join(",");
+    for (const s of this.db.prepare(
+      `SELECT id, runtime, display_name FROM agents WHERE id IN (${ph})`
+    ).all(...senderIds) as Array<Record<string, unknown>>) {
+      info.set(String(s.id), { runtime: String(s.runtime), display_name: String(s.display_name ?? s.id) });
+    }
+    return rows.map((r) => {
+      let text = "";
+      try { const b = JSON.parse(String(r.body_json) || "{}") as Record<string, unknown>; if (typeof b.text === "string") text = b.text; } catch { /* empty */ }
+      const meta = r.metadata_json ? (() => { try { return JSON.parse(String(r.metadata_json)) as Record<string, unknown>; } catch { return {}; } })() : {};
+      const inf = info.get(String(r.sender_agent_id));
+      const sk = inf?.runtime === "operator" ? "operator" : "agent";
+      return {
+        message_id: r.id,
+        sender_agent_id: r.sender_agent_id,
+        sender_kind: sk,
+        sender_label: sk === "operator" ? String(meta.sender_label ?? "Operator") : (inf?.display_name ?? String(r.sender_agent_id)),
+        text,
+        created_at: r.created_at
+      };
+    });
+  }
+
   ackMessages(agentId: string, ackRows: Array<{ message_id: string; received_at: string }>) {
     const tx = this.db.transaction(() => {
       for (const ack of ackRows) {
