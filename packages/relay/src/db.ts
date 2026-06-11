@@ -40,6 +40,64 @@ export interface AgentIdentityKeyRow {
   endorsed_at: string | null;
 }
 
+const IDEMPOTENT_DDL_ERROR = /duplicate column|already exists/i;
+
+/** Split a migration file into individual statements. A naive ';' split is safe
+ *  here: every migration is pure DDL with no ';' inside a string literal
+ *  (verified across migrations/001..014). */
+function splitStatements(sql: string): string[] {
+  return sql.split(";").map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Apply one migration file's SQL and record its version ATOMICALLY, inside a
+ * single transaction. Each statement runs in a nested transaction (SAVEPOINT);
+ * a "duplicate column"/"already exists" error is swallowed per-statement so a
+ * fresh DB (whose schema.ts already created the column) or a legacy partially-
+ * applied DB does not abort — but the surviving statements AND the version row
+ * still commit together. Any OTHER error propagates, rolling the ENTIRE
+ * migration (every statement + the version insert) back to nothing. This is the
+ * fix: it is impossible to record a version without the DDL committing, or to
+ * commit partial DDL without recording the version.
+ */
+export function applyMigration(rawDb: Database.Database, version: number, sql: string, appliedAt: string): void {
+  const apply = rawDb.transaction(() => {
+    for (const stmt of splitStatements(sql)) {
+      try {
+        const savepoint = rawDb.transaction(() => rawDb.exec(stmt));
+        savepoint();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!IDEMPOTENT_DDL_ERROR.test(msg)) throw err; // real error → roll the whole migration back
+        // else: column/table already exists — savepoint rolled back this one
+        // statement only; the outer transaction continues.
+      }
+    }
+    rawDb.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, appliedAt);
+  });
+  apply();
+}
+
+/** Ensure schema_migrations exists, then apply each unapplied migrations/NNN_*.sql
+ *  file transactionally in version order. Idempotent: already-applied versions
+ *  are skipped. NOTE: a future migration needing PRAGMA foreign_keys=OFF for a
+ *  table rebuild can't run inside a transaction (SQLite forbids it) and would
+ *  need bespoke handling — none of 001..014 do this. */
+export function runMigrationsOn(rawDb: Database.Database, migrationsDir: string): void {
+  rawDb.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+  const applied = new Set(
+    (rawDb.prepare("SELECT version FROM schema_migrations").all() as Array<{ version: number }>).map((r) => r.version)
+  );
+  if (!fs.existsSync(migrationsDir)) return;
+  const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
+  for (const file of files) {
+    const version = parseInt(file.split("_")[0], 10);
+    if (!Number.isFinite(version) || applied.has(version)) continue;
+    const sql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
+    applyMigration(rawDb, version, sql, nowIso());
+  }
+}
+
 export class EkhoDb {
   private db: Database.Database;
 
@@ -52,36 +110,7 @@ export class EkhoDb {
   }
 
   private runMigrations() {
-    this.db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
-    const applied = new Set(
-      (this.db.prepare("SELECT version FROM schema_migrations").all() as Array<{ version: number }>).map((r) => r.version)
-    );
-    const migrationsDir = path.join(__dirname, "..", "migrations");
-    if (!fs.existsSync(migrationsDir)) return;
-    const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
-    for (const file of files) {
-      const version = parseInt(file.split("_")[0], 10);
-      if (!Number.isFinite(version) || applied.has(version)) continue;
-      const sql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
-      try {
-        this.db.exec(sql);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes("duplicate column")) {
-          // For ALTER TABLE migrations on existing DBs, run statements individually
-          const statements = sql.split(";").map((s) => s.trim()).filter(Boolean);
-          for (const stmt of statements) {
-            try { this.db.exec(stmt); } catch (e: unknown) {
-              const m = e instanceof Error ? e.message : String(e);
-              if (!m.includes("duplicate column") && !m.includes("already exists")) throw e;
-            }
-          }
-        } else {
-          throw err;
-        }
-      }
-      this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(version, nowIso());
-    }
+    runMigrationsOn(this.db, path.join(__dirname, "..", "migrations"));
   }
 
   raw() {
