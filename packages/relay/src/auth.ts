@@ -49,10 +49,6 @@ export async function requireAgentAuth(request: FastifyRequest, reply: FastifyRe
     return unauthorized(reply, "timestamp outside allowed skew");
   }
 
-  if (db.findNonce(agentId, nonce)) {
-    return unauthorized(reply, "replayed nonce");
-  }
-
   const body = request.body ? JSON.stringify(request.body) : "";
   const normalizedPath = request.url.split("?")[0] ?? request.url;
   const payload = `${request.method}\n${normalizedPath}\n${timestamp}\n${nonce}\n${sha256(body)}`;
@@ -61,7 +57,12 @@ export async function requireAgentAuth(request: FastifyRequest, reply: FastifyRe
     return unauthorized(reply, "invalid signature");
   }
 
-  db.rememberNonce(agentId, nonce);
+  // Atomic replay defence: claim the nonce only AFTER the signature verifies, so
+  // an unsigned/forged request can never burn a victim's nonce. A losing claim
+  // (the pair already exists) is a replay.
+  if (!db.claimNonce(agentId, nonce)) {
+    return unauthorized(reply, "replayed nonce");
+  }
   request.agent = { id: agentId, fleetId: String(agent.fleet_id), status: String(agent.status) };
 }
 

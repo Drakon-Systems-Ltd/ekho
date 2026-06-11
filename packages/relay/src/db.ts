@@ -356,12 +356,20 @@ export class EkhoDb {
     ).get(agentId) as Record<string, unknown> | undefined;
   }
 
-  rememberNonce(agentId: string, nonce: string) {
-    this.db.prepare("INSERT INTO replay_nonces (id, agent_id, nonce, created_at) VALUES (?, ?, ?, ?)").run(id("rpl"), agentId, nonce, nowIso());
-  }
-
-  findNonce(agentId: string, nonce: string) {
-    return this.db.prepare("SELECT id FROM replay_nonces WHERE agent_id = ? AND nonce = ?").get(agentId, nonce);
+  /**
+   * Atomically claim (agentId, nonce). Returns true if this call recorded the
+   * nonce (first use), false if it was already present (a replay). Relies on the
+   * UNIQUE(agent_id, nonce) constraint on replay_nonces: INSERT OR IGNORE is a
+   * no-op (changes === 0) when the pair already exists, so the claim is a single
+   * atomic statement — no check-then-act window between "have I seen this?" and
+   * "remember it". Keying is composite, so the same nonce from a different agent
+   * is independent.
+   */
+  claimNonce(agentId: string, nonce: string): boolean {
+    const res = this.db
+      .prepare("INSERT OR IGNORE INTO replay_nonces (id, agent_id, nonce, created_at) VALUES (?, ?, ?, ?)")
+      .run(id("rpl"), agentId, nonce, nowIso());
+    return res.changes === 1;
   }
 
   /**
