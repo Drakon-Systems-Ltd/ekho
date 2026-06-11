@@ -3,8 +3,12 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { applyMigration, runMigrationsOn } from "../src/db";
+import { schemaSql } from "../src/schema";
+
+const REAL_MIGRATIONS_DIR = fileURLToPath(new URL("../migrations", import.meta.url));
 
 function freshDb() {
   const db = new Database(":memory:");
@@ -74,5 +78,27 @@ describe("transactional migrations (M6)", () => {
     expect(versions(db)).toEqual([1, 2]);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Boot-critical: the REAL migration files must apply atomically on a fresh
+  // schema.ts DB (the actual cold-boot path), and be a byte-for-byte no-op on a
+  // DB already at the latest version (the live tars relay). This guards the
+  // naive ';' split against a future migration that adds a trigger / quoted ';'.
+  it("applies the real migrations/ files on a fresh schema.ts DB and is a no-op when already current", () => {
+    const db = new Database(":memory:");
+    db.exec(schemaSql); // mirror EkhoDb's constructor: schema first, then migrations
+    runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+
+    const applied = versions(db);
+    expect(applied.length).toBeGreaterThanOrEqual(14);
+    // versions are contiguous from 1 and the agents table has migration-added cols
+    expect(applied[0]).toBe(1);
+    expect(hasColumn(db, "agents", "operator_trusted")).toBe(true);
+    expect(db.inTransaction).toBe(false);
+
+    // already-current DB → zero new statements, identical version set
+    const before = versions(db);
+    runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+    expect(versions(db)).toEqual(before);
   });
 });

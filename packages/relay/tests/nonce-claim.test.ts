@@ -45,6 +45,18 @@ describe("atomic nonce claim", () => {
     expect(relay.db.claimNonce(a.agent_id, "shared")).toBe(false);
   });
 
+  test("an invalid-signature request never records a nonce (claim is post-verification)", async () => {
+    const nonce = crypto.randomUUID();
+    const headers = signedHeaders(a.agent_id, a.secret, nonce);
+    headers["x-ekho-signature"] = "deadbeef".repeat(8); // tamper after signing
+    const res = await relay.app.inject({ method: "GET", url: "/v1/inbox", headers });
+    expect(res.statusCode).toBe(401);
+    const count = relay.db.raw()
+      .prepare("SELECT COUNT(*) AS c FROM replay_nonces WHERE agent_id = ? AND nonce = ?")
+      .get(a.agent_id, nonce) as { c: number };
+    expect(count.c).toBe(0); // a forged request must not burn a victim's nonce
+  });
+
   test("a replayed signed request is rejected with 401, never a 500", async () => {
     const nonce = crypto.randomUUID();
     const headers = signedHeaders(a.agent_id, a.secret, nonce);
