@@ -1,5 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
+import { timingSafeEqualStr } from "../src/utils";
+
+describe("timingSafeEqualStr", () => {
+  it("matches equal strings and rejects unequal / different-length", () => {
+    expect(timingSafeEqualStr("abc", "abc")).toBe(true);
+    expect(timingSafeEqualStr("abc", "abd")).toBe(false);
+    expect(timingSafeEqualStr("abc", "abcd")).toBe(false);
+    expect(timingSafeEqualStr("", "")).toBe(true);
+  });
+});
 
 // Regression tests for the audit's correctness/security findings.
 describe("relay hardening", () => {

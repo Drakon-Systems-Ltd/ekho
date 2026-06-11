@@ -1,7 +1,7 @@
 import { FastifyReply, FastifyRequest } from "fastify";
 import { config } from "./config";
 import { db } from "./db";
-import { hashSecret, sha256, sign } from "./utils";
+import { hashSecret, sha256, sign, timingSafeEqualStr } from "./utils";
 import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
 
 declare module "fastify" {
@@ -40,7 +40,7 @@ export async function requireAgentAuth(request: FastifyRequest, reply: FastifyRe
   }
 
   const agent = db.authenticateAgent(agentId, sharedSecret);
-  if (!agent || agent.secret_hash !== hashSecret(sharedSecret)) {
+  if (!agent || !timingSafeEqualStr(String(agent.secret_hash), hashSecret(sharedSecret))) {
     return unauthorized(reply, "invalid agent credentials");
   }
 
@@ -57,7 +57,7 @@ export async function requireAgentAuth(request: FastifyRequest, reply: FastifyRe
   const normalizedPath = request.url.split("?")[0] ?? request.url;
   const payload = `${request.method}\n${normalizedPath}\n${timestamp}\n${nonce}\n${sha256(body)}`;
   const expected = sign(sharedSecret, payload);
-  if (expected !== signature) {
+  if (!timingSafeEqualStr(expected, signature)) {
     return unauthorized(reply, "invalid signature");
   }
 
@@ -88,7 +88,7 @@ export async function requireOperatorAuth(request: FastifyRequest, reply: Fastif
   }
 
   const expected = sign(config.operatorSessionSecret, `${operatorId}.${fleetId}`);
-  if (expected !== signature) {
+  if (!timingSafeEqualStr(expected, signature)) {
     return unauthorized(reply, "invalid operator session");
   }
 

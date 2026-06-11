@@ -5,7 +5,7 @@ import { config } from "./config";
 import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
-import { addSeconds, hashSecret, id, nowIso } from "./utils";
+import { addSeconds, hashSecret, id, nowIso, timingSafeEqualStr } from "./utils";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -285,7 +285,7 @@ export class EkhoDb {
        WHERE fleets.name = ? AND operators.email = ?`
     ).get(fleetName, email) as Record<string, unknown> | undefined;
 
-    if (!row || row.password_hash !== hashSecret(password)) {
+    if (!row || !timingSafeEqualStr(String(row.password_hash), hashSecret(password))) {
       return null;
     }
 

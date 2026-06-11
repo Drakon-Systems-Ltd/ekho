@@ -20,6 +20,15 @@ export function sign(secret: string, payload: string): string {
   return crypto.createHmac("sha256", secret).update(payload).digest("hex");
 }
 
+/** Constant-time string compare for secrets/HMACs/signatures — avoids leaking
+ *  the expected value byte-by-byte through early-exit `!==` timing. */
+export function timingSafeEqualStr(a: string, b: string): boolean {
+  const ba = Buffer.from(String(a ?? ""), "utf8");
+  const bb = Buffer.from(String(b ?? ""), "utf8");
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
 export function addSeconds(isoDate: string, seconds: number): string {
   return new Date(new Date(isoDate).getTime() + seconds * 1000).toISOString();
 }
