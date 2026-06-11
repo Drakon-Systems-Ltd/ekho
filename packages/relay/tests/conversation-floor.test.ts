@@ -71,6 +71,19 @@ describe("conversation floor control", () => {
     expect((await relay.agentRequest(b.agent_id, b.secret, "POST", `/v1/conversations/${r.id}/floor`, {})).body.granted).toBe(true);
   });
 
+  it("blocks an agent that is not a participant (IDOR / tail-leak guard)", async () => {
+    const a = await relay.enrollAgent("floor-mem-a");
+    const outsider = await relay.enrollAgent("floor-outsider");
+    const r = await room([a.agent_id]); // outsider is NOT a member
+    await relay.operatorRequest("POST", "/v1/operator/messages", { room_id: r.id, text: "room-only secret" });
+
+    const acq = await relay.agentRequest(outsider.agent_id, outsider.secret, "POST", `/v1/conversations/${r.id}/floor`, {});
+    expect(acq.status).toBe(404);
+    expect(JSON.stringify(acq.body)).not.toContain("room-only secret");
+    // and the member is unaffected — can still take the floor
+    expect((await relay.agentRequest(a.agent_id, a.secret, "POST", `/v1/conversations/${r.id}/floor`, {})).body.granted).toBe(true);
+  });
+
   it("hands the floor holder a fresh conversation tail (catch-up)", async () => {
     const a = await relay.enrollAgent("floor-tail-a");
     const r = await room([a.agent_id]);

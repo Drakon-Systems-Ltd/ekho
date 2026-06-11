@@ -1000,6 +1000,27 @@ export class EkhoDb {
     return tx();
   }
 
+  /**
+   * Whether an agent is a participant of a conversation — a member of the room,
+   * or has sent/received a message in it. Gates the floor + catch-up so an agent
+   * can never acquire a floor for, or read the tail of, a thread it isn't in.
+   */
+  isConversationParticipant(fleetId: string, conversationId: string, agentId: string): boolean {
+    const room = this.db.prepare(
+      `SELECT 1 FROM room_members rm JOIN rooms r ON r.id = rm.room_id
+       WHERE r.fleet_id = ? AND rm.room_id = ? AND rm.agent_id = ? LIMIT 1`
+    ).get(fleetId, conversationId, agentId);
+    if (room) return true;
+    const msg = this.db.prepare(
+      `SELECT 1 FROM messages m
+       WHERE m.fleet_id = ? AND m.conversation_id = ? AND (
+         m.sender_agent_id = ?
+         OR EXISTS (SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_agent_id = ?)
+       ) LIMIT 1`
+    ).get(fleetId, conversationId, agentId, agentId);
+    return Boolean(msg);
+  }
+
   /** Release a conversation floor — only the current holder can. */
   releaseFloor(fleetId: string, conversationId: string, agentId: string): boolean {
     const r = this.db.prepare(

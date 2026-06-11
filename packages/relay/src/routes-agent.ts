@@ -230,6 +230,11 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
     const conversationId = String((request.params as { id: string }).id || "");
     if (!conversationId) return reply.code(400).send({ error: "conversation id required" });
+    // Only a participant may take the floor or read the catch-up tail (no
+    // cross-conversation grief or info disclosure).
+    if (!db.isConversationParticipant(request.agent.fleetId, conversationId, request.agent.id)) {
+      return reply.code(404).send({ error: "not found" });
+    }
     const rawTtl = Number((request.body as { ttl_seconds?: number } | undefined)?.ttl_seconds);
     const ttl = Math.max(0, Math.min(Number.isFinite(rawTtl) ? rawTtl : config.floorTtlSeconds, config.floorTtlMaxSeconds));
     const result = db.acquireFloor(request.agent.fleetId, conversationId, request.agent.id, ttl);
@@ -245,6 +250,9 @@ export async function registerAgentRoutes(app: FastifyInstance) {
   app.delete("/v1/conversations/:id/floor", { preHandler: requireAgentAuth }, async (request, reply) => {
     if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
     const conversationId = String((request.params as { id: string }).id || "");
+    if (!db.isConversationParticipant(request.agent.fleetId, conversationId, request.agent.id)) {
+      return reply.code(404).send({ error: "not found" });
+    }
     const released = db.releaseFloor(request.agent.fleetId, conversationId, request.agent.id);
     return reply.send({ released });
   });
