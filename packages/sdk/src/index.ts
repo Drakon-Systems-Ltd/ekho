@@ -1,4 +1,5 @@
 export { EkhoAgentClient } from "./client";
+export type { FloorResult } from "./client";
 export { EkhoAgentAdapter } from "./adapter";
 export type { AdapterHooks } from "./adapter";
 export type {

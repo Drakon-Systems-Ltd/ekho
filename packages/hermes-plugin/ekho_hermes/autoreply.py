@@ -54,6 +54,9 @@ PEER_RATE_WINDOW_S = 60.0
 # no turn). An operator message in the conversation re-opens it. Caps degenerate
 # agent<->agent ping-pong without starving productive collaboration.
 DEFAULT_PEER_TURN_BUDGET = 6
+# Floor TTL covers a max-length turn (~180s) + margin; the relay auto-releases on
+# expiry so a crashed holder never wedges a conversation.
+FLOOR_TTL_SECONDS = 240
 PEER_LATCH_CONVERSATION_CAP = 500  # FIFO-evicted per-conversation counter map
 
 SEEN_CAP = 500  # FIFO-evicted dedupe set
@@ -596,6 +599,46 @@ def trigger_turn(
     (spawn or _default_spawn)(cmd, env)
 
 
+def plan_floor_turn(kept, acquire, log=None):
+    """Floor planning (turn-taking). For each conversation in ``kept``, try to
+    acquire its floor. Returns ``(floored, to_release, tails)``: conversations
+    whose floor we get are responded to (with the fresh catch-up tail from the
+    acquire); the rest are deferred to whichever agent holds the floor. A relay
+    without floor support (``acquire`` raises) degrades to responding without a
+    floor, preserving the old behavior."""
+    by_conv: Dict[str, List[Any]] = {}
+    for m in kept:
+        by_conv.setdefault(getattr(m, "conversation_id", ""), []).append(m)
+    floored: List[Any] = []
+    to_release: List[str] = []
+    tails: Dict[str, Any] = {}
+    for conv, msgs in by_conv.items():
+        granted = True
+        try:
+            res = acquire(conv) or {}
+            granted = bool(res.get("granted"))
+            if granted:
+                to_release.append(conv)
+                tail = res.get("conversation_tail")
+                if isinstance(tail, list):
+                    tails[conv] = tail
+            elif log:
+                log.info(
+                    "[ekho-autoreply] floor for %s held by %s; deferring",
+                    conv, res.get("holder_agent_id") or "another agent",
+                )
+        except Exception as exc:  # noqa: BLE001 — older relay without floor support
+            if log:
+                log.debug(
+                    "[ekho-autoreply] floor acquire failed for %s (%s); "
+                    "proceeding without floor", conv, exc,
+                )
+            granted = True
+        if granted:
+            floored.extend(msgs)
+    return floored, to_release, tails
+
+
 # --- The tick + the loop ---------------------------------------------------
 
 
@@ -766,21 +809,29 @@ def process_inbox_once(
     acked = _ack()
 
     spawned = 0
-    if kept:
+    # Floor control: take each conversation's floor before replying so agents
+    # take turns instead of all answering at once. Conversations whose floor
+    # another agent holds are deferred to it; the holder gets a fresh tail.
+    floored, to_release, tails = plan_floor_turn(
+        kept, lambda c: client.acquire_floor(c, FLOOR_TTL_SECONDS), log
+    ) if kept else ([], [], {})
+    if floored:
+        base_hist = getattr(inbox, "conversation_history", None) or {}
+        fresh_hist = {**base_hist, **tails}
         # Pre-download any operator attachments HERE (the daemon has the relay
         # client) so the prompt can hand the agent real local file paths — the
         # spawned one-shot child has an empty inbox cache and couldn't fetch
         # them itself. Best-effort: a failed download just drops the paths.
         local_attachments = None
-        if any(getattr(m, "attachments", None) for m in kept):
+        if any(getattr(m, "attachments", None) for m in floored):
             try:
-                local_attachments = download_inbox_attachments(client, kept)
+                local_attachments = download_inbox_attachments(client, floored)
             except Exception as exc:  # noqa: BLE001
                 log.debug("[ekho-autoreply] attachment pre-download failed: %s", exc)
         state.in_flight = True
         try:
             trigger_turn(
-                kept,
+                floored,
                 operator_trusted,
                 local_attachments=local_attachments,
                 roster=getattr(inbox, "roster", None),
@@ -788,13 +839,18 @@ def process_inbox_once(
                 log=log,
                 verifications=verifications,
                 self_agent_id=self_agent_id,
-                conversation_history=getattr(inbox, "conversation_history", None),
+                conversation_history=fresh_hist,
             )
             spawned = 1
         except Exception as exc:  # noqa: BLE001
             log.warning("[ekho-autoreply] turn trigger failed: %s", exc)
         finally:
             state.in_flight = False
+            for conv in to_release:
+                try:
+                    client.release_floor(conv)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("[ekho-autoreply] floor release failed for %s: %s", conv, exc)
 
     return {
         "polled": len(messages),

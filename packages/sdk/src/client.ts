@@ -4,11 +4,19 @@ import type {
   ActionDecision,
   AttachmentUploadInput,
   InboxResponse,
+  MessageSnapshot,
   SendMessagePayload,
   HeartbeatPayload,
   ProposeActionPayload,
   ActionResultPayload
 } from "./types";
+
+export type FloorResult = {
+  granted: boolean;
+  holder_agent_id: string;
+  expires_at: string;
+  conversation_tail: MessageSnapshot[];
+};
 
 const DEFAULT_POLL_INTERVAL = 5;
 const DEFAULT_HEARTBEAT_INTERVAL = 30;
@@ -72,6 +80,22 @@ export class EkhoAgentClient {
 
   ackMessages(acks: Array<{ message_id: string; status: "received"; received_at: string }>) {
     return this.request<{ updated: number }>("POST", "/v1/acks", { acks });
+  }
+
+  /** Acquire a conversation's floor so this agent — and not its peers — takes the
+   *  next turn. Returns granted + the current holder + a fresh catch-up tail. */
+  acquireFloor(conversationId: string, ttlSeconds?: number) {
+    return this.request<FloorResult>(
+      "POST", `/v1/conversations/${encodeURIComponent(conversationId)}/floor`,
+      ttlSeconds === undefined ? {} : { ttl_seconds: ttlSeconds }
+    );
+  }
+
+  /** Release a conversation's floor once this agent's turn is done. */
+  releaseFloor(conversationId: string) {
+    return this.request<{ released: boolean }>(
+      "DELETE", `/v1/conversations/${encodeURIComponent(conversationId)}/floor`
+    );
   }
 
   heartbeat(payload: HeartbeatPayload) {

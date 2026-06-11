@@ -5,6 +5,7 @@ import {
   consumePeerLatch,
   resetPeerLatch,
   buildPrompt,
+  planFloorTurn,
   createAutoReplyState,
   effectivePeerSettings,
   DEFAULT_PEER_TURN_BUDGET
@@ -189,5 +190,45 @@ describe("bounded peer delegation", () => {
   it("relay budget overrides the bootstrap budget", () => {
     expect(effectivePeerSettings({ peer_autoreply: true, peer_turn_budget: 3 }, { peerEnabled: true, peerTurnBudget: 99 }))
       .toEqual({ peerEnabled: true, peerTurnBudget: 3 });
+  });
+});
+
+describe("floor planning (turn-taking)", () => {
+  function fmsg(conv: string): any {
+    return { message_id: "m-" + conv, conversation_id: conv, sender_agent_id: "op", sender_kind: "operator", message_type: "direct", body: { text: "hi" } };
+  }
+
+  it("responds only to conversations where the floor was granted; defers the rest", async () => {
+    const kept = [fmsg("c1"), fmsg("c2")];
+    const acquire = async (conv: string) =>
+      conv === "c1" ? { granted: true, conversation_tail: [] } : { granted: false, holder_agent_id: "other" };
+    const plan = await planFloorTurn(kept, acquire);
+    expect(plan.floored.map((m: any) => m.conversation_id)).toEqual(["c1"]);
+    expect(plan.toRelease).toEqual(["c1"]);
+  });
+
+  it("carries the fresh catch-up tail from the acquire response", async () => {
+    const kept = [fmsg("c1")];
+    const acquire = async () => ({
+      granted: true,
+      conversation_tail: [{ message_id: "h1", sender_agent_id: "x", sender_kind: "agent", sender_label: "X", text: "earlier", created_at: "t" }]
+    });
+    const plan = await planFloorTurn(kept, acquire);
+    expect(plan.tails["c1"][0].text).toBe("earlier");
+  });
+
+  it("degrades to responding without a floor when the relay lacks the endpoint", async () => {
+    const kept = [fmsg("c1")];
+    const acquire = async () => { throw new Error("404 not found"); };
+    const plan = await planFloorTurn(kept, acquire);
+    expect(plan.floored).toHaveLength(1);   // still responds (back-compat)
+    expect(plan.toRelease).toEqual([]);     // nothing acquired -> nothing to release
+  });
+
+  it("spawns no turn when every conversation is deferred", async () => {
+    const kept = [fmsg("c1"), fmsg("c2")];
+    const acquire = async () => ({ granted: false, holder_agent_id: "other" });
+    const plan = await planFloorTurn(kept, acquire);
+    expect(plan.floored).toEqual([]);
   });
 });

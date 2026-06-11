@@ -28,6 +28,7 @@ from ekho_hermes.autoreply import (
     is_real_inbound,
     mark_seen,
     peer_latch_open,
+    plan_floor_turn,
     process_inbox_once,
     record_batch,
     reset_cache,
@@ -713,3 +714,39 @@ def test_build_prompt_peer_uses_display_name_and_productivity_gate():
     # Productivity gate — don't chatter.
     assert "materially advances the work" in prompt
     assert "acknowledge" in prompt
+
+
+def test_plan_floor_turn_responds_only_to_granted_conversations():
+    kept = [_msg(conversation_id="c1"), _msg(conversation_id="c2")]
+
+    def acquire(conv):
+        if conv == "c1":
+            return {"granted": True, "conversation_tail": []}
+        return {"granted": False, "holder_agent_id": "other"}
+
+    floored, to_release, tails = plan_floor_turn(kept, acquire)
+    assert [m.conversation_id for m in floored] == ["c1"]
+    assert to_release == ["c1"]
+
+
+def test_plan_floor_turn_carries_fresh_tail():
+    kept = [_msg(conversation_id="c1")]
+
+    def acquire(conv):
+        return {"granted": True, "conversation_tail": [
+            {"message_id": "h1", "text": "earlier", "sender_kind": "agent",
+             "sender_agent_id": "x", "sender_label": "X", "created_at": "t"}]}
+
+    _, _, tails = plan_floor_turn(kept, acquire)
+    assert tails["c1"][0]["text"] == "earlier"
+
+
+def test_plan_floor_turn_degrades_without_floor_endpoint():
+    kept = [_msg(conversation_id="c1")]
+
+    def acquire(conv):
+        raise RuntimeError("404 not found")
+
+    floored, to_release, _ = plan_floor_turn(kept, acquire)
+    assert len(floored) == 1   # still responds (back-compat)
+    assert to_release == []     # nothing acquired -> nothing to release

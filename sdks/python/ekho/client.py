@@ -190,6 +190,27 @@ class EkhoAgentClient:
             {"acks": [dict(a) for a in acks]},
         )
 
+    def acquire_floor(
+        self, conversation_id: str, ttl_seconds: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Acquire a conversation's floor so this agent takes the next turn (not
+        its peers). Returns {granted, holder_agent_id, expires_at,
+        conversation_tail}."""
+        from urllib.parse import quote
+
+        body = {} if ttl_seconds is None else {"ttl_seconds": ttl_seconds}
+        return self._request(
+            "POST", f"/v1/conversations/{quote(conversation_id, safe='')}/floor", body
+        )
+
+    def release_floor(self, conversation_id: str) -> Dict[str, Any]:
+        """Release a conversation's floor once this agent's turn is done."""
+        from urllib.parse import quote
+
+        return self._request(
+            "DELETE", f"/v1/conversations/{quote(conversation_id, safe='')}/floor"
+        )
+
     def heartbeat(self, payload: HeartbeatInput) -> HeartbeatResult:
         return HeartbeatResult.from_dict(
             self._request("POST", "/v1/heartbeats", dict(payload))

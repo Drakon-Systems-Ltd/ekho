@@ -122,6 +122,7 @@ const PEER_RATE_WINDOW_MS = 60_000;
 // no turn). An operator message in the conversation re-opens it. Caps degenerate
 // agent↔agent ping-pong without starving productive collaboration.
 export const DEFAULT_PEER_TURN_BUDGET = 6;
+const FLOOR_TTL_SECONDS = 240; // covers a max-length turn (~180s) + margin; relay auto-releases on expiry
 const PEER_LATCH_CONVERSATION_CAP = 500; // FIFO-evicted per-conversation counter map
 
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
@@ -466,6 +467,54 @@ export function buildPrompt(
  * EKHO_AUTOREPLY_DISABLE=1 so it never starts its own poll loop, and the caller's
  * inFlight guard serializes turns so only one runs at a time.
  */
+type FloorAcquire = (conversationId: string) => Promise<{
+  granted: boolean;
+  holder_agent_id?: string;
+  conversation_tail?: MsgSnapshot[];
+}>;
+
+/**
+ * Floor planning (turn-taking). For each conversation in the kept batch, try to
+ * acquire its floor. Conversations whose floor we get are responded to (with the
+ * fresh catch-up tail from the acquire); the rest are deferred — another agent
+ * holds the floor and will answer. A relay without floor support (acquire throws)
+ * degrades to responding without a floor, preserving the old behavior.
+ */
+export async function planFloorTurn(
+  kept: InboxMessage[],
+  acquire: FloorAcquire,
+  log?: { info?: (m: string) => void; debug?: (m: string) => void }
+): Promise<{ floored: InboxMessage[]; toRelease: string[]; tails: Record<string, MsgSnapshot[]> }> {
+  const byConv = new Map<string, InboxMessage[]>();
+  for (const m of kept) {
+    const arr = byConv.get(m.conversation_id) ?? [];
+    arr.push(m);
+    byConv.set(m.conversation_id, arr);
+  }
+  const floored: InboxMessage[] = [];
+  const toRelease: string[] = [];
+  const tails: Record<string, MsgSnapshot[]> = {};
+  for (const [conv, msgs] of byConv) {
+    let granted = true;
+    try {
+      const res = await acquire(conv);
+      granted = Boolean(res.granted);
+      if (granted) {
+        toRelease.push(conv);
+        if (Array.isArray(res.conversation_tail)) tails[conv] = res.conversation_tail;
+      } else {
+        log?.info?.(`[ekho-autoreply] floor for ${conv} held by ${res.holder_agent_id ?? "another agent"}; deferring`);
+      }
+    } catch (err) {
+      // Older relay without floor support — respond without a floor (no release).
+      log?.debug?.(`[ekho-autoreply] floor acquire failed for ${conv} (${String(err)}); proceeding without floor`);
+      granted = true;
+    }
+    if (granted) floored.push(...msgs);
+  }
+  return { floored, toRelease, tails };
+}
+
 async function triggerTurn(
   messages: InboxMessage[],
   batch: InboxBatch,
@@ -664,13 +713,30 @@ export function startAutoReply(opts: {
 
     if (kept.length === 0) return; // suppressed by rate gate; consumed, no turn
 
+    // Floor control: take each conversation's floor before replying so agents take
+    // turns instead of all answering at once. Conversations whose floor another
+    // agent already holds are deferred to it; the floor holder gets a fresh tail.
+    const plan = await planFloorTurn(kept, (conv) => client.acquireFloor(conv, FLOOR_TTL_SECONDS), log);
+    if (plan.floored.length === 0) return; // every conversation deferred to its holder
+
     state.inFlight = true;
     try {
-      await triggerTurn(kept, batch, api, log, verifications, selfAgentId);
+      const flooredBatch: InboxBatch = {
+        ...batch,
+        conversation_history: { ...(batch.conversation_history ?? {}), ...plan.tails }
+      };
+      await triggerTurn(plan.floored, flooredBatch, api, log, verifications, selfAgentId);
     } catch (err) {
       log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
     } finally {
       state.inFlight = false;
+      for (const conv of plan.toRelease) {
+        try {
+          await client.releaseFloor(conv);
+        } catch (err) {
+          log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+        }
+      }
     }
   };
 
