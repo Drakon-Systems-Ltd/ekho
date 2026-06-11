@@ -29,6 +29,23 @@ describe("relay hardening", () => {
     expect((await relay.agentRequest(a.agent_id, a.secret, "GET", `/v1/actions/${approvalId}`)).status).toBe(200);
   });
 
+  it("ignores an ack for a message not delivered to the acking agent", async () => {
+    const a = await relay.enrollAgent("ack-a");
+    const b = await relay.enrollAgent("ack-b");
+    const sent = await relay.operatorRequest("POST", "/v1/operator/messages", {
+      recipient_agent_id: b.agent_id, text: "for b only"
+    });
+    const messageId = sent.body.message_id;
+    // a is not a recipient — its ack of b's message must be a no-op (no status flip)
+    const res = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/acks", {
+      acks: [{ message_id: messageId, status: "received", received_at: "2026-06-09T00:00:00.000Z" }]
+    });
+    expect(res.body.updated).toBe(0);
+    // b still receives it intact
+    const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox");
+    expect(inbox.body.messages.some((m: { message_id: string }) => m.message_id === messageId)).toBe(true);
+  });
+
   it("rejects a 'group' message instead of silently dropping it (no delivery)", async () => {
     const a = await relay.enrollAgent("grp-a");
     const b = await relay.enrollAgent("grp-b");

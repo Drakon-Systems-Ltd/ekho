@@ -1071,13 +1071,26 @@ export class EkhoDb {
   }
 
   ackMessages(agentId: string, ackRows: Array<{ message_id: string; received_at: string }>) {
+    let updated = 0;
     const tx = this.db.transaction(() => {
       for (const ack of ackRows) {
-        this.db.prepare(
-          "UPDATE message_deliveries SET status = 'acked', acked_at = ? WHERE message_id = ? AND recipient_agent_id = ?"
+        // Only the agent's OWN delivery is touched. If nothing matched (the
+        // message wasn't delivered to this agent), the ack is a no-op — never
+        // flip a foreign/broadcast message's shared status off an unrelated ack.
+        const res = this.db.prepare(
+          "UPDATE message_deliveries SET status = 'acked', acked_at = ? WHERE message_id = ? AND recipient_agent_id = ? AND status != 'acked'"
         ).run(ack.received_at, ack.message_id, agentId);
+        if (res.changes === 0) continue;
+        updated += 1;
 
-        this.db.prepare("UPDATE messages SET status = 'acked' WHERE id = ?").run(ack.message_id);
+        // The message as a whole is 'acked' only once every recipient has acked
+        // (a broadcast stays pending until the last recipient does).
+        const pending = this.db.prepare(
+          "SELECT 1 FROM message_deliveries WHERE message_id = ? AND status != 'acked' LIMIT 1"
+        ).get(ack.message_id);
+        if (!pending) {
+          this.db.prepare("UPDATE messages SET status = 'acked' WHERE id = ?").run(ack.message_id);
+        }
 
         const message = this.db.prepare("SELECT fleet_id, conversation_id FROM messages WHERE id = ?").get(ack.message_id) as Record<string, unknown> | undefined;
         if (message) {
@@ -1088,7 +1101,7 @@ export class EkhoDb {
       }
     });
     tx();
-    return ackRows.length;
+    return updated;
   }
 
   insertHeartbeat(agentId: string, status: string, metrics: JsonValue) {
