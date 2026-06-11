@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
-import { timingSafeEqualStr } from "../src/utils";
+import { timingSafeEqualStr, sign } from "../src/utils";
 
 describe("timingSafeEqualStr", () => {
   it("matches equal strings and rejects unequal / different-length", () => {
@@ -16,6 +16,18 @@ describe("relay hardening", () => {
   let relay: TestRelay;
   beforeEach(async () => {
     relay = await createTestRelay();
+  });
+
+  it("rejects an operator token whose operator no longer exists in the DB", async () => {
+    // A structurally valid, correctly-HMAC'd token for an operator id that does
+    // not exist (e.g. deleted) — same fleet, real signature — must still fail.
+    const core = `op_ghost.${relay.fleetId}`;
+    const forged = `${core}.${sign("test-secret", core)}`;
+    const res = await relay.app.inject({
+      method: "GET", url: "/v1/operator/overview",
+      headers: { authorization: `Bearer ${forged}` }
+    });
+    expect(res.statusCode).toBe(401);
   });
 
   it("does not let an agent read or complete another agent's approval (IDOR)", async () => {

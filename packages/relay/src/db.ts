@@ -288,8 +288,16 @@ export class EkhoDb {
     if (!row || !timingSafeEqualStr(String(row.password_hash), hashSecret(password))) {
       return null;
     }
-
     return row;
+  }
+
+  /** Whether an operator id is a current member of the fleet — authoritative
+   *  authorization for operator session tokens (a deleted operator's token must
+   *  stop working even though its HMAC still verifies). */
+  operatorBelongsToFleet(operatorId: string, fleetId: string): boolean {
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM operators WHERE id = ? AND fleet_id = ? LIMIT 1").get(operatorId, fleetId)
+    );
   }
 
   issueEnrollmentToken(fleetId: string, operatorId: string) {

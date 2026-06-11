@@ -92,5 +92,11 @@ export async function requireOperatorAuth(request: FastifyRequest, reply: Fastif
     return unauthorized(reply, "invalid operator session");
   }
 
+  // The token asserts (operatorId, fleetId), but authorization must come from the
+  // DB — a deleted/reassigned operator's still-valid token must not keep access.
+  if (!db.operatorBelongsToFleet(operatorId, fleetId)) {
+    return unauthorized(reply, "operator not found");
+  }
+
   request.operator = { id: operatorId, fleetId };
 }
