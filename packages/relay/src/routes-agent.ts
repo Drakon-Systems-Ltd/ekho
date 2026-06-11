@@ -289,17 +289,18 @@ export async function registerAgentRoutes(app: FastifyInstance) {
 
   app.post("/v1/actions/result", { preHandler: requireAgentAuth }, async (request, reply) => {
     const parsed = actionResultSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: parsed.error.flatten() });
+    if (!parsed.success || !request.agent) {
+      return reply.code(parsed.success ? 401 : 400).send({ error: parsed.success ? "unauthorized" : parsed.error.flatten() });
     }
 
-    const ok = db.completeActionResult(parsed.data.approval_id, parsed.data.result, parsed.data.output);
+    const ok = db.completeActionResult(parsed.data.approval_id, request.agent.fleetId, request.agent.id, parsed.data.result, parsed.data.output);
     return reply.send({ ok });
   });
 
   app.get("/v1/actions/:approvalId", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
     const params = request.params as { approvalId: string };
-    const approval = db.getApprovalStatus(params.approvalId);
+    const approval = db.getApprovalStatus(params.approvalId, request.agent.fleetId, request.agent.id);
     if (!approval) {
       return reply.code(404).send({ error: "approval not found" });
     }

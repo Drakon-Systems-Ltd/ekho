@@ -1157,8 +1157,12 @@ export class EkhoDb {
     return { decision: "allow" as const };
   }
 
-  completeActionResult(approvalId: string, result: string, output: JsonValue) {
-    const approval = this.db.prepare("SELECT fleet_id, conversation_id, agent_id FROM approvals WHERE id = ?").get(approvalId) as Record<string, unknown> | undefined;
+  completeActionResult(approvalId: string, fleetId: string, agentId: string, result: string, output: JsonValue) {
+    // Scoped to the owning agent + fleet: an agent can only complete its own
+    // approval, never another agent's or another fleet's (IDOR).
+    const approval = this.db.prepare(
+      "SELECT fleet_id, conversation_id, agent_id FROM approvals WHERE id = ? AND fleet_id = ? AND agent_id = ?"
+    ).get(approvalId, fleetId, agentId) as Record<string, unknown> | undefined;
     if (!approval) {
       return false;
     }
@@ -1172,10 +1176,10 @@ export class EkhoDb {
     return true;
   }
 
-  getApprovalStatus(approvalId: string) {
+  getApprovalStatus(approvalId: string, fleetId: string, agentId: string) {
     const approval = this.db.prepare(
-      "SELECT id, status, action_type, risk_level, summary, requested_at, resolved_at FROM approvals WHERE id = ?"
-    ).get(approvalId) as Record<string, unknown> | undefined;
+      "SELECT id, status, action_type, risk_level, summary, requested_at, resolved_at FROM approvals WHERE id = ? AND fleet_id = ? AND agent_id = ?"
+    ).get(approvalId, fleetId, agentId) as Record<string, unknown> | undefined;
     return approval ?? null;
   }
 
