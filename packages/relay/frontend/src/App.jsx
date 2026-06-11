@@ -71,6 +71,7 @@ import {
 import { useAutoRefresh, useEdgeSwipeBack, useNow } from "./hooks";
 import { reconcileOptimistic } from "./optimistic.js";
 import { resolveOutgoingConversationId } from "./compose.js";
+import { isConnectionStale } from "./connection.js";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { getUnlocked } from "./operatorKeyStore.js";
 import { buildOperatorCanonical, signCanonical, randomNonce } from "./operatorKey.js";
@@ -301,6 +302,30 @@ export default function App() {
   // polls until the Typewriter signals completion (no mid-flight snap to full).
   const typingNow = useRef(new Set());
   const [, forceTick] = useState(0);
+
+  // Relay link health: lastOkRef is stamped on every successful poll; connStale
+  // flips true only after auto-refresh has failed for a few intervals (a real
+  // outage), so the header pill tells the truth instead of always reading green.
+  const [connStale, setConnStale] = useState(false);
+  const lastOkRef = useRef(Date.now());
+  function markConnectionOk() {
+    lastOkRef.current = Date.now();
+    setConnStale(false);
+  }
+  // Errors raised by the background auto-refresh: a 401 still ends the session,
+  // but a transient relay/network blip must mark the link stale — never spam a
+  // modal on every 5s tick.
+  function noteConnectionTrouble(error) {
+    if (error instanceof ApiError && error.status === 401) {
+      clearStoredSession();
+      setLoginTone("error");
+      setLoginStatus("Session expired. Log in again.");
+      return;
+    }
+    if (isConnectionStale(lastOkRef.current, Date.now(), POLL_INTERVAL_MS)) {
+      setConnStale(true);
+    }
+  }
   const markInit = (key) => {
     if (!initialized.current[key]) {
       initialized.current[key] = true;
@@ -354,7 +379,7 @@ export default function App() {
       setFleetHealth(result.agents || []);
       markInit("health");
     } catch (error) {
-      handleApiError(error, { allowSessionReset: true });
+      noteConnectionTrouble(error); // background refresh — mark stale, no modal
     }
   }
 
@@ -365,7 +390,7 @@ export default function App() {
       setTopology({ nodes: result.nodes || [], edges: result.edges || [], window_minutes: result.window_minutes || 60 });
       markInit("topology");
     } catch (error) {
-      handleApiError(error, { allowSessionReset: true });
+      noteConnectionTrouble(error); // background refresh — mark stale, no modal
     }
   }
 
@@ -376,7 +401,7 @@ export default function App() {
       setActivity(result.events || []);
       markInit("activity");
     } catch (error) {
-      handleApiError(error, { allowSessionReset: true });
+      noteConnectionTrouble(error); // background refresh — mark stale, no modal
     }
   }
 
@@ -505,7 +530,7 @@ export default function App() {
       const detail = await getAgentDetail(session.token, agentId);
       setAgentDetail(detail);
     } catch (error) {
-      handleApiError(error, { allowSessionReset: true });
+      noteConnectionTrouble(error); // background/selection refresh — mark stale, no modal
     }
   }
 
@@ -1031,7 +1056,7 @@ export default function App() {
         selectedConversationId ? refreshTimeline(selectedConversationId) : Promise.resolve(),
         selectedAgentId ? refreshAgentDetail(selectedAgentId) : Promise.resolve(),
         selectedAgentId ? refreshAgentRateLimits(selectedAgentId) : Promise.resolve(),
-      ]).catch((error) => handleApiError(error, { allowSessionReset: true }));
+      ]).then(markConnectionOk).catch(noteConnectionTrouble);
     },
     [session.token, selectedConversationId, selectedAgentId, agentSearch, agentStatusFilter]
   );
@@ -1228,9 +1253,12 @@ export default function App() {
           </div>
         </div>
         <div className="appbar__right">
-          <span className="sync-pill" title="Live — auto-syncing every 5s">
-            <LiveDot active />
-            synced
+          <span
+            className={`sync-pill${connStale ? " sync-pill--stale" : ""}`}
+            title={connStale ? "Relay link degraded — retrying every 5s" : "Live — auto-syncing every 5s"}
+          >
+            <LiveDot active={!connStale} />
+            {connStale ? "reconnecting…" : "synced"}
           </span>
           <button className="icon-button appbar__icon" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="Settings">
             <GearIcon />
