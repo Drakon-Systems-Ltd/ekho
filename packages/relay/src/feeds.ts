@@ -72,16 +72,25 @@ export function isAllowedFeedUrl(raw: string): boolean {
     return false;
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  // Strip brackets AND any trailing dot(s): "localhost." resolves to localhost
+  // but slips past an === "localhost" check, so a redirect could smuggle it.
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
   if (!host) return false;
+  // IPv6 (any host carrying a colon): allow ONLY global unicast (2000::/3, i.e.
+  // a first hextet 2xxx/3xxx). That single rule rejects loopback (::1),
+  // unspecified (::), ULA (fc00::/7), link-local (fe80::/10), and — crucially —
+  // every form that embeds an IPv4 address (IPv4-mapped ::ffff:a.b.c.d, IPv4-
+  // compatible ::a.b.c.d, NAT64 64:ff9b::/96), which would otherwise route to a
+  // private/loopback target and bypass the dotted-IPv4 rules below.
+  if (host.includes(":")) {
+    return /^[23][0-9a-f]{3}:/i.test(host);
+  }
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false;
-  if (host === "0.0.0.0" || host === "::1" || host === "::") return false;
+  if (host === "0.0.0.0") return false;
   if (/^127\./.test(host)) return false; // loopback
   if (/^10\./.test(host) || /^192\.168\./.test(host)) return false; // private
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false; // private
   if (/^169\.254\./.test(host)) return false; // link-local + 169.254.169.254 metadata
-  if (/^(f[cd])/i.test(host)) return false; // IPv6 unique-local fc00::/7
-  if (/^fe80:/i.test(host)) return false; // IPv6 link-local
   return true;
 }
 

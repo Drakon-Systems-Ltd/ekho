@@ -83,6 +83,30 @@ describe("isAllowedFeedUrl (SSRF guard)", () => {
       expect(isAllowedFeedUrl(u), u).toBe(false);
     }
   });
+
+  it("blocks IPv4-mapped / NAT64 IPv6 that smuggles a private target", () => {
+    for (const u of [
+      "http://[::ffff:127.0.0.1]/x",
+      "http://[::ffff:169.254.169.254]/latest/meta-data/",
+      "http://[::ffff:10.0.0.1]/x",
+      "http://[::ffff:192.168.1.1]/x",
+      "http://[::ffff:172.16.0.1]/x",
+      "http://[64:ff9b::127.0.0.1]/x"
+    ]) {
+      expect(isAllowedFeedUrl(u), u).toBe(false);
+    }
+  });
+
+  it("blocks trailing-dot localhost / .local FQDNs", () => {
+    expect(isAllowedFeedUrl("http://localhost./x")).toBe(false);
+    expect(isAllowedFeedUrl("http://foo.local./x")).toBe(false);
+  });
+
+  it("still allows genuinely public hosts (incl. global-unicast IPv6 and trailing-dot FQDN)", () => {
+    expect(isAllowedFeedUrl("https://techcrunch.com/feed/")).toBe(true);
+    expect(isAllowedFeedUrl("http://[2606:4700::1111]/x")).toBe(true); // Cloudflare, global unicast
+    expect(isAllowedFeedUrl("https://blog.example.com./rss")).toBe(true); // trailing-dot FQDN is legit
+  });
 });
 
 // M3 — redirects must be followed MANUALLY and re-validated each hop, so an
@@ -103,6 +127,12 @@ describe("resolveRedirectTarget", () => {
   });
   it("returns null for a missing Location header", () => {
     expect(resolveRedirectTarget("https://a.example/feed", null)).toBeNull();
+  });
+
+  it("blocks a redirect to an IPv4-mapped IPv6 or trailing-dot loopback", () => {
+    expect(resolveRedirectTarget("https://a.example/feed", "http://[::ffff:169.254.169.254]/latest/meta-data/")).toBeNull();
+    expect(resolveRedirectTarget("https://a.example/feed", "http://[::ffff:127.0.0.1]/x")).toBeNull();
+    expect(resolveRedirectTarget("https://a.example/feed", "http://localhost./secret")).toBeNull();
   });
 });
 
