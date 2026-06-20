@@ -613,6 +613,15 @@ def plan_floor_turn(kept, acquire, log=None):
     to_release: List[str] = []
     tails: Dict[str, Any] = {}
     for conv, msgs in by_conv.items():
+        # The floor serializes AGENT-to-agent turns so peers don't talk over each
+        # other. An operator-addressed turn (the operator messaging a room or
+        # broadcasting) must NOT be serialized — every addressed member should
+        # reply independently. So only contend for the floor when a PEER message
+        # triggered this conversation.
+        has_peer = any(getattr(m, "sender_kind", None) != "operator" for m in msgs)
+        if not has_peer:
+            floored.extend(msgs)
+            continue
         granted = True
         try:
             res = acquire(conv) or {}

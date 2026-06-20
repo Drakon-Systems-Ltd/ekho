@@ -194,12 +194,17 @@ describe("bounded peer delegation", () => {
 });
 
 describe("floor planning (turn-taking)", () => {
-  function fmsg(conv: string): any {
-    return { message_id: "m-" + conv, conversation_id: conv, sender_agent_id: "op", sender_kind: "operator", message_type: "direct", body: { text: "hi" } };
+  // Peer (agent→agent) message — the floor exists to serialize THESE.
+  function amsg(conv: string, sender = "jarvis"): any {
+    return { message_id: "a-" + conv, conversation_id: conv, sender_agent_id: sender, sender_kind: "agent", message_type: "direct", body: { text: "hi" } };
+  }
+  // Operator-addressed message — must bypass the floor so every member responds.
+  function omsg(conv: string): any {
+    return { message_id: "o-" + conv, conversation_id: conv, sender_agent_id: "op", sender_kind: "operator", message_type: "direct", body: { text: "hi" } };
   }
 
-  it("responds only to conversations where the floor was granted; defers the rest", async () => {
-    const kept = [fmsg("c1"), fmsg("c2")];
+  it("agent→agent: responds only where the floor was granted; defers the rest", async () => {
+    const kept = [amsg("c1"), amsg("c2")];
     const acquire = async (conv: string) =>
       conv === "c1" ? { granted: true, conversation_tail: [] } : { granted: false, holder_agent_id: "other" };
     const plan = await planFloorTurn(kept, acquire);
@@ -207,8 +212,8 @@ describe("floor planning (turn-taking)", () => {
     expect(plan.toRelease).toEqual(["c1"]);
   });
 
-  it("carries the fresh catch-up tail from the acquire response", async () => {
-    const kept = [fmsg("c1")];
+  it("agent→agent: carries the fresh catch-up tail from the acquire response", async () => {
+    const kept = [amsg("c1")];
     const acquire = async () => ({
       granted: true,
       conversation_tail: [{ message_id: "h1", sender_agent_id: "x", sender_kind: "agent", sender_label: "X", text: "earlier", created_at: "t" }]
@@ -217,18 +222,39 @@ describe("floor planning (turn-taking)", () => {
     expect(plan.tails["c1"][0].text).toBe("earlier");
   });
 
-  it("degrades to responding without a floor when the relay lacks the endpoint", async () => {
-    const kept = [fmsg("c1")];
+  it("agent→agent: degrades to responding without a floor when the relay lacks the endpoint", async () => {
+    const kept = [amsg("c1")];
     const acquire = async () => { throw new Error("404 not found"); };
     const plan = await planFloorTurn(kept, acquire);
     expect(plan.floored).toHaveLength(1);   // still responds (back-compat)
     expect(plan.toRelease).toEqual([]);     // nothing acquired -> nothing to release
   });
 
-  it("spawns no turn when every conversation is deferred", async () => {
-    const kept = [fmsg("c1"), fmsg("c2")];
+  it("agent→agent: spawns no turn when every conversation is deferred", async () => {
+    const kept = [amsg("c1"), amsg("c2")];
     const acquire = async () => ({ granted: false, holder_agent_id: "other" });
     const plan = await planFloorTurn(kept, acquire);
     expect(plan.floored).toEqual([]);
+  });
+
+  it("operator→ messages bypass the floor — every member responds without contending", async () => {
+    // The operator addressing a room/broadcast: each member should respond
+    // independently, so we must NOT contend for (or defer on) the shared floor.
+    const kept = [omsg("room1"), omsg("bcast")];
+    let acquired = 0;
+    const acquire = async () => { acquired++; return { granted: false, holder_agent_id: "other" }; };
+    const plan = await planFloorTurn(kept, acquire);
+    expect(acquired).toBe(0); // never contends for an operator turn
+    expect(plan.floored.map((m: any) => m.conversation_id)).toEqual(["room1", "bcast"]);
+    expect(plan.toRelease).toEqual([]);
+  });
+
+  it("still contends for the floor when a peer message shares the conversation", async () => {
+    const kept = [omsg("room1"), amsg("room1", "tars")]; // operator + peer in the same room
+    let acquired = 0;
+    const acquire = async () => { acquired++; return { granted: true, conversation_tail: [] }; };
+    const plan = await planFloorTurn(kept, acquire);
+    expect(acquired).toBe(1);
+    expect(plan.toRelease).toEqual(["room1"]);
   });
 });

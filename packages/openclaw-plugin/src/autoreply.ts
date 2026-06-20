@@ -495,6 +495,16 @@ export async function planFloorTurn(
   const toRelease: string[] = [];
   const tails: Record<string, MsgSnapshot[]> = {};
   for (const [conv, msgs] of byConv) {
+    // The floor serializes AGENT-to-agent turns so peers don't talk over each
+    // other. An operator-addressed turn (the operator messaging a room or
+    // broadcasting) must NOT be serialized — every addressed member should reply
+    // independently. So only contend for the floor when a PEER message triggered
+    // this conversation; a purely operator-triggered turn responds without it.
+    const hasPeer = msgs.some((m) => m.sender_kind !== "operator");
+    if (!hasPeer) {
+      floored.push(...msgs);
+      continue;
+    }
     let granted = true;
     try {
       const res = await acquire(conv);

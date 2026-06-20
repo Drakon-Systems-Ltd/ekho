@@ -716,8 +716,10 @@ def test_build_prompt_peer_uses_display_name_and_productivity_gate():
     assert "acknowledge" in prompt
 
 
-def test_plan_floor_turn_responds_only_to_granted_conversations():
-    kept = [_msg(conversation_id="c1"), _msg(conversation_id="c2")]
+def test_plan_floor_turn_agent_responds_only_to_granted_conversations():
+    # The floor serializes AGENT-to-agent turns.
+    kept = [_msg(conversation_id="c1", sender_kind="agent", sender_agent_id="jarvis"),
+            _msg(conversation_id="c2", sender_kind="agent", sender_agent_id="jarvis")]
 
     def acquire(conv):
         if conv == "c1":
@@ -730,7 +732,7 @@ def test_plan_floor_turn_responds_only_to_granted_conversations():
 
 
 def test_plan_floor_turn_carries_fresh_tail():
-    kept = [_msg(conversation_id="c1")]
+    kept = [_msg(conversation_id="c1", sender_kind="agent", sender_agent_id="jarvis")]
 
     def acquire(conv):
         return {"granted": True, "conversation_tail": [
@@ -742,7 +744,7 @@ def test_plan_floor_turn_carries_fresh_tail():
 
 
 def test_plan_floor_turn_degrades_without_floor_endpoint():
-    kept = [_msg(conversation_id="c1")]
+    kept = [_msg(conversation_id="c1", sender_kind="agent", sender_agent_id="jarvis")]
 
     def acquire(conv):
         raise RuntimeError("404 not found")
@@ -750,3 +752,33 @@ def test_plan_floor_turn_degrades_without_floor_endpoint():
     floored, to_release, _ = plan_floor_turn(kept, acquire)
     assert len(floored) == 1   # still responds (back-compat)
     assert to_release == []     # nothing acquired -> nothing to release
+
+
+def test_plan_floor_turn_operator_messages_bypass_floor():
+    # The operator addressing a room/broadcast: each member replies independently,
+    # so we must NOT contend for (or defer on) the shared floor.
+    kept = [_msg(conversation_id="room1"), _msg(conversation_id="bcast")]  # both operator
+    calls = {"n": 0}
+
+    def acquire(conv):
+        calls["n"] += 1
+        return {"granted": False, "holder_agent_id": "other"}
+
+    floored, to_release, _ = plan_floor_turn(kept, acquire)
+    assert calls["n"] == 0  # never contends for an operator turn
+    assert [m.conversation_id for m in floored] == ["room1", "bcast"]
+    assert to_release == []
+
+
+def test_plan_floor_turn_contends_when_peer_shares_conversation():
+    kept = [_msg(conversation_id="room1"),  # operator
+            _msg(conversation_id="room1", sender_kind="agent", sender_agent_id="tars")]
+    calls = {"n": 0}
+
+    def acquire(conv):
+        calls["n"] += 1
+        return {"granted": True, "conversation_tail": []}
+
+    _, to_release, _ = plan_floor_turn(kept, acquire)
+    assert calls["n"] == 1
+    assert to_release == ["room1"]
