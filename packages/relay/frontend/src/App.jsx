@@ -1480,7 +1480,7 @@ export default function App() {
             ) : null}
 
             <div className="composer__row">
-              <select className="composer__recipient" value={composerRecipient} onChange={(e) => { const v = e.target.value; if (v === "__manage_rooms__") { setRoomModalOpen(true); } else { setComposerRecipient(v); } }}>
+              <select className="composer__recipient" value={composerRecipient} onChange={(e) => { const v = e.target.value; if (v === "__manage_rooms__") { setRoomModalOpen(true); return; } setComposerRecipient(v); if (v.startsWith("room:")) setSelectedConversationId(v.slice("room:".length)); }}>
                 {recipientOptions.map((o) => (
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
@@ -1835,6 +1835,11 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
         const isOp = item.side === "operator";
         const label = isOp ? "Operator" : nameFor(item.senderId);
         const accent = isOp ? null : colorForAgent(item.senderId, settings);
+        // Agent→agent chatter: a message FROM an agent addressed to another agent
+        // (recipient is an agent and not the synthetic operator). Highlighted
+        // distinctly so peer coordination stands out from agent↔operator talk.
+        const isPeer = item.side === "agent" && item.recipientKind === "agent"
+          && item.recipientId && !String(item.recipientId).startsWith("op_");
 
         // Reveal a genuinely new agent message with the typewriter: not seen
         // before AND created within the freshness window (scrollback/history and
@@ -1852,16 +1857,17 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
 
         const bubbleStyle = !isOp && accent ? { borderColor: `${accent}55` } : undefined;
         return (
-          <div className={`bubble-row${isOp ? " bubble-row--op" : ""}${grouped ? " bubble-row--grouped" : ""}`} key={key}>
+          <div className={`bubble-row${isOp ? " bubble-row--op" : ""}${isPeer ? " bubble-row--peer" : ""}${grouped ? " bubble-row--grouped" : ""}`} key={key}>
             {!isOp && !grouped ? <Avatar id={item.senderId} label={label} size={30} color={accent} /> : <span className="bubble-spacer" />}
             <div className="bubble-col">
               {!grouped ? (
                 <div className="bubble-meta">
                   <span className="bubble-meta__name" style={!isOp && accent ? { color: accent } : undefined}>{label}</span>
+                  {isPeer ? <span className="bubble-meta__peer">→ {nameFor(item.recipientId)}</span> : null}
                   <span className="bubble-meta__time mono">{clockTime(item.createdAt)}</span>
                 </div>
               ) : null}
-              <div className={`bubble${isOp ? " bubble--op" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`} style={bubbleStyle}>
+              <div className={`bubble${isOp ? " bubble--op" : ""}${isPeer ? " bubble--peer" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`} style={bubbleStyle}>
                 {item.text ? (
                   <div className="bubble__text">
                     {shouldType ? (
