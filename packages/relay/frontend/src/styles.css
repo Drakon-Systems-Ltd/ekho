@@ -291,6 +291,8 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
    scan apart from agent↔operator talk. */
 .bubble--peer { background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.34); border-left: 2px solid #a78bfa; }
 .bubble-meta__peer { font-size: 11px; font-weight: 600; color: #a78bfa; }
+/* Feed items: a muted, context stream of headlines (one-way ingest). */
+.bubble--feed { background: rgba(255, 255, 255, 0.02); border-style: dashed; color: var(--muted); }
 .bubble--pending { opacity: 0.6; }
 
 /* WhatsApp-style delivery ticks (operator messages) */

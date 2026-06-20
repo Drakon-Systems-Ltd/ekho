@@ -1936,7 +1936,62 @@ export class EkhoDb {
     return { agent, recentEvents, controls, recentMessages };
   }
 
+  /**
+   * A feed conversation's items are delivered as messages but never record a
+   * message.queued event, so the event timeline would only show "delivered"
+   * receipts. Render the actual feed items (headlines) from the messages table
+   * instead, shaped as message.queued rows the frontend already draws as bubbles.
+   * Returns the NEWEST page (chronological) so a capped limit shows recent items.
+   */
+  private getFeedConversation(
+    fleetId: string,
+    conversationId: string,
+    options?: { search?: string; limit?: number; offset?: number }
+  ) {
+    const limit = options?.limit ?? 100;
+    const offset = options?.offset ?? 0;
+    const search = this.buildLikeSearch(options?.search);
+    const where = ["fleet_id = ?", "conversation_id = ?"];
+    const params: Array<string | number> = [fleetId, conversationId];
+    if (search) {
+      where.push("LOWER(COALESCE(body_json, '')) LIKE ? ESCAPE '\\'");
+      params.push(search);
+    }
+    const whereSql = where.join(" AND ");
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM messages WHERE ${whereSql}`).get(...params) as { count: number }).count;
+    const rows = this.db.prepare(
+      `SELECT id, sender_agent_id, recipient_kind, recipient_id, body_json, created_at
+       FROM messages WHERE ${whereSql}
+       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset) as Array<Record<string, unknown>>;
+    rows.reverse(); // chronological (oldest -> newest) for display
+    const items = rows.map((m) => {
+      let body: Record<string, unknown> = {};
+      try { body = (JSON.parse(String(m.body_json)) as Record<string, unknown>) || {}; } catch { /* non-JSON body */ }
+      const feedName = typeof body.feed === "string" && body.feed ? body.feed : "Feed";
+      return {
+        id: String(m.id),
+        event_type: "message.queued",
+        actor_kind: "feed",
+        actor_id: "feed",
+        resource_kind: "message",
+        resource_id: String(m.id),
+        conversation_id: conversationId,
+        payload_json: JSON.stringify({ text: body.text ?? "", feed: feedName, link: body.link, message_type: "feed", sender_label: feedName }),
+        created_at: m.created_at,
+        message_body_json: m.body_json,
+        message_sender_id: m.sender_agent_id,
+        message_recipient_kind: m.recipient_kind,
+        message_recipient_id: m.recipient_id
+      };
+    });
+    return { items, total };
+  }
+
   getConversation(fleetId: string, conversationId: string, options?: { search?: string; type?: string; dateFrom?: string; dateTo?: string; sortBy?: string; sortOrder?: string; limit?: number; offset?: number }) {
+    if (conversationId.startsWith("feed-")) {
+      return this.getFeedConversation(fleetId, conversationId, options);
+    }
     const search = this.buildLikeSearch(options?.search);
     const type = options?.type && options.type !== "all" ? `${options.type}.%` : undefined;
     const dateFrom = this.normalizeDateStart(options?.dateFrom);

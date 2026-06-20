@@ -102,6 +102,10 @@ function describeEvent(event) {
   const type = event.event_type || "";
   const isOperator = event.actor_kind === "operator" || payload.sender_label === "Operator";
   const isMessage = type === "message.queued";
+  // Feed items (rendered from messages by getFeedConversation) — a one-way news
+  // stream, labelled by the feed name rather than an agent/operator.
+  const isFeed = isMessage && (event.actor_kind === "feed" || payload.message_type === "feed");
+  const feedName = isFeed ? (payload.feed || "Feed") : undefined;
   const isSystem = !isMessage && (event.actor_kind === "system" || /^(approval|policy|agent)\./.test(type));
 
   // Prefer the real message body (attached by the API for agent + operator
@@ -132,6 +136,8 @@ function describeEvent(event) {
     id: event.id,
     kind: isSystem ? "system" : "message",
     side: isOperator ? "operator" : "agent",
+    feed: isFeed,
+    feedName,
     senderId: event.actor_id || "system",
     // Display name is resolved later from the live agents map; fall back to the id.
     senderLabel: isOperator ? "Operator" : event.actor_id || "system",
@@ -1833,8 +1839,9 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
           );
         }
         const isOp = item.side === "operator";
-        const label = isOp ? "Operator" : nameFor(item.senderId);
-        const accent = isOp ? null : colorForAgent(item.senderId, settings);
+        const isFeed = Boolean(item.feed);
+        const label = isOp ? "Operator" : isFeed ? `📰 ${item.feedName}` : nameFor(item.senderId);
+        const accent = isOp || isFeed ? null : colorForAgent(item.senderId, settings);
         // Agent→agent chatter: a message FROM an agent addressed to another agent
         // (recipient is an agent and not the synthetic operator). Highlighted
         // distinctly so peer coordination stands out from agent↔operator talk.
@@ -1851,14 +1858,15 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
         const id = item.messageId;
         const done = id && animatedIds.current.has(id);
         const inFlight = id && typingNow.current.has(id);
-        const startNew = animate && !isOp && id && isFresh && !done && !inFlight && !item.pending;
+        // Feeds are a one-way news stream — render them instantly, never typed.
+        const startNew = animate && !isOp && !isFeed && id && isFresh && !done && !inFlight && !item.pending;
         if (startNew) typingNow.current.add(id);
-        const shouldType = animate && !isOp && id && !done && (inFlight || startNew);
+        const shouldType = animate && !isOp && !isFeed && id && !done && (inFlight || startNew);
 
-        const bubbleStyle = !isOp && accent ? { borderColor: `${accent}55` } : undefined;
+        const bubbleStyle = !isOp && !isFeed && accent ? { borderColor: `${accent}55` } : undefined;
         return (
-          <div className={`bubble-row${isOp ? " bubble-row--op" : ""}${isPeer ? " bubble-row--peer" : ""}${grouped ? " bubble-row--grouped" : ""}`} key={key}>
-            {!isOp && !grouped ? <Avatar id={item.senderId} label={label} size={30} color={accent} /> : <span className="bubble-spacer" />}
+          <div className={`bubble-row${isOp ? " bubble-row--op" : ""}${isPeer ? " bubble-row--peer" : ""}${isFeed ? " bubble-row--feed" : ""}${grouped ? " bubble-row--grouped" : ""}`} key={key}>
+            {!isOp && !grouped ? <Avatar id={isFeed ? "feed" : item.senderId} label={label} size={30} color={accent} /> : <span className="bubble-spacer" />}
             <div className="bubble-col">
               {!grouped ? (
                 <div className="bubble-meta">
@@ -1867,7 +1875,7 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
                   <span className="bubble-meta__time mono">{clockTime(item.createdAt)}</span>
                 </div>
               ) : null}
-              <div className={`bubble${isOp ? " bubble--op" : ""}${isPeer ? " bubble--peer" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`} style={bubbleStyle}>
+              <div className={`bubble${isOp ? " bubble--op" : ""}${isPeer ? " bubble--peer" : ""}${isFeed ? " bubble--feed" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`} style={bubbleStyle}>
                 {item.text ? (
                   <div className="bubble__text">
                     {shouldType ? (
