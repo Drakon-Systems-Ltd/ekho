@@ -31,6 +31,7 @@ from ekho_hermes.autoreply import (
     plan_floor_turn,
     process_inbox_once,
     record_batch,
+    record_peer_usage,
     reset_cache,
     reset_peer_latch,
     resolve_python_exe,
@@ -782,3 +783,111 @@ def test_plan_floor_turn_contends_when_peer_shares_conversation():
     _, to_release, _ = plan_floor_turn(kept, acquire)
     assert calls["n"] == 1
     assert to_release == ["room1"]
+
+
+# --- budget-awareness in the prompt ----------------------------------------
+
+
+def test_build_prompt_includes_budget_line_with_remaining():
+    # The peer-woken agent is told its turn number and how many wakes remain.
+    prompt = build_prompt(
+        [_peer(0)],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 5},
+    )
+    assert "Bounded delegation: peer turn 1 of 6 in this conversation" in prompt
+    assert "5 wake(s) left" in prompt
+    assert "front-load" in prompt
+
+
+def test_build_prompt_budget_line_counts_down():
+    # After 4 consumed of 6, this (5th) wake leaves 2.
+    prompt = build_prompt(
+        [_peer(0)],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 2},
+    )
+    assert "peer turn 4 of 6" in prompt
+    assert "2 wake(s) left" in prompt
+
+
+def test_build_prompt_no_budget_line_without_remaining_map():
+    # Operator-only / older callers pass no map -> no budget line at all.
+    prompt = build_prompt([_msg()], operator_trusted=True)
+    assert "Bounded delegation" not in prompt
+
+
+def test_build_prompt_budget_line_reenergised_when_operator_in_batch():
+    # An operator message in the same conversation re-energises the latch, so the
+    # line says so rather than counting down toward an auto-pause.
+    op = _msg(message_id="o1", sender_kind="operator", sender_agent_id="op",
+              conversation_id="proj-1")
+    prompt = build_prompt(
+        [op, _peer(0)],
+        operator_trusted=True,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 5},
+    )
+    assert "re-energising this conversation's peer budget" in prompt
+    assert "peer turn 1 of 6" in prompt
+
+
+def test_build_prompt_budget_line_once_per_conversation():
+    # Two peer messages in the same conversation -> a single budget line.
+    p1 = _peer(0)
+    p2 = _peer(1)  # same conversation_id "proj-1"
+    prompt = build_prompt(
+        [p1, p2],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 4},
+    )
+    assert prompt.count("Bounded delegation:") == 1
+
+
+def _prompt_recorder(captured):
+    """A spawn that captures the one-shot prompt argv (cmd[-1])."""
+    def spawn(cmd, env):
+        captured.append(cmd[-1])
+    return spawn
+
+
+def test_tick_threads_budget_into_spawned_prompt():
+    captured = []
+    inbox = InboxResponse(
+        messages=[_peer(0)], controls=[], operator_trusted=False, roster=[],
+        peer_autoreply=True, peer_turn_budget=6,
+    )
+    summary = process_inbox_once(
+        FakeClient(inbox), "self", _state(),
+        spawn=_prompt_recorder(captured), now=0.0,
+    )
+    assert summary["spawned"] == 1
+    assert captured, "expected a spawned turn"
+    assert "Bounded delegation: peer turn 1 of 6 in this conversation" in captured[0]
+    assert "5 wake(s) left" in captured[0]
+
+
+def test_tick_records_peer_usage_for_ekho_inbox():
+    inbox = InboxResponse(
+        messages=[_peer(0)], controls=[], operator_trusted=False, roster=[],
+        peer_autoreply=True, peer_turn_budget=6,
+    )
+    process_inbox_once(
+        FakeClient(inbox), "self", _state(),
+        spawn=_spawn_recorder([]), now=0.0,
+    )
+    cached = get_cached_inbox()
+    assert cached["peer_autoreply"] is True
+    assert cached["peer_turn_budget"] == 6
+    assert cached["peer_turns_used"].get("proj-1") == 1  # one wake consumed
+
+
+def test_record_peer_usage_snapshot_is_isolated():
+    # The snapshot must be a copy — later state mutations don't leak into the cache.
+    live = {"c1": 2}
+    record_peer_usage(live)
+    live["c1"] = 99
+    assert get_cached_inbox()["peer_turns_used"]["c1"] == 2

@@ -75,4 +75,20 @@ describe("atomic enrollment-token consumption", () => {
     });
     expect(created).toBeNull();
   });
+
+  // Peer auto-reply ON by default: a freshly enrolled agent must land peer-ON even
+  // on a migrated DB (where the column was created DEFAULT 0), so the INSERT sets
+  // peer_autoreply = 1 explicitly rather than relying on the column default.
+  it("enrolls new agents with peer auto-reply ON by default", () => {
+    const token = relay.db.issueEnrollmentToken(relay.fleetId, relay.operatorId);
+    const created = relay.db.createAgentFromEnrollment({
+      fleetId: relay.fleetId, token, displayName: "fresh", runtime: "custom"
+    });
+    expect(created).not.toBeNull();
+    const row = relay.db.raw()
+      .prepare("SELECT peer_autoreply, peer_turn_budget FROM agents WHERE id = ?")
+      .get(created!.agentId) as { peer_autoreply: number; peer_turn_budget: number };
+    expect(row.peer_autoreply).toBe(1);
+    expect(row.peer_turn_budget).toBe(6); // budget default unchanged
+  });
 });

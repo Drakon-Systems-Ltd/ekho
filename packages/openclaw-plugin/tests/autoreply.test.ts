@@ -8,6 +8,8 @@ import {
   planFloorTurn,
   createAutoReplyState,
   effectivePeerSettings,
+  recordPeerUsage,
+  getCachedInbox,
   DEFAULT_PEER_TURN_BUDGET
 } from "../src/autoreply";
 
@@ -175,6 +177,52 @@ describe("bounded peer delegation", () => {
     expect(DEFAULT_PEER_TURN_BUDGET).toBe(6);
   });
 
+  it("tells a peer-woken agent how much turn budget remains", () => {
+    const m = msg({ sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const batch = { messages: [m], operator_trusted: false, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self", 6, { "proj-1": 5 });
+    expect(p).toContain("Bounded delegation: peer turn 1 of 6 in this conversation");
+    expect(p).toContain("5 wake(s) left");
+    expect(p).toContain("front-load");
+  });
+
+  it("counts the budget line down as turns are consumed", () => {
+    const m = msg({ sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const batch = { messages: [m], operator_trusted: false, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self", 6, { "proj-1": 2 });
+    expect(p).toContain("peer turn 4 of 6");
+    expect(p).toContain("2 wake(s) left");
+  });
+
+  it("omits the budget line when no remaining map is passed", () => {
+    const p = buildPrompt([msg()], { messages: [msg()], operator_trusted: true, roster: [] } as any);
+    expect(p).not.toContain("Bounded delegation");
+  });
+
+  it("says the budget was re-energised when an operator shares the conversation", () => {
+    const op = msg({ message_id: "o1", conversation_id: "proj-1" });
+    const peer = msg({ message_id: "p1", sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const batch = { messages: [op, peer], operator_trusted: true, roster: [] } as any;
+    const p = buildPrompt([op, peer], batch, undefined, "self", 6, { "proj-1": 5 });
+    expect(p).toContain("re-energising this conversation's peer budget");
+    expect(p).toContain("peer turn 1 of 6");
+  });
+
+  it("emits a single budget line per conversation", () => {
+    const p1 = msg({ message_id: "p1", sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const p2 = msg({ message_id: "p2", sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const batch = { messages: [p1, p2], operator_trusted: false, roster: [] } as any;
+    const p = buildPrompt([p1, p2], batch, undefined, "self", 6, { "proj-1": 4 });
+    expect(p.split("Bounded delegation:").length - 1).toBe(1);
+  });
+
+  it("the bootstrap default is now peer-ON (relay omits the field)", () => {
+    // Mirrors connection.ts `config?.peerAutoreply ?? true`: with no console
+    // override and the new ON default, the agent lands peer-enabled.
+    expect(effectivePeerSettings({}, { peerEnabled: true, peerTurnBudget: 6 }))
+      .toEqual({ peerEnabled: true, peerTurnBudget: 6 });
+  });
+
   it("relay value overrides the bootstrap default (live console control)", () => {
     expect(effectivePeerSettings({ peer_autoreply: true }, { peerEnabled: false, peerTurnBudget: 6 }))
       .toEqual({ peerEnabled: true, peerTurnBudget: 6 });
@@ -256,5 +304,21 @@ describe("floor planning (turn-taking)", () => {
     const plan = await planFloorTurn(kept, acquire);
     expect(acquired).toBe(1);
     expect(plan.toRelease).toEqual(["room1"]);
+  });
+});
+
+describe("ekho_inbox budget surfacing", () => {
+  it("snapshots per-conversation peer usage for a manual inbox read", () => {
+    recordPeerUsage(new Map([["proj-1", 2], ["proj-2", 5]]));
+    const cached = getCachedInbox();
+    expect(cached.peer_turns_used["proj-1"]).toBe(2);
+    expect(cached.peer_turns_used["proj-2"]).toBe(5);
+  });
+
+  it("the snapshot is isolated — later state mutations don't leak in", () => {
+    const live = new Map([["c1", 2]]);
+    recordPeerUsage(live);
+    live.set("c1", 99);
+    expect(getCachedInbox().peer_turns_used["c1"]).toBe(2);
   });
 });
