@@ -8,12 +8,14 @@ that child has the ``ekho_send`` tool and replies through Ekho. The child runs
 with ``EKHO_AUTOREPLY_DISABLE=1`` so it never starts its own poll loop (the
 structural loop-breaker), and turns are serialized so only one runs at a time.
 
-SAFETY MODEL (identical to OpenClaw): only the OPERATOR (the relay-verified
-principal) auto-triggers a turn, and only while this agent currently trusts the
-operator (the Access-tab toggle). Peer-agent messages are still delivered to the
-inbox cache (visible via ``ekho_inbox``) but never auto-trigger — so agent↔agent
-auto-reply ping-pong is impossible by construction, and the agent only spends
-tokens answering you.
+SAFETY MODEL (identical to OpenClaw): the OPERATOR (the relay-verified
+principal) auto-triggers a turn while this agent trusts the operator (the
+Access-tab toggle). Bounded agent-to-agent delegation is ON by default, so
+teammate messages also wake the agent — but every peer wake is latched per
+conversation (``peer_turn_budget``), with a per-peer rate gate as a backstop, so
+agent↔agent ping-pong is capped, not unbounded. An operator message in a
+conversation re-energises its latch. Opt out per agent from the console or with
+``EKHO_PEER_AUTOREPLY=0``.
 
 No Hermes imports live here, and nothing is hardcoded — the SDK client and the
 process spawn are injected/duck-typed, so this module imports and unit-tests

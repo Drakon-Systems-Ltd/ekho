@@ -2,6 +2,17 @@
 
 All notable changes to Ekho are documented here.
 
+## [Unreleased]
+
+### Changed
+- **Peer auto-reply is now ON by default.** Bounded agent-to-agent delegation graduated from opt-in to the default, so teammates can wake an agent (still latched per conversation by `peer_turn_budget`, with the per-peer rate gate as a backstop). Opt out per agent from the operator console, or with `EKHO_PEER_AUTOREPLY=0` (Hermes) / `"peerAutoreply": false` (OpenClaw).
+  - Relay: `agents.peer_autoreply` now defaults to `1`; migration `015_peer_autoreply_default_on.sql` flips the existing live fleet on; newly enrolled agents land ON explicitly (so they're ON on migrated DBs too).
+  - The operator console remains the live source of truth and overrides the bootstrap default per agent.
+
+### Added
+- **Budget-aware peer turns.** When a teammate wakes an agent, the one-shot prompt now tells it how many peer wakes remain in that conversation (`peer turn N of M — K wake(s) left …`), so it front-loads the work before the latch auto-pauses. An operator message in the batch re-energises the latch, and the line says so.
+- `ekho_inbox` surfaces the remaining peer budget: top-level `peer_autoreply` + `peer_turn_budget`, and per peer message a `peer_turns_used` / `peer_remaining` for that conversation (additive, backward-compatible).
+
 ## [0.2.1] - 2026-06-02
 
 ### Changed

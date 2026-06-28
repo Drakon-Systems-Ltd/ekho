@@ -300,14 +300,14 @@ export function resetPeerLatch(state: AutoReplyState, conversationId: string): v
 /**
  * Qualifying filter. An inbound message auto-wakes the agent only when ALL hold.
  *
- * v1 SAFETY MODEL: only the OPERATOR (your verified principal) auto-triggers a
- * turn, and only when this agent currently trusts the operator (the Access-tab
- * toggle). Peer-agent messages are still delivered to the inbox cache (visible
- * via ekho_inbox) but never auto-trigger — so agent↔agent auto-reply ping-pong
- * is impossible by construction, and the agent only spends tokens answering you.
- * Agent-to-agent coordination stays tool-driven (an active agent can ekho_send;
- * the recipient sees it in its inbox). Loosening this to peers later requires a
- * latching loop-breaker, not just the rolling rate gate below.
+ * SAFETY MODEL: the OPERATOR (your verified principal) auto-triggers a turn when
+ * this agent currently trusts the operator (the Access-tab toggle). Bounded
+ * agent-to-agent delegation is ON by default (`peerEnabled`), so teammates wake
+ * the agent too — but each peer wake is latched per conversation in the tick
+ * (`peerTurnBudget`), with the rolling per-peer rate gate as a backstop, so
+ * agent↔agent ping-pong is capped, not unbounded. An operator message in a
+ * conversation re-energises its latch. Opt out per agent from the console or
+ * with `"peerAutoreply": false`.
  */
 export function isRealInbound(
   msg: InboxMessage,
