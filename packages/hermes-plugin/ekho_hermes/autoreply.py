@@ -453,7 +453,18 @@ def _budget_note(turn: int, budget: int, remaining: int, reenergised: bool) -> s
     """One concise budget-awareness line for a peer-triggered conversation, so the
     woken agent knows how many peer wakes remain before the latch auto-pauses and
     can front-load the work. ``reenergised`` covers the case where an operator
-    message in the same batch just reset the latch."""
+    message in the same batch just reset the latch. When ``remaining`` is 0 this
+    is the LAST auto-wake before the latch closes, so the line tells the agent to
+    finish, hand off, or sign off cleanly — never to stop mid-task silently."""
+    if remaining <= 0:
+        return (
+            f"\n    Bounded delegation: peer turn {turn} of {budget} — this is your "
+            f"LAST auto-wake in this thread before it pauses. Finish the task now, or "
+            f"hand it off cleanly (a handoff/claim/complete refreshes the budget and "
+            f"keeps the thread alive), or send one clear message stating where things "
+            f"stand and that you're pausing for the operator — do NOT stop mid-task "
+            f"without a word."
+        )
     if reenergised:
         return (
             f"\n    Bounded delegation: the operator just re-engaged, re-energising "

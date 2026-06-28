@@ -478,6 +478,18 @@ function historyBlock(batch: InboxBatch, names: Map<string, string>): string {
  * message in the same batch just reset the latch.
  */
 function budgetNote(turn: number, budget: number, remaining: number, reenergised: boolean): string {
+  if (remaining <= 0) {
+    // Last auto-wake before the latch closes: finish, hand off, or sign off
+    // cleanly — never stop mid-task silently.
+    return (
+      `\n    Bounded delegation: peer turn ${turn} of ${budget} — this is your ` +
+      `LAST auto-wake in this thread before it pauses. Finish the task now, or ` +
+      `hand it off cleanly (a handoff/claim/complete refreshes the budget and ` +
+      `keeps the thread alive), or send one clear message stating where things ` +
+      `stand and that you're pausing for the operator — do NOT stop mid-task ` +
+      `without a word.`
+    );
+  }
   if (reenergised) {
     return (
       `\n    Bounded delegation: the operator just re-engaged, re-energising this ` +

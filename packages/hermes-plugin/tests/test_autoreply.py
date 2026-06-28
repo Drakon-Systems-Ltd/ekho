@@ -925,6 +925,36 @@ def test_build_prompt_budget_line_once_per_conversation():
     assert prompt.count("Bounded delegation:") == 1
 
 
+# --- Feature 2: graceful last turn ------------------------------------------
+
+
+def test_build_prompt_last_turn_line_when_remaining_zero():
+    # remaining-after == 0 -> this is the last auto-wake before the latch closes,
+    # so the agent is told to finish or hand off cleanly, never stop mid-task.
+    prompt = build_prompt(
+        [_peer(0)],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 0},
+    )
+    assert "LAST auto-wake in this thread before it pauses" in prompt
+    assert "do NOT stop mid-task without a word" in prompt
+    assert "peer turn 6 of 6" in prompt
+    # The normal countdown line is replaced, not also shown.
+    assert "wake(s) left before it auto-pauses" not in prompt
+
+
+def test_build_prompt_normal_budget_line_when_remaining_positive():
+    prompt = build_prompt(
+        [_peer(0)],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 3},
+    )
+    assert "LAST auto-wake" not in prompt
+    assert "3 wake(s) left" in prompt
+
+
 def _prompt_recorder(captured):
     """A spawn that captures the one-shot prompt argv (cmd[-1])."""
     def spawn(cmd, env):
