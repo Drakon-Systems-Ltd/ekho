@@ -137,6 +137,9 @@ def format_inbox(
     operator_trusted: bool,
     roster: Optional[Sequence[Any]] = None,
     verifications: Optional[Dict[str, Any]] = None,
+    peer_autoreply: bool = False,
+    peer_turn_budget: Optional[int] = None,
+    peer_turns_used: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Shape an inbox batch into the dict ``ekho_inbox`` returns.
 
@@ -164,6 +167,16 @@ def format_inbox(
         attachments = _message_get(message, "attachment_local_paths")
         if attachments:
             base["attachments"] = attachments
+
+        # Bounded-delegation budget left for this peer conversation, so a manual
+        # inbox read shows how many more times a teammate can wake this agent
+        # before the latch auto-pauses. Additive + peer-only.
+        if from_kind == "agent" and peer_turn_budget:
+            conv = _message_get(message, "conversation_id")
+            used = int((peer_turns_used or {}).get(conv, 0))
+            base["peer_turns_used"] = used
+            base["peer_turn_budget"] = int(peer_turn_budget)
+            base["peer_remaining"] = max(0, int(peer_turn_budget) - used)
 
         # The agent-computed verdict (if verification ran). reason == "unsigned"
         # means no signature was present → fall through to relay-attested labels.
@@ -206,6 +219,10 @@ def format_inbox(
     return {
         "count": len(formatted),
         "operator_trusted": bool(operator_trusted),
+        # Bounded delegation, surfaced top-level so the agent can reason about its
+        # peer budget even before reading individual messages.
+        "peer_autoreply": bool(peer_autoreply),
+        "peer_turn_budget": int(peer_turn_budget) if peer_turn_budget else None,
         "messages": formatted,
         "roster": _format_roster(roster),
     }

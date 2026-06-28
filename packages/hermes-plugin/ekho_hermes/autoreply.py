@@ -8,12 +8,14 @@ that child has the ``ekho_send`` tool and replies through Ekho. The child runs
 with ``EKHO_AUTOREPLY_DISABLE=1`` so it never starts its own poll loop (the
 structural loop-breaker), and turns are serialized so only one runs at a time.
 
-SAFETY MODEL (identical to OpenClaw): only the OPERATOR (the relay-verified
-principal) auto-triggers a turn, and only while this agent currently trusts the
-operator (the Access-tab toggle). Peer-agent messages are still delivered to the
-inbox cache (visible via ``ekho_inbox``) but never auto-trigger — so agent↔agent
-auto-reply ping-pong is impossible by construction, and the agent only spends
-tokens answering you.
+SAFETY MODEL (identical to OpenClaw): the OPERATOR (the relay-verified
+principal) auto-triggers a turn while this agent trusts the operator (the
+Access-tab toggle). Bounded agent-to-agent delegation is ON by default, so
+teammate messages also wake the agent — but every peer wake is latched per
+conversation (``peer_turn_budget``), with a per-peer rate gate as a backstop, so
+agent↔agent ping-pong is capped, not unbounded. An operator message in a
+conversation re-energises its latch. Opt out per agent from the console or with
+``EKHO_PEER_AUTOREPLY=0``.
 
 No Hermes imports live here, and nothing is hardcoded — the SDK client and the
 process spawn are injected/duck-typed, so this module imports and unit-tests
@@ -87,6 +89,12 @@ _last_batch_meta: Dict[str, Any] = {
     "controls": [],
     # message_id -> VerificationResult, so ekho_inbox can show truthful labels.
     "verifications": {},
+    # Bounded-delegation state, so a manual ekho_inbox read shows how much peer
+    # budget is left: the effective cap, the on/off flag, and per-conversation
+    # consumed counts (conversation_id -> turns used).
+    "peer_autoreply": False,
+    "peer_turn_budget": DEFAULT_PEER_TURN_BUDGET,
+    "peer_turns_used": {},
 }
 
 
@@ -98,6 +106,9 @@ def reset_cache() -> None:
         _last_batch_meta["roster"] = []
         _last_batch_meta["controls"] = []
         _last_batch_meta["verifications"] = {}
+        _last_batch_meta["peer_autoreply"] = False
+        _last_batch_meta["peer_turn_budget"] = DEFAULT_PEER_TURN_BUDGET
+        _last_batch_meta["peer_turns_used"] = {}
 
 
 def record_verifications(verifications: Dict[str, Any]) -> None:
@@ -120,6 +131,16 @@ def record_batch(inbox: Any) -> None:
         )
         _last_batch_meta["roster"] = list(getattr(inbox, "roster", []) or [])
         _last_batch_meta["controls"] = list(getattr(inbox, "controls", []) or [])
+        # Bounded-delegation knobs the relay surfaces (source of truth). Older
+        # relays omit them -> keep peer off / the default budget.
+        relay_peer = getattr(inbox, "peer_autoreply", None)
+        _last_batch_meta["peer_autoreply"] = bool(relay_peer) if relay_peer is not None else False
+        relay_budget = getattr(inbox, "peer_turn_budget", None)
+        _last_batch_meta["peer_turn_budget"] = (
+            int(relay_budget)
+            if isinstance(relay_budget, int) and relay_budget > 0
+            else DEFAULT_PEER_TURN_BUDGET
+        )
         for msg in getattr(inbox, "messages", []) or []:
             message_id = getattr(msg, "message_id", None)
             if not message_id:
@@ -129,6 +150,13 @@ def record_batch(inbox: Any) -> None:
             _last_batch[message_id] = msg
         while len(_last_batch) > LAST_BATCH_CAP:
             _last_batch.popitem(last=False)  # evict oldest
+
+
+def record_peer_usage(used_by_conversation: Dict[str, int]) -> None:
+    """Snapshot the per-conversation peer-turn counts so ``ekho_inbox`` can show
+    how much delegation budget each conversation has left."""
+    with _cache_lock:
+        _last_batch_meta["peer_turns_used"] = dict(used_by_conversation or {})
 
 
 def get_cached_inbox() -> Dict[str, Any]:
@@ -143,6 +171,9 @@ def get_cached_inbox() -> Dict[str, Any]:
             "roster": list(_last_batch_meta["roster"]),
             "controls": list(_last_batch_meta["controls"]),
             "verifications": dict(_last_batch_meta["verifications"]),
+            "peer_autoreply": _last_batch_meta["peer_autoreply"],
+            "peer_turn_budget": _last_batch_meta["peer_turn_budget"],
+            "peer_turns_used": dict(_last_batch_meta["peer_turns_used"]),
         }
 
 
@@ -410,6 +441,26 @@ def _history_block(
     )
 
 
+def _budget_note(turn: int, budget: int, remaining: int, reenergised: bool) -> str:
+    """One concise budget-awareness line for a peer-triggered conversation, so the
+    woken agent knows how many peer wakes remain before the latch auto-pauses and
+    can front-load the work. ``reenergised`` covers the case where an operator
+    message in the same batch just reset the latch."""
+    if reenergised:
+        return (
+            f"\n    Bounded delegation: the operator just re-engaged, re-energising "
+            f"this conversation's peer budget — peer turn {turn} of {budget}, "
+            f"{remaining} wake(s) left. Front-load what matters and don't spend "
+            f"turns on acknowledgements."
+        )
+    return (
+        f"\n    Bounded delegation: peer turn {turn} of {budget} in this conversation "
+        f"— {remaining} wake(s) left before it auto-pauses until the operator "
+        f"re-engages. Get the work or the key message done within them; front-load "
+        f"what matters and don't spend turns on acknowledgements."
+    )
+
+
 def build_prompt(
     messages: Sequence[Any],
     operator_trusted: bool,
@@ -419,14 +470,27 @@ def build_prompt(
     verifications: Optional[Dict[str, Any]] = None,
     self_agent_id: Optional[str] = None,
     conversation_history: Optional[Dict[str, Any]] = None,
+    peer_turn_budget: Optional[int] = None,
+    peer_budget_remaining: Optional[Dict[str, int]] = None,
 ) -> str:
     """Build the one-shot turn prompt. Tells the agent its ONLY reply channel is
     ``ekho_send`` with the exact recipient + conversation id, surfaces trust,
     keeps the guardrails, and frames teammate messages with a productivity gate
     so bounded delegation doesn't become chatter. ``local_attachments`` carries
-    already-downloaded file paths; ``roster`` maps agent ids to display names."""
+    already-downloaded file paths; ``roster`` maps agent ids to display names.
+    ``peer_budget_remaining`` maps a peer-triggered conversation_id to the wakes
+    left AFTER this turn (with ``peer_turn_budget`` the cap), so the agent gets a
+    bounded-delegation line telling it to front-load before the latch closes."""
     names = _roster_names(roster)
     has_peer = any(getattr(m, "sender_kind", None) != "operator" for m in messages)
+    # Conversations the operator also messaged in this batch: their peer latch was
+    # just re-energised, so the budget line says so instead of counting down.
+    operator_convs = {
+        getattr(m, "conversation_id", "")
+        for m in messages
+        if getattr(m, "sender_kind", None) == "operator"
+    }
+    annotated_convs: set = set()
     lines: List[str] = []
     for i, m in enumerate(messages):
         verdict = (verifications or {}).get(getattr(m, "message_id", None))
@@ -458,12 +522,27 @@ def build_prompt(
         atts = _attachments_note(m, local_for_msg)
         addr = _addressing_note(m, self_agent_id, names)
         quote = _reply_quote(m, names)
+        # Budget-awareness line: only for peer (non-operator) messages whose
+        # conversation has a remaining count, and only once per conversation.
+        budget = ""
+        conv = getattr(m, "conversation_id", "")
+        if (
+            getattr(m, "sender_kind", None) != "operator"
+            and peer_budget_remaining is not None
+            and conv in peer_budget_remaining
+            and conv not in annotated_convs
+        ):
+            cap = peer_turn_budget or 0
+            remaining = peer_budget_remaining[conv]
+            turn = cap - remaining  # post-consumption count = this wake's number
+            budget = _budget_note(turn, cap, remaining, conv in operator_convs)
+            annotated_convs.add(conv)
         lines.append(
             f'• From {who}{addr} — reply with ekho_send using '
             f'recipient_agent_id="{getattr(m, "sender_agent_id", "")}", '
             f'conversation_id="{getattr(m, "conversation_id", "")}":'
             f'{quote}\n'
-            f'    "{text}"{atts}'
+            f'    "{text}"{atts}{budget}'
         )
     teammate_rule = (
         " When a message is from a TEAMMATE, reply with ekho_send ONLY if it "
@@ -579,6 +658,8 @@ def trigger_turn(
     verifications: Optional[Dict[str, Any]] = None,
     self_agent_id: Optional[str] = None,
     conversation_history: Optional[Dict[str, Any]] = None,
+    peer_turn_budget: Optional[int] = None,
+    peer_budget_remaining: Optional[Dict[str, int]] = None,
 ) -> None:
     """Wake the agent to handle ``messages`` by spawning a one-shot reply turn."""
     prompt = build_prompt(
@@ -589,6 +670,8 @@ def trigger_turn(
         verifications=verifications,
         self_agent_id=self_agent_id,
         conversation_history=conversation_history,
+        peer_turn_budget=peer_turn_budget,
+        peer_budget_remaining=peer_budget_remaining,
     )
     cmd = build_oneshot_command(prompt)
     env = dict(os.environ)
@@ -809,6 +892,20 @@ def process_inbox_once(
                 eff_budget,
             )
 
+    # Remaining peer budget per peer-triggered conversation, AFTER this turn's
+    # consumption (clamped >= 0). Threaded into the prompt so the woken agent
+    # knows how many wakes are left before the latch auto-pauses.
+    peer_budget_remaining: Dict[str, int] = {}
+    for m in kept:
+        if getattr(m, "sender_kind", None) == "operator":
+            continue
+        conv = getattr(m, "conversation_id", "")
+        used = state.peer_turns_by_conversation.get(conv, 0)
+        peer_budget_remaining[conv] = max(0, eff_budget - used)
+
+    # Expose the post-consumption per-conversation counts to ekho_inbox.
+    record_peer_usage(state.peer_turns_by_conversation)
+
     # Mark every real message handled (dedupe defence).
     for m in real:
         mark_seen(state, m.message_id)
@@ -849,6 +946,8 @@ def process_inbox_once(
                 verifications=verifications,
                 self_agent_id=self_agent_id,
                 conversation_history=fresh_hist,
+                peer_turn_budget=eff_budget,
+                peer_budget_remaining=peer_budget_remaining,
             )
             spawned = 1
         except Exception as exc:  # noqa: BLE001

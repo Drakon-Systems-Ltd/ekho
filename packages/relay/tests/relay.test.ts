@@ -345,17 +345,18 @@ describe("Relay integration", () => {
     it("toggles per-agent peer-autoreply + budget, live on the inbox", async () => {
       const agent = await relay.enrollAgent("peer-agent");
 
-      // Defaults: off, budget 6 — both in the agent list and the agent's inbox.
+      // Defaults: ON, budget 6 — both in the agent list and the agent's inbox.
+      // Peer auto-reply is on by default now; the latch still caps ping-pong.
       const list = await relay.operatorRequest("GET", "/v1/operator/agents");
       const row = list.body.agents.find((a: { id: string }) => a.id === agent.agent_id);
-      expect(row.peer_autoreply).toBe(false);
+      expect(row.peer_autoreply).toBe(true);
       expect(row.peer_turn_budget).toBe(6);
 
       const inbox0 = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox");
-      expect(inbox0.body.peer_autoreply).toBe(false);
+      expect(inbox0.body.peer_autoreply).toBe(true);
       expect(inbox0.body.peer_turn_budget).toBe(6);
 
-      // Enable with a custom budget.
+      // The operator can still raise the budget for an already-on agent.
       const on = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/peer-autoreply`, {
         autoreply: true,
         budget: 8
@@ -368,7 +369,7 @@ describe("Relay integration", () => {
       expect(inbox1.body.peer_autoreply).toBe(true);
       expect(inbox1.body.peer_turn_budget).toBe(8);
 
-      // Disabling leaves the budget untouched.
+      // Disabling (opt-out) leaves the budget untouched.
       const off = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/peer-autoreply`, {
         autoreply: false
       });

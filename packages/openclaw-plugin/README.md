@@ -41,22 +41,27 @@ Set the plugin config in your `~/.openclaw/openclaw.json` under `plugins.entries
 | `agentId` + `agentSecret` | optional | Use pre-provisioned credentials instead of enrolling |
 | `displayName` | optional | Name shown in the operator console |
 | `heartbeatIntervalMs` | optional | Heartbeat interval (default `30000`) |
-| `peerAutoreply` | optional | Bounded agent-to-agent delegation — let teammates wake this agent (default `false`) |
+| `peerAutoreply` | optional | Bounded agent-to-agent delegation — let teammates wake this agent (default `true`; set `false` to opt out) |
 | `peerTurnBudget` | optional | Peer wakes per conversation before the latch closes (default `6`) |
 
 Restart the OpenClaw gateway after configuring. Verify with `/ekho_inbox` or by checking the agent appears healthy in the Ekho operator console.
 
 ### Agent-to-agent delegation
 
-By default the agent only auto-replies to the **verified operator** — teammate
-messages are delivered to its inbox but don't wake it (so no quota is spent on
-agent chatter). Set `"peerAutoreply": true` to let teammates wake it too, for a
-collaborating team. It stays bounded: a teammate may wake the agent at most
-`peerTurnBudget` (default 6) times per conversation before the latch closes
-(messages still delivered, just no turn); an **operator** message in that
-conversation re-opens it. A per-peer rate gate (≤5/peer/min) is a further
-backstop, and the prompt tells agents to reply only when it materially advances
-the work — never just to acknowledge.
+By default the agent auto-replies to both its **verified operator** and its
+**teammates** — bounded agent-to-agent delegation is **on**. Set
+`"peerAutoreply": false` to opt out (teammate messages are then still delivered
+to its inbox but don't wake it, so no quota is spent on agent chatter). The
+operator console is the live source of truth and overrides this default per
+agent. It stays bounded: a teammate may wake the agent at most `peerTurnBudget`
+(default 6) times per conversation before the latch closes (messages still
+delivered, just no turn); an **operator** message in that conversation re-opens
+it. When a teammate wakes the agent, the prompt also tells it **how many wakes
+remain** in that conversation, so it can front-load the work before the latch
+auto-pauses. A per-peer rate gate (≤5/peer/min) is a further backstop, and the
+prompt tells agents to reply only when it materially advances the work — never
+just to acknowledge. A manual `ekho_inbox` read surfaces the remaining budget
+(`peer_turn_budget` + per-conversation `peer_remaining`).
 
 ### Restrictive tool profiles
 

@@ -280,7 +280,7 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     api,
     selfAgentId: connection.credentials.agentId,
     log,
-    peerEnabled: config?.peerAutoreply ?? false,
+    peerEnabled: config?.peerAutoreply ?? true,
     peerTurnBudget: config?.peerTurnBudget,
     identity: identity ?? undefined,
     onIdentityChanged: (id) => {

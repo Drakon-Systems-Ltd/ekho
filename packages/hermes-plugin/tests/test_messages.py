@@ -106,6 +106,41 @@ def test_format_inbox_agent_message():
     assert "trust" not in msg
 
 
+def test_format_inbox_surfaces_peer_budget():
+    # Bounded-delegation budget is surfaced top-level and per peer message so a
+    # manual inbox read shows how much delegation budget is left.
+    out = format_inbox(
+        [_msg(conversation_id="proj-1")],
+        operator_trusted=False,
+        peer_autoreply=True,
+        peer_turn_budget=6,
+        peer_turns_used={"proj-1": 2},
+    )
+    assert out["peer_autoreply"] is True
+    assert out["peer_turn_budget"] == 6
+    msg = out["messages"][0]
+    assert msg["peer_turns_used"] == 2
+    assert msg["peer_turn_budget"] == 6
+    assert msg["peer_remaining"] == 4
+
+
+def test_format_inbox_peer_budget_omitted_when_no_budget():
+    # Backward-compatible: without a budget, no per-message peer_* fields.
+    out = format_inbox([_msg()], operator_trusted=False)
+    assert out["peer_turn_budget"] is None
+    assert "peer_remaining" not in out["messages"][0]
+
+
+def test_format_inbox_no_peer_budget_on_operator_messages():
+    out = format_inbox(
+        [_msg(sender_kind="operator", sender_agent_id="op")],
+        operator_trusted=True,
+        peer_autoreply=True,
+        peer_turn_budget=6,
+    )
+    assert "peer_remaining" not in out["messages"][0]
+
+
 def test_format_inbox_operator_trusted_label():
     out = format_inbox(
         [_msg(sender_kind="operator", sender_agent_id="op")],

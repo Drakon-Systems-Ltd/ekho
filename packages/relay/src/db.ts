@@ -44,7 +44,7 @@ const IDEMPOTENT_DDL_ERROR = /duplicate column|already exists/i;
 
 /** Split a migration file into individual statements. A naive ';' split is safe
  *  here: every migration is pure DDL with no ';' inside a string literal
- *  (verified across migrations/001..014). */
+ *  (verified across migrations/001..015). */
 function splitStatements(sql: string): string[] {
   return sql.split(";").map((s) => s.trim()).filter(Boolean);
 }
@@ -82,7 +82,7 @@ export function applyMigration(rawDb: Database.Database, version: number, sql: s
  *  file transactionally in version order. Idempotent: already-applied versions
  *  are skipped. NOTE: a future migration needing PRAGMA foreign_keys=OFF for a
  *  table rebuild can't run inside a transaction (SQLite forbids it) and would
- *  need bespoke handling — none of 001..014 do this. */
+ *  need bespoke handling — none of 001..015 do this. */
 export function runMigrationsOn(rawDb: Database.Database, migrationsDir: string): void {
   rawDb.exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
   const applied = new Set(
@@ -378,8 +378,13 @@ export class EkhoDb {
         "SELECT id FROM enrollment_tokens WHERE token_hash = ? AND fleet_id = ?"
       ).get(tokenHash, input.fleetId) as { id: string }).id;
 
+      // peer_autoreply is set explicitly to 1 (ON) rather than relying on the
+      // column default: on an EXISTING relay DB the column was created by
+      // migration 009 with DEFAULT 0, so an implicit insert would land a fresh
+      // agent OFF. Setting it here makes newly enrolled agents land ON on both
+      // fresh (schema.ts DEFAULT 1) and migrated databases.
       this.db.prepare(
-        "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at, peer_autoreply) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)"
       ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now);
 
       this.db.prepare(

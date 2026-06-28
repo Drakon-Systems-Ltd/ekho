@@ -145,21 +145,37 @@ let lastBatchMeta: {
   controls: ControlEntry[];
   verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
+  // Bounded-delegation state, so a manual ekho_inbox read shows how much peer
+  // budget is left: the effective cap, the on/off flag, and per-conversation
+  // consumed counts (conversation_id -> turns used).
+  peer_autoreply: boolean;
+  peer_turn_budget: number;
+  peer_turns_used: Record<string, number>;
 } = {
   operator_trusted: false,
   roster: [],
   controls: [],
   verifications: {},
-  conversation_history: {}
+  conversation_history: {},
+  peer_autoreply: false,
+  peer_turn_budget: DEFAULT_PEER_TURN_BUDGET,
+  peer_turns_used: {}
 };
 
 function recordBatch(batch: InboxBatch) {
+  const relayPeer = batch.peer_autoreply;
+  const relayBudget = batch.peer_turn_budget;
   lastBatchMeta = {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
     verifications: lastBatchMeta.verifications,
-    conversation_history: batch.conversation_history ?? {}
+    conversation_history: batch.conversation_history ?? {},
+    // Relay is the source of truth; older relays omit these -> off / default cap.
+    peer_autoreply: typeof relayPeer === "boolean" ? relayPeer : false,
+    peer_turn_budget:
+      typeof relayBudget === "number" && relayBudget > 0 ? relayBudget : DEFAULT_PEER_TURN_BUDGET,
+    peer_turns_used: lastBatchMeta.peer_turns_used
   };
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
@@ -179,6 +195,17 @@ function recordBatch(batch: InboxBatch) {
  * recent poll, plus the operator-trust flag. No relay call, no ack — the loop
  * already consumed and acked these.
  */
+/**
+ * Snapshot the per-conversation peer-turn counts so `ekho_inbox` can show how
+ * much delegation budget each conversation has left. Called by the loop after
+ * it consumes the latch for a batch.
+ */
+export function recordPeerUsage(usedByConversation: Map<string, number>): void {
+  const snapshot: Record<string, number> = {};
+  for (const [conv, used] of usedByConversation) snapshot[conv] = used;
+  lastBatchMeta.peer_turns_used = snapshot;
+}
+
 export function getCachedInbox(): {
   messages: InboxMessage[];
   operator_trusted: boolean;
@@ -186,6 +213,9 @@ export function getCachedInbox(): {
   controls: ControlEntry[];
   verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
+  peer_autoreply: boolean;
+  peer_turn_budget: number;
+  peer_turns_used: Record<string, number>;
 } {
   return {
     messages: Array.from(lastBatch.values()),
@@ -193,7 +223,10 @@ export function getCachedInbox(): {
     roster: lastBatchMeta.roster,
     controls: lastBatchMeta.controls,
     verifications: lastBatchMeta.verifications,
-    conversation_history: lastBatchMeta.conversation_history
+    conversation_history: lastBatchMeta.conversation_history,
+    peer_autoreply: lastBatchMeta.peer_autoreply,
+    peer_turn_budget: lastBatchMeta.peer_turn_budget,
+    peer_turns_used: lastBatchMeta.peer_turns_used
   };
 }
 
@@ -267,14 +300,14 @@ export function resetPeerLatch(state: AutoReplyState, conversationId: string): v
 /**
  * Qualifying filter. An inbound message auto-wakes the agent only when ALL hold.
  *
- * v1 SAFETY MODEL: only the OPERATOR (your verified principal) auto-triggers a
- * turn, and only when this agent currently trusts the operator (the Access-tab
- * toggle). Peer-agent messages are still delivered to the inbox cache (visible
- * via ekho_inbox) but never auto-trigger — so agent↔agent auto-reply ping-pong
- * is impossible by construction, and the agent only spends tokens answering you.
- * Agent-to-agent coordination stays tool-driven (an active agent can ekho_send;
- * the recipient sees it in its inbox). Loosening this to peers later requires a
- * latching loop-breaker, not just the rolling rate gate below.
+ * SAFETY MODEL: the OPERATOR (your verified principal) auto-triggers a turn when
+ * this agent currently trusts the operator (the Access-tab toggle). Bounded
+ * agent-to-agent delegation is ON by default (`peerEnabled`), so teammates wake
+ * the agent too — but each peer wake is latched per conversation in the tick
+ * (`peerTurnBudget`), with the rolling per-peer rate gate as a backstop, so
+ * agent↔agent ping-pong is capped, not unbounded. An operator message in a
+ * conversation re-energises its latch. Opt out per agent from the console or
+ * with `"peerAutoreply": false`.
  */
 export function isRealInbound(
   msg: InboxMessage,
@@ -401,17 +434,47 @@ function historyBlock(batch: InboxBatch, names: Map<string, string>): string {
   );
 }
 
+/**
+ * One concise budget-awareness line for a peer-triggered conversation, so the
+ * woken agent knows how many peer wakes remain before the latch auto-pauses and
+ * can front-load the work. `reenergised` covers the case where an operator
+ * message in the same batch just reset the latch.
+ */
+function budgetNote(turn: number, budget: number, remaining: number, reenergised: boolean): string {
+  if (reenergised) {
+    return (
+      `\n    Bounded delegation: the operator just re-engaged, re-energising this ` +
+      `conversation's peer budget — peer turn ${turn} of ${budget}, ${remaining} wake(s) ` +
+      `left. Front-load what matters and don't spend turns on acknowledgements.`
+    );
+  }
+  return (
+    `\n    Bounded delegation: peer turn ${turn} of ${budget} in this conversation — ` +
+    `${remaining} wake(s) left before it auto-pauses until the operator re-engages. ` +
+    `Get the work or the key message done within them; front-load what matters and ` +
+    `don't spend turns on acknowledgements.`
+  );
+}
+
 export function buildPrompt(
   messages: InboxMessage[],
   batch: InboxBatch,
   verifications?: Record<string, VerifyResult | null>,
-  selfAgentId?: string
+  selfAgentId?: string,
+  peerTurnBudget?: number,
+  peerBudgetRemaining?: Record<string, number>
 ): string {
   const names = new Map<string, string>();
   for (const r of batch.roster ?? []) {
     if (r.agent_id && r.display_name) names.set(r.agent_id, r.display_name);
   }
   const hasPeer = messages.some((m) => m.sender_kind !== "operator");
+  // Conversations the operator also messaged in this batch: their peer latch was
+  // just re-energised, so the budget line says so instead of counting down.
+  const operatorConvs = new Set(
+    messages.filter((m) => m.sender_kind === "operator").map((m) => m.conversation_id)
+  );
+  const annotatedConvs = new Set<string>();
   const lines = messages.map((m) => {
     let who: string;
     const verdict = verifications?.[m.message_id];
@@ -438,7 +501,22 @@ export function buildPrompt(
       : "";
     const addr = addressingNote(m, selfAgentId, names);
     const quote = replyQuote(m, names);
-    return `• From ${who}${addr} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":${quote}\n    "${text}"${atts}`;
+    // Budget-awareness line: only for peer (non-operator) messages whose
+    // conversation has a remaining count, and only once per conversation.
+    let budget = "";
+    if (
+      m.sender_kind !== "operator" &&
+      peerBudgetRemaining &&
+      Object.prototype.hasOwnProperty.call(peerBudgetRemaining, m.conversation_id) &&
+      !annotatedConvs.has(m.conversation_id)
+    ) {
+      const cap = peerTurnBudget ?? 0;
+      const remaining = peerBudgetRemaining[m.conversation_id];
+      const turn = cap - remaining; // post-consumption count = this wake's number
+      budget = budgetNote(turn, cap, remaining, operatorConvs.has(m.conversation_id));
+      annotatedConvs.add(m.conversation_id);
+    }
+    return `• From ${who}${addr} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":${quote}\n    "${text}"${atts}${budget}`;
   });
   const teammateRule = hasPeer
     ? ` When a message is from a TEAMMATE, reply with ekho_send ONLY if it materially advances the work — answer a question, complete a handoff, unblock them, or share something they need. Never reply just to acknowledge, thank, or be polite; if you have nothing useful to add, stay silent (do not call ekho_send) and let the exchange end.`
@@ -531,9 +609,11 @@ async function triggerTurn(
   api: PluginApi,
   log?: Logger,
   verifications?: Record<string, VerifyResult | null>,
-  selfAgentId?: string
+  selfAgentId?: string,
+  peerTurnBudget?: number,
+  peerBudgetRemaining?: Record<string, number>
 ): Promise<void> {
-  const prompt = buildPrompt(messages, batch, verifications, selfAgentId);
+  const prompt = buildPrompt(messages, batch, verifications, selfAgentId, peerTurnBudget, peerBudgetRemaining);
   const node = process.execPath;
   const entry = process.argv[1]; // the openclaw entry the gateway is running from
   if (!entry) {
@@ -708,6 +788,18 @@ export function startAutoReply(opts: {
       }
     }
 
+    // Remaining peer budget per peer-triggered conversation, AFTER this turn's
+    // consumption (clamped >= 0). Threaded into the prompt so the woken agent
+    // knows how many wakes are left before the latch auto-pauses.
+    const peerBudgetRemaining: Record<string, number> = {};
+    for (const m of kept) {
+      if (m.sender_kind === "operator") continue;
+      const used = state.peerTurnsByConversation.get(m.conversation_id) ?? 0;
+      peerBudgetRemaining[m.conversation_id] = Math.max(0, eff.peerTurnBudget - used);
+    }
+    // Expose the post-consumption per-conversation counts to ekho_inbox.
+    recordPeerUsage(state.peerTurnsByConversation);
+
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m.message_id);
 
@@ -735,7 +827,16 @@ export function startAutoReply(opts: {
         ...batch,
         conversation_history: { ...(batch.conversation_history ?? {}), ...plan.tails }
       };
-      await triggerTurn(plan.floored, flooredBatch, api, log, verifications, selfAgentId);
+      await triggerTurn(
+        plan.floored,
+        flooredBatch,
+        api,
+        log,
+        verifications,
+        selfAgentId,
+        eff.peerTurnBudget,
+        peerBudgetRemaining
+      );
     } catch (err) {
       log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
     } finally {

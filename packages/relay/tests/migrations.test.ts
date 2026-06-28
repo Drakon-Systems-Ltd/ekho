@@ -101,4 +101,27 @@ describe("transactional migrations (M6)", () => {
     runMigrationsOn(db, REAL_MIGRATIONS_DIR);
     expect(versions(db)).toEqual(before);
   });
+
+  // Peer auto-reply ON by default: migration 015 flips the existing live fleet on
+  // (peer_autoreply 0 -> 1) while leaving already-on agents untouched.
+  it("migration 015 flips existing peer_autoreply=0 rows to 1", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+    // Simulate a legacy DB: the column was created DEFAULT 0 by migration 009.
+    db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_autoreply INTEGER NOT NULL DEFAULT 0)");
+    db.exec("INSERT INTO agents (id, peer_autoreply) VALUES ('a', 0), ('b', 0), ('c', 1)");
+    // Mark every migration before 015 as applied so runMigrationsOn runs ONLY 015.
+    const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
+    for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
+
+    runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+
+    const rows = db.prepare("SELECT id, peer_autoreply FROM agents ORDER BY id").all();
+    expect(rows).toEqual([
+      { id: "a", peer_autoreply: 1 }, // flipped on
+      { id: "b", peer_autoreply: 1 }, // flipped on
+      { id: "c", peer_autoreply: 1 }  // already on, unchanged
+    ]);
+    expect(versions(db)).toContain(15);
+  });
 });
