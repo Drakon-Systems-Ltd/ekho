@@ -653,6 +653,84 @@ def test_tick_operator_message_resets_peer_latch():
     assert s4["spawned"] == 1
 
 
+# --- Feature 1: progress signals refresh the budget -------------------------
+
+
+def _peer_typed(i, message_type, conversation_id="proj-1", sender="jarvis"):
+    return _msg(
+        message_id=f"p{i}",
+        sender_kind="agent",
+        sender_agent_id=sender,
+        conversation_id=conversation_id,
+        message_type=message_type,
+        body={"text": f"{message_type} {i}"},
+    )
+
+
+def test_tick_handoff_on_closed_latch_wakes_and_resets():
+    # A handoff arriving on an EXHAUSTED latch refreshes the budget AND wakes the
+    # agent — real work can never silently die on a spent budget.
+    state = _state()
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    # A plain direct on the closed latch would NOT wake (it latches).
+    s_closed = process_inbox_once(
+        FakeClient(InboxResponse([_peer(1)], [], False, [])),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_closed["spawned"] == 0 and s_closed["latched"] == 1
+    # A handoff on the (still) closed latch refreshes the budget AND wakes.
+    s_handoff = process_inbox_once(
+        FakeClient(InboxResponse([_peer_typed(2, "handoff")], [], False, [])),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_handoff["spawned"] == 1
+    assert s_handoff["latched"] == 0
+    # Latch is fresh: reset to 0, then this wake consumed exactly one.
+    assert state.peer_turns_by_conversation["proj-1"] == 1
+
+
+def test_tick_complete_on_closed_latch_resets_without_spawn():
+    # A complete is NOT a trigger type: it refreshes the budget but spawns no turn.
+    state = _state()
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert not peer_latch_open(state, "proj-1", 1)  # exhausted
+    s_complete = process_inbox_once(
+        FakeClient(InboxResponse([_peer_typed(1, "complete")], [], False, [])),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_complete["spawned"] == 0
+    assert peer_latch_open(state, "proj-1", 1)  # budget refreshed, latch re-opened
+    # A following direct now wakes on the fresh budget.
+    s_next = process_inbox_once(
+        FakeClient(InboxResponse([_peer(2)], [], False, [])),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_next["spawned"] == 1
+
+
+def test_tick_direct_chatter_still_latches_at_budget():
+    # Plain direct ping-pong is still capped at the budget (no refresh).
+    state = _state()
+    spawn = _spawn_recorder([])
+    spawned = 0
+    for i in range(4):
+        s = process_inbox_once(
+            FakeClient(InboxResponse([_peer(i)], [], False, [])),
+            "self", state, spawn=spawn, now=float(i),
+            peer_enabled=True, peer_turn_budget=2,
+        )
+        spawned += s["spawned"]
+    assert spawned == 2
+
+
 def test_tick_relay_peer_autoreply_overrides_bootstrap_off():
     # Bootstrap default OFF, but the operator turned delegation ON in the console
     # (relay surfaces peer_autoreply=True) -> the teammate wakes the agent live.
@@ -847,6 +925,36 @@ def test_build_prompt_budget_line_once_per_conversation():
     assert prompt.count("Bounded delegation:") == 1
 
 
+# --- Feature 2: graceful last turn ------------------------------------------
+
+
+def test_build_prompt_last_turn_line_when_remaining_zero():
+    # remaining-after == 0 -> this is the last auto-wake before the latch closes,
+    # so the agent is told to finish or hand off cleanly, never stop mid-task.
+    prompt = build_prompt(
+        [_peer(0)],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 0},
+    )
+    assert "LAST auto-wake in this thread before it pauses" in prompt
+    assert "do NOT stop mid-task without a word" in prompt
+    assert "peer turn 6 of 6" in prompt
+    # The normal countdown line is replaced, not also shown.
+    assert "wake(s) left before it auto-pauses" not in prompt
+
+
+def test_build_prompt_normal_budget_line_when_remaining_positive():
+    prompt = build_prompt(
+        [_peer(0)],
+        operator_trusted=False,
+        peer_turn_budget=6,
+        peer_budget_remaining={"proj-1": 3},
+    )
+    assert "LAST auto-wake" not in prompt
+    assert "3 wake(s) left" in prompt
+
+
 def _prompt_recorder(captured):
     """A spawn that captures the one-shot prompt argv (cmd[-1])."""
     def spawn(cmd, env):
@@ -891,3 +999,103 @@ def test_record_peer_usage_snapshot_is_isolated():
     record_peer_usage(live)
     live["c1"] = 99
     assert get_cached_inbox()["peer_turns_used"]["c1"] == 2
+
+
+# --- Feature 3: stall escalation (no silent death) --------------------------
+
+
+def _notice_client(inbox, notices):
+    """A FakeClient that records best-effort raise_notice() escalations."""
+    c = FakeClient(inbox)
+    c.raise_notice = lambda **kw: (notices.append(kw), {"ok": True, "recorded": True})[1]
+    return c
+
+
+def test_tick_escalates_once_when_a_peer_is_withheld_on_a_closed_latch():
+    state = _state()
+    notices = []
+    spawn = _spawn_recorder([])
+    # budget 1: the first peer wakes (consumes the only turn) — nothing withheld.
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(0)], [], False, []), notices),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert notices == []
+    # A second peer is withheld (latch closed) -> exactly one escalation.
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(1)], [], False, []), notices),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 1
+    assert notices[0]["conversation_id"] == "proj-1"
+    assert notices[0]["reason"] == "peer_turn_budget_exhausted"
+    assert notices[0]["pending_count"] == 1
+    assert notices[0]["budget"] == 1
+    # A third withheld peer does NOT re-escalate (deduped until reset).
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(2)], [], False, []), notices),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 1
+
+
+def test_tick_escalation_re_arms_after_operator_reset():
+    state = _state()
+    notices = []
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(0)], [], False, []), notices),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(1)], [], False, []), notices),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 1
+    # The operator engaging re-opens the latch AND re-arms the escalation.
+    op = _msg(message_id="o1", sender_kind="operator", sender_agent_id="op",
+              conversation_id="proj-1")
+    process_inbox_once(
+        _notice_client(InboxResponse([op], [], True, []), notices),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    # Fresh budget: a peer wakes, the next is withheld -> a NEW escalation.
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(2)], [], False, []), notices),
+        "self", state, spawn=spawn, now=3.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(3)], [], False, []), notices),
+        "self", state, spawn=spawn, now=4.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 2
+
+
+def test_tick_no_escalation_when_a_progress_signal_refreshes_the_budget():
+    # A handoff refreshes the budget and wakes -> never latched -> no escalation.
+    state = _state()
+    notices = []
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer_typed(0, "handoff")], [], False, []), notices),
+        "self", state, spawn=_spawn_recorder([]), now=0.0,
+        peer_enabled=True, peer_turn_budget=1,
+    )
+    assert notices == []
+
+
+def test_tick_escalation_failure_never_breaks_the_tick():
+    # A raise_notice that raises must not propagate — escalation is best-effort.
+    state = _state()
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    boom = FakeClient(InboxResponse([_peer(1)], [], False, []))
+    def _raise(**kw):
+        raise RuntimeError("relay down")
+    boom.raise_notice = _raise
+    summary = process_inbox_once(
+        boom, "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert summary["latched"] == 1  # tick completed despite the escalation failure

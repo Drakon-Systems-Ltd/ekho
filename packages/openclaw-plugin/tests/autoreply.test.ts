@@ -4,6 +4,8 @@ import {
   peerLatchOpen,
   consumePeerLatch,
   resetPeerLatch,
+  refreshBudgetForProgressSignals,
+  markConversationEscalated,
   buildPrompt,
   planFloorTurn,
   createAutoReplyState,
@@ -63,6 +65,83 @@ describe("bounded peer delegation", () => {
     expect(peerLatchOpen(s, "c", 2)).toBe(false);
     resetPeerLatch(s, "c");
     expect(peerLatchOpen(s, "c", 2)).toBe(true);
+  });
+
+  it("a peer handoff/claim/complete refreshes the budget on a closed latch (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    consumePeerLatch(s, "c");
+    expect(peerLatchOpen(s, "c", 2)).toBe(false); // exhausted
+    const refreshed = refreshBudgetForProgressSignals(
+      s,
+      [msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "handoff" })],
+      "self"
+    );
+    expect(refreshed.has("c")).toBe(true);
+    expect(peerLatchOpen(s, "c", 2)).toBe(true); // budget refreshed
+  });
+
+  it("a complete (non-trigger) still refreshes the budget (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    expect(peerLatchOpen(s, "c", 1)).toBe(false);
+    refreshBudgetForProgressSignals(
+      s,
+      [msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "complete" })],
+      "self"
+    );
+    expect(peerLatchOpen(s, "c", 1)).toBe(true);
+  });
+
+  it("plain direct/broadcast chatter does NOT refresh the budget (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    consumePeerLatch(s, "c");
+    expect(peerLatchOpen(s, "c", 2)).toBe(false);
+    const refreshed = refreshBudgetForProgressSignals(
+      s,
+      [
+        msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "direct" }),
+        msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "broadcast" })
+      ],
+      "self"
+    );
+    expect(refreshed.size).toBe(0);
+    expect(peerLatchOpen(s, "c", 2)).toBe(false); // still closed
+  });
+
+  it("a progress signal from the operator or self does NOT refresh (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    refreshBudgetForProgressSignals(
+      s,
+      [
+        msg({ conversation_id: "c", sender_kind: "operator", sender_agent_id: "op", message_type: "handoff" }),
+        msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "self", message_type: "handoff" })
+      ],
+      "self"
+    );
+    expect(peerLatchOpen(s, "c", 1)).toBe(false); // neither path counts
+  });
+
+  it("escalates a closed conversation at most once until reset (F3)", () => {
+    const s = createAutoReplyState();
+    expect(markConversationEscalated(s, "c")).toBe(true); // first close -> escalate
+    expect(markConversationEscalated(s, "c")).toBe(false); // deduped
+    expect(markConversationEscalated(s, "c")).toBe(false);
+    // A reset (operator engagement / progress signal) re-arms the escalation.
+    resetPeerLatch(s, "c");
+    expect(markConversationEscalated(s, "c")).toBe(true);
+  });
+
+  it("tracks escalation per conversation independently (F3)", () => {
+    const s = createAutoReplyState();
+    expect(markConversationEscalated(s, "a")).toBe(true);
+    expect(markConversationEscalated(s, "b")).toBe(true);
+    expect(markConversationEscalated(s, "a")).toBe(false);
+    resetPeerLatch(s, "a");
+    expect(markConversationEscalated(s, "a")).toBe(true);
+    expect(markConversationEscalated(s, "b")).toBe(false); // b unaffected by a's reset
   });
 
   it("frames a teammate by display name with the productivity gate", () => {
@@ -214,6 +293,25 @@ describe("bounded peer delegation", () => {
     const batch = { messages: [p1, p2], operator_trusted: false, roster: [] } as any;
     const p = buildPrompt([p1, p2], batch, undefined, "self", 6, { "proj-1": 4 });
     expect(p.split("Bounded delegation:").length - 1).toBe(1);
+  });
+
+  it("emits the graceful last-turn line when remaining-after is 0 (F2)", () => {
+    const m = msg({ sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const batch = { messages: [m], operator_trusted: false, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self", 6, { "proj-1": 0 });
+    expect(p).toContain("LAST auto-wake in this thread before it pauses");
+    expect(p).toContain("do NOT stop mid-task");
+    expect(p).toContain("peer turn 6 of 6");
+    // The normal countdown line is replaced, not also shown.
+    expect(p).not.toContain("wake(s) left before it auto-pauses");
+  });
+
+  it("keeps the normal budget line when remaining-after is positive (F2)", () => {
+    const m = msg({ sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "proj-1" });
+    const batch = { messages: [m], operator_trusted: false, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self", 6, { "proj-1": 3 });
+    expect(p).not.toContain("LAST auto-wake");
+    expect(p).toContain("3 wake(s) left");
   });
 
   it("the bootstrap default is now peer-ON (relay omits the field)", () => {

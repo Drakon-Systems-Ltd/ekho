@@ -48,6 +48,14 @@ logger = logging.getLogger("ekho_hermes.autoreply")
 # control, complete, acks, ...) is consumed but never triggers a turn.
 TRIGGER_TYPES = frozenset({"direct", "broadcast", "handoff", "claim", "alert"})
 
+# Progress signals — real work-transfers between peers. Each one re-energises its
+# conversation's peer latch (like an operator message would), so genuine work is
+# never penalised like ping-pong chatter: a ``handoff``/``claim`` both wakes the
+# agent AND refreshes the budget; a ``complete`` (never a trigger type) refreshes
+# the budget without waking. A handoff can therefore never silently die on an
+# exhausted budget — it always lands on a fresh one.
+PROGRESS_SIGNAL_TYPES = frozenset({"handoff", "claim", "complete"})
+
 PEER_RATE_MAX = 5  # turns per peer per window before suppression
 PEER_RATE_WINDOW_S = 60.0
 
@@ -193,6 +201,10 @@ class AutoReplyState:
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
     peer_conv_order: List[str] = field(default_factory=list)
+    # Conversations we've already raised a stall escalation for (so we escalate
+    # at most once per close). Cleared per conversation by reset_peer_latch, so the
+    # next operator engagement / progress signal re-arms a future escalation.
+    escalated_closed_convs: set = field(default_factory=set)
 
 
 def mark_nonce_seen(state: AutoReplyState, nonce: str) -> None:
@@ -232,8 +244,11 @@ def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
 
 
 def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
-    """Re-open a conversation's latch — the operator engaging re-energises it."""
+    """Re-open a conversation's latch — the operator engaging (or a peer progress
+    signal) re-energises it. Also re-arms the stall escalation for this
+    conversation, so a future close raises a fresh operator-visible notice."""
     state.peer_turns_by_conversation[conversation_id] = 0
+    state.escalated_closed_convs.discard(conversation_id)
 
 
 def _body_text(msg: Any) -> str:
@@ -445,7 +460,18 @@ def _budget_note(turn: int, budget: int, remaining: int, reenergised: bool) -> s
     """One concise budget-awareness line for a peer-triggered conversation, so the
     woken agent knows how many peer wakes remain before the latch auto-pauses and
     can front-load the work. ``reenergised`` covers the case where an operator
-    message in the same batch just reset the latch."""
+    message in the same batch just reset the latch. When ``remaining`` is 0 this
+    is the LAST auto-wake before the latch closes, so the line tells the agent to
+    finish, hand off, or sign off cleanly — never to stop mid-task silently."""
+    if remaining <= 0:
+        return (
+            f"\n    Bounded delegation: peer turn {turn} of {budget} — this is your "
+            f"LAST auto-wake in this thread before it pauses. Finish the task now, or "
+            f"hand it off cleanly (a handoff/claim/complete refreshes the budget and "
+            f"keeps the thread alive), or send one clear message stating where things "
+            f"stand and that you're pausing for the operator — do NOT stop mid-task "
+            f"without a word."
+        )
     if reenergised:
         return (
             f"\n    Bounded delegation: the operator just re-engaged, re-energising "
@@ -844,6 +870,20 @@ def process_inbox_once(
             ),
         )
 
+    # Progress signals refresh the budget (scan the FULL batch, BEFORE the latch
+    # gate). A peer handoff/claim/complete is real work-transfer, not chatter, so
+    # it re-energises its conversation's latch exactly like an operator message —
+    # a handoff lands on a fresh budget instead of silently stalling, and a
+    # ``complete`` (never a trigger type, so not in ``real``) still refreshes the
+    # budget without waking. ``direct``/``broadcast`` keep consuming the latch.
+    for m in messages:
+        if (
+            getattr(m, "sender_kind", None) != "operator"
+            and getattr(m, "sender_agent_id", None) != self_agent_id
+            and getattr(m, "message_type", None) in PROGRESS_SIGNAL_TYPES
+        ):
+            reset_peer_latch(state, getattr(m, "conversation_id", ""))
+
     def _ack() -> int:
         if not ack_all:
             return 0
@@ -875,6 +915,9 @@ def process_inbox_once(
     rate_kept = apply_peer_rate_gate(real, state, now, log)
     kept: List[Any] = []
     latched = 0
+    # conversation_id -> count of real peer messages withheld because its latch is
+    # closed. Drives a single operator-visible stall escalation per close.
+    latched_convs: Dict[str, int] = {}
     for m in rate_kept:
         if getattr(m, "sender_kind", None) == "operator":
             kept.append(m)
@@ -885,12 +928,34 @@ def process_inbox_once(
             kept.append(m)
         else:
             latched += 1
+            latched_convs[conv] = latched_convs.get(conv, 0) + 1
             log.info(
                 "[ekho-autoreply] peer latch closed for conversation %s "
                 "(budget %d reached); delivered without a turn",
                 conv,
                 eff_budget,
             )
+
+    # No silent death: when a real peer message is withheld on a closed latch,
+    # raise ONE operator-visible escalation per conversation-close (deduped via
+    # escalated_closed_convs, re-armed by reset_peer_latch). Best-effort — a relay
+    # failure (or an older client without raise_notice) must never break the tick.
+    raise_notice = getattr(client, "raise_notice", None)
+    for conv, pending in latched_convs.items():
+        if conv in state.escalated_closed_convs:
+            continue
+        state.escalated_closed_convs.add(conv)
+        if not callable(raise_notice):
+            continue
+        try:
+            raise_notice(
+                conversation_id=conv,
+                reason="peer_turn_budget_exhausted",
+                pending_count=pending,
+                budget=eff_budget,
+            )
+        except Exception as exc:  # noqa: BLE001 — escalation is best-effort
+            log.debug("[ekho-autoreply] stall escalation failed for %s: %s", conv, exc)
 
     # Remaining peer budget per peer-triggered conversation, AFTER this turn's
     # consumption (clamped >= 0). Threaded into the prompt so the woken agent

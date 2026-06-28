@@ -113,6 +113,14 @@ export function effectivePeerSettings(
 // control, complete, acks, …) is consumed but never triggers a turn.
 const TRIGGER_TYPES = new Set(["direct", "broadcast", "handoff", "claim", "alert"]);
 
+// Progress signals — real work-transfers between peers. Each re-energises its
+// conversation's peer latch (like an operator message would), so genuine work is
+// never penalised like ping-pong chatter: a handoff/claim both wakes the agent
+// AND refreshes the budget; a complete (never a trigger type) refreshes the
+// budget without waking. A handoff can therefore never silently die on an
+// exhausted budget — it always lands on a fresh one.
+const PROGRESS_SIGNAL_TYPES = new Set(["handoff", "claim", "complete"]);
+
 // Loop-prevention defaults (Part C, rule 5).
 const PEER_RATE_MAX = 5; // turns per peer per window before suppression
 const PEER_RATE_WINDOW_MS = 60_000;
@@ -240,6 +248,10 @@ export interface AutoReplyState {
   inFlight: boolean;
   // conversation_id -> count of times a peer has woken this agent in it.
   peerTurnsByConversation: Map<string, number>;
+  // Conversations we've already raised a stall escalation for (escalate at most
+  // once per close). Cleared per conversation by resetPeerLatch, so the next
+  // operator engagement / progress signal re-arms a future escalation.
+  escalatedClosedConvs: Set<string>;
 }
 
 export function createAutoReplyState(): AutoReplyState {
@@ -250,7 +262,8 @@ export function createAutoReplyState(): AutoReplyState {
     seenNonceOrder: [],
     recentInboundByPeer: new Map(),
     inFlight: false,
-    peerTurnsByConversation: new Map()
+    peerTurnsByConversation: new Map(),
+    escalatedClosedConvs: new Set()
   };
 }
 
@@ -292,9 +305,52 @@ export function consumePeerLatch(state: AutoReplyState, conversationId: string):
   }
 }
 
-/** Re-open a conversation's latch — the operator engaging re-energises it. */
+/** Re-open a conversation's latch — the operator engaging (or a peer progress
+ *  signal) re-energises it. Also re-arms the stall escalation for this
+ *  conversation, so a future close raises a fresh operator-visible notice. */
 export function resetPeerLatch(state: AutoReplyState, conversationId: string): void {
   state.peerTurnsByConversation.set(conversationId, 0);
+  state.escalatedClosedConvs.delete(conversationId);
+}
+
+/**
+ * Decide whether to raise a stall escalation for a just-closed conversation, and
+ * mark it escalated. Returns true at most once per close (until resetPeerLatch
+ * re-arms it), so the escalate-once dedup is unit-testable without the tick.
+ */
+export function markConversationEscalated(state: AutoReplyState, conversationId: string): boolean {
+  if (state.escalatedClosedConvs.has(conversationId)) return false;
+  state.escalatedClosedConvs.add(conversationId);
+  return true;
+}
+
+/**
+ * Feature 1: progress signals refresh the budget. Scan the FULL inbound batch
+ * and re-energise the peer latch for every conversation carrying a peer
+ * handoff/claim/complete — real work-transfer, not ping-pong chatter. A handoff
+ * therefore lands on a fresh budget instead of silently stalling, and a
+ * `complete` (never a trigger type) refreshes the budget without waking. Mutates
+ * `state`; returns the conversation ids it refreshed (for logging/tests).
+ */
+export function refreshBudgetForProgressSignals(
+  state: AutoReplyState,
+  messages: Array<{ sender_kind?: string; sender_agent_id?: string; message_type?: string; conversation_id?: string }>,
+  selfAgentId: string
+): Set<string> {
+  const refreshed = new Set<string>();
+  for (const m of messages) {
+    if (
+      m.sender_kind !== "operator" &&
+      m.sender_agent_id !== selfAgentId &&
+      typeof m.message_type === "string" &&
+      PROGRESS_SIGNAL_TYPES.has(m.message_type) &&
+      m.conversation_id
+    ) {
+      resetPeerLatch(state, m.conversation_id);
+      refreshed.add(m.conversation_id);
+    }
+  }
+  return refreshed;
 }
 
 /**
@@ -441,6 +497,18 @@ function historyBlock(batch: InboxBatch, names: Map<string, string>): string {
  * message in the same batch just reset the latch.
  */
 function budgetNote(turn: number, budget: number, remaining: number, reenergised: boolean): string {
+  if (remaining <= 0) {
+    // Last auto-wake before the latch closes: finish, hand off, or sign off
+    // cleanly — never stop mid-task silently.
+    return (
+      `\n    Bounded delegation: peer turn ${turn} of ${budget} — this is your ` +
+      `LAST auto-wake in this thread before it pauses. Finish the task now, or ` +
+      `hand it off cleanly (a handoff/claim/complete refreshes the budget and ` +
+      `keeps the thread alive), or send one clear message stating where things ` +
+      `stand and that you're pausing for the operator — do NOT stop mid-task ` +
+      `without a word.`
+    );
+  }
   if (reenergised) {
     return (
       `\n    Bounded delegation: the operator just re-engaged, re-energising this ` +
@@ -753,6 +821,14 @@ export function startAutoReply(opts: {
       );
     }
 
+    // Progress signals refresh the budget (scan the FULL batch, BEFORE the latch
+    // gate). A peer handoff/claim/complete is real work-transfer, not chatter, so
+    // it re-energises its conversation's latch exactly like an operator message —
+    // a handoff lands on a fresh budget instead of silently stalling, and a
+    // `complete` (never a trigger type, so not in `real`) still refreshes the
+    // budget without waking. `direct`/`broadcast` keep consuming the latch.
+    refreshBudgetForProgressSignals(state, batch.messages, selfAgentId);
+
     if (real.length === 0) {
       if (ackAll.length > 0) {
         try {
@@ -773,6 +849,8 @@ export function startAutoReply(opts: {
     // latch on the surviving teammate messages (the structural loop-breaker).
     const rateKept = applyPeerRateGate(real, state, log);
     const kept: InboxMessage[] = [];
+    // conversation_id -> count of real peer messages withheld on a closed latch.
+    const latchedConvs = new Map<string, number>();
     for (const m of rateKept) {
       if (m.sender_kind === "operator") {
         kept.push(m);
@@ -782,9 +860,28 @@ export function startAutoReply(opts: {
         consumePeerLatch(state, m.conversation_id);
         kept.push(m);
       } else {
+        latchedConvs.set(m.conversation_id, (latchedConvs.get(m.conversation_id) ?? 0) + 1);
         log?.info?.(
           `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${eff.peerTurnBudget} reached); delivered without a turn`
         );
+      }
+    }
+
+    // No silent death: when a real peer message is withheld on a closed latch,
+    // raise ONE operator-visible escalation per conversation-close (deduped via
+    // markConversationEscalated, re-armed by resetPeerLatch). Best-effort — a
+    // relay failure must never break the tick.
+    for (const [conv, pending] of latchedConvs) {
+      if (!markConversationEscalated(state, conv)) continue;
+      try {
+        await client.raiseNotice({
+          conversation_id: conv,
+          reason: "peer_turn_budget_exhausted",
+          pending_count: pending,
+          budget: eff.peerTurnBudget
+        });
+      } catch (err) {
+        log?.debug?.(`[ekho-autoreply] stall escalation failed for ${conv}: ${String(err)}`);
       }
     }
 

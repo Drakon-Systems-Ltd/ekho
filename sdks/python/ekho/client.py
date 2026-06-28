@@ -211,6 +211,27 @@ class EkhoAgentClient:
             "DELETE", f"/v1/conversations/{quote(conversation_id, safe='')}/floor"
         )
 
+    def raise_notice(
+        self,
+        *,
+        conversation_id: str,
+        reason: str = "peer_turn_budget_exhausted",
+        pending_count: int = 0,
+        budget: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Raise an operator-visible notice that a conversation has stalled (e.g.
+        the peer-turn budget is exhausted with real work withheld). Recorded as a
+        ``conversation.stalled`` event; idempotent per (fleet, agent, conversation)
+        until the next operator engagement, so it's safe to call best-effort."""
+        payload: Dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "reason": reason,
+            "pending_count": pending_count,
+        }
+        if budget is not None:
+            payload["budget"] = budget
+        return self._request("POST", "/v1/notices", payload)
+
     def heartbeat(self, payload: HeartbeatInput) -> HeartbeatResult:
         return HeartbeatResult.from_dict(
             self._request("POST", "/v1/heartbeats", dict(payload))

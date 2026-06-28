@@ -33,6 +33,16 @@ export const ackSchema = z.object({
   })).min(1)
 });
 
+// An agent-raised operator-visible notice. Today the only kind is a stalled
+// conversation (peer-turn budget exhausted with real work withheld), recorded as
+// a `conversation.stalled` event the operator console already surfaces.
+export const noticeSchema = z.object({
+  conversation_id: z.string().min(1),
+  reason: z.string().min(1).max(64).default("peer_turn_budget_exhausted"),
+  pending_count: z.number().int().nonnegative().max(10000).default(0),
+  budget: z.number().int().positive().max(10000).optional()
+});
+
 export const heartbeatSchema = z.object({
   status: z.enum(["healthy", "degraded", "busy", "idle"]),
   active_conversation_ids: z.array(z.string()).optional().default([]),
