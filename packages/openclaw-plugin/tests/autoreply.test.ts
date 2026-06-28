@@ -4,6 +4,7 @@ import {
   peerLatchOpen,
   consumePeerLatch,
   resetPeerLatch,
+  refreshBudgetForProgressSignals,
   buildPrompt,
   planFloorTurn,
   createAutoReplyState,
@@ -63,6 +64,63 @@ describe("bounded peer delegation", () => {
     expect(peerLatchOpen(s, "c", 2)).toBe(false);
     resetPeerLatch(s, "c");
     expect(peerLatchOpen(s, "c", 2)).toBe(true);
+  });
+
+  it("a peer handoff/claim/complete refreshes the budget on a closed latch (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    consumePeerLatch(s, "c");
+    expect(peerLatchOpen(s, "c", 2)).toBe(false); // exhausted
+    const refreshed = refreshBudgetForProgressSignals(
+      s,
+      [msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "handoff" })],
+      "self"
+    );
+    expect(refreshed.has("c")).toBe(true);
+    expect(peerLatchOpen(s, "c", 2)).toBe(true); // budget refreshed
+  });
+
+  it("a complete (non-trigger) still refreshes the budget (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    expect(peerLatchOpen(s, "c", 1)).toBe(false);
+    refreshBudgetForProgressSignals(
+      s,
+      [msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "complete" })],
+      "self"
+    );
+    expect(peerLatchOpen(s, "c", 1)).toBe(true);
+  });
+
+  it("plain direct/broadcast chatter does NOT refresh the budget (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    consumePeerLatch(s, "c");
+    expect(peerLatchOpen(s, "c", 2)).toBe(false);
+    const refreshed = refreshBudgetForProgressSignals(
+      s,
+      [
+        msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "direct" }),
+        msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "jarvis", message_type: "broadcast" })
+      ],
+      "self"
+    );
+    expect(refreshed.size).toBe(0);
+    expect(peerLatchOpen(s, "c", 2)).toBe(false); // still closed
+  });
+
+  it("a progress signal from the operator or self does NOT refresh (F1)", () => {
+    const s = createAutoReplyState();
+    consumePeerLatch(s, "c");
+    refreshBudgetForProgressSignals(
+      s,
+      [
+        msg({ conversation_id: "c", sender_kind: "operator", sender_agent_id: "op", message_type: "handoff" }),
+        msg({ conversation_id: "c", sender_kind: "agent", sender_agent_id: "self", message_type: "handoff" })
+      ],
+      "self"
+    );
+    expect(peerLatchOpen(s, "c", 1)).toBe(false); // neither path counts
   });
 
   it("frames a teammate by display name with the productivity gate", () => {

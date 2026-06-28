@@ -48,6 +48,14 @@ logger = logging.getLogger("ekho_hermes.autoreply")
 # control, complete, acks, ...) is consumed but never triggers a turn.
 TRIGGER_TYPES = frozenset({"direct", "broadcast", "handoff", "claim", "alert"})
 
+# Progress signals — real work-transfers between peers. Each one re-energises its
+# conversation's peer latch (like an operator message would), so genuine work is
+# never penalised like ping-pong chatter: a ``handoff``/``claim`` both wakes the
+# agent AND refreshes the budget; a ``complete`` (never a trigger type) refreshes
+# the budget without waking. A handoff can therefore never silently die on an
+# exhausted budget — it always lands on a fresh one.
+PROGRESS_SIGNAL_TYPES = frozenset({"handoff", "claim", "complete"})
+
 PEER_RATE_MAX = 5  # turns per peer per window before suppression
 PEER_RATE_WINDOW_S = 60.0
 
@@ -843,6 +851,20 @@ def process_inbox_once(
                 for m in messages
             ),
         )
+
+    # Progress signals refresh the budget (scan the FULL batch, BEFORE the latch
+    # gate). A peer handoff/claim/complete is real work-transfer, not chatter, so
+    # it re-energises its conversation's latch exactly like an operator message —
+    # a handoff lands on a fresh budget instead of silently stalling, and a
+    # ``complete`` (never a trigger type, so not in ``real``) still refreshes the
+    # budget without waking. ``direct``/``broadcast`` keep consuming the latch.
+    for m in messages:
+        if (
+            getattr(m, "sender_kind", None) != "operator"
+            and getattr(m, "sender_agent_id", None) != self_agent_id
+            and getattr(m, "message_type", None) in PROGRESS_SIGNAL_TYPES
+        ):
+            reset_peer_latch(state, getattr(m, "conversation_id", ""))
 
     def _ack() -> int:
         if not ack_all:

@@ -113,6 +113,14 @@ export function effectivePeerSettings(
 // control, complete, acks, …) is consumed but never triggers a turn.
 const TRIGGER_TYPES = new Set(["direct", "broadcast", "handoff", "claim", "alert"]);
 
+// Progress signals — real work-transfers between peers. Each re-energises its
+// conversation's peer latch (like an operator message would), so genuine work is
+// never penalised like ping-pong chatter: a handoff/claim both wakes the agent
+// AND refreshes the budget; a complete (never a trigger type) refreshes the
+// budget without waking. A handoff can therefore never silently die on an
+// exhausted budget — it always lands on a fresh one.
+const PROGRESS_SIGNAL_TYPES = new Set(["handoff", "claim", "complete"]);
+
 // Loop-prevention defaults (Part C, rule 5).
 const PEER_RATE_MAX = 5; // turns per peer per window before suppression
 const PEER_RATE_WINDOW_MS = 60_000;
@@ -295,6 +303,35 @@ export function consumePeerLatch(state: AutoReplyState, conversationId: string):
 /** Re-open a conversation's latch — the operator engaging re-energises it. */
 export function resetPeerLatch(state: AutoReplyState, conversationId: string): void {
   state.peerTurnsByConversation.set(conversationId, 0);
+}
+
+/**
+ * Feature 1: progress signals refresh the budget. Scan the FULL inbound batch
+ * and re-energise the peer latch for every conversation carrying a peer
+ * handoff/claim/complete — real work-transfer, not ping-pong chatter. A handoff
+ * therefore lands on a fresh budget instead of silently stalling, and a
+ * `complete` (never a trigger type) refreshes the budget without waking. Mutates
+ * `state`; returns the conversation ids it refreshed (for logging/tests).
+ */
+export function refreshBudgetForProgressSignals(
+  state: AutoReplyState,
+  messages: Array<{ sender_kind?: string; sender_agent_id?: string; message_type?: string; conversation_id?: string }>,
+  selfAgentId: string
+): Set<string> {
+  const refreshed = new Set<string>();
+  for (const m of messages) {
+    if (
+      m.sender_kind !== "operator" &&
+      m.sender_agent_id !== selfAgentId &&
+      typeof m.message_type === "string" &&
+      PROGRESS_SIGNAL_TYPES.has(m.message_type) &&
+      m.conversation_id
+    ) {
+      resetPeerLatch(state, m.conversation_id);
+      refreshed.add(m.conversation_id);
+    }
+  }
+  return refreshed;
 }
 
 /**
@@ -752,6 +789,14 @@ export function startAutoReply(opts: {
         batch.messages.map((m) => `${m.sender_kind ?? "?"}/${m.message_type}`).join(", ") + "]"
       );
     }
+
+    // Progress signals refresh the budget (scan the FULL batch, BEFORE the latch
+    // gate). A peer handoff/claim/complete is real work-transfer, not chatter, so
+    // it re-energises its conversation's latch exactly like an operator message —
+    // a handoff lands on a fresh budget instead of silently stalling, and a
+    // `complete` (never a trigger type, so not in `real`) still refreshes the
+    // budget without waking. `direct`/`broadcast` keep consuming the latch.
+    refreshBudgetForProgressSignals(state, batch.messages, selfAgentId);
 
     if (real.length === 0) {
       if (ackAll.length > 0) {

@@ -653,6 +653,84 @@ def test_tick_operator_message_resets_peer_latch():
     assert s4["spawned"] == 1
 
 
+# --- Feature 1: progress signals refresh the budget -------------------------
+
+
+def _peer_typed(i, message_type, conversation_id="proj-1", sender="jarvis"):
+    return _msg(
+        message_id=f"p{i}",
+        sender_kind="agent",
+        sender_agent_id=sender,
+        conversation_id=conversation_id,
+        message_type=message_type,
+        body={"text": f"{message_type} {i}"},
+    )
+
+
+def test_tick_handoff_on_closed_latch_wakes_and_resets():
+    # A handoff arriving on an EXHAUSTED latch refreshes the budget AND wakes the
+    # agent — real work can never silently die on a spent budget.
+    state = _state()
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    # A plain direct on the closed latch would NOT wake (it latches).
+    s_closed = process_inbox_once(
+        FakeClient(InboxResponse([_peer(1)], [], False, [])),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_closed["spawned"] == 0 and s_closed["latched"] == 1
+    # A handoff on the (still) closed latch refreshes the budget AND wakes.
+    s_handoff = process_inbox_once(
+        FakeClient(InboxResponse([_peer_typed(2, "handoff")], [], False, [])),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_handoff["spawned"] == 1
+    assert s_handoff["latched"] == 0
+    # Latch is fresh: reset to 0, then this wake consumed exactly one.
+    assert state.peer_turns_by_conversation["proj-1"] == 1
+
+
+def test_tick_complete_on_closed_latch_resets_without_spawn():
+    # A complete is NOT a trigger type: it refreshes the budget but spawns no turn.
+    state = _state()
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert not peer_latch_open(state, "proj-1", 1)  # exhausted
+    s_complete = process_inbox_once(
+        FakeClient(InboxResponse([_peer_typed(1, "complete")], [], False, [])),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_complete["spawned"] == 0
+    assert peer_latch_open(state, "proj-1", 1)  # budget refreshed, latch re-opened
+    # A following direct now wakes on the fresh budget.
+    s_next = process_inbox_once(
+        FakeClient(InboxResponse([_peer(2)], [], False, [])),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert s_next["spawned"] == 1
+
+
+def test_tick_direct_chatter_still_latches_at_budget():
+    # Plain direct ping-pong is still capped at the budget (no refresh).
+    state = _state()
+    spawn = _spawn_recorder([])
+    spawned = 0
+    for i in range(4):
+        s = process_inbox_once(
+            FakeClient(InboxResponse([_peer(i)], [], False, [])),
+            "self", state, spawn=spawn, now=float(i),
+            peer_enabled=True, peer_turn_budget=2,
+        )
+        spawned += s["spawned"]
+    assert spawned == 2
+
+
 def test_tick_relay_peer_autoreply_overrides_bootstrap_off():
     # Bootstrap default OFF, but the operator turned delegation ON in the console
     # (relay surfaces peer_autoreply=True) -> the teammate wakes the agent live.
