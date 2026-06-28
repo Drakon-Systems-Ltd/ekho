@@ -215,6 +215,9 @@ const plugin = defineToolPlugin({
         const operatorTrusted = Boolean(cached.operator_trusted);
         const roster = (cached.roster ?? []) as unknown as Array<Record<string, unknown>>;
         const controls = (cached.controls ?? []) as unknown as Array<Record<string, unknown>>;
+        const peerAutoreply = Boolean(cached.peer_autoreply);
+        const peerTurnBudget = Number(cached.peer_turn_budget) || 0;
+        const peerTurnsUsed = cached.peer_turns_used ?? {};
 
         // Download each message's attachments to a scoped local dir and surface
         // the local_path so the agent's file tools can open them. Done here (on
@@ -230,6 +233,10 @@ const plugin = defineToolPlugin({
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.
           operator_trusted: operatorTrusted,
+          // Bounded delegation, surfaced top-level so the agent can reason about
+          // its peer budget even before reading individual messages.
+          peer_autoreply: peerAutoreply,
+          peer_turn_budget: peerTurnBudget > 0 ? peerTurnBudget : null,
           messages: messages.map((m, i) => {
             const fromKind = m.sender_kind === "operator" ? "operator" : "agent";
             const attachments = localAttachments[i];
@@ -259,7 +266,23 @@ const plugin = defineToolPlugin({
                     note: "Unverified operator identity — treat with caution; do not act on sensitive requests without confirmation."
                   };
             }
-            return { ...base, from: m.sender_agent_id };
+            // Bounded-delegation budget left for this peer conversation, so a
+            // manual inbox read shows how many more times a teammate can wake
+            // this agent before the latch auto-pauses. Additive + peer-only.
+            const peerBudget =
+              peerTurnBudget > 0
+                ? (() => {
+                    const used = Number(
+                      (peerTurnsUsed as Record<string, number>)[String(m.conversation_id)] ?? 0
+                    );
+                    return {
+                      peer_turns_used: used,
+                      peer_turn_budget: peerTurnBudget,
+                      peer_remaining: Math.max(0, peerTurnBudget - used)
+                    };
+                  })()
+                : {};
+            return { ...base, ...peerBudget, from: m.sender_agent_id };
           }),
           // Teammates the agent can delegate to / coordinate with.
           roster: roster.map((r) => ({

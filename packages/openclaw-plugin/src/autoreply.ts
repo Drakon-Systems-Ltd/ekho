@@ -145,21 +145,37 @@ let lastBatchMeta: {
   controls: ControlEntry[];
   verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
+  // Bounded-delegation state, so a manual ekho_inbox read shows how much peer
+  // budget is left: the effective cap, the on/off flag, and per-conversation
+  // consumed counts (conversation_id -> turns used).
+  peer_autoreply: boolean;
+  peer_turn_budget: number;
+  peer_turns_used: Record<string, number>;
 } = {
   operator_trusted: false,
   roster: [],
   controls: [],
   verifications: {},
-  conversation_history: {}
+  conversation_history: {},
+  peer_autoreply: false,
+  peer_turn_budget: DEFAULT_PEER_TURN_BUDGET,
+  peer_turns_used: {}
 };
 
 function recordBatch(batch: InboxBatch) {
+  const relayPeer = batch.peer_autoreply;
+  const relayBudget = batch.peer_turn_budget;
   lastBatchMeta = {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
     verifications: lastBatchMeta.verifications,
-    conversation_history: batch.conversation_history ?? {}
+    conversation_history: batch.conversation_history ?? {},
+    // Relay is the source of truth; older relays omit these -> off / default cap.
+    peer_autoreply: typeof relayPeer === "boolean" ? relayPeer : false,
+    peer_turn_budget:
+      typeof relayBudget === "number" && relayBudget > 0 ? relayBudget : DEFAULT_PEER_TURN_BUDGET,
+    peer_turns_used: lastBatchMeta.peer_turns_used
   };
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
@@ -179,6 +195,17 @@ function recordBatch(batch: InboxBatch) {
  * recent poll, plus the operator-trust flag. No relay call, no ack — the loop
  * already consumed and acked these.
  */
+/**
+ * Snapshot the per-conversation peer-turn counts so `ekho_inbox` can show how
+ * much delegation budget each conversation has left. Called by the loop after
+ * it consumes the latch for a batch.
+ */
+export function recordPeerUsage(usedByConversation: Map<string, number>): void {
+  const snapshot: Record<string, number> = {};
+  for (const [conv, used] of usedByConversation) snapshot[conv] = used;
+  lastBatchMeta.peer_turns_used = snapshot;
+}
+
 export function getCachedInbox(): {
   messages: InboxMessage[];
   operator_trusted: boolean;
@@ -186,6 +213,9 @@ export function getCachedInbox(): {
   controls: ControlEntry[];
   verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
+  peer_autoreply: boolean;
+  peer_turn_budget: number;
+  peer_turns_used: Record<string, number>;
 } {
   return {
     messages: Array.from(lastBatch.values()),
@@ -193,7 +223,10 @@ export function getCachedInbox(): {
     roster: lastBatchMeta.roster,
     controls: lastBatchMeta.controls,
     verifications: lastBatchMeta.verifications,
-    conversation_history: lastBatchMeta.conversation_history
+    conversation_history: lastBatchMeta.conversation_history,
+    peer_autoreply: lastBatchMeta.peer_autoreply,
+    peer_turn_budget: lastBatchMeta.peer_turn_budget,
+    peer_turns_used: lastBatchMeta.peer_turns_used
   };
 }
 
@@ -764,6 +797,8 @@ export function startAutoReply(opts: {
       const used = state.peerTurnsByConversation.get(m.conversation_id) ?? 0;
       peerBudgetRemaining[m.conversation_id] = Math.max(0, eff.peerTurnBudget - used);
     }
+    // Expose the post-consumption per-conversation counts to ekho_inbox.
+    recordPeerUsage(state.peerTurnsByConversation);
 
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m.message_id);

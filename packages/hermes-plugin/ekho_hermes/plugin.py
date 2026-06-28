@@ -227,6 +227,9 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
         operator_trusted=cached["operator_trusted"],
         roster=cached["roster"],
         verifications=cached.get("verifications"),
+        peer_autoreply=cached.get("peer_autoreply", False),
+        peer_turn_budget=cached.get("peer_turn_budget"),
+        peer_turns_used=cached.get("peer_turns_used"),
     )
     return _tool_result(result)
 

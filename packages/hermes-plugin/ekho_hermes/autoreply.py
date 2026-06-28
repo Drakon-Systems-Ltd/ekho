@@ -87,6 +87,12 @@ _last_batch_meta: Dict[str, Any] = {
     "controls": [],
     # message_id -> VerificationResult, so ekho_inbox can show truthful labels.
     "verifications": {},
+    # Bounded-delegation state, so a manual ekho_inbox read shows how much peer
+    # budget is left: the effective cap, the on/off flag, and per-conversation
+    # consumed counts (conversation_id -> turns used).
+    "peer_autoreply": False,
+    "peer_turn_budget": DEFAULT_PEER_TURN_BUDGET,
+    "peer_turns_used": {},
 }
 
 
@@ -98,6 +104,9 @@ def reset_cache() -> None:
         _last_batch_meta["roster"] = []
         _last_batch_meta["controls"] = []
         _last_batch_meta["verifications"] = {}
+        _last_batch_meta["peer_autoreply"] = False
+        _last_batch_meta["peer_turn_budget"] = DEFAULT_PEER_TURN_BUDGET
+        _last_batch_meta["peer_turns_used"] = {}
 
 
 def record_verifications(verifications: Dict[str, Any]) -> None:
@@ -120,6 +129,16 @@ def record_batch(inbox: Any) -> None:
         )
         _last_batch_meta["roster"] = list(getattr(inbox, "roster", []) or [])
         _last_batch_meta["controls"] = list(getattr(inbox, "controls", []) or [])
+        # Bounded-delegation knobs the relay surfaces (source of truth). Older
+        # relays omit them -> keep peer off / the default budget.
+        relay_peer = getattr(inbox, "peer_autoreply", None)
+        _last_batch_meta["peer_autoreply"] = bool(relay_peer) if relay_peer is not None else False
+        relay_budget = getattr(inbox, "peer_turn_budget", None)
+        _last_batch_meta["peer_turn_budget"] = (
+            int(relay_budget)
+            if isinstance(relay_budget, int) and relay_budget > 0
+            else DEFAULT_PEER_TURN_BUDGET
+        )
         for msg in getattr(inbox, "messages", []) or []:
             message_id = getattr(msg, "message_id", None)
             if not message_id:
@@ -129,6 +148,13 @@ def record_batch(inbox: Any) -> None:
             _last_batch[message_id] = msg
         while len(_last_batch) > LAST_BATCH_CAP:
             _last_batch.popitem(last=False)  # evict oldest
+
+
+def record_peer_usage(used_by_conversation: Dict[str, int]) -> None:
+    """Snapshot the per-conversation peer-turn counts so ``ekho_inbox`` can show
+    how much delegation budget each conversation has left."""
+    with _cache_lock:
+        _last_batch_meta["peer_turns_used"] = dict(used_by_conversation or {})
 
 
 def get_cached_inbox() -> Dict[str, Any]:
@@ -143,6 +169,9 @@ def get_cached_inbox() -> Dict[str, Any]:
             "roster": list(_last_batch_meta["roster"]),
             "controls": list(_last_batch_meta["controls"]),
             "verifications": dict(_last_batch_meta["verifications"]),
+            "peer_autoreply": _last_batch_meta["peer_autoreply"],
+            "peer_turn_budget": _last_batch_meta["peer_turn_budget"],
+            "peer_turns_used": dict(_last_batch_meta["peer_turns_used"]),
         }
 
 
@@ -871,6 +900,9 @@ def process_inbox_once(
         conv = getattr(m, "conversation_id", "")
         used = state.peer_turns_by_conversation.get(conv, 0)
         peer_budget_remaining[conv] = max(0, eff_budget - used)
+
+    # Expose the post-consumption per-conversation counts to ekho_inbox.
+    record_peer_usage(state.peer_turns_by_conversation)
 
     # Mark every real message handled (dedupe defence).
     for m in real:
