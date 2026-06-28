@@ -25,10 +25,26 @@ def _clean(value: Optional[str]) -> Optional[str]:
     return stripped or None
 
 
+_FALSEY = {"0", "false", "no", "off"}
+
+
 def _truthy(value: Optional[str]) -> bool:
     """Parse a boolean-ish env value; anything not clearly truthy is False."""
     cleaned = _clean(value)
     return cleaned is not None and cleaned.lower() in _TRUTHY
+
+
+def _truthy_default_true(value: Optional[str]) -> bool:
+    """Parse a boolean-ish env value defaulting to True when UNSET.
+
+    An absent (or empty/whitespace) env var yields the new default (True); an
+    explicit falsey value (``0``/``false``/``no``/``off``) still disables. Any
+    other non-empty value is treated as truthy.
+    """
+    cleaned = _clean(value)
+    if cleaned is None:
+        return True
+    return cleaned.lower() not in _FALSEY
 
 
 @dataclass
@@ -47,9 +63,11 @@ class EkhoConfig:
     agent_id: Optional[str] = None
     agent_secret: Optional[str] = None
     heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
-    # Bounded agent-to-agent delegation. OFF by default so the public repo never
-    # gives an adopter surprise peer traffic; the operator opts in per fleet.
-    peer_autoreply: bool = False
+    # Bounded agent-to-agent delegation. ON by default: teammates can wake this
+    # agent, still latched per conversation by peer_turn_budget so it can never
+    # become unbounded ping-pong. An operator disables it per agent from the
+    # console (the relay value overrides this default), or via EKHO_PEER_AUTOREPLY=0.
+    peer_autoreply: bool = True
     peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET
     # Operator signing public key(s) to bootstrap-pin as the trust root, for
     # agents enrolled before signing existed. Format: "<b64url>" or
@@ -103,7 +121,7 @@ class EkhoConfig:
             agent_id=_clean(env.get("EKHO_AGENT_ID")),
             agent_secret=_clean(env.get("EKHO_AGENT_SECRET")),
             heartbeat_interval_seconds=interval,
-            peer_autoreply=_truthy(env.get("EKHO_PEER_AUTOREPLY")),
+            peer_autoreply=_truthy_default_true(env.get("EKHO_PEER_AUTOREPLY")),
             peer_turn_budget=budget,
             operator_pubkey=_clean(env.get("EKHO_OPERATOR_PUBKEY")),
         )

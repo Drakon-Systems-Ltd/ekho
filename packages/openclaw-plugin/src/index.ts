@@ -112,7 +112,7 @@ const plugin = defineToolPlugin({
     agentSecret: Type.Optional(Type.String({ description: "Pre-provisioned agent secret (skips enrollment)" })),
     displayName: Type.Optional(Type.String({ description: "Display name shown in the operator console" })),
     heartbeatIntervalMs: Type.Optional(Type.Number({ description: "Heartbeat interval in ms (default 30000)" })),
-    peerAutoreply: Type.Optional(Type.Boolean({ description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default false)" })),
+    peerAutoreply: Type.Optional(Type.Boolean({ description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)" })),
     peerTurnBudget: Type.Optional(Type.Number({ description: "Max times a teammate may wake this agent per conversation before the latch closes (default 6)" }))
   }),
   tools: (tool) => [
