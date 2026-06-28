@@ -5,6 +5,7 @@ import {
   consumePeerLatch,
   resetPeerLatch,
   refreshBudgetForProgressSignals,
+  markConversationEscalated,
   buildPrompt,
   planFloorTurn,
   createAutoReplyState,
@@ -121,6 +122,26 @@ describe("bounded peer delegation", () => {
       "self"
     );
     expect(peerLatchOpen(s, "c", 1)).toBe(false); // neither path counts
+  });
+
+  it("escalates a closed conversation at most once until reset (F3)", () => {
+    const s = createAutoReplyState();
+    expect(markConversationEscalated(s, "c")).toBe(true); // first close -> escalate
+    expect(markConversationEscalated(s, "c")).toBe(false); // deduped
+    expect(markConversationEscalated(s, "c")).toBe(false);
+    // A reset (operator engagement / progress signal) re-arms the escalation.
+    resetPeerLatch(s, "c");
+    expect(markConversationEscalated(s, "c")).toBe(true);
+  });
+
+  it("tracks escalation per conversation independently (F3)", () => {
+    const s = createAutoReplyState();
+    expect(markConversationEscalated(s, "a")).toBe(true);
+    expect(markConversationEscalated(s, "b")).toBe(true);
+    expect(markConversationEscalated(s, "a")).toBe(false);
+    resetPeerLatch(s, "a");
+    expect(markConversationEscalated(s, "a")).toBe(true);
+    expect(markConversationEscalated(s, "b")).toBe(false); // b unaffected by a's reset
   });
 
   it("frames a teammate by display name with the productivity gate", () => {

@@ -999,3 +999,103 @@ def test_record_peer_usage_snapshot_is_isolated():
     record_peer_usage(live)
     live["c1"] = 99
     assert get_cached_inbox()["peer_turns_used"]["c1"] == 2
+
+
+# --- Feature 3: stall escalation (no silent death) --------------------------
+
+
+def _notice_client(inbox, notices):
+    """A FakeClient that records best-effort raise_notice() escalations."""
+    c = FakeClient(inbox)
+    c.raise_notice = lambda **kw: (notices.append(kw), {"ok": True, "recorded": True})[1]
+    return c
+
+
+def test_tick_escalates_once_when_a_peer_is_withheld_on_a_closed_latch():
+    state = _state()
+    notices = []
+    spawn = _spawn_recorder([])
+    # budget 1: the first peer wakes (consumes the only turn) — nothing withheld.
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(0)], [], False, []), notices),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert notices == []
+    # A second peer is withheld (latch closed) -> exactly one escalation.
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(1)], [], False, []), notices),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 1
+    assert notices[0]["conversation_id"] == "proj-1"
+    assert notices[0]["reason"] == "peer_turn_budget_exhausted"
+    assert notices[0]["pending_count"] == 1
+    assert notices[0]["budget"] == 1
+    # A third withheld peer does NOT re-escalate (deduped until reset).
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(2)], [], False, []), notices),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 1
+
+
+def test_tick_escalation_re_arms_after_operator_reset():
+    state = _state()
+    notices = []
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(0)], [], False, []), notices),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(1)], [], False, []), notices),
+        "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 1
+    # The operator engaging re-opens the latch AND re-arms the escalation.
+    op = _msg(message_id="o1", sender_kind="operator", sender_agent_id="op",
+              conversation_id="proj-1")
+    process_inbox_once(
+        _notice_client(InboxResponse([op], [], True, []), notices),
+        "self", state, spawn=spawn, now=2.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    # Fresh budget: a peer wakes, the next is withheld -> a NEW escalation.
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(2)], [], False, []), notices),
+        "self", state, spawn=spawn, now=3.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer(3)], [], False, []), notices),
+        "self", state, spawn=spawn, now=4.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert len(notices) == 2
+
+
+def test_tick_no_escalation_when_a_progress_signal_refreshes_the_budget():
+    # A handoff refreshes the budget and wakes -> never latched -> no escalation.
+    state = _state()
+    notices = []
+    process_inbox_once(
+        _notice_client(InboxResponse([_peer_typed(0, "handoff")], [], False, []), notices),
+        "self", state, spawn=_spawn_recorder([]), now=0.0,
+        peer_enabled=True, peer_turn_budget=1,
+    )
+    assert notices == []
+
+
+def test_tick_escalation_failure_never_breaks_the_tick():
+    # A raise_notice that raises must not propagate — escalation is best-effort.
+    state = _state()
+    spawn = _spawn_recorder([])
+    process_inbox_once(
+        FakeClient(InboxResponse([_peer(0)], [], False, [])),
+        "self", state, spawn=spawn, now=0.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    boom = FakeClient(InboxResponse([_peer(1)], [], False, []))
+    def _raise(**kw):
+        raise RuntimeError("relay down")
+    boom.raise_notice = _raise
+    summary = process_inbox_once(
+        boom, "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
+    )
+    assert summary["latched"] == 1  # tick completed despite the escalation failure

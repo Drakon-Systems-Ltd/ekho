@@ -297,6 +297,40 @@ components:
         updated:
           type: integer
 
+    NoticeRequest:
+      type: object
+      required: [conversation_id]
+      properties:
+        conversation_id:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          maxLength: 64
+          default: peer_turn_budget_exhausted
+        pending_count:
+          type: integer
+          minimum: 0
+          default: 0
+        budget:
+          type: integer
+          minimum: 1
+      description: >
+        An operator-visible notice that a conversation has stalled. Recorded as a
+        `conversation.stalled` event surfaced via `/v1/operator/events`.
+
+    NoticeResponse:
+      type: object
+      required: [ok, recorded]
+      properties:
+        ok:
+          type: boolean
+        recorded:
+          type: boolean
+          description: >
+            `false` when a still-open stall for this (fleet, agent, conversation)
+            already exists (idempotent until the next operator engagement).
+
     HeartbeatRequest:
       type: object
       required: [status]
@@ -1052,6 +1086,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AckResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/notices:
+    post:
+      operationId: raiseNotice
+      tags: [Agent]
+      summary: Raise an operator-visible notice (e.g. a stalled conversation)
+      description: >
+        Records an operator-visible event when a conversation stalls — today, the
+        peer-turn budget is exhausted while a real peer message was withheld.
+        Surfaces as a `conversation.stalled` event in `/v1/operator/events`.
+        Idempotent per (fleet, agent, conversation) until the next operator
+        engagement re-opens the conversation, so a polling agent can call it every
+        tick without flooding the events feed.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NoticeRequest"
+      responses:
+        "200":
+          description: Notice processed (recorded, or deduplicated as a no-op).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoticeResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":

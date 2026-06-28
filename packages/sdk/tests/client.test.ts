@@ -54,6 +54,24 @@ describe("@drakon-systems/ekho-sdk", () => {
       expect(result.ok).toBe(true);
     });
 
+    it("raises a stall notice and dedups idempotently", async () => {
+      const creds = await relay.enrollAgent("sdk-notice");
+      const client = new EkhoAgentClient({
+        agentId: creds.agent_id,
+        secret: creds.secret,
+        relayBaseUrl: creds.relayBaseUrl
+      });
+      const first = await client.raiseNotice({
+        conversation_id: "sdk-stall-conv",
+        pending_count: 2,
+        budget: 6
+      });
+      expect(first).toEqual({ ok: true, recorded: true });
+      // A repeat for the same conversation is a no-op (still 200).
+      const second = await client.raiseNotice({ conversation_id: "sdk-stall-conv" });
+      expect(second).toEqual({ ok: true, recorded: false });
+    });
+
     it("rejects invalid credentials", async () => {
       const client = new EkhoAgentClient({
         agentId: "fake-agent",

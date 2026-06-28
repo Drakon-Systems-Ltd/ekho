@@ -2486,6 +2486,41 @@ export class EkhoDb {
     return row.count === new Set(ids).size;
   }
 
+  /**
+   * Record an agent-raised "conversation stalled" notice as an operator-visible
+   * `conversation.stalled` event. Idempotent per (fleet, agent, conversation):
+   * at most ONE open stall is recorded until the next operator engagement in that
+   * conversation re-opens things — so a repeating poll loop can call this every
+   * tick without spamming the events feed. The latest operator event in the
+   * conversation marks the re-open boundary; a stall newer than it already exists
+   * → skip. Returns whether a new event was written.
+   */
+  recordConversationStall(
+    fleetId: string,
+    agentId: string,
+    conversationId: string,
+    payload: { reason: string; pending_count: number; budget?: number }
+  ): { recorded: boolean } {
+    const lastOperator = this.db.prepare(
+      "SELECT MAX(created_at) AS ts FROM events WHERE fleet_id = ? AND conversation_id = ? AND actor_kind = 'operator'"
+    ).get(fleetId, conversationId) as { ts: string | null } | undefined;
+    const boundary = lastOperator?.ts ?? null;
+    const existing = this.db.prepare(
+      `SELECT 1 FROM events
+       WHERE fleet_id = ? AND conversation_id = ? AND event_type = 'conversation.stalled' AND actor_id = ?
+       ${boundary ? "AND created_at > ?" : ""}
+       LIMIT 1`
+    ).get(...(boundary ? [fleetId, conversationId, agentId, boundary] : [fleetId, conversationId, agentId]));
+    if (existing) return { recorded: false };
+    this.recordEvent(fleetId, "conversation.stalled", "agent", agentId, "conversation", conversationId, conversationId, {
+      conversation_id: conversationId,
+      reason: payload.reason,
+      pending_count: payload.pending_count,
+      budget: payload.budget ?? null
+    });
+    return { recorded: true };
+  }
+
   recordEvent(
     fleetId: string,
     eventType: string,

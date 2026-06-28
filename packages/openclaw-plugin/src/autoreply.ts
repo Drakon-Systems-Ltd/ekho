@@ -248,6 +248,10 @@ export interface AutoReplyState {
   inFlight: boolean;
   // conversation_id -> count of times a peer has woken this agent in it.
   peerTurnsByConversation: Map<string, number>;
+  // Conversations we've already raised a stall escalation for (escalate at most
+  // once per close). Cleared per conversation by resetPeerLatch, so the next
+  // operator engagement / progress signal re-arms a future escalation.
+  escalatedClosedConvs: Set<string>;
 }
 
 export function createAutoReplyState(): AutoReplyState {
@@ -258,7 +262,8 @@ export function createAutoReplyState(): AutoReplyState {
     seenNonceOrder: [],
     recentInboundByPeer: new Map(),
     inFlight: false,
-    peerTurnsByConversation: new Map()
+    peerTurnsByConversation: new Map(),
+    escalatedClosedConvs: new Set()
   };
 }
 
@@ -300,9 +305,23 @@ export function consumePeerLatch(state: AutoReplyState, conversationId: string):
   }
 }
 
-/** Re-open a conversation's latch — the operator engaging re-energises it. */
+/** Re-open a conversation's latch — the operator engaging (or a peer progress
+ *  signal) re-energises it. Also re-arms the stall escalation for this
+ *  conversation, so a future close raises a fresh operator-visible notice. */
 export function resetPeerLatch(state: AutoReplyState, conversationId: string): void {
   state.peerTurnsByConversation.set(conversationId, 0);
+  state.escalatedClosedConvs.delete(conversationId);
+}
+
+/**
+ * Decide whether to raise a stall escalation for a just-closed conversation, and
+ * mark it escalated. Returns true at most once per close (until resetPeerLatch
+ * re-arms it), so the escalate-once dedup is unit-testable without the tick.
+ */
+export function markConversationEscalated(state: AutoReplyState, conversationId: string): boolean {
+  if (state.escalatedClosedConvs.has(conversationId)) return false;
+  state.escalatedClosedConvs.add(conversationId);
+  return true;
 }
 
 /**
@@ -830,6 +849,8 @@ export function startAutoReply(opts: {
     // latch on the surviving teammate messages (the structural loop-breaker).
     const rateKept = applyPeerRateGate(real, state, log);
     const kept: InboxMessage[] = [];
+    // conversation_id -> count of real peer messages withheld on a closed latch.
+    const latchedConvs = new Map<string, number>();
     for (const m of rateKept) {
       if (m.sender_kind === "operator") {
         kept.push(m);
@@ -839,9 +860,28 @@ export function startAutoReply(opts: {
         consumePeerLatch(state, m.conversation_id);
         kept.push(m);
       } else {
+        latchedConvs.set(m.conversation_id, (latchedConvs.get(m.conversation_id) ?? 0) + 1);
         log?.info?.(
           `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${eff.peerTurnBudget} reached); delivered without a turn`
         );
+      }
+    }
+
+    // No silent death: when a real peer message is withheld on a closed latch,
+    // raise ONE operator-visible escalation per conversation-close (deduped via
+    // markConversationEscalated, re-armed by resetPeerLatch). Best-effort — a
+    // relay failure must never break the tick.
+    for (const [conv, pending] of latchedConvs) {
+      if (!markConversationEscalated(state, conv)) continue;
+      try {
+        await client.raiseNotice({
+          conversation_id: conv,
+          reason: "peer_turn_budget_exhausted",
+          pending_count: pending,
+          budget: eff.peerTurnBudget
+        });
+      } catch (err) {
+        log?.debug?.(`[ekho-autoreply] stall escalation failed for ${conv}: ${String(err)}`);
       }
     }
 

@@ -216,6 +216,46 @@ def test_client_get_inbox_sends_no_body():
     assert call.kwargs["data"] is None
 
 
+def test_client_raise_notice_posts_signed_request():
+    client, session = _make_client_with_mock()
+    response = MagicMock()
+    response.ok = True
+    response.content = b'{"ok":true,"recorded":true}'
+    response.json.return_value = {"ok": True, "recorded": True}
+    session.request.return_value = response
+
+    result = client.raise_notice(
+        conversation_id="proj-1", pending_count=2, budget=6
+    )
+    assert result == {"ok": True, "recorded": True}
+
+    call = session.request.call_args
+    assert call.args[0] == "POST"
+    assert call.args[1] == "http://relay.example/v1/notices"
+    # The signed body carries the conversation, default reason, and counts.
+    body = json.loads(call.kwargs["data"].decode("utf-8"))
+    assert body == {
+        "conversation_id": "proj-1",
+        "reason": "peer_turn_budget_exhausted",
+        "pending_count": 2,
+        "budget": 6,
+    }
+
+
+def test_client_raise_notice_omits_budget_when_none():
+    client, session = _make_client_with_mock()
+    response = MagicMock()
+    response.ok = True
+    response.content = b'{"ok":true,"recorded":false}'
+    response.json.return_value = {"ok": True, "recorded": False}
+    session.request.return_value = response
+
+    client.raise_notice(conversation_id="proj-1")
+    body = json.loads(session.request.call_args.kwargs["data"].decode("utf-8"))
+    assert "budget" not in body
+    assert body["pending_count"] == 0
+
+
 def test_client_raises_on_http_error():
     client, session = _make_client_with_mock()
     response = MagicMock()

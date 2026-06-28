@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
 import { db } from "./db";
-import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -255,6 +255,24 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     }
     const released = db.releaseFloor(request.agent.fleetId, conversationId, request.agent.id);
     return reply.send({ released });
+  });
+
+  // An agent raises an operator-visible notice when a conversation stalls — the
+  // peer-turn budget is exhausted and a real peer message was withheld. Recorded
+  // as a `conversation.stalled` event (surfaced via /v1/operator/events), so the
+  // operator can re-engage. Idempotent per (fleet, agent, conversation) until the
+  // next operator message re-opens the conversation, so a repeating poll loop can
+  // call it every tick without flooding the feed.
+  app.post("/v1/notices", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = noticeSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const result = db.recordConversationStall(request.agent.fleetId, request.agent.id, parsed.data.conversation_id, {
+      reason: parsed.data.reason,
+      pending_count: parsed.data.pending_count,
+      budget: parsed.data.budget
+    });
+    return reply.send({ ok: true, recorded: result.recorded });
   });
 
   app.post("/v1/heartbeats", { preHandler: requireAgentAuth }, async (request, reply) => {

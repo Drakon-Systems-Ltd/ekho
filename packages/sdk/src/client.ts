@@ -98,6 +98,14 @@ export class EkhoAgentClient {
     );
   }
 
+  /** Raise an operator-visible notice that a conversation has stalled (e.g. the
+   *  peer-turn budget is exhausted with real work withheld). Recorded as a
+   *  `conversation.stalled` event; idempotent per (fleet, agent, conversation)
+   *  until the next operator engagement, so it's safe to call best-effort. */
+  raiseNotice(payload: { conversation_id: string; reason?: string; pending_count?: number; budget?: number }) {
+    return this.request<{ ok: boolean; recorded: boolean }>("POST", "/v1/notices", payload);
+  }
+
   heartbeat(payload: HeartbeatPayload) {
     return this.request<{ ok: boolean; next_heartbeat_due_seconds: number }>("POST", "/v1/heartbeats", payload);
   }

@@ -201,6 +201,10 @@ class AutoReplyState:
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
     peer_conv_order: List[str] = field(default_factory=list)
+    # Conversations we've already raised a stall escalation for (so we escalate
+    # at most once per close). Cleared per conversation by reset_peer_latch, so the
+    # next operator engagement / progress signal re-arms a future escalation.
+    escalated_closed_convs: set = field(default_factory=set)
 
 
 def mark_nonce_seen(state: AutoReplyState, nonce: str) -> None:
@@ -240,8 +244,11 @@ def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
 
 
 def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
-    """Re-open a conversation's latch — the operator engaging re-energises it."""
+    """Re-open a conversation's latch — the operator engaging (or a peer progress
+    signal) re-energises it. Also re-arms the stall escalation for this
+    conversation, so a future close raises a fresh operator-visible notice."""
     state.peer_turns_by_conversation[conversation_id] = 0
+    state.escalated_closed_convs.discard(conversation_id)
 
 
 def _body_text(msg: Any) -> str:
@@ -908,6 +915,9 @@ def process_inbox_once(
     rate_kept = apply_peer_rate_gate(real, state, now, log)
     kept: List[Any] = []
     latched = 0
+    # conversation_id -> count of real peer messages withheld because its latch is
+    # closed. Drives a single operator-visible stall escalation per close.
+    latched_convs: Dict[str, int] = {}
     for m in rate_kept:
         if getattr(m, "sender_kind", None) == "operator":
             kept.append(m)
@@ -918,12 +928,34 @@ def process_inbox_once(
             kept.append(m)
         else:
             latched += 1
+            latched_convs[conv] = latched_convs.get(conv, 0) + 1
             log.info(
                 "[ekho-autoreply] peer latch closed for conversation %s "
                 "(budget %d reached); delivered without a turn",
                 conv,
                 eff_budget,
             )
+
+    # No silent death: when a real peer message is withheld on a closed latch,
+    # raise ONE operator-visible escalation per conversation-close (deduped via
+    # escalated_closed_convs, re-armed by reset_peer_latch). Best-effort — a relay
+    # failure (or an older client without raise_notice) must never break the tick.
+    raise_notice = getattr(client, "raise_notice", None)
+    for conv, pending in latched_convs.items():
+        if conv in state.escalated_closed_convs:
+            continue
+        state.escalated_closed_convs.add(conv)
+        if not callable(raise_notice):
+            continue
+        try:
+            raise_notice(
+                conversation_id=conv,
+                reason="peer_turn_budget_exhausted",
+                pending_count=pending,
+                budget=eff_budget,
+            )
+        except Exception as exc:  # noqa: BLE001 — escalation is best-effort
+            log.debug("[ekho-autoreply] stall escalation failed for %s: %s", conv, exc)
 
     # Remaining peer budget per peer-triggered conversation, AFTER this turn's
     # consumption (clamped >= 0). Threaded into the prompt so the woken agent
