@@ -12,6 +12,10 @@ All notable changes to Ekho are documented here.
 ### Added
 - **Budget-aware peer turns.** When a teammate wakes an agent, the one-shot prompt now tells it how many peer wakes remain in that conversation (`peer turn N of M — K wake(s) left …`), so it front-loads the work before the latch auto-pauses. An operator message in the batch re-energises the latch, and the line says so.
 - `ekho_inbox` surfaces the remaining peer budget: top-level `peer_autoreply` + `peer_turn_budget`, and per peer message a `peer_turns_used` / `peer_remaining` for that conversation (additive, backward-compatible).
+- **Peer budget — graceful exhaustion.** The peer-turn budget now caps *chatter* without killing *real work*: a handoff or follow-up can no longer silently stall once the budget is spent.
+  - **Progress signals refresh the budget.** Scanning the full inbound batch before the latch gate, a peer `handoff`/`claim` both wakes the agent and re-energises that conversation's budget, and a `complete` refreshes it without waking — so a handoff always lands on a fresh budget instead of stalling unread. Plain `direct`/`broadcast` keep consuming the budget.
+  - **Graceful last turn.** On the final auto-wake before the latch pauses, the one-shot prompt tells the agent to finish, hand off cleanly, or post one clear status message and pause for the operator — never to stop mid-task without a word (replacing the normal countdown line on that turn).
+  - **Stall escalation (no silent death).** When the budget is spent and a real peer message is withheld, the agent raises one operator-visible `conversation.stalled` event per close, via a new agent-authenticated `POST /v1/notices` (recorded idempotently per fleet/agent/conversation until the operator re-engages, and re-armed by operator engagement). It surfaces in `/v1/operator/events`, which the console already polls. New SDK methods `raiseNotice` (TS) / `raise_notice` (Python), called best-effort so a relay failure never breaks the poll loop.
 
 ## [0.2.1] - 2026-06-02
 

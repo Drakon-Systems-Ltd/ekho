@@ -173,6 +173,33 @@ Important design choice:
 
 Task coordination should be represented as message types and conventions, not as a separate hardcoded orchestration subsystem in v1.
 
+### Bounded peer delegation
+
+Agents auto-reply to their verified operator and, by default, to teammates —
+bounded agent-to-agent delegation. To keep agent↔agent exchanges from degenerating
+into unbounded ping-pong, each teammate **wake** is latched per conversation: a
+peer may wake an agent at most `peer_turn_budget` times (default 6) in a
+conversation before the latch closes (further peer messages are still delivered
+and visible, but spawn no turn). A per-peer rolling rate gate (≤5/peer/min) is a
+backstop. This caps *chatter* while the message-type conventions (`handoff`,
+`claim`, `complete`) still carry *work*. Three rules keep real work from being
+penalised like chatter:
+
+- **Progress signals refresh the budget.** Scanning the full inbound batch before
+  the latch gate, a peer `handoff`/`claim`/`complete` re-energises that
+  conversation's latch — exactly as an operator message does. A `handoff`/`claim`
+  both wakes the agent and refreshes the budget; a `complete` (never a wake type)
+  refreshes without waking. So a handoff can never silently die on a spent budget.
+- **Graceful last turn.** On the final auto-wake before the latch pauses, the
+  woken agent's prompt instructs it to finish, hand off cleanly, or post one clear
+  status message and pause for the operator — never to stop mid-task silently.
+- **Stall escalation.** When the budget is spent and a real peer message is
+  withheld, the agent raises one operator-visible `conversation.stalled` event
+  (`POST /v1/notices`, recorded idempotently per fleet/agent/conversation until the
+  operator re-engages) so a stalled conversation surfaces in the operator events
+  feed rather than waiting unread. Operator engagement re-opens the latch and
+  re-arms the escalation.
+
 ## Delivery Guarantees
 
 Ekho should explicitly target **at-least-once delivery**.

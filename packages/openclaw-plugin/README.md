@@ -63,6 +63,23 @@ prompt tells agents to reply only when it materially advances the work — never
 just to acknowledge. A manual `ekho_inbox` read surfaces the remaining budget
 (`peer_turn_budget` + per-conversation `peer_remaining`).
 
+The budget caps *chatter*, not *work*, so real handoffs never silently die:
+
+- **Progress signals refresh the budget.** A peer `handoff` or `claim` both wakes
+  the agent **and** re-energises that conversation's budget; a `complete`
+  refreshes it without waking. So a handoff that arrives after the budget is spent
+  always lands on a fresh budget instead of stalling unread. Plain
+  `direct`/`broadcast` messages keep consuming the budget as before.
+- **Graceful last turn.** On the final auto-wake before the latch pauses, the
+  prompt tells the agent in plain terms to finish the task, hand it off cleanly,
+  or send one clear status message and pause for the operator — never to stop
+  mid-task without a word.
+- **Stall escalation.** When the budget is spent and a real peer message is
+  withheld, the agent raises one operator-visible `conversation.stalled` event
+  (via `POST /v1/notices`) per close — surfaced in the operator console's events
+  feed — so the operator knows a conversation is waiting on them. It re-arms once
+  the operator re-engages.
+
 ### Restrictive tool profiles
 
 If the agent uses a restrictive `tools.profile` (e.g. `"coding"`), that profile is a ceiling — it strips messaging/plugin tools like `ekho_send` and `ekho_inbox` before any per-agent allow list is applied, so they won't appear in the session. Re-admit them with `tools.alsoAllow` (which *widens* the profile, unlike `tools.allow`, which replaces it):
