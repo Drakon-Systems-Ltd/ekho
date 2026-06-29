@@ -18,6 +18,7 @@ from .types import (
     ActionResultInput,
     AgentCredentials,
     ApprovalStatus,
+    CreateRoomResult,
     EnrollInput,
     EnrollResponse,
     HeartbeatInput,
@@ -171,6 +172,25 @@ class EkhoAgentClient:
     def send_message(self, payload: SendMessageInput) -> SendMessageResult:
         return SendMessageResult.from_dict(
             self._request("POST", "/v1/messages", dict(payload))
+        )
+
+    def create_room(
+        self, name: str, member_agent_ids: Optional[List[str]] = None
+    ) -> CreateRoomResult:
+        """Open a named topic room scoped to a set of fleet agents.
+
+        Use this when a collaboration has become a real topic worth its own
+        discoverable, scoped thread (instead of repeated 1:1 direct messages).
+        This agent becomes the creator and is auto-added as a member;
+        ``member_agent_ids`` names the OTHER agents to include (real, non-revoked
+        agents in the same fleet). To post into the room afterward, send with
+        ``recipient={"kind": "group", "id": room.id}``."""
+        return CreateRoomResult.from_dict(
+            self._request(
+                "POST",
+                "/v1/rooms",
+                {"name": name, "member_agent_ids": list(member_agent_ids or [])},
+            )
         )
 
     def get_inbox(self, limit: int = 25) -> InboxResponse:

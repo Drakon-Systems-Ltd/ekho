@@ -68,6 +68,20 @@ export class EkhoAgentClient {
     return this.request<{ message_id: string; status: string; queued_at: string }>("POST", "/v1/messages", payload);
   }
 
+  /**
+   * Open a named topic room scoped to a set of fleet agents. Use this when a
+   * collaboration has become a real topic worth its own discoverable, scoped
+   * thread (instead of repeated 1:1 direct messages). This agent becomes the
+   * creator and is auto-added as a member; `memberAgentIds` names the OTHER
+   * agents to include (real, non-revoked agents in the same fleet). To post into
+   * the room afterward, send with `recipient: { kind: "group", id: <room.id> }`.
+   */
+  createRoom(payload: { name: string; member_agent_ids?: string[] }) {
+    return this.request<{ id: string; name: string; created_at: string; members: string[] }>(
+      "POST", "/v1/rooms", { name: payload.name, member_agent_ids: payload.member_agent_ids ?? [] }
+    );
+  }
+
   getInbox(limit = 25) {
     return this.request<InboxResponse>("GET", `/v1/inbox?limit=${limit}`);
   }

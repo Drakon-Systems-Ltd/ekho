@@ -72,6 +72,8 @@ export type InboxResponse = {
   peer_turn_budget?: number;
   /** Recent thread per room conversation (id -> chronological snapshots); {} for direct. */
   conversation_history?: Record<string, MessageSnapshot[]>;
+  /** Rooms (among this batch) the polling agent is a member of, so a reply can be framed as going to the named room. */
+  rooms?: Array<{ id: string; name: string }>;
 };
 
 export type SendMessagePayload = {

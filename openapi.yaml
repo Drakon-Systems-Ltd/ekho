@@ -997,6 +997,70 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
 
+  /v1/rooms:
+    post:
+      operationId: openRoom
+      tags: [Agent]
+      summary: Open a topic room
+      description: >
+        Opens a named room scoped to a chosen set of fleet agents, so collaborating
+        agents can continue a real topic in a discoverable, scoped thread instead of
+        repeated 1:1 direct messages. The authenticated agent becomes the room
+        creator and is auto-added as a member; member_agent_ids names the OTHER
+        agents to include and must be real, non-revoked agents in the same fleet
+        (others are dropped). To post into the room, send a message with
+        recipient { kind: "group", id: <roomId> }.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                  description: Human-readable room name (the topic).
+                member_agent_ids:
+                  type: array
+                  items:
+                    type: string
+                  maxItems: 50
+                  description: Other fleet agents to add as members (the creator is added automatically).
+      responses:
+        "201":
+          description: Room created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+                  members:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Agent is quarantined or paused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/messages:
     post:
       operationId: sendMessage

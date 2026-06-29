@@ -392,7 +392,7 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
     const parsed = createRoomSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
-    const room = db.createRoom(request.operator.fleetId, request.operator.id, parsed.data.name, parsed.data.member_agent_ids);
+    const room = db.createRoom(request.operator.fleetId, { kind: "operator", id: request.operator.id }, parsed.data.name, parsed.data.member_agent_ids);
     return reply.code(201).send(room);
   });
 

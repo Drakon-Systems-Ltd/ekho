@@ -190,6 +190,10 @@ class InboxResponse:
     conversation_history: Dict[str, List[Dict[str, Any]]] = field(
         default_factory=dict
     )
+    # Rooms (among this batch) the polling agent is a MEMBER of, as
+    # {id, name} dicts — so a reply can be framed as going to the named room
+    # rather than a 1:1 thread. Empty for direct-only batches.
+    rooms: List[Dict[str, Any]] = field(default_factory=list)
     # The polling agent's own fleet — binds verified signatures to a fleet.
     # Last field so positional InboxResponse(...) construction stays stable.
     fleet_id: Optional[str] = None
@@ -218,6 +222,7 @@ class InboxResponse:
                 for k in data.get("operator_keys", [])
             ],
             conversation_history=data.get("conversation_history") or {},
+            rooms=list(data.get("rooms") or []),
         )
 
 
@@ -346,6 +351,23 @@ class SendMessageResult:
             message_id=data["message_id"],
             status=data["status"],
             queued_at=data["queued_at"],
+        )
+
+
+@dataclass
+class CreateRoomResult:
+    id: str
+    name: str
+    created_at: str
+    members: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "CreateRoomResult":
+        return cls(
+            id=data["id"],
+            name=data["name"],
+            created_at=data.get("created_at", ""),
+            members=list(data.get("members", [])),
         )
 
 

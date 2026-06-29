@@ -498,6 +498,7 @@ def build_prompt(
     conversation_history: Optional[Dict[str, Any]] = None,
     peer_turn_budget: Optional[int] = None,
     peer_budget_remaining: Optional[Dict[str, int]] = None,
+    rooms: Optional[Sequence[Any]] = None,
 ) -> str:
     """Build the one-shot turn prompt. Tells the agent its ONLY reply channel is
     ``ekho_send`` with the exact recipient + conversation id, surfaces trust,
@@ -508,6 +509,14 @@ def build_prompt(
     left AFTER this turn (with ``peer_turn_budget`` the cap), so the agent gets a
     bounded-delegation line telling it to front-load before the latch closes."""
     names = _roster_names(roster)
+    # Rooms this agent is a member of (conversation_id -> room name), so a room
+    # message's reply is framed as going to the whole room, not a 1:1 thread.
+    room_names: Dict[str, str] = {}
+    for room in rooms or []:
+        rid = room.get("id") if isinstance(room, dict) else getattr(room, "id", None)
+        rname = room.get("name") if isinstance(room, dict) else getattr(room, "name", None)
+        if rid and rname:
+            room_names[str(rid)] = str(rname)
     has_peer = any(getattr(m, "sender_kind", None) != "operator" for m in messages)
     # Conversations the operator also messaged in this batch: their peer latch was
     # just re-energised, so the budget line says so instead of counting down.
@@ -563,10 +572,22 @@ def build_prompt(
             turn = cap - remaining  # post-consumption count = this wake's number
             budget = _budget_note(turn, cap, remaining, conv in operator_convs)
             annotated_convs.add(conv)
+        # A room message: replying goes to the whole room (recipient is the
+        # room), so point the agent at ekho_send with room_id, not a 1:1 reply.
+        room_name = room_names.get(conv)
+        if room_name:
+            reply_via = (
+                f'reply into the room "{room_name}" with ekho_send using '
+                f'room_id="{conv}" (your reply goes to every member)'
+            )
+        else:
+            reply_via = (
+                f'reply with ekho_send using '
+                f'recipient_agent_id="{getattr(m, "sender_agent_id", "")}", '
+                f'conversation_id="{getattr(m, "conversation_id", "")}"'
+            )
         lines.append(
-            f'• From {who}{addr} — reply with ekho_send using '
-            f'recipient_agent_id="{getattr(m, "sender_agent_id", "")}", '
-            f'conversation_id="{getattr(m, "conversation_id", "")}":'
+            f'• From {who}{addr} — {reply_via}:'
             f'{quote}\n'
             f'    "{text}"{atts}{budget}'
         )
@@ -576,6 +597,10 @@ def build_prompt(
         "unblock them, or share something they need. Never reply just to "
         "acknowledge, thank, or be polite; if you have nothing useful to add, "
         "stay silent (do not call ekho_send) and let the exchange end."
+        " For multi-step work on a specific topic, or a handoff you'll iterate "
+        "on, open a room with ekho_open_room (topic + the agents involved) and "
+        "continue there instead of repeated direct messages — it keeps the "
+        "thread scoped and lets the operator follow and chime in."
         if has_peer
         else ""
     )
@@ -686,6 +711,7 @@ def trigger_turn(
     conversation_history: Optional[Dict[str, Any]] = None,
     peer_turn_budget: Optional[int] = None,
     peer_budget_remaining: Optional[Dict[str, int]] = None,
+    rooms: Optional[Sequence[Any]] = None,
 ) -> None:
     """Wake the agent to handle ``messages`` by spawning a one-shot reply turn."""
     prompt = build_prompt(
@@ -698,6 +724,7 @@ def trigger_turn(
         conversation_history=conversation_history,
         peer_turn_budget=peer_turn_budget,
         peer_budget_remaining=peer_budget_remaining,
+        rooms=rooms,
     )
     cmd = build_oneshot_command(prompt)
     env = dict(os.environ)
@@ -1013,6 +1040,7 @@ def process_inbox_once(
                 conversation_history=fresh_hist,
                 peer_turn_budget=eff_budget,
                 peer_budget_remaining=peer_budget_remaining,
+                rooms=getattr(inbox, "rooms", None),
             )
             spawned = 1
         except Exception as exc:  # noqa: BLE001

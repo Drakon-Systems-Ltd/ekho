@@ -51,6 +51,21 @@ def test_build_send_input_conversation_id():
     assert payload["conversation_id"] == "conv-7"
 
 
+def test_build_send_input_room_id_targets_group_and_threads_under_room():
+    payload = build_send_input("", "into the room", room_id="room_42")
+    assert payload["recipient"] == {"kind": "group", "id": "room_42"}
+    # The room IS the conversation, so the message threads under the room id.
+    assert payload["conversation_id"] == "room_42"
+
+
+def test_build_send_input_room_id_overrides_recipient_and_conversation():
+    payload = build_send_input(
+        "agent-9", "x", conversation_id="conv-7", room_id="room_1"
+    )
+    assert payload["recipient"] == {"kind": "group", "id": "room_1"}
+    assert payload["conversation_id"] == "room_1"
+
+
 def test_build_send_input_attachment_ids():
     payload = build_send_input(
         "agent-9", "see files", attachment_ids=["att-1", "att-2"]

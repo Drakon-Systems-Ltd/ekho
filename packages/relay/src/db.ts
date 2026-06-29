@@ -532,6 +532,12 @@ export class EkhoDb {
       throw new Error("attachment not found in fleet or not owned by sender");
     }
 
+    // A "group" recipient targets a room directly: the room id IS both the
+    // recipient and the conversation (mirroring the operator->room path), so the
+    // message threads under the room regardless of the conversation_id passed.
+    const conversationId =
+      input.recipientKind === "group" && input.recipientId ? input.recipientId : input.conversationId;
+
     const tx = this.db.transaction(() => {
       this.db.prepare(
         `INSERT INTO messages (
@@ -541,7 +547,7 @@ export class EkhoDb {
       ).run(
         messageId,
         input.fleetId,
-        input.conversationId,
+        conversationId,
         input.correlationId,
         input.senderAgentId,
         input.recipientKind,
@@ -563,11 +569,17 @@ export class EkhoDb {
       // A message into a room fans out to its members (minus sender), whatever
       // recipient the sender stated — that's what makes the room shared. The
       // sender must be a member (else a non-member could inject into the room).
-      const roomRecipients = this.roomMemberIds(input.fleetId, input.conversationId, input.senderAgentId, true);
+      // A "group" recipient names the room explicitly; otherwise a room is
+      // inferred from the conversation_id (an agent threading under a room id).
+      const roomRecipients = this.roomMemberIds(input.fleetId, conversationId, input.senderAgentId, true);
       if (roomRecipients !== null) {
         for (const rid of roomRecipients) {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
         }
+      } else if (input.recipientKind === "group") {
+        // A group send that didn't resolve to a room the sender belongs to: the
+        // room is unknown or the sender isn't a member. Reject (no silent drop).
+        throw new Error("room not found");
       } else if (input.recipientKind === "agent" && input.recipientId) {
         if (!this.isDeliverableAgent(input.fleetId, input.recipientId)) throw new Error("recipient not found");
         deliveryStmt.run(id("dly"), messageId, input.recipientId, createdAt, "queued");
@@ -576,16 +588,24 @@ export class EkhoDb {
           deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
         }
       } else {
-        // No delivery path matched (e.g. an unimplemented "group" recipient, or a
-        // conversation that isn't a room). Reject loudly instead of inserting a
-        // message with zero deliveries that looks sent but reaches no one.
+        // No delivery path matched (e.g. a conversation that isn't a room).
+        // Reject loudly instead of inserting a message with zero deliveries that
+        // looks sent but reaches no one.
         throw new Error(`unsupported recipient: ${input.recipientKind}`);
       }
 
-      this.recordEvent(input.fleetId, "message.queued", "agent", input.senderAgentId, "message", messageId, input.conversationId, {
+      // Surface the message text in the operator-visible event (same as the
+      // operator->room path) so the console signal log renders the REAL content
+      // of peer + room messages, not a routing stub. It's the same text already
+      // stored in body_json — just surfaced for rendering.
+      const bodyText = typeof (input.body as Record<string, unknown> | undefined)?.text === "string"
+        ? ((input.body as Record<string, unknown>).text as string)
+        : undefined;
+      this.recordEvent(input.fleetId, "message.queued", "agent", input.senderAgentId, "message", messageId, conversationId, {
         recipient_kind: input.recipientKind,
         recipient_id: input.recipientId ?? null,
         message_type: input.messageType,
+        ...(bodyText !== undefined ? { text: bodyText } : {}),
         attachments: attachmentIds
       });
     });
@@ -742,8 +762,22 @@ export class EkhoDb {
     return { messageId, conversationId, createdAt };
   }
 
-  /** Create a named room with a set of member agents. Returns the room + members. */
-  createRoom(fleetId: string, operatorId: string, name: string, memberAgentIds: string[]) {
+  /**
+   * Create a named room with a set of member agents. The creator may be the
+   * operator OR an agent (agent-opened topic rooms). Returns the room + members.
+   *
+   * When an AGENT opens the room it is auto-added as a member (in addition to
+   * ``memberAgentIds``) so it can immediately post into the thread it created —
+   * the operator is never a member (it owns all fleet rooms implicitly). Either
+   * way only real, non-revoked agents in THIS fleet can be members, so a
+   * malicious agent can't pull in arbitrary/foreign ids.
+   */
+  createRoom(
+    fleetId: string,
+    createdBy: { kind: "operator" | "agent"; id: string },
+    name: string,
+    memberAgentIds: string[]
+  ) {
     const roomId = id("room");
     const createdAt = nowIso();
     // Only real, non-revoked agents in this fleet can be members.
@@ -752,14 +786,21 @@ export class EkhoDb {
         "SELECT id FROM agents WHERE fleet_id = ? AND runtime != 'operator' AND revoked_at IS NULL"
       ).all(fleetId) as Array<{ id: string }>).map((r) => r.id)
     );
-    const members = [...new Set(memberAgentIds)].filter((m) => valid.has(m));
+    const requested = [...memberAgentIds];
+    // An agent creator joins its own room (it must be a member to post into it).
+    if (createdBy.kind === "agent") requested.push(createdBy.id);
+    const members = [...new Set(requested)].filter((m) => valid.has(m));
+    const operatorId = createdBy.kind === "operator" ? createdBy.id : null;
+    const agentId = createdBy.kind === "agent" ? createdBy.id : null;
     const tx = this.db.transaction(() => {
       this.db.prepare(
-        "INSERT INTO rooms (id, fleet_id, name, created_at, created_by_operator_id) VALUES (?, ?, ?, ?, ?)"
-      ).run(roomId, fleetId, name, createdAt, operatorId);
+        "INSERT INTO rooms (id, fleet_id, name, created_at, created_by_operator_id, created_by_agent_id) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(roomId, fleetId, name, createdAt, operatorId, agentId);
       const memberStmt = this.db.prepare("INSERT OR IGNORE INTO room_members (room_id, agent_id) VALUES (?, ?)");
       for (const m of members) memberStmt.run(roomId, m);
-      this.recordEvent(fleetId, "room.created", "operator", operatorId, "room", roomId, roomId, { name, members });
+      // actor = whoever opened it, so the operator console's events feed shows
+      // an agent-opened room with the right actor.
+      this.recordEvent(fleetId, "room.created", createdBy.kind, createdBy.id, "room", roomId, roomId, { name, members });
     });
     tx();
     return { id: roomId, name, created_at: createdAt, members };
@@ -923,13 +964,14 @@ export class EkhoDb {
     // Only rooms the polling agent is actually a MEMBER of get history — never
     // infer access from a delivery alone (an agent can tag a message with any
     // room's conversation_id, which would otherwise leak that room's thread).
-    const roomConvIds = convIds.length && fleetId
+    const roomRows = convIds.length && fleetId
       ? (this.db.prepare(
-          `SELECT rooms.id FROM rooms
+          `SELECT rooms.id, rooms.name FROM rooms
              JOIN room_members ON room_members.room_id = rooms.id
            WHERE rooms.fleet_id = ? AND room_members.agent_id = ? AND rooms.id IN (${convIds.map(() => "?").join(",")})`
-        ).all(fleetId, agentId, ...convIds) as Array<{ id: string }>).map((r) => r.id)
+        ).all(fleetId, agentId, ...convIds) as Array<{ id: string; name: string }>)
       : [];
+    const roomConvIds = roomRows.map((r) => r.id);
 
     const HISTORY_LIMIT = 15;
     const contextRows: Array<Record<string, unknown>> = [];
@@ -1037,6 +1079,9 @@ export class EkhoDb {
       // conversation_id), so an agent always has the room context, not just the
       // single delivered message. Empty for direct (non-room) conversations.
       conversation_history,
+      // Rooms (of the ones in this batch) the polling agent is a MEMBER of, so a
+      // reply can be framed as going to the named room rather than a 1:1 thread.
+      rooms: roomRows.map((r) => ({ id: r.id, name: r.name })),
       // Pinned operator signing keys (incl. revoked, so agents can drop them).
       operator_keys: fleetId
         ? this.listOperatorKeys(fleetId).map((k) => ({

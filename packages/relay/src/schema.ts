@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   name TEXT NOT NULL,
   created_at TEXT NOT NULL,
   created_by_operator_id TEXT,
+  created_by_agent_id TEXT,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 

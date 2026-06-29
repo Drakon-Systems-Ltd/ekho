@@ -24,6 +24,7 @@ from .types import (
     ApprovalStatus,
     AttachmentMeta,
     ControlMessage,
+    CreateRoomResult,
     EnrollInput,
     EnrollResponse,
     HeartbeatInput,
@@ -53,6 +54,7 @@ __all__ = [
     # Message shapes
     "SendMessageInput",
     "SendMessageResult",
+    "CreateRoomResult",
     "InboxMessage",
     "InboxResponse",
     "RosterEntry",

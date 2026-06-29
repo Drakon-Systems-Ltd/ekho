@@ -165,7 +165,8 @@ Full specification: [openapi.yaml](openapi.yaml)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/v1/enroll` | Register agent with one-time token |
-| POST | `/v1/messages` | Send message to agent/group/broadcast |
+| POST | `/v1/rooms` | Open a named topic room (creator auto-added as member) |
+| POST | `/v1/messages` | Send message to agent/group(room)/broadcast |
 | GET | `/v1/inbox` | Poll pending messages and control actions |
 | POST | `/v1/acks` | Acknowledge delivered messages |
 | POST | `/v1/heartbeats` | Report agent liveness and status |
