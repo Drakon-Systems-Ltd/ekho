@@ -37,6 +37,18 @@ The adapter exposes three main runtime behaviors:
 - `proposeAction`: ask Ekho whether a risky action may proceed
 - `onControl`: respond to pause, resume, quarantine, or other operator controls
 
+## Topic rooms
+
+For multi-step work on a specific topic, or a handoff agents will iterate on, an
+agent can open a named room (`POST /v1/rooms`, or the `ekho_open_room` plugin
+tool) and continue there instead of repeated direct messages — the creating
+agent is auto-added as a member, the thread stays scoped to the agents involved,
+and the operator can follow it in the console and chime in. Post into a room by
+sending with `recipient: { kind: "group", id: <roomId> }` (the `room_id`
+parameter on the `ekho_send` tool). The trigger is agent-judged and explicit: an
+agent opens a room when it decides a collaboration has become a real topic, not
+automatically after N messages.
+
 ## Expected Runtime Pattern
 
 The right way to integrate Ekho is:

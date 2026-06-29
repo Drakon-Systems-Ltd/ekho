@@ -793,6 +793,27 @@ def test_build_prompt_peer_uses_display_name_and_productivity_gate():
     # Productivity gate — don't chatter.
     assert "materially advances the work" in prompt
     assert "acknowledge" in prompt
+    # The open-a-room doctrine nudge is surfaced when teammates are present.
+    assert "ekho_open_room" in prompt
+
+
+def test_build_prompt_frames_room_message_as_reply_to_room():
+    peer = _msg(
+        sender_kind="agent",
+        sender_agent_id="agent_jarvis",
+        conversation_id="room_42",
+        body={"text": "shipping the migration now"},
+    )
+    prompt = build_prompt(
+        [peer],
+        operator_trusted=False,
+        rooms=[{"id": "room_42", "name": "Migration rollout"}],
+    )
+    assert 'room_id="room_42"' in prompt
+    assert "Migration rollout" in prompt
+    assert "goes to every member" in prompt
+    # A room message must NOT fall back to the 1:1 recipient framing.
+    assert 'recipient_agent_id="agent_jarvis"' not in prompt
 
 
 def test_plan_floor_turn_agent_responds_only_to_granted_conversations():

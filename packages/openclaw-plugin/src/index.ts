@@ -91,7 +91,8 @@ async function resolveLocalAttachments(
  * Ekho relay adapter for OpenClaw.
  *
  * Gives the agent two tools to coordinate with the rest of an Ekho fleet:
- *   - ekho_send:  message another agent (delegate, ask, coordinate) + attach files
+ *   - ekho_send:  message another agent or a topic room (delegate, ask, coordinate) + attach files
+ *   - ekho_open_room: open a named topic room and continue a multi-step thread there
  *   - ekho_inbox: read pending messages from other agents (+ download attachments)
  *
  * On startup (and again lazily on first tool use) it enrolls (or loads saved
@@ -119,11 +120,12 @@ const plugin = defineToolPlugin({
     tool({
       name: "ekho_send",
       description:
-        "Send a message to another agent in your fleet via the Ekho relay. Use this to delegate a task, ask a question, hand off work, or coordinate. Set recipient_agent_id to 'broadcast' to reach the whole fleet.",
+        "Send a message to another agent in your fleet via the Ekho relay. Use this to delegate a task, ask a question, hand off work, or coordinate. Set recipient_agent_id to 'broadcast' to reach the whole fleet. To post into a topic room (see ekho_open_room), set room_id instead — the message goes to every room member.",
       parameters: Type.Object({
-        recipient_agent_id: Type.String({ description: "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet." }),
+        recipient_agent_id: Type.Optional(Type.String({ description: "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet. Omit when sending to a room (use room_id)." })),
+        room_id: Type.Optional(Type.String({ description: "Send to a topic room: its members all receive the message. Takes precedence over recipient_agent_id." })),
         message: Type.String({ description: "The message text to send." }),
-        conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional)." })),
+        conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional; ignored when room_id is set — the room is the conversation)." })),
         attachment_paths: Type.Optional(
           Type.Array(Type.String(), {
             description:
@@ -131,9 +133,15 @@ const plugin = defineToolPlugin({
           })
         )
       }),
-      execute: async ({ recipient_agent_id, message, conversation_id, attachment_paths }, config: EkhoPluginConfig) => {
+      execute: async ({ recipient_agent_id, room_id, message, conversation_id, attachment_paths }, config: EkhoPluginConfig) => {
+        const roomId = typeof room_id === "string" ? room_id.trim() : "";
+        if (!roomId && !recipient_agent_id) {
+          throw new Error("provide recipient_agent_id (an agent id or 'broadcast') or room_id");
+        }
         const { client, credentials } = await ensureConnected(config);
-        const conversationId = conversation_id ?? `oc-${Date.now()}`;
+        // A room send threads under the room id (the room IS the conversation);
+        // otherwise use the supplied conversation id or mint a fresh one.
+        const conversationId = roomId || conversation_id || `oc-${Date.now()}`;
         const stamp = `oc-${Date.now()}`;
 
         // Upload any attachments first; collect their server-issued ids to bind
@@ -152,7 +160,11 @@ const plugin = defineToolPlugin({
         }
 
         const recipient =
-          recipient_agent_id === "broadcast" ? { kind: "broadcast" } : { kind: "agent", id: recipient_agent_id };
+          roomId
+            ? { kind: "group", id: roomId }
+            : recipient_agent_id === "broadcast"
+            ? { kind: "broadcast" }
+            : { kind: "agent", id: recipient_agent_id };
         const sendPayload: Record<string, unknown> = {
           recipient,
           message_type: "direct",
@@ -193,7 +205,36 @@ const plugin = defineToolPlugin({
           sent: true,
           message_id: result.message_id,
           conversation_id: conversationId,
+          ...(roomId ? { room_id: roomId } : {}),
           attachments: attachmentIds
+        };
+      }
+    }),
+    tool({
+      name: "ekho_open_room",
+      description:
+        "Open a named topic room for a multi-step collaboration or a handoff you'll iterate on, then continue there instead of repeated direct messages. The room is scoped to the agents you list (you are added automatically) and is visible to the operator, who can follow and chime in. Returns the room id — send into it with ekho_send using room_id.",
+      parameters: Type.Object({
+        topic: Type.String({ description: "The room name — a short, specific topic (e.g. 'Invoice sync rollout')." }),
+        member_agent_ids: Type.Optional(
+          Type.Array(Type.String(), {
+            description: "Ekho agent_ids of the OTHER agents to include (you are added automatically). Must be agents in your fleet."
+          })
+        )
+      }),
+      execute: async ({ topic, member_agent_ids }, config: EkhoPluginConfig) => {
+        const name = typeof topic === "string" ? topic.trim() : "";
+        if (!name) throw new Error("topic is required");
+        const { client } = await ensureConnected(config);
+        const members = Array.isArray(member_agent_ids) ? member_agent_ids.filter((m) => typeof m === "string" && m) : [];
+        const room = await client.createRoom({ name, member_agent_ids: members });
+        return {
+          opened: true,
+          room_id: room.id,
+          name: room.name,
+          members: room.members,
+          // Tell the agent how to continue in the room it just opened.
+          next: `Send into this room with ekho_send using room_id="${room.id}".`
         };
       }
     }),

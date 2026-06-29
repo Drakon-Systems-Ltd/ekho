@@ -77,21 +77,27 @@ def build_send_input(
     conversation_id: Optional[str] = None,
     attachment_ids: Optional[Sequence[str]] = None,
     correlation_id: Optional[str] = None,
+    room_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a ``SendMessageInput`` dict for ``client.send_message``.
 
-    ``recipient_agent_id == "broadcast"`` targets the whole fleet; anything else
-    is a direct message to that agent. Attachment ids ride inside the signed
-    ``body.attachments`` so the relay binds + validates them, exactly like the
-    OpenClaw plugin does.
+    When ``room_id`` is set the message targets a topic room: the recipient is
+    ``{"kind": "group", "id": room_id}`` and the room IS the conversation, so it
+    fans out to every member (mirrors the OpenClaw plugin's room send). Otherwise
+    ``recipient_agent_id == "broadcast"`` targets the whole fleet and anything
+    else is a direct message to that agent. Attachment ids ride inside the signed
+    ``body.attachments`` so the relay binds + validates them.
 
     The relay's ``sendMessageSchema`` requires BOTH ``conversation_id`` and
     ``correlation_id`` as non-empty strings, so we always set them — threading a
     caller-supplied ``conversation_id`` (an auto-reply continues the operator's
     thread) and otherwise minting fresh ids.
     """
-    if recipient_agent_id == "broadcast":
-        recipient: Dict[str, Any] = {"kind": "broadcast"}
+    room = (room_id or "").strip()
+    if room:
+        recipient: Dict[str, Any] = {"kind": "group", "id": room}
+    elif recipient_agent_id == "broadcast":
+        recipient = {"kind": "broadcast"}
     else:
         recipient = {"kind": "agent", "id": recipient_agent_id}
 
@@ -100,12 +106,15 @@ def build_send_input(
     if ids:
         body["attachments"] = list(ids)
 
+    # A room send threads under the room id (the room is the conversation).
+    conv = room or conversation_id or new_id("hermes-conv")
+
     return {
         "recipient": recipient,
         "message_type": "direct",
         "body": body,
         "metadata": {"ekho_origin": EKHO_ORIGIN_STAMP},
-        "conversation_id": conversation_id or new_id("hermes-conv"),
+        "conversation_id": conv,
         "correlation_id": correlation_id or new_id("hermes"),
     }
 

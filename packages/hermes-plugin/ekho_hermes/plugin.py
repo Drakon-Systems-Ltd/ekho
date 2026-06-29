@@ -58,7 +58,14 @@ EKHO_SEND_SCHEMA = {
             "type": "string",
             "description": (
                 "Ekho agent_id of the recipient, or 'broadcast' for the whole "
-                "fleet."
+                "fleet. Omit when sending to a room (use room_id)."
+            ),
+        },
+        "room_id": {
+            "type": "string",
+            "description": (
+                "Send to a topic room: every room member receives the message. "
+                "Takes precedence over recipient_agent_id."
             ),
         },
         "message": {
@@ -67,7 +74,10 @@ EKHO_SEND_SCHEMA = {
         },
         "conversation_id": {
             "type": "string",
-            "description": "Existing conversation id to thread under (optional).",
+            "description": (
+                "Existing conversation id to thread under (optional; ignored "
+                "when room_id is set — the room is the conversation)."
+            ),
         },
         "attachment_paths": {
             "type": "array",
@@ -79,7 +89,7 @@ EKHO_SEND_SCHEMA = {
             ),
         },
     },
-    "required": ["recipient_agent_id", "message"],
+    "required": ["message"],
 }
 
 EKHO_INBOX_SCHEMA = {
@@ -87,11 +97,42 @@ EKHO_INBOX_SCHEMA = {
     "properties": {},
 }
 
+EKHO_OPEN_ROOM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "topic": {
+            "type": "string",
+            "description": (
+                "The room name — a short, specific topic (e.g. 'Invoice sync "
+                "rollout')."
+            ),
+        },
+        "member_agent_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Ekho agent_ids of the OTHER agents to include (you are added "
+                "automatically). Must be agents in your fleet."
+            ),
+        },
+    },
+    "required": ["topic"],
+}
+
 EKHO_SEND_DESCRIPTION = (
     "Send a message to another agent in your fleet via the Ekho relay. Use this "
     "to delegate a task, ask a question, hand off work, or coordinate. Set "
-    "recipient_agent_id to 'broadcast' to reach the whole fleet. Optionally "
-    "attach local files via attachment_paths."
+    "recipient_agent_id to 'broadcast' to reach the whole fleet, or set room_id "
+    "to post into a topic room (every member receives it). Optionally attach "
+    "local files via attachment_paths."
+)
+
+EKHO_OPEN_ROOM_DESCRIPTION = (
+    "Open a named topic room for a multi-step collaboration or a handoff you'll "
+    "iterate on, then continue there instead of repeated direct messages. The "
+    "room is scoped to the agents you list (you are added automatically) and is "
+    "visible to the operator, who can follow and chime in. Returns the room id — "
+    "send into it with ekho_send using room_id."
 )
 
 EKHO_INBOX_DESCRIPTION = (
@@ -113,9 +154,12 @@ def _check_relay_configured() -> bool:
 def _handle_ekho_send(args: dict, **_kw) -> str:
     """ekho_send handler. Signature matches Hermes: ``(args, **kw) -> str``."""
     recipient = str(args.get("recipient_agent_id") or "").strip()
+    room_id = str(args.get("room_id") or "").strip()
     message = args.get("message")
-    if not recipient:
-        return _tool_error("recipient_agent_id is required")
+    if not recipient and not room_id:
+        return _tool_error(
+            "provide recipient_agent_id (an agent id or 'broadcast') or room_id"
+        )
     if not isinstance(message, str) or not message:
         return _tool_error("message is required")
 
@@ -143,6 +187,7 @@ def _handle_ekho_send(args: dict, **_kw) -> str:
         message,
         conversation_id=conversation_id,
         attachment_ids=attachment_ids,
+        room_id=room_id or None,
     )
 
     # Best-effort: sign the outbound message so recipients can verify it's us.
@@ -173,13 +218,56 @@ def _handle_ekho_send(args: dict, **_kw) -> str:
     except Exception as exc:  # noqa: BLE001
         return _tool_error(f"Ekho send failed: {exc}")
 
+    out = {
+        "sent": True,
+        "message_id": getattr(result, "message_id", None),
+        "conversation_id": payload.get("conversation_id"),
+        "recipient": room_id or recipient,
+        "attachments": attachment_ids,
+    }
+    if room_id:
+        out["room_id"] = room_id
+    return _tool_result(out)
+
+
+def _handle_ekho_open_room(args: dict, **_kw) -> str:
+    """ekho_open_room handler. Opens a named topic room scoped to a set of fleet
+    agents and returns the room id so the agent can continue there via ekho_send
+    with room_id."""
+    topic = str(args.get("topic") or "").strip()
+    if not topic:
+        return _tool_error("topic is required")
+
+    config = EkhoConfig.from_env()
+    if not config.has_relay:
+        return _tool_error("EKHO_RELAY_URL is not configured")
+
+    members = [
+        str(m)
+        for m in (args.get("member_agent_ids") or [])
+        if isinstance(m, str) and m
+    ]
+
+    try:
+        conn = ensure_connected(config)
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(f"Ekho relay connection failed: {exc}")
+
+    try:
+        room = conn.client.create_room(topic, members)
+    except Exception as exc:  # noqa: BLE001
+        return _tool_error(f"Ekho open room failed: {exc}")
+
     return _tool_result(
         {
-            "sent": True,
-            "message_id": getattr(result, "message_id", None),
-            "conversation_id": payload.get("conversation_id"),
-            "recipient": recipient,
-            "attachments": attachment_ids,
+            "opened": True,
+            "room_id": getattr(room, "id", None),
+            "name": getattr(room, "name", topic),
+            "members": getattr(room, "members", []),
+            "next": (
+                f'Send into this room with ekho_send using '
+                f'room_id="{getattr(room, "id", "")}".'
+            ),
         }
     )
 
@@ -275,6 +363,16 @@ def register(ctx) -> None:
         requires_env=["EKHO_RELAY_URL"],
         description=EKHO_SEND_DESCRIPTION,
         emoji="📤",
+    )
+    ctx.register_tool(
+        name="ekho_open_room",
+        toolset="ekho",
+        schema=EKHO_OPEN_ROOM_SCHEMA,
+        handler=_handle_ekho_open_room,
+        check_fn=_check_relay_configured,
+        requires_env=["EKHO_RELAY_URL"],
+        description=EKHO_OPEN_ROOM_DESCRIPTION,
+        emoji="🚪",
     )
     ctx.register_tool(
         name="ekho_inbox",

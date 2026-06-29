@@ -162,6 +162,34 @@ describe("bounded peer delegation", () => {
     expect(p).toContain("acknowledge");
   });
 
+  it("frames a room message as a reply to the whole room via room_id", () => {
+    const m = msg({
+      sender_kind: "agent",
+      sender_agent_id: "agent_jarvis",
+      conversation_id: "room_42",
+      body: { text: "shipping the migration now" }
+    });
+    const batch: any = {
+      messages: [m],
+      operator_trusted: false,
+      roster: [{ agent_id: "agent_jarvis", display_name: "Jarvis" }],
+      rooms: [{ id: "room_42", name: "Migration rollout" }]
+    };
+    const p = buildPrompt([m], batch);
+    expect(p).toContain('room_id="room_42"');
+    expect(p).toContain("Migration rollout");
+    expect(p).toContain("goes to every member");
+    // It should NOT fall back to the 1:1 recipient framing for a room message.
+    expect(p).not.toContain('recipient_agent_id="agent_jarvis"');
+  });
+
+  it("surfaces the open-a-room doctrine line when teammates are present", () => {
+    const m = msg({ sender_kind: "agent", sender_agent_id: "agent_jarvis", body: { text: "let's keep going" } });
+    const batch: any = { messages: [m], operator_trusted: false, roster: [] };
+    const p = buildPrompt([m], batch);
+    expect(p).toContain("ekho_open_room");
+  });
+
   it("does not hardcode an operator name", () => {
     const p = buildPrompt([msg()], { messages: [msg()], operator_trusted: true, roster: [] } as any);
     expect(p).not.toContain("Michael");

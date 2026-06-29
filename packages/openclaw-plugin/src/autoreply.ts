@@ -90,6 +90,9 @@ interface InboxBatch {
   // Recent thread per room conversation (id -> chronological snapshots). {} for
   // direct conversations; absent on older relays.
   conversation_history?: Record<string, MsgSnapshot[]>;
+  // Rooms (among this batch) this agent is a member of — so a reply to a room
+  // message can be framed as going to the named room. Absent on older relays.
+  rooms?: Array<{ id: string; name: string }>;
 }
 
 /**
@@ -536,6 +539,12 @@ export function buildPrompt(
   for (const r of batch.roster ?? []) {
     if (r.agent_id && r.display_name) names.set(r.agent_id, r.display_name);
   }
+  // Rooms this agent is a member of (conversation_id -> room name), so a room
+  // message's reply is framed as going to the whole room, not a 1:1 thread.
+  const roomNames = new Map<string, string>();
+  for (const room of batch.rooms ?? []) {
+    if (room?.id && room.name) roomNames.set(room.id, room.name);
+  }
   const hasPeer = messages.some((m) => m.sender_kind !== "operator");
   // Conversations the operator also messaged in this batch: their peer latch was
   // just re-energised, so the budget line says so instead of counting down.
@@ -584,10 +593,17 @@ export function buildPrompt(
       budget = budgetNote(turn, cap, remaining, operatorConvs.has(m.conversation_id));
       annotatedConvs.add(m.conversation_id);
     }
-    return `• From ${who}${addr} — reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}":${quote}\n    "${text}"${atts}${budget}`;
+    // A room message: replying goes to the whole room (recipient is the room),
+    // so point the agent at ekho_send with room_id rather than a 1:1 reply.
+    const roomName = roomNames.get(m.conversation_id);
+    const replyVia = roomName
+      ? `reply into the room "${roomName}" with ekho_send using room_id="${m.conversation_id}" (your reply goes to every member)`
+      : `reply with ekho_send using recipient_agent_id="${m.sender_agent_id}", conversation_id="${m.conversation_id}"`;
+    return `• From ${who}${addr} — ${replyVia}:${quote}\n    "${text}"${atts}${budget}`;
   });
   const teammateRule = hasPeer
-    ? ` When a message is from a TEAMMATE, reply with ekho_send ONLY if it materially advances the work — answer a question, complete a handoff, unblock them, or share something they need. Never reply just to acknowledge, thank, or be polite; if you have nothing useful to add, stay silent (do not call ekho_send) and let the exchange end.`
+    ? ` When a message is from a TEAMMATE, reply with ekho_send ONLY if it materially advances the work — answer a question, complete a handoff, unblock them, or share something they need. Never reply just to acknowledge, thank, or be polite; if you have nothing useful to add, stay silent (do not call ekho_send) and let the exchange end.` +
+      ` For multi-step work on a specific topic, or a handoff you'll iterate on, open a room with ekho_open_room (topic + the agents involved) and continue there instead of repeated direct messages — it keeps the thread scoped and lets the operator follow and chime in.`
     : "";
   const history = historyBlock(batch, names);
   const hasContext = history.length > 0 || messages.some((m) => m.reply_to && typeof m.reply_to === "object");
