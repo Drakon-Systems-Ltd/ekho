@@ -495,6 +495,9 @@ describe("Relay integration", () => {
       expect(msgs.length).toBeGreaterThanOrEqual(2);
       // Operator message carries its text in the payload.
       expect(msgs.some((e: { payload: { text?: string } }) => e.payload?.text === "hello a")).toBe(true);
+      // Agent (peer) message ALSO carries its body text in the payload, so the
+      // console signal log renders the real content, not a "Sent a direct →" stub.
+      expect(msgs.some((e: { payload: { text?: string } }) => e.payload?.text === "hi b")).toBe(true);
       // Agent actor id resolves to a display name.
       const aEvent = msgs.find((e: { actor_id: string }) => e.actor_id === a.agent_id);
       expect(aEvent.actor_name).toBe("act-a");
@@ -776,6 +779,103 @@ describe("Relay integration", () => {
       });
       expect(allowed.status).toBe(200);
     });
+  });
+});
+
+describe("agent topic rooms", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => relay.cleanup());
+
+  it("lets an agent open a room, auto-adds the creator, and records an agent-actor event", async () => {
+    const a = await relay.enrollAgent("ar-a");
+    const b = await relay.enrollAgent("ar-b");
+    const create = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/rooms", {
+      name: "Topic: API redesign",
+      member_agent_ids: [b.agent_id]
+    });
+    expect(create.status).toBe(201);
+    expect(create.body.id).toMatch(/^room_/);
+    expect(create.body.name).toBe("Topic: API redesign");
+    // The creator is auto-added alongside the named members.
+    expect(create.body.members.sort()).toEqual([a.agent_id, b.agent_id].sort());
+
+    // The operator sees the agent-opened room in the console room list...
+    const list = await relay.operatorRequest("GET", "/v1/operator/rooms");
+    const room = list.body.rooms.find((r: { id: string }) => r.id === create.body.id);
+    expect(room).toBeTruthy();
+
+    // ...and a room.created event attributed to the AGENT actor (not the operator).
+    const activity = await relay.operatorRequest("GET", "/v1/operator/activity?type=room");
+    const ev = activity.body.events.find(
+      (e: { event_type: string; resource_id: string }) => e.event_type === "room.created" && e.resource_id === create.body.id
+    );
+    expect(ev).toBeTruthy();
+    expect(ev.actor_kind).toBe("agent");
+    expect(ev.actor_id).toBe(a.agent_id);
+  });
+
+  it("drops member ids that aren't real non-revoked agents in this fleet", async () => {
+    const a = await relay.enrollAgent("af-a");
+    const create = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/rooms", {
+      name: "Scoped",
+      member_agent_ids: ["agent_bogus", "agent_not_in_fleet"]
+    });
+    expect(create.status).toBe(201);
+    // Only the (auto-added) creator survives the fleet-membership validation.
+    expect(create.body.members).toEqual([a.agent_id]);
+  });
+
+  it("fans an agent group-send out to room members only (not sender, not outsiders)", async () => {
+    const a = await relay.enrollAgent("ag-a");
+    const b = await relay.enrollAgent("ag-b");
+    const outsider = await relay.enrollAgent("ag-out");
+    const room = (await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/rooms", {
+      name: "Group Send", member_agent_ids: [b.agent_id]
+    })).body;
+
+    const send = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "group", id: room.id },
+      message_type: "direct",
+      body: { text: "room message from a" },
+      conversation_id: "ignored-conv",
+      correlation_id: "ag-c1"
+    });
+    expect(send.status).toBe(200);
+
+    const inboxB = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox");
+    const inboxA = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+    const inboxOut = await relay.agentRequest(outsider.agent_id, outsider.secret, "GET", "/v1/inbox");
+
+    expect(inboxB.body.messages.some((m: { body: { text: string } }) => m.body.text === "room message from a")).toBe(true);
+    // The message threads under the ROOM id (the group recipient), not the passed conversation_id.
+    expect(inboxB.body.messages[0].conversation_id).toBe(room.id);
+    // B sees the room in its inbox rooms list.
+    expect(inboxB.body.rooms.some((r: { id: string; name: string }) => r.id === room.id && r.name === "Group Send")).toBe(true);
+    expect(inboxA.body.messages.length).toBe(0); // sender excluded
+    expect(inboxOut.body.messages.length).toBe(0); // not a member
+  });
+
+  it("rejects a group-send to a room the sender is not a member of", async () => {
+    const a = await relay.enrollAgent("gn-a");
+    const b = await relay.enrollAgent("gn-b");
+    const intruder = await relay.enrollAgent("gn-intruder");
+    // a + b own the room; the intruder is not a member.
+    const room = (await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/rooms", {
+      name: "Members Only", member_agent_ids: [b.agent_id]
+    })).body;
+
+    const send = await relay.agentRequest(intruder.agent_id, intruder.secret, "POST", "/v1/messages", {
+      recipient: { kind: "group", id: room.id },
+      message_type: "direct",
+      body: { text: "intruder group blast" },
+      conversation_id: room.id,
+      correlation_id: "gn-c1"
+    });
+    expect(send.status).toBe(404); // "room not found" for a non-member
+
+    const inboxB = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox");
+    expect(inboxB.body.messages.some((m: { body: { text: string } }) => m.body.text === "intruder group blast")).toBe(false);
   });
 });
 

@@ -110,7 +110,11 @@ describe("transactional migrations (M6)", () => {
     // Simulate a legacy DB: the column was created DEFAULT 0 by migration 009.
     db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_autoreply INTEGER NOT NULL DEFAULT 0)");
     db.exec("INSERT INTO agents (id, peer_autoreply) VALUES ('a', 0), ('b', 0), ('c', 1)");
-    // Mark every migration before 015 as applied so runMigrationsOn runs ONLY 015.
+    // A legacy DB also has the rooms table (migration 010) — needed so the later
+    // migration 016 (ALTER TABLE rooms) applies cleanly when runMigrationsOn runs
+    // every migration after 014.
+    db.exec("CREATE TABLE rooms (id TEXT PRIMARY KEY, fleet_id TEXT, name TEXT, created_at TEXT, created_by_operator_id TEXT)");
+    // Mark every migration through 014 as applied so runMigrationsOn runs 015+.
     const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
     for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
 

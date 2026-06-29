@@ -113,6 +113,14 @@ export const createRoomSchema = z.object({
   member_agent_ids: z.array(z.string().min(1)).max(50).default([])
 });
 
+// Agent-opened topic room. Same shape as the operator schema; the creating
+// agent is auto-added as a member by the relay, so member_agent_ids lists the
+// OTHER agents to pull in (it may be empty).
+export const agentCreateRoomSchema = z.object({
+  name: z.string().min(1).max(120),
+  member_agent_ids: z.array(z.string().min(1)).max(50).default([])
+});
+
 export const createFeedSchema = z.object({
   name: z.string().min(1).max(120),
   url: z.string().url().max(2000),

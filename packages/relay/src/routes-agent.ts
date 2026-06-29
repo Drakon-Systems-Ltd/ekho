@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
 import { db } from "./db";
-import { actionResultSchema, ackSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -81,6 +81,28 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     }
     const { keyId } = db.setAgentIdentityKey(request.agent.id, request.agent.fleetId, parsed.data.public_key);
     return reply.send({ key_id: keyId });
+  });
+
+  // Agent-opened topic room. When two+ agents are collaborating on a real
+  // topic, an agent can open a named room and continue there instead of repeated
+  // 1:1 direct messages — it's discoverable for the operator and scoped so the
+  // rest of the fleet isn't woken. The creating agent is auto-added as a member;
+  // member_agent_ids must be real, non-revoked agents in this same fleet (the
+  // relay drops anything else), so an agent can't pull in foreign ids.
+  app.post("/v1/rooms", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    if (request.agent.status === "quarantined" || request.agent.status === "paused") {
+      return reply.code(403).send({ error: `agent is ${request.agent.status}` });
+    }
+    const parsed = agentCreateRoomSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const room = db.createRoom(
+      request.agent.fleetId,
+      { kind: "agent", id: request.agent.id },
+      parsed.data.name,
+      parsed.data.member_agent_ids
+    );
+    return reply.code(201).send(room);
   });
 
   app.post("/v1/messages", { preHandler: requireAgentAuth }, async (request, reply) => {
