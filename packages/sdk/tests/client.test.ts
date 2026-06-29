@@ -43,6 +43,36 @@ describe("@drakon-systems/ekho-sdk", () => {
       expect(ackResult.updated).toBe(1);
     });
 
+    it("opens a topic room and sends into it via a group recipient", async () => {
+      const aCreds = await relay.enrollAgent("sdk-room-a");
+      const bCreds = await relay.enrollAgent("sdk-room-b");
+
+      const a = new EkhoAgentClient({
+        agentId: aCreds.agent_id, secret: aCreds.secret, relayBaseUrl: aCreds.relayBaseUrl
+      });
+      const b = new EkhoAgentClient({
+        agentId: bCreds.agent_id, secret: bCreds.secret, relayBaseUrl: bCreds.relayBaseUrl
+      });
+
+      const room = await a.createRoom({ name: "SDK Topic", member_agent_ids: [bCreds.agent_id] });
+      expect(room.id).toMatch(/^room_/);
+      expect(room.name).toBe("SDK Topic");
+      // Creator is auto-added alongside the named member.
+      expect(room.members.sort()).toEqual([aCreds.agent_id, bCreds.agent_id].sort());
+
+      await a.sendMessage({
+        recipient: { kind: "group", id: room.id },
+        message_type: "direct",
+        body: { text: "into the room" },
+        conversation_id: room.id,
+        correlation_id: "sdk-room-corr"
+      });
+
+      const inboxB = await b.getInbox();
+      expect(inboxB.messages.some((m) => m.body.text === "into the room")).toBe(true);
+      expect(inboxB.rooms?.some((r) => r.id === room.id && r.name === "SDK Topic")).toBe(true);
+    });
+
     it("sends heartbeat", async () => {
       const creds = await relay.enrollAgent("sdk-hb");
       const client = new EkhoAgentClient({

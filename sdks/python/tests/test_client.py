@@ -33,7 +33,7 @@ from ekho._signing import (
     signed_headers,
 )
 from ekho.client import EkhoAgentClient, EkhoRequestError
-from ekho.types import AgentCredentials
+from ekho.types import AgentCredentials, InboxResponse
 
 
 # --- Golden-value signature tests -----------------------------------------
@@ -197,6 +197,71 @@ def test_client_send_message_posts_signed_request():
     # relay's re-serialised hash matches even for non-ASCII content).
     data = call.kwargs["data"]
     assert isinstance(data, bytes) and data.startswith(b"{")
+
+
+def test_client_create_room_posts_signed_request():
+    client, session = _make_client_with_mock()
+    response = MagicMock()
+    response.ok = True
+    response.content = (
+        b'{"id":"room_1","name":"Topic","created_at":"2026-04-18T00:00:00.000Z",'
+        b'"members":["agent_abc","agent_def"]}'
+    )
+    response.json.return_value = {
+        "id": "room_1",
+        "name": "Topic",
+        "created_at": "2026-04-18T00:00:00.000Z",
+        "members": ["agent_abc", "agent_def"],
+    }
+    session.request.return_value = response
+
+    room = client.create_room("Topic", ["agent_def"])
+    assert room.id == "room_1"
+    assert room.name == "Topic"
+    assert room.members == ["agent_abc", "agent_def"]
+
+    call = session.request.call_args
+    assert call.args[0] == "POST"
+    assert call.args[1] == "http://relay.example/v1/rooms"
+    # Signed like every other agent request.
+    assert "x-ekho-signature" in call.kwargs["headers"]
+    data = call.kwargs["data"]
+    assert isinstance(data, bytes) and b'"name":"Topic"' in data
+
+
+def test_client_send_message_group_recipient_threads_into_room():
+    client, session = _make_client_with_mock()
+    response = MagicMock()
+    response.ok = True
+    response.content = b'{"message_id":"m9","status":"queued","queued_at":"t"}'
+    response.json.return_value = {
+        "message_id": "m9", "status": "queued", "queued_at": "t"
+    }
+    session.request.return_value = response
+
+    result = client.send_message(
+        {
+            "recipient": {"kind": "group", "id": "room_1"},
+            "message_type": "direct",
+            "body": {"text": "into the room"},
+            "conversation_id": "room_1",
+            "correlation_id": "k",
+        }
+    )
+    assert result.message_id == "m9"
+    data = session.request.call_args.kwargs["data"]
+    assert b'"kind":"group"' in data and b'"id":"room_1"' in data
+
+
+def test_inbox_response_surfaces_rooms():
+    inbox = InboxResponse.from_dict(
+        {
+            "messages": [],
+            "controls": [],
+            "rooms": [{"id": "room_1", "name": "Topic"}],
+        }
+    )
+    assert inbox.rooms == [{"id": "room_1", "name": "Topic"}]
 
 
 def test_client_get_inbox_sends_no_body():
