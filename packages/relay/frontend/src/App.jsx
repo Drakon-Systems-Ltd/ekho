@@ -146,6 +146,9 @@ function describeEvent(event) {
     recipientId,
     text,
     attachments,
+    // Operator messages carry an Ed25519 signature when an operator key is
+    // unlocked; surface it for the signal-log verification glyph.
+    signed: Boolean(payload.operator_sig),
     type,
     createdAt: event.created_at,
   };
@@ -197,6 +200,41 @@ function parsePayload(raw) {
 
 function isHeartbeatEvent(type) {
   return type === "agent.heartbeat" || type === "message.delivered" || type === "message.acked";
+}
+
+// A glyph that self-describes a channel's kind: # room, 📰 feed, ◈ direct thread.
+function channelGlyph(convId, rooms = []) {
+  const id = String(convId || "");
+  if (id.startsWith("feed-")) return "📰";
+  if (id.startsWith("room_") || rooms.some((r) => r.id === id)) return "#";
+  return "◈";
+}
+
+// A short, scannable date label for the signal-log dividers: TODAY / YESTERDAY
+// for the recent two days, otherwise "29 JUN" (day + uppercase month).
+function dayKey(value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? "" : d.toDateString();
+}
+function dayDividerLabel(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "TODAY";
+  if (d.toDateString() === yesterday.toDateString()) return "YESTERDAY";
+  return d.toLocaleDateString([], { day: "2-digit", month: "short" }).toUpperCase();
+}
+
+// Verification state for a signal line, from data already on the message:
+//   "verified"  — carries an operator cryptographic signature (✓)
+//   "attested"  — relayed through the signed store-and-forward relay (·)
+//   ""          — still in flight (optimistic), nothing to attest yet
+function verificationOf(item) {
+  if (item.pending) return "";
+  if (item.side === "operator" && item.signed) return "verified";
+  return "attested";
 }
 
 const RAIL_LEFT_KEY = "ekho.rail.left.collapsed.v1";
@@ -1215,14 +1253,15 @@ export default function App() {
     return (
       <div className="boot-screen">
         <form className="auth-card" onSubmit={handleLoginSubmit}>
+          <div className="eyebrow auth-card__eyebrow">▸ Operator Terminal</div>
           <div className="auth-card__brand">
             <span className="brand-mark">E</span>
             <div>
               <div className="brand-name">Ekho</div>
-              <div className="brand-sub">by Drakon Systems · Operator Console</div>
+              <div className="brand-sub">by Drakon Systems</div>
             </div>
           </div>
-          <p className="auth-card__lede">Sign in to monitor, steer, and message your private agent fleet.</p>
+          <p className="auth-card__lede">Authenticate to monitor, steer, and message your private agent fleet.</p>
           <label className="field">
             <span>Fleet</span>
             <input value={formState.fleet_name} onChange={(e) => setFormState((v) => ({ ...v, fleet_name: e.target.value }))} autoComplete="off" />
@@ -1248,15 +1287,30 @@ export default function App() {
 
   return (
     <div className={`app app--${mobileView}${opsOpen ? " app--ops" : ""}`}>
-      <header className="appbar">
+      <header className="appbar grid-tex">
         <div className="appbar__brand">
           <span className="brand-mark">E</span>
           <div className="appbar__titles">
             <span className="brand-name">
               Ekho <span className="brand-by">by Drakon Systems</span>
             </span>
-            <span className="appbar__sub">Operator Console · {session.fleetId}</span>
+            <span className="appbar__sub">Operator Terminal · <span className="mono">{session.fleetId}</span></span>
           </div>
+        </div>
+        {/* Live fleet status line — colour-coded mono telemetry chips. */}
+        <div className="appbar__hud" role="status" aria-label="Fleet status">
+          <span className="hud-chip hud-chip--ok" title="Agents reporting healthy">
+            <span className="hud-chip__v mono">{healthyCount}/{overview.agents?.length ?? 0}</span>
+            <span className="hud-chip__l">healthy</span>
+          </span>
+          <span className={`hud-chip${overview.pendingApprovals ? " hud-chip--warn" : ""}`} title="Approvals awaiting decision">
+            <span className="hud-chip__v mono">{overview.pendingApprovals || 0}</span>
+            <span className="hud-chip__l">approvals</span>
+          </span>
+          <span className={`hud-chip${overview.deadLetterCount ? " hud-chip--danger" : ""}`} title="Undeliverable messages (dead-lettered)">
+            <span className="hud-chip__v mono">{overview.deadLetterCount || 0}</span>
+            <span className="hud-chip__l">dead-letter</span>
+          </span>
         </div>
         <div className="appbar__right">
           <span
@@ -1264,7 +1318,7 @@ export default function App() {
             title={connStale ? "Relay link degraded — retrying every 5s" : "Live — auto-syncing every 5s"}
           >
             <LiveDot active={!connStale} />
-            {connStale ? "reconnecting…" : "synced"}
+            {connStale ? "reconnecting…" : "live"}
           </span>
           <button className="icon-button appbar__icon" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="Settings">
             <GearIcon />
@@ -1297,8 +1351,8 @@ export default function App() {
 
           <div className="rail__section">
             <div className="rail__head">
-              <span>Agents</span>
-              <span className="rail__count">{agentsTotal}</span>
+              <span className="eyebrow">▸ Fleet</span>
+              <span className="rail__count mono">{agentsTotal}</span>
             </div>
             <div className="rail__filters">
               <input className="rail__search" placeholder="Search agents" value={agentSearch} onChange={(e) => setAgentSearch(e.target.value)} />
@@ -1324,7 +1378,7 @@ export default function App() {
                     <span className="agent-row__main">
                       <span className="agent-row__name">{agent.display_name || agent.id}</span>
                       <span className="agent-row__meta">
-                        <span className="mono">{agent.runtime || "custom"}</span> · {relativeTime(agent.last_seen_at)}
+                        <span className="mono">{agent.runtime || "custom"}</span> · <span className="mono">{relativeTime(agent.last_seen_at)}</span>
                       </span>
                     </span>
                     <StatusDot status={agent.status} title={agent.status} />
@@ -1338,26 +1392,31 @@ export default function App() {
 
           <div className="rail__section rail__section--grow">
             <div className="rail__head">
-              <span>Conversations</span>
+              <span className="eyebrow">▸ Channels</span>
+              <span className="rail__count mono">{conversationList.length}</span>
             </div>
             <div className="rail__list">
               {conversationList.length ? (
-                conversationList.map((c) => (
+                conversationList.map((c) => {
+                  const glyph = channelGlyph(c.id, rooms);
+                  return (
                   <button
                     key={c.id}
                     className={`conv-row${c.id === selectedConversationId ? " conv-row--active" : ""}`}
                     onClick={() => selectConversation(c.id)}
                   >
+                    <span className="conv-row__glyph" aria-hidden="true">{glyph}</span>
                     <span className="conv-row__dot" style={{ background: colorForId(c.id) }} />
                     <span className="conv-row__main">
                       <span className="conv-row__id">{c.title || convTitle(c.id)}</span>
-                      <span className="conv-row__preview">{c.preview || "Open conversation"}</span>
+                      <span className="conv-row__preview">{c.preview || "No signals yet"}</span>
                     </span>
-                    {c.ts ? <span className="conv-row__time">{relativeTime(c.ts)}</span> : null}
+                    {c.ts ? <span className="conv-row__time mono">{relativeTime(c.ts)}</span> : null}
                   </button>
-                ))
+                  );
+                })
               ) : (
-                <EmptyState>No recent conversations.</EmptyState>
+                <EmptyState>No channels yet — message the fleet to begin.</EmptyState>
               )}
             </div>
           </div>
@@ -1382,13 +1441,14 @@ export default function App() {
               </button>
             )}
             <div className="chat__heading">
+              <span className="eyebrow chat__eyebrow">▸ Signal Log</span>
               {selectedConversationId ? (
                 <>
                   <span className="conv-row__dot" style={{ background: colorForId(selectedConversationId) }} />
                   <span className="chat__convid">{convTitle(selectedConversationId)}</span>
                 </>
               ) : (
-                <span className="chat__placeholder-title">No conversation selected</span>
+                <span className="chat__placeholder-title">No channel selected</span>
               )}
             </div>
             <label className="toggle toggle--inline">
@@ -1538,7 +1598,7 @@ export default function App() {
         <div className="rail-backdrop" onClick={() => setOpsOpen(false)} aria-hidden="true" />
         <aside className="rail rail--right">
           <div className="rail__mobilebar">
-            <span>Operations</span>
+            <span className="eyebrow">▸ Operations</span>
             <button className="icon-button" onClick={() => setOpsOpen(false)} aria-label="Close operations panel">✕</button>
           </div>
           <div className="tabs tabs--grouped">
@@ -1805,8 +1865,8 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
   if (!hasConversation) {
     return (
       <div className="chat__body chat__body--empty" ref={ref}>
-        <EmptyState icon="✦" title="Start a conversation">
-          Pick a conversation on the left, or message an agent below to open a new thread. Operator messages land in the agent’s inbox and appear here live.
+        <EmptyState icon="▢" title="Select a channel to view its signal log">
+          Pick a channel on the left, or message an agent below to open a new one. Your transmissions reach the agent’s inbox and stream back here live.
         </EmptyState>
       </div>
     );
@@ -1815,7 +1875,7 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
   if (!items.length && !typingAgents.length) {
     return (
       <div className="chat__body chat__body--empty" ref={ref}>
-        <EmptyState title="No messages yet">This conversation has no visible activity. Toggle system events to see heartbeats and delivery receipts, or send the first message.</EmptyState>
+        <EmptyState icon="▢" title="No signals yet">Message the fleet to begin. Toggle system events to surface heartbeats and delivery receipts.</EmptyState>
       </div>
     );
   }
@@ -1827,26 +1887,34 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
       {items.map((item, idx) => {
         const prev = items[idx - 1];
         const grouped = prev && prev.kind === item.kind && prev.side === item.side && prev.senderId === item.senderId;
+        // A dated rule breaks the log into TODAY / YESTERDAY / "29 JUN" sections
+        // so it never reads as an undifferentiated wall.
+        const showDay = !prev || dayKey(prev.createdAt) !== dayKey(item.createdAt);
+        const dayLabel = showDay ? dayDividerLabel(item.createdAt) : "";
         // Stable identity: the event id (server rows) or the optimistic id
         // (pending sends). Both are unique; idx is only a last-ditch fallback.
         const key = item.id || `${item.type}-${item.createdAt}-${idx}`;
         if (item.kind === "system") {
           return (
-            <div className="sys-chip" key={key}>
-              <span>{item.text}</span>
-              <span className="sys-chip__time mono">{clockTime(item.createdAt)}</span>
-            </div>
+            <React.Fragment key={key}>
+              {dayLabel ? <div className="day-divider"><span>{dayLabel}</span></div> : null}
+              <div className="sys-chip">
+                <span>{item.text}</span>
+                <span className="sys-chip__time">{clockTime(item.createdAt)}</span>
+              </div>
+            </React.Fragment>
           );
         }
         const isOp = item.side === "operator";
         const isFeed = Boolean(item.feed);
-        const label = isOp ? "Operator" : isFeed ? `📰 ${item.feedName}` : nameFor(item.senderId);
+        const label = isOp ? "Operator" : isFeed ? item.feedName : nameFor(item.senderId);
         const accent = isOp || isFeed ? null : colorForAgent(item.senderId, settings);
         // Agent→agent chatter: a message FROM an agent addressed to another agent
         // (recipient is an agent and not the synthetic operator). Highlighted
         // distinctly so peer coordination stands out from agent↔operator talk.
         const isPeer = item.side === "agent" && item.recipientKind === "agent"
           && item.recipientId && !String(item.recipientId).startsWith("op_");
+        const verify = verificationOf(item);
 
         // Reveal a genuinely new agent message with the typewriter: not seen
         // before AND created within the freshness window (scrollback/history and
@@ -1863,19 +1931,33 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
         if (startNew) typingNow.current.add(id);
         const shouldType = animate && !isOp && !isFeed && id && !done && (inFlight || startNew);
 
-        const bubbleStyle = !isOp && !isFeed && accent ? { borderColor: `${accent}55` } : undefined;
+        // Plain agent rows take their stable hash colour as the rail; peer/feed/
+        // operator/system rails come from their kind class (--sig).
+        const rowStyle = !isOp && !isFeed && !isPeer && accent ? { "--sig": accent } : undefined;
+        const nameClass = isOp ? " bubble-meta__name--op" : isFeed ? " bubble-meta__name--feed" : "";
+        const nameStyle = !isOp && !isFeed && accent ? { color: accent } : undefined;
         return (
-          <div className={`bubble-row${isOp ? " bubble-row--op" : ""}${isPeer ? " bubble-row--peer" : ""}${isFeed ? " bubble-row--feed" : ""}${grouped ? " bubble-row--grouped" : ""}`} key={key}>
-            {!isOp && !grouped ? <Avatar id={isFeed ? "feed" : item.senderId} label={label} size={30} color={accent} /> : <span className="bubble-spacer" />}
+          <React.Fragment key={key}>
+            {dayLabel ? <div className="day-divider"><span>{dayLabel}</span></div> : null}
+          <div className={`bubble-row${isOp ? " bubble-row--op" : ""}${isPeer ? " bubble-row--peer" : ""}${isFeed ? " bubble-row--feed" : ""}${grouped ? " bubble-row--grouped" : ""}`} style={rowStyle}>
+            {!isOp && !grouped ? <Avatar id={isFeed ? "feed" : item.senderId} label={isFeed ? "📰" : label} size={30} color={accent || (isFeed ? "#fbbf24" : undefined)} /> : <span className="bubble-spacer" />}
             <div className="bubble-col">
-              {!grouped ? (
-                <div className="bubble-meta">
-                  <span className="bubble-meta__name" style={!isOp && accent ? { color: accent } : undefined}>{label}</span>
-                  {isPeer ? <span className="bubble-meta__peer">→ {nameFor(item.recipientId)}</span> : null}
-                  <span className="bubble-meta__time mono">{clockTime(item.createdAt)}</span>
-                </div>
-              ) : null}
-              <div className={`bubble${isOp ? " bubble--op" : ""}${isPeer ? " bubble--peer" : ""}${isFeed ? " bubble--feed" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`} style={bubbleStyle}>
+              <div className="bubble-meta">
+                {grouped ? <span className="bubble-meta__dot" aria-hidden="true" /> : null}
+                <span className={`bubble-meta__name${nameClass}`} style={nameStyle}>{isFeed ? `📰 ${label}` : label}</span>
+                {isFeed ? <span className="bubble-meta__broadcast">broadcast</span> : null}
+                {isPeer ? <span className="bubble-meta__peer">→ {nameFor(item.recipientId)}</span> : null}
+                <span className="bubble-meta__time">{clockTime(item.createdAt)}</span>
+                {verify ? (
+                  <span
+                    className={`bubble-meta__verify${verify === "verified" ? " bubble-meta__verify--ok" : ""}`}
+                    title={verify === "verified" ? "Operator-signed — cryptographically verified" : "Relay-attested delivery"}
+                  >
+                    {verify === "verified" ? "✓" : "·"}
+                  </span>
+                ) : null}
+              </div>
+              <div className={`bubble${isOp ? " bubble--op" : ""}${isPeer ? " bubble--peer" : ""}${isFeed ? " bubble--feed" : ""}${item.pending ? " bubble--pending" : ""}${item.text ? "" : " bubble--media"}`}>
                 {item.text ? (
                   <div className="bubble__text">
                     {shouldType ? (
@@ -1914,6 +1996,7 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
               </button>
             ) : null}
           </div>
+          </React.Fragment>
         );
       })}
 
@@ -1921,14 +2004,14 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
       {typingAgents.map((t) => {
         const accent = colorForAgent(t.agentId, settings);
         return (
-          <div className="bubble-row bubble-row--typing" key={`typing-${t.agentId}`}>
+          <div className="bubble-row bubble-row--typing" key={`typing-${t.agentId}`} style={{ "--sig": accent }}>
             <Avatar id={t.agentId} label={t.label} size={30} color={accent} />
             <div className="bubble-col">
               <div className="bubble-meta">
                 <span className="bubble-meta__name" style={{ color: accent }}>{t.label}</span>
                 <span className="bubble-meta__time">typing…</span>
               </div>
-              <div className="bubble bubble--typing" style={{ borderColor: `${accent}55` }}>
+              <div className="bubble bubble--typing">
                 <TypingDots color={accent} animated={settings.typingAnimation} />
               </div>
             </div>
