@@ -1,25 +1,38 @@
 :root {
-  --bg: #0a0c10;
-  --panel: #12151b;
-  --raised: #171b22;
-  --raised-2: #1c212a;
+  /* Operator Terminal — phosphor-on-black comms HUD. Deeper, cooler base than
+     the old flat charcoal so the teal signal colour reads as live phosphor. */
+  --bg: #06080c;
+  --panel: #0d1117;
+  --raised: #141b24;
+  --raised-2: #1b2430;
   --hair: rgba(255, 255, 255, 0.07);
-  --hair-strong: rgba(255, 255, 255, 0.11);
+  --hair-strong: rgba(255, 255, 255, 0.12);
   --text: #e8ecf2;
   --muted: #8b93a1;
   --faint: #5b6473;
   --accent: #2dd4bf;
   --accent-ink: #04201c;
   --accent-soft: rgba(45, 212, 191, 0.14);
+  --accent-glow: 0 0 12px rgba(45, 212, 191, 0.35);
   --warn: #fbbf24;
   --danger: #f87171;
   --ok: #34d399;
+  --quarantined: #fb7185;
+  /* Signal-kind colours — every line in the log self-describes by colour. */
+  --sig-operator: #2dd4bf; /* phosphor teal — the operator's own transmissions */
+  --sig-peer: #a78bfa;     /* violet — agent→agent coordination */
+  --sig-feed: #fbbf24;     /* amber — one-way broadcast ingest */
+  --sig-system: #64d2ff;   /* cyan-slate — relay events */
+  /* Faint phosphor grid for CHROME ONLY (appbar/rails) — never behind text. */
+  --grid: rgba(45, 212, 191, 0.045);
   --radius: 14px;
   --radius-sm: 10px;
-  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.55);
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.3);
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --t: 170ms var(--ease);
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Menlo", monospace;
+  --eyebrow: "Chakra Petch", "Inter", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -38,9 +51,46 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-.mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", monospace; }
+/* All machine data — ids, timestamps, models, token counts — rides JetBrains
+   Mono so it reads as instrument output, distinct from human body copy. */
+.mono { font-family: var(--mono); font-feature-settings: "tnum" 1; }
+
+/* Eyebrow / section labels — Chakra Petch, uppercase, wide-tracked, with the
+   ▸ caret supplied by the markup. The operator's vocabulary for "zones". */
+.eyebrow {
+  font-family: var(--eyebrow);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+/* Faint phosphor grid texture, masked so it only tints chrome edges. Applied as
+   a ::before on appbar/rails — legibility first, never behind message text. */
+.grid-tex::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 30px 30px;
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.6), transparent 70%);
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.6), transparent 70%);
+}
 button, input, textarea, select { font: inherit; color: inherit; }
 ::selection { background: var(--accent-soft); }
+
+/* Visible keyboard focus across the console (zero-specificity so it never
+   fights component styles). Pointer focus stays quiet via :focus-visible. */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 99px; border: 2px solid transparent; background-clip: padding-box; }
@@ -73,28 +123,40 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .icon-button { background: none; border: 0; color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer; padding: 2px 8px; border-radius: 8px; }
 .icon-button:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
 
-/* ---------------- login ---------------- */
+/* ---------------- login (terminal boot gate) ---------------- */
 .boot-screen {
+  position: relative;
   height: 100%;
   display: grid;
   place-items: center;
   padding: 24px;
   background:
-    radial-gradient(1200px 600px at 50% -10%, rgba(45, 212, 191, 0.10), transparent 60%),
-    radial-gradient(900px 500px at 100% 100%, rgba(99, 102, 241, 0.08), transparent 55%),
+    radial-gradient(1100px 560px at 50% -12%, rgba(45, 212, 191, 0.12), transparent 60%),
     var(--bg);
 }
+/* Phosphor grid behind the gate — masked to the centre so the card floats. */
+.boot-screen::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(45, 212, 191, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 212, 191, 0.05) 1px, transparent 1px);
+  background-size: 34px 34px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 70% at 50% 42%, #000 20%, transparent 80%);
+  mask-image: radial-gradient(ellipse 70% 70% at 50% 42%, #000 20%, transparent 80%);
+}
+.boot-screen > * { position: relative; z-index: 1; }
 .auth-card {
   width: 100%;
   max-width: 380px;
-  background: var(--panel);
-  border: 1px solid var(--hair);
-  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(45, 212, 191, 0.04), transparent 40%), var(--panel);
+  border: 1px solid var(--hair-strong);
+  border-radius: 16px;
   padding: 30px 28px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(45, 212, 191, 0.06);
   display: grid;
   gap: 14px;
 }
+.auth-card__eyebrow { margin-bottom: 4px; }
 .auth-card__brand { display: flex; align-items: center; gap: 12px; margin-bottom: 2px; }
 .auth-card__lede { margin: 0 0 6px; color: var(--muted); line-height: 1.55; font-size: 13px; }
 .auth-card h2 { margin: 0 0 4px; font-size: 18px; }
@@ -110,7 +172,7 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .brand-sub { color: var(--muted); font-size: 12px; }
 
 .field { display: grid; gap: 6px; }
-.field > span { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.field > span { font-family: var(--eyebrow); font-size: 10px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
 input, textarea, select {
   width: 100%;
   padding: 10px 12px;
@@ -127,25 +189,40 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 /* ---------------- app shell ---------------- */
 .app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
 .appbar {
+  position: relative;
   display: flex; align-items: center; justify-content: space-between;
   height: 56px; padding: 0 18px;
   border-bottom: 1px solid var(--hair);
-  background: rgba(18, 21, 27, 0.7);
+  background: linear-gradient(180deg, rgba(13, 17, 23, 0.92), rgba(13, 17, 23, 0.7));
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
   flex: 0 0 auto;
 }
+.appbar > * { position: relative; z-index: 1; }
 .appbar__brand { display: flex; align-items: center; gap: 11px; }
-.appbar__titles { display: flex; flex-direction: column; line-height: 1.1; }
-.appbar__sub { color: var(--muted); font-size: 11.5px; }
+.appbar__titles { display: flex; flex-direction: column; line-height: 1.15; }
+.appbar__sub { color: var(--muted); font-size: 11px; }
 .appbar__right { display: flex; align-items: center; gap: 8px; }
+
+/* Operator HUD — live colour-coded telemetry chips between brand and controls. */
+.appbar__hud { display: flex; align-items: stretch; gap: 0; border: 1px solid var(--hair); border-radius: 9px; overflow: hidden; background: rgba(0, 0, 0, 0.25); }
+.hud-chip { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 5px 14px; min-width: 64px; color: var(--muted); }
+.hud-chip + .hud-chip { border-left: 1px solid var(--hair); }
+.hud-chip__v { font-size: 14px; font-weight: 700; line-height: 1; color: var(--text); letter-spacing: 0.02em; }
+.hud-chip__l { font-family: var(--eyebrow); font-size: 8.5px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.hud-chip--ok .hud-chip__v { color: var(--ok); }
+.hud-chip--warn { background: rgba(251, 191, 36, 0.08); }
+.hud-chip--warn .hud-chip__v { color: var(--warn); }
+.hud-chip--danger { background: rgba(248, 113, 113, 0.08); }
+.hud-chip--danger .hud-chip__v { color: var(--danger); }
 .appbar__icon { display: inline-grid; place-items: center; width: 32px; height: 32px; font-size: 0; }
 .appbar__icon svg { display: block; }
 .sync-pill {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 6px 11px; border-radius: 99px;
-  border: 1px solid var(--hair); background: rgba(255, 255, 255, 0.03);
-  color: var(--muted); font-size: 12px;
+  border: 1px solid rgba(45, 212, 191, 0.28); background: rgba(45, 212, 191, 0.08);
+  color: var(--accent); font-size: 11.5px; font-family: var(--eyebrow);
+  letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600;
   transition: color 200ms var(--ease), border-color 200ms var(--ease), background 200ms var(--ease);
 }
 /* Relay link degraded: the pill stops lying green and reads amber while polls retry. */
@@ -167,6 +244,17 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .layout--right-collapsed { grid-template-columns: 304px minmax(0, 1fr) 0; }
 .layout--left-collapsed.layout--right-collapsed { grid-template-columns: 0 minmax(0, 1fr) 0; }
 .rail { min-height: 0; display: flex; flex-direction: column; background: var(--panel); position: relative; }
+/* Faint phosphor grid on the rail chrome (top-masked, never behind content). */
+.rail::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 30px 30px;
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 60%);
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.55), transparent 60%);
+}
+.rail > * { position: relative; z-index: 1; }
 .rail--left { border-right: 1px solid var(--hair); }
 .rail--right { border-left: 1px solid var(--hair); }
 /* a collapsed rail clips its content and drops its border so 0-width is truly 0 */
@@ -210,18 +298,24 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .layout--right-collapsed .rail-reopen--right { display: flex; }
 
 /* left rail */
-.kpi-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 14px; border-bottom: 1px solid var(--hair); }
-.stat-chip { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--raised); border: 1px solid var(--hair); }
-.stat-chip__value { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
-.stat-chip__label { font-size: 11px; color: var(--muted); }
+.rail--left { position: relative; }
+.kpi-strip { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 14px; border-bottom: 1px solid var(--hair); position: relative; z-index: 1; }
+/* Vivid, colour-coded stat chips — each carries a left rail in its status hue and
+   a glance-readable mono value. */
+.stat-chip { position: relative; display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--raised); border: 1px solid var(--hair); border-left: 3px solid var(--hair-strong); overflow: hidden; }
+.stat-chip__value { font-size: 21px; font-weight: 700; letter-spacing: -0.02em; font-family: var(--mono); line-height: 1; color: var(--text); }
+.stat-chip__label { font-family: var(--eyebrow); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+.stat-chip--ok { border-left-color: var(--ok); }
 .stat-chip--ok .stat-chip__value { color: var(--ok); }
+.stat-chip--warn { border-left-color: var(--warn); background: rgba(251, 191, 36, 0.05); }
 .stat-chip--warn .stat-chip__value { color: var(--warn); }
+.stat-chip--danger { border-left-color: var(--danger); background: rgba(248, 113, 113, 0.05); }
 .stat-chip--danger .stat-chip__value { color: var(--danger); }
 
-.rail__section { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--hair); }
+.rail__section { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--hair); position: relative; z-index: 1; }
 .rail__section--grow { flex: 1 1 auto; border-bottom: 0; }
-.rail__head { display: flex; align-items: center; justify-content: space-between; padding: 13px 16px 8px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
-.rail__count { color: var(--muted); }
+.rail__head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 9px; }
+.rail__count { color: var(--muted); font-size: 11px; }
 .rail__filters { display: flex; gap: 7px; padding: 0 14px 10px; }
 .rail__search { flex: 1 1 auto; padding: 7px 10px; font-size: 13px; }
 .rail__statusfilter { width: auto; padding: 7px 26px 7px 10px; font-size: 12px; }
@@ -235,16 +329,22 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
   transition: background var(--t), border-color var(--t);
 }
 .agent-row:hover, .conv-row:hover { background: var(--raised); }
-.agent-row--active, .conv-row--active { background: var(--accent-soft); border-color: rgba(45, 212, 191, 0.24); }
+/* Active channel/agent — phosphor highlight with a teal rail + glow so the
+   current selection is unmistakable. */
+.agent-row--active, .conv-row--active { background: var(--accent-soft); border-color: rgba(45, 212, 191, 0.3); box-shadow: inset 2px 0 0 var(--accent), var(--accent-glow); }
 .agent-row__main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
 .agent-row__name { font-weight: 560; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-row__meta { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Channel rows read as scannable comms lines: kind glyph + colour dot + title +
+   last-signal preview + relative time. */
+.conv-row__glyph { flex: 0 0 auto; width: 16px; text-align: center; font-size: 12px; color: var(--faint); font-family: var(--mono); }
+.conv-row--active .conv-row__glyph { color: var(--accent); }
 .conv-row__dot { width: 8px; height: 8px; border-radius: 99px; flex: 0 0 auto; }
 .conv-row__main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
 .conv-row__id { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .conv-row__preview { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.conv-row__time { font-size: 11px; color: var(--faint); flex: 0 0 auto; }
+.conv-row__time { font-size: 10.5px; color: var(--faint); flex: 0 0 auto; }
 
 /* avatars + dots */
 .avatar { display: inline-grid; place-items: center; border-radius: 99px; border: 1px solid; font-weight: 700; flex: 0 0 auto; letter-spacing: 0.02em; }
@@ -256,43 +356,75 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 @keyframes pulse { 0% { transform: scale(1); opacity: 0.7; } 70% { transform: scale(2.6); opacity: 0; } 100% { opacity: 0; } }
 
 .live-dot { width: 8px; height: 8px; border-radius: 99px; position: relative; flex: 0 0 auto; }
-.live-dot--on { background: var(--accent); }
+.live-dot--on { background: var(--accent); box-shadow: var(--accent-glow); }
 .live-dot--on::after { content: ""; position: absolute; inset: 0; border-radius: 99px; background: var(--accent); animation: pulse 2.2s var(--ease) infinite; }
 .live-dot--off { background: var(--faint); }
 
-/* ---------------- chat ---------------- */
+/* ================= signal log (the centre comms feed) =================
+   The message thread reads as a colour-coded operator log, not generic chat:
+   every line carries a left gutter rail coloured by signal kind, an always-
+   present sender identity, a mono timestamp, and a verification glyph. */
 .chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
-.chat__header { flex: 0 0 auto; height: 50px; padding: 0 18px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--hair); }
+.chat__header {
+  flex: 0 0 auto; height: 50px; padding: 0 18px; display: flex; align-items: center;
+  justify-content: space-between; border-bottom: 1px solid var(--hair);
+  background: linear-gradient(180deg, rgba(45, 212, 191, 0.03), transparent);
+}
 .chat__heading { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.chat__convid { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat__eyebrow { margin-right: 2px; }
+.chat__convid { font-size: 13.5px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
 .chat__placeholder-title { color: var(--muted); font-size: 13px; }
 
-.chat__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 22px 8px; display: flex; flex-direction: column; gap: 3px; }
+.chat__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px 22px 10px; display: flex; flex-direction: column; gap: 3px; }
 .chat__body--empty { align-items: center; justify-content: center; }
 
-.bubble-row { position: relative; display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
-.bubble-row--grouped { margin-top: 2px; }
-.bubble-row--op { flex-direction: row-reverse; }
-.bubble-spacer { width: 30px; flex: 0 0 auto; }
-.bubble-col { display: flex; flex-direction: column; gap: 3px; max-width: min(680px, 74%); min-width: 0; }
+/* Day / time divider — breaks the wall into dated sections. */
+.day-divider { display: flex; align-items: center; gap: 12px; margin: 16px 6px 8px; color: var(--faint); }
+.day-divider::before, .day-divider::after { content: ""; height: 1px; flex: 1 1 auto; background: var(--hair); }
+.day-divider span { font-family: var(--eyebrow); font-size: 10px; font-weight: 600; letter-spacing: 0.22em; text-transform: uppercase; white-space: nowrap; }
+
+/* Each row defaults its rail colour to the signal kind; plain agent rows get
+   their stable hash colour injected as --sig inline. */
+.bubble-row { --sig: var(--accent); position: relative; display: flex; gap: 10px; align-items: flex-start; margin-top: 13px; }
+.bubble-row--grouped { margin-top: 3px; }
+.bubble-row--op { flex-direction: row-reverse; --sig: var(--accent); }
+.bubble-row--peer { --sig: var(--sig-peer); }
+.bubble-row--feed { --sig: var(--sig-feed); }
+.bubble-spacer { width: 26px; flex: 0 0 auto; }
+.bubble-col { display: flex; flex-direction: column; gap: 4px; max-width: min(680px, 78%); min-width: 0; }
 .bubble-row--op .bubble-col { align-items: flex-end; }
-.bubble-meta { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
+
+/* Sender identity — ALWAYS present, even on grouped runs (slim dot + name). */
+.bubble-meta { display: flex; align-items: center; gap: 8px; padding: 0 2px; min-width: 0; }
 .bubble-row--op .bubble-meta { flex-direction: row-reverse; }
-.bubble-meta__name { font-size: 12px; font-weight: 600; color: var(--text); }
-.bubble-meta__time { font-size: 10.5px; color: var(--faint); }
+.bubble-meta__dot { width: 7px; height: 7px; border-radius: 99px; background: var(--sig); box-shadow: 0 0 6px color-mix(in srgb, var(--sig) 60%, transparent); flex: 0 0 auto; }
+.bubble-meta__name { font-size: 11.5px; font-weight: 600; color: var(--sig); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bubble-meta__name--op { color: var(--accent); }
+.bubble-meta__name--feed { color: var(--sig-feed); }
+.bubble-meta__time { font-size: 10.5px; color: var(--faint); font-family: var(--mono); flex: 0 0 auto; }
+/* Verification glyph — ✓ operator-signed, · relay-attested. */
+.bubble-meta__verify { font-size: 11px; line-height: 1; color: var(--faint); cursor: default; flex: 0 0 auto; }
+.bubble-meta__verify--ok { color: var(--accent); text-shadow: var(--accent-glow); }
+.bubble-meta__peer { font-size: 10.5px; font-weight: 600; color: var(--sig-peer); font-family: var(--mono); white-space: nowrap; }
+.bubble-meta__broadcast { font-family: var(--eyebrow); font-size: 9px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--sig-feed); border: 1px solid rgba(251, 191, 36, 0.3); border-radius: 4px; padding: 1px 5px; }
+
 .bubble {
-  padding: 9px 13px; border-radius: 14px;
+  padding: 8px 13px; border-radius: 4px 10px 10px 4px;
   background: var(--raised); border: 1px solid var(--hair);
-  line-height: 1.5; font-size: 13.5px; white-space: pre-wrap; word-break: break-word;
-  border-top-left-radius: 5px;
+  border-left: 3px solid var(--sig);
+  line-height: 1.55; font-size: 13.5px; white-space: pre-wrap; word-break: break-word;
 }
-.bubble--op { background: var(--accent-soft); border-color: rgba(45, 212, 191, 0.28); color: #d4faf3; border-top-left-radius: 14px; border-top-right-radius: 5px; }
-/* Agent→agent chatter: distinct violet treatment so peer coordination is easy to
-   scan apart from agent↔operator talk. */
-.bubble--peer { background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.34); border-left: 2px solid #a78bfa; }
-.bubble-meta__peer { font-size: 11px; font-weight: 600; color: #a78bfa; }
-/* Feed items: a muted, context stream of headlines (one-way ingest). */
-.bubble--feed { background: rgba(255, 255, 255, 0.02); border-style: dashed; color: var(--muted); }
+/* Operator transmissions — phosphor teal, rail on the right (right-aligned). */
+.bubble--op {
+  background: var(--accent-soft); border-color: rgba(45, 212, 191, 0.26);
+  border-left: 1px solid rgba(45, 212, 191, 0.26); border-right: 3px solid var(--accent);
+  border-radius: 10px 4px 4px 10px; color: #d4faf3;
+}
+/* Agent→agent chatter — violet, distinct from agent↔operator talk. */
+.bubble--peer { background: rgba(167, 139, 250, 0.06); border-color: rgba(167, 139, 250, 0.2); }
+/* Feed items — one-way amber broadcast ingest; dashed so it never reads as a
+   two-way conversation. */
+.bubble--feed { background: rgba(251, 191, 36, 0.04); border-color: rgba(251, 191, 36, 0.16); border-left-style: dashed; color: #d7c7a0; }
 .bubble--pending { opacity: 0.6; }
 
 /* WhatsApp-style delivery ticks (operator messages) */
@@ -316,12 +448,14 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .typing-dots--still span { animation: none; opacity: 0.6; }
 @keyframes typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-4px); opacity: 1; } }
 
+/* System / relay events — cyan-slate, centered, mono, set apart from messages. */
 .sys-chip {
-  align-self: center; display: inline-flex; align-items: center; gap: 8px;
-  margin: 8px auto; padding: 4px 12px; border-radius: 99px;
-  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--hair);
-  color: var(--muted); font-size: 11.5px;
+  align-self: center; display: inline-flex; align-items: center; gap: 9px;
+  margin: 8px auto; padding: 4px 12px; border-radius: 6px;
+  background: rgba(100, 210, 255, 0.06); border: 1px solid rgba(100, 210, 255, 0.18);
+  color: var(--sig-system); font-size: 11.5px; font-family: var(--mono);
 }
+.sys-chip::before { content: "◇"; color: var(--sig-system); font-size: 9px; opacity: 0.8; }
 .sys-chip__time { color: var(--faint); }
 
 .composer { position: relative; flex: 0 0 auto; display: flex; flex-direction: column; gap: 9px; padding: 12px 18px 16px; border-top: 1px solid var(--hair); background: var(--panel); transition: background var(--t), box-shadow var(--t); }
@@ -370,11 +504,13 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 /* Resolved @handle in a transcript bubble. */
 .mention { color: var(--accent); font-weight: 600; }
 
-/* Per-message reply affordance — revealed on row hover. */
-.bubble-reply { position: absolute; top: 0; right: 0; opacity: 0; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; background: var(--panel); border: 1px solid var(--hair); border-radius: 7px; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; transition: opacity var(--t), color var(--t), border-color var(--t); }
+/* Per-message reply affordance — ALWAYS present (hover-only fails on touch).
+   Sits low-key at the row edge, brightens on hover/focus. */
+.bubble-reply { position: absolute; top: 2px; right: 0; opacity: 0.4; display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; background: var(--panel); border: 1px solid var(--hair); border-radius: 7px; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; transition: opacity var(--t), color var(--t), border-color var(--t); }
 .bubble-row:hover .bubble-reply, .bubble-reply:focus-visible { opacity: 1; }
-.bubble-reply:hover { color: var(--accent); border-color: var(--accent); }
+.bubble-reply:hover { opacity: 1; color: var(--accent); border-color: var(--accent); }
 .bubble-row--op .bubble-reply { right: auto; left: 0; }
+@media (hover: none) { .bubble-reply { opacity: 0.75; } }
 .att-pending {
   display: inline-flex; align-items: center; gap: 8px;
   max-width: 240px; padding: 6px 8px 6px 11px; border-radius: 99px;
@@ -431,7 +567,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .tab-group { display: flex; align-items: flex-end; gap: 2px; padding-right: 11px; position: relative; }
 .tab-group + .tab-group { padding-left: 11px; }
 .tab-group + .tab-group::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 9px; width: 1px; background: var(--hair); }
-.tab-group__label { align-self: flex-end; margin: 0 4px 9px 0; font-size: 9px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--faint); white-space: nowrap; -webkit-user-select: none; user-select: none; }
+.tab-group__label { align-self: flex-end; margin: 0 4px 9px 0; font-family: var(--eyebrow); font-size: 9px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); white-space: nowrap; -webkit-user-select: none; user-select: none; }
 .rail__scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px; }
 .rail__foot { flex: 0 0 auto; padding: 12px 14px; border-top: 1px solid var(--hair); display: grid; gap: 8px; }
 .token-out { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; padding: 8px 10px; border-radius: 8px; background: var(--raised); border: 1px solid var(--hair); color: var(--accent); }
@@ -447,7 +583,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .rcard__agenthead > div { flex: 1 1 auto; min-width: 0; }
 .rcard__statline { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
 
-.rsection-title { font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); margin: 8px 2px 2px; }
+.rsection-title { font-family: var(--eyebrow); font-size: 10px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); margin: 10px 2px 2px; }
 .muted-note { font-size: 12px; color: var(--muted); padding: 4px 2px; }
 .line-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 8px 9px; border-radius: var(--radius-sm); background: none; border: 1px solid transparent; cursor: pointer; transition: background var(--t); }
 .line-row:hover { background: var(--raised); }
@@ -666,7 +802,9 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
   .layout--right-collapsed .rail--right > * { visibility: visible; }
   /* Compact app bar */
   .appbar { height: 52px; padding: 0 max(10px, env(safe-area-inset-left)) 0 max(10px, env(safe-area-inset-right)); }
-  .appbar__sub, .brand-by, .sync-pill { display: none; }
+  /* HUD telemetry chips would overflow the cramped mobile bar — the KPI strip
+     in the list view already carries these stats. */
+  .appbar__sub, .brand-by, .sync-pill, .appbar__hud { display: none; }
   .brand-name { font-size: 15px; }
   .appbar__brand { gap: 8px; }
   .appbar__right { gap: 4px; }
