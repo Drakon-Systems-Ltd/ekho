@@ -81,7 +81,7 @@ describe("relay hardening", () => {
     expect(res.status).toBe(400);
   });
 
-  it("rejects a 'group' message instead of silently dropping it (no delivery)", async () => {
+  it("rejects a 'group' message to a non-room instead of silently dropping it (no delivery)", async () => {
     const a = await relay.enrollAgent("grp-a");
     const b = await relay.enrollAgent("grp-b");
     const res = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
@@ -91,7 +91,10 @@ describe("relay hardening", () => {
       conversation_id: "g1",
       correlation_id: "gc1"
     });
-    expect(res.status).toBe(400);
+    // A group recipient that doesn't resolve to a room the sender belongs to is
+    // rejected as "room not found" (404) — never silently accepted with zero
+    // deliveries. (A real room the sender is a member of fans out; see relay.test.)
+    expect(res.status).toBe(404);
     // and nobody silently received it
     const inbox = await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/inbox");
     expect(inbox.body.messages.length).toBe(0);
