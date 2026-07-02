@@ -84,6 +84,7 @@
   "contracts": {
     "tools": [
       "ekho_send",
+      "ekho_open_room",
       "ekho_inbox"
     ]
   }
