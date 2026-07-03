@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveAgentHealth, HEARTBEAT_STALE_MS } from "../src/fleet-health";
+import { deriveAgentHealth, buildAttentionItems, HEARTBEAT_STALE_MS } from "../src/fleet-health";
 
 const T0 = 1_700_000_000_000;
 const iso = (t: number) => new Date(t).toISOString();
@@ -62,5 +62,42 @@ describe("deriveAgentHealth", () => {
     const v = deriveAgentHealth({ status: "paused", last_heartbeat_at: fresh, metrics: { turn_health: "ok" } }, T0);
     expect(v.level).toBe("degraded");
     expect(v.reason).toBe("paused");
+  });
+});
+
+describe("buildAttentionItems", () => {
+  const agents = [
+    { id: "a_tars", display_name: "Tars", health: { level: "down", reason: "model failing every turn (not_found)", cognitive_unknown: false }, last_heartbeat_at: iso(T0 - 10_000) },
+    { id: "a_case", display_name: "Case", health: { level: "degraded", reason: "model errors (3/1h)", cognitive_unknown: false }, last_heartbeat_at: iso(T0 - 20_000) },
+    { id: "a_jarvis", display_name: "Jarvis", health: { level: "ok", reason: "healthy", cognitive_unknown: false }, last_heartbeat_at: iso(T0 - 5_000) }
+  ];
+  const agentNames = { a_tars: "Tars", a_case: "Case", a_friday: "Friday", a_edith: "Edith" };
+
+  it("includes down + degraded agents but never healthy ones", () => {
+    const items = buildAttentionItems({ agents, stalled: [], deadLetters: [], agentNames });
+    expect(items.map((i) => i.kind)).toEqual(["agent_down", "agent_degraded"]);
+    expect(items.find((i) => i.agentId === "a_jarvis")).toBeUndefined();
+  });
+
+  it("folds stalls and dead letters in, ranking critical first", () => {
+    const items = buildAttentionItems({
+      agents,
+      stalled: [{ id: "e1", actor_id: "a_friday", conversation_id: "c9", created_at: iso(T0 - 1000), payload: { reason: "handoff pending, budget spent" } }],
+      deadLetters: [{ id: "d1", recipient_agent_id: "a_edith", sender_agent_id: "a_tars", conversation_id: "c2", failure_reason: "max retries", dead_lettered_at: iso(T0 - 500) }],
+      agentNames
+    });
+    // criticals (agent_down + dead_letter) come before warns (agent_degraded + stalled)
+    expect(items[0].severity).toBe("critical");
+    expect(items[items.length - 1].severity).toBe("warn");
+    const dl = items.find((i) => i.kind === "dead_letter");
+    expect(dl?.title).toMatch(/Edith/);
+    expect(dl?.detail).toMatch(/Tars/);
+    const stall = items.find((i) => i.kind === "stalled");
+    expect(stall?.title).toMatch(/Friday/);
+    expect(stall?.detail).toMatch(/handoff pending/);
+  });
+
+  it("is empty when the fleet is all-green and quiet", () => {
+    expect(buildAttentionItems({ agents: [agents[2]], stalled: [], deadLetters: [], agentNames })).toEqual([]);
   });
 });

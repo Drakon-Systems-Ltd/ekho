@@ -78,3 +78,64 @@ export function deriveAgentHealth(input: AgentHealthInput, now: number = Date.no
 
   return { level: "ok", reason: cognitive_unknown ? "connected (no turn data yet)" : "healthy", cognitive_unknown };
 }
+
+// ---- "Needs You" queue ----------------------------------------------------
+// Agents can't DM the operator, so failures otherwise only surface as raw
+// events in the firehose. This folds the three things that actually need a
+// human — dead/degraded models, stalled hand-offs, and dropped deliveries —
+// into one ranked to-do list. Pure so the ranking/shape is unit-tested.
+
+export type AttentionSeverity = "critical" | "warn";
+export type AttentionKind = "agent_down" | "agent_degraded" | "stalled" | "dead_letter";
+
+export interface AttentionItem {
+  id: string;
+  kind: AttentionKind;
+  severity: AttentionSeverity;
+  title: string;
+  detail: string;
+  agentId?: string;
+  conversationId?: string;
+  at: string | null;
+}
+
+export interface AttentionSources {
+  agents: Array<{ id: string; display_name?: string | null; health?: AgentHealthVerdict; last_heartbeat_at?: string | null }>;
+  stalled: Array<{ id: string; actor_id?: string | null; conversation_id?: string | null; created_at?: string | null; payload?: Record<string, unknown> | null }>;
+  deadLetters: Array<{ id: string; recipient_agent_id?: string | null; sender_agent_id?: string | null; conversation_id?: string | null; failure_reason?: string | null; dead_lettered_at?: string | null }>;
+  agentNames?: Record<string, string>;
+}
+
+const SEVERITY_RANK: Record<AttentionSeverity, number> = { critical: 0, warn: 1 };
+
+export function buildAttentionItems(src: AttentionSources): AttentionItem[] {
+  const name = (id?: string | null) => (id ? src.agentNames?.[id] || id : "unknown");
+  const items: AttentionItem[] = [];
+
+  for (const a of src.agents) {
+    const level = a.health?.level;
+    if (level === "down") {
+      items.push({ id: `agent:${a.id}`, kind: "agent_down", severity: "critical", title: `${a.display_name || a.id} is down`, detail: a.health?.reason || "unhealthy", agentId: a.id, at: a.last_heartbeat_at ?? null });
+    } else if (level === "degraded") {
+      items.push({ id: `agent:${a.id}`, kind: "agent_degraded", severity: "warn", title: `${a.display_name || a.id} is degraded`, detail: a.health?.reason || "degraded", agentId: a.id, at: a.last_heartbeat_at ?? null });
+    }
+  }
+
+  for (const s of src.stalled) {
+    const reason = typeof s.payload?.reason === "string" ? String(s.payload.reason) : "conversation paused with work pending";
+    items.push({ id: `stall:${s.id}`, kind: "stalled", severity: "warn", title: `${name(s.actor_id)} stalled a conversation`, detail: reason, agentId: s.actor_id ?? undefined, conversationId: s.conversation_id ?? undefined, at: s.created_at ?? null });
+  }
+
+  for (const d of src.deadLetters) {
+    items.push({ id: `dead:${d.id}`, kind: "dead_letter", severity: "critical", title: `Undelivered message to ${name(d.recipient_agent_id)}`, detail: `from ${name(d.sender_agent_id)} — ${d.failure_reason || "delivery failed"}`, agentId: d.recipient_agent_id ?? undefined, conversationId: d.conversation_id ?? undefined, at: d.dead_lettered_at ?? null });
+  }
+
+  // Critical first, then most-recent first (nulls last).
+  return items.sort((x, y) => {
+    const s = SEVERITY_RANK[x.severity] - SEVERITY_RANK[y.severity];
+    if (s !== 0) return s;
+    const tx = x.at ? Date.parse(x.at) : -Infinity;
+    const ty = y.at ? Date.parse(y.at) : -Infinity;
+    return ty - tx;
+  });
+}

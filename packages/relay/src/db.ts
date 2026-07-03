@@ -6,7 +6,7 @@ import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
-import { deriveAgentHealth } from "./fleet-health";
+import { deriveAgentHealth, buildAttentionItems } from "./fleet-health";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -1617,6 +1617,47 @@ export class EkhoDb {
         received_1h: (recvStmt.get(fleetId, id, since) as { c: number }).c
       };
     });
+  }
+
+  /**
+   * The operator "Needs You" queue: the three things that actually need a human
+   * — dead/degraded models, stalled hand-offs, and undeliverable messages —
+   * folded into one ranked list (assembly is the pure buildAttentionItems).
+   * `stalledSinceMs` bounds how far back a stall still counts as open.
+   */
+  getAttentionItems(fleetId: string, stalledSinceMs = 7 * 86400_000) {
+    const agents = this.getFleetHealth(fleetId).map((a) => ({
+      id: a.id,
+      display_name: a.display_name as string,
+      health: a.health,
+      last_heartbeat_at: a.last_heartbeat_at
+    }));
+    const since = new Date(Date.now() - stalledSinceMs).toISOString();
+    const stalledRaw = this.db.prepare(
+      `SELECT id, actor_id, conversation_id, payload_json, created_at
+       FROM events WHERE fleet_id = ? AND event_type = 'conversation.stalled' AND created_at >= ?
+       ORDER BY created_at DESC LIMIT 50`
+    ).all(fleetId, since) as Array<Record<string, unknown>>;
+    const stalled = stalledRaw.map((e) => {
+      let payload: Record<string, unknown> | null = null;
+      try { payload = JSON.parse(String(e.payload_json) || "{}"); } catch { /* malformed */ }
+      return { id: String(e.id), actor_id: e.actor_id as string | null, conversation_id: e.conversation_id as string | null, created_at: e.created_at as string | null, payload };
+    });
+    const deadLetters = this.listDeadLetters(fleetId, { limit: 50, offset: 0 }).items as Array<Record<string, unknown>>;
+    const agentNames = Object.fromEntries(
+      (this.db.prepare("SELECT id, display_name FROM agents WHERE fleet_id = ?").all(fleetId) as Array<{ id: string; display_name: string }>)
+        .map((a) => [a.id, a.display_name])
+    );
+    const items = buildAttentionItems({
+      agents,
+      stalled,
+      deadLetters: deadLetters.map((d) => ({
+        id: String(d.id), recipient_agent_id: d.recipient_agent_id as string, sender_agent_id: d.sender_agent_id as string,
+        conversation_id: d.conversation_id as string, failure_reason: d.failure_reason as string, dead_lettered_at: d.dead_lettered_at as string
+      })),
+      agentNames
+    });
+    return { items, counts: { critical: items.filter((i) => i.severity === "critical").length, warn: items.filter((i) => i.severity === "warn").length } };
   }
 
   /**
