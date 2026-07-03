@@ -6,6 +6,7 @@ import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
+import { deriveAgentHealth } from "./fleet-health";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -1592,6 +1593,12 @@ export class EkhoDb {
           /* malformed heartbeat metrics — show none */
         }
       }
+      const health = deriveAgentHealth({
+        status: String(a.status),
+        last_heartbeat_at: hb?.received_at ?? null,
+        consecutive_missed_heartbeats: Number(a.consecutive_missed_heartbeats) || 0,
+        metrics
+      });
       return {
         id,
         display_name: a.display_name,
@@ -1604,6 +1611,7 @@ export class EkhoDb {
         peer_turn_budget: Number(a.peer_turn_budget) || 6,
         last_heartbeat_at: hb?.received_at ?? null,
         metrics,
+        health,
         active_conversations: activeConversations,
         sent_1h: (sentStmt.get(fleetId, id, since) as { c: number }).c,
         received_1h: (recvStmt.get(fleetId, id, since) as { c: number }).c
