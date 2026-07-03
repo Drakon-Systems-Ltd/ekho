@@ -2365,21 +2365,51 @@ function ActivityTab({ events, agents, initialized, filter, onFilter, onOpenConv
   );
 }
 
+// Fleet-health verdict → visual tone. The verdict is computed server-side
+// (deriveAgentHealth) combining connection liveness with the model's real
+// turn outcomes, so a connected-but-brain-dead agent lands on "down", not "ok".
+const HEALTH_TONE = { down: "danger", degraded: "warn", ok: "ok" };
+const HEALTH_RANK = { down: 0, degraded: 1, ok: 2 };
+const HEALTH_LABEL = { down: "DOWN", degraded: "DEGRADED", ok: "OK" };
+
+// Defensive fallback for a relay that predates the verdict (old build): derive
+// a coarse level from the raw fields so the board never renders blank.
+function agentHealth(a) {
+  if (a.health && a.health.level) return a.health;
+  if (a.status === "quarantined" || a.status === "revoked") return { level: "down", reason: a.status };
+  if ((a.consecutive_missed_heartbeats || 0) > 0 || !a.last_heartbeat_at) return { level: "degraded", reason: "missing heartbeats" };
+  return { level: "ok", reason: "healthy" };
+}
+
 function HealthTab({ agents, initialized }) {
   if (!initialized) return <Skeleton count={3} height="80px" />;
   if (!agents.length) return <EmptyState title="No agents">Enroll an agent to see fleet health here.</EmptyState>;
+
+  // Sort worst-first so anything needing attention sits at the top of the board.
+  const ranked = [...agents].sort((x, y) => {
+    const hx = agentHealth(x), hy = agentHealth(y);
+    const d = (HEALTH_RANK[hx.level] ?? 3) - (HEALTH_RANK[hy.level] ?? 3);
+    return d !== 0 ? d : String(x.display_name || x.id).localeCompare(String(y.display_name || y.id));
+  });
+  const counts = ranked.reduce((acc, a) => { acc[agentHealth(a).level] = (acc[agentHealth(a).level] || 0) + 1; return acc; }, {});
+
   return (
     <div className="cards">
-      <div className="access-caption">
-        Live fleet health — model, current activity, and message throughput (last hour) per agent.
+      <div className="health-summary">
+        <StatChip label="OK" value={counts.ok || 0} tone="ok" />
+        <StatChip label="Degraded" value={counts.degraded || 0} tone="warn" />
+        <StatChip label="Down" value={counts.down || 0} tone={counts.down ? "danger" : "muted"} />
       </div>
-      {agents.map((a) => {
+      {ranked.map((a) => {
+        const h = agentHealth(a);
+        const tone = HEALTH_TONE[h.level] || "muted";
         const model = a.metrics?.model;
         const provider = a.metrics?.provider;
+        const turnHealth = a.metrics?.turn_health;
+        const errs = Number(a.metrics?.model_errors_1h ?? 0) || 0;
         const active = a.active_conversations?.length || 0;
-        const missed = a.consecutive_missed_heartbeats || 0;
         return (
-          <article className="rcard health-row" key={a.id}>
+          <article className={`rcard health-row health-row--${tone}`} key={a.id}>
             <div className="access-row__head">
               <Avatar id={a.id} label={a.display_name || a.id} size={34} />
               <div className="access-row__id">
@@ -2387,14 +2417,17 @@ function HealthTab({ agents, initialized }) {
                 <div className="rcard__meta">
                   <span className="mono">{a.runtime || "custom"}</span>
                   {model ? (
-                    <> · {model}{provider ? <span className="muted"> ({provider})</span> : null}</>
+                    <> · <span className="mono">{model}</span>{provider ? <span className="muted"> ({provider})</span> : null}</>
                   ) : (
                     <span className="muted"> · model —</span>
                   )}
                 </div>
               </div>
-              <StatusDot status={a.status} title={a.status} />
+              <Badge tone={tone}>{HEALTH_LABEL[h.level] || "?"}</Badge>
             </div>
+            {h.level !== "ok" && h.reason ? (
+              <div className={`health-reason health-reason--${tone}`}>▸ {h.reason}</div>
+            ) : null}
             <div className="health-row__stats">
               <span className="health-stat"><strong>{a.sent_1h ?? 0}</strong> sent</span>
               <span className="health-stat"><strong>{a.received_1h ?? 0}</strong> recv</span>
@@ -2404,9 +2437,15 @@ function HealthTab({ agents, initialized }) {
               <span className="muted">beat {relativeTime(a.last_heartbeat_at)}</span>
             </div>
             <div className="health-row__flags">
+              {turnHealth ? (
+                <Badge tone={turnHealth === "down" ? "danger" : turnHealth === "degraded" ? "warn" : "ok"}>
+                  turns {turnHealth}{errs ? ` · ${errs} err/1h` : ""}
+                </Badge>
+              ) : (
+                <Badge tone="muted" title="Agent plugin predates turn telemetry">turns —</Badge>
+              )}
               {a.operator_trusted ? <Badge tone="ok">trusted</Badge> : null}
               {a.peer_autoreply ? <Badge>delegation · {a.peer_turn_budget}</Badge> : <Badge>solo</Badge>}
-              {missed > 0 ? <Badge tone="warn">missed {missed}</Badge> : null}
             </div>
           </article>
         );
