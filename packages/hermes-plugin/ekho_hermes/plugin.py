@@ -384,3 +384,37 @@ def register(ctx) -> None:
         description=EKHO_INBOX_DESCRIPTION,
         emoji="📥",
     )
+
+    _maybe_register_turn_health_hook(ctx)
+
+
+def _maybe_register_turn_health_hook(ctx) -> None:
+    """Feature-detect a host hook that fires when a model call finishes, and fold
+    its outcome into the turn-health window (parity with the OpenClaw plugin's
+    ``model_call_ended``). The Hermes ctx hook surface varies by version, so we
+    probe a few registration method + event names and degrade to a silent no-op
+    if none are present — Hermes agents then keep full connection health + the
+    env model label exactly as before, just without cognitive telemetry."""
+    from .connection import note_model_call_ended
+
+    def _on_ended(event, *_a, **_kw):
+        try:
+            e = event if isinstance(event, dict) else getattr(event, "__dict__", {}) or {}
+            note_model_call_ended(e.get("outcome"), e.get("errorCategory") or e.get("failureKind") or e.get("error_category"))
+        except Exception as exc:  # noqa: BLE001 — never let telemetry break a turn
+            logger.debug("[ekho] model_call_ended handler error: %s", exc)
+
+    register_fns = ("register_hook", "add_hook", "on")
+    event_names = ("model_call_ended", "model_call_finished", "after_model_call")
+    for fn_name in register_fns:
+        fn = getattr(ctx, fn_name, None)
+        if not callable(fn):
+            continue
+        for ev in event_names:
+            try:
+                fn(ev, _on_ended)
+                logger.info("[ekho] turn-health telemetry wired via ctx.%s(%r)", fn_name, ev)
+                return
+            except Exception as exc:  # noqa: BLE001 — try the next candidate
+                logger.debug("[ekho] hook %s(%s) unavailable: %s", fn_name, ev, exc)
+    logger.info("[ekho] no model-call hook on this Hermes ctx; turn-health stays env-only")

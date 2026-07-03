@@ -94,6 +94,102 @@ export function getEkhoIdentity(): EkhoIdentity | null {
   return identity;
 }
 
+// ---- Turn / model-call health (operator health board) --------------------
+// The heartbeat status is hardcoded "healthy" — it only proves the CONNECTION
+// is up. An agent whose MODEL is failing (bad auth, 404, quota) keeps
+// heartbeating while every turn dies, so it reads green on the board while its
+// brain is dead. That exact blind spot let a brain-dead agent look fine this
+// week. We hook the host's model_call_ended and fold each outcome into a
+// rolling window so the heartbeat can carry a truthful cognitive-health signal.
+
+export interface ModelCallOutcome {
+  t: number; // epoch ms
+  ok: boolean; // outcome === "completed"
+  category?: string; // errorCategory / failureKind when ok === false
+}
+
+const TURN_HEALTH_WINDOW_MS = 60 * 60_000; // 1h rolling window
+const TURN_HEALTH_MAX = 200; // cap retained samples (memory bound)
+
+let modelCalls: ModelCallOutcome[] = [];
+
+/** Fold a finished model call into the rolling window (pruning old/oversized). */
+export function noteModelCallEnded(
+  outcome: string | undefined,
+  category?: string,
+  now: number = Date.now()
+): void {
+  const ok = outcome === "completed";
+  modelCalls.push({ t: now, ok, category: ok ? undefined : (category || "error") });
+  if (modelCalls.length > TURN_HEALTH_MAX) modelCalls = modelCalls.slice(-TURN_HEALTH_MAX);
+  const cutoff = now - TURN_HEALTH_WINDOW_MS;
+  let i = 0;
+  while (i < modelCalls.length && modelCalls[i].t < cutoff) i++;
+  if (i > 0) modelCalls = modelCalls.slice(i);
+}
+
+/**
+ * Derive a truthful cognitive-health verdict from recent model-call outcomes.
+ * Pure — the window is passed in — so the thresholds are unit-tested directly.
+ *   down     : calls exist but NONE completed (brain failing every attempt — the
+ *              Tars 404 case), or a run of >=3 consecutive failures after health.
+ *   degraded : some errors mixed with successes in the window.
+ *   ok       : recent success, no error tail.
+ *   unknown  : no calls in the window — we never invent health.
+ */
+export function deriveTurnHealth(
+  calls: ModelCallOutcome[],
+  now: number = Date.now()
+): {
+  turn_health: "ok" | "degraded" | "down" | "unknown";
+  errors_1h: number;
+  calls_1h: number;
+  last_error?: string;
+  last_ok_at?: number;
+} {
+  const cutoff = now - TURN_HEALTH_WINDOW_MS;
+  const win = calls.filter((c) => c.t >= cutoff);
+  const calls_1h = win.length;
+  if (calls_1h === 0) return { turn_health: "unknown", errors_1h: 0, calls_1h: 0 };
+  const errors_1h = win.filter((c) => !c.ok).length;
+  const hasSuccess = win.some((c) => c.ok);
+  const lastOk = [...win].reverse().find((c) => c.ok);
+  const lastErr = [...win].reverse().find((c) => !c.ok);
+  let tail = 0;
+  for (let i = win.length - 1; i >= 0 && !win[i].ok; i--) tail++;
+  let verdict: "ok" | "degraded" | "down";
+  if (!hasSuccess) verdict = "down"; // nothing completes = brain down
+  else if (tail >= 3) verdict = "down"; // was healthy, now failing a run
+  else if (errors_1h > 0) verdict = "degraded";
+  else verdict = "ok";
+  return {
+    turn_health: verdict,
+    errors_1h,
+    calls_1h,
+    last_error: verdict === "ok" ? undefined : lastErr?.category,
+    last_ok_at: lastOk?.t
+  };
+}
+
+/** Snapshot the current turn-health metrics for the heartbeat (string-valued, like model metrics). */
+export function turnHealthMetrics(now: number = Date.now()): Record<string, string> {
+  const h = deriveTurnHealth(modelCalls, now);
+  if (h.turn_health === "unknown") return {};
+  const m: Record<string, string> = {
+    turn_health: h.turn_health,
+    model_errors_1h: String(h.errors_1h),
+    model_calls_1h: String(h.calls_1h)
+  };
+  if (h.last_error) m.last_error = h.last_error;
+  if (h.last_ok_at) m.last_ok_at = new Date(h.last_ok_at).toISOString();
+  return m;
+}
+
+/** Test seam: clear the rolling turn-health window. */
+export function __resetTurnHealth(): void {
+  modelCalls = [];
+}
+
 /** Split a "provider/model" ref into parts; tolerates bare ids, leading/extra slashes, and whitespace. */
 export function splitModelRef(ref: string): { provider: string; model: string } {
   const s = (ref ?? "").trim().replace(/^\/+/, ""); // a leading slash means "no provider"
@@ -232,15 +328,19 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
       // Best-effort model/provider for the operator health board. Auto-detected
       // from the host (live model_call hook + config seed, see register), with
       // EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER as an explicit override/fallback.
-      const reportMetrics = (): Record<string, string> =>
-        pickModelMetrics({
+      const reportMetrics = (): Record<string, string> => ({
+        ...pickModelMetrics({
           envModel: process.env.EKHO_REPORT_MODEL,
           envProvider: process.env.EKHO_REPORT_PROVIDER,
           observedModel: observed.model,
           observedProvider: observed.provider,
           configModel: configured.model,
           configProvider: configured.provider
-        });
+        }),
+        // Truthful cognitive-health signal so a brain-dead-but-connected agent
+        // (model 404/auth failing every turn) reads red, not green.
+        ...turnHealthMetrics()
+      });
       const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
       beat();
       heartbeatTimer = setInterval(beat, config.heartbeatIntervalMs ?? 30_000);

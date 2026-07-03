@@ -649,6 +649,34 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .health-row__spacer { flex: 1 1 auto; }
 .health-row__flags { display: flex; gap: 6px; flex-wrap: wrap; }
 
+/* Fleet Health board: worst-first, colour-coded by the server-side verdict. */
+.health-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 4px; }
+.stat-chip--muted { border-left-color: var(--hair-strong); }
+.stat-chip--muted .stat-chip__value { color: var(--muted); }
+.badge--muted { color: var(--faint); border-color: var(--hair); }
+.health-row { position: relative; border-left: 3px solid var(--hair-strong); }
+.health-row--ok { border-left-color: var(--ok); }
+.health-row--warn { border-left-color: var(--warn); background: rgba(251, 191, 36, 0.04); }
+.health-row--danger { border-left-color: var(--danger); background: rgba(248, 113, 113, 0.05); }
+.health-reason { font-family: var(--mono); font-size: 11.5px; padding: 4px 8px; border-radius: var(--radius-sm); letter-spacing: 0.01em; }
+.health-reason--warn { color: var(--warn); background: rgba(251, 191, 36, 0.08); }
+.health-reason--danger { color: var(--danger); background: rgba(248, 113, 113, 0.09); }
+
+/* "Needs You" queue: ranked operator to-do list. */
+.attn-item { position: relative; border-left: 3px solid var(--hair-strong); gap: 6px; }
+.attn-item--danger { border-left-color: var(--danger); background: rgba(248, 113, 113, 0.05); }
+.attn-item--warn { border-left-color: var(--warn); background: rgba(251, 191, 36, 0.04); }
+.attn-item--click { cursor: pointer; transition: background 120ms ease; }
+.attn-item--click:hover { background: rgba(255, 255, 255, 0.04); }
+.attn-item__head { display: flex; align-items: center; gap: 8px; }
+.attn-item__glyph { font-size: 14px; line-height: 1; width: 18px; text-align: center; }
+.attn-item__glyph--danger { color: var(--danger); }
+.attn-item__glyph--warn { color: var(--warn); }
+.attn-item__title { flex: 1 1 auto; font-weight: 600; font-size: 13px; }
+.attn-item__detail { font-family: var(--mono); font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+.attn-item__foot { display: flex; align-items: center; gap: 6px; font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; }
+.attn-item__cta { margin-left: auto; color: var(--accent, var(--teal, #2dd4bf)); font-weight: 600; }
+
 /* ---------------- topology map ---------------- */
 .topo { display: flex; flex-direction: column; gap: 12px; }
 .topo-svg {

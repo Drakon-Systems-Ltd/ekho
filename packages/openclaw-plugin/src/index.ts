@@ -3,7 +3,7 @@ import fs from "node:fs";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { ensureConnected, getEkhoIdentity, noteObservedModel, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
+import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
 import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
 import { buildSignedSendFields } from "./verification.js";
 import {
@@ -370,6 +370,17 @@ plugin.register = (api) => {
     });
   } catch (err) {
     api.logger?.debug?.(`[ekho-adapter] model_call hook unavailable: ${String(err)}`);
+  }
+  // Turn-outcome telemetry: fold each finished model call into the rolling
+  // health window so the heartbeat carries a truthful cognitive-health signal
+  // (an agent whose every turn 404s reads red on the board, not green).
+  try {
+    api.registerHook?.("model_call_ended", (event) => {
+      const e = event as { outcome?: string; errorCategory?: string; failureKind?: string } | undefined;
+      noteModelCallEnded(e?.outcome, e?.errorCategory ?? e?.failureKind);
+    });
+  } catch (err) {
+    api.logger?.debug?.(`[ekho-adapter] model_call_ended hook unavailable: ${String(err)}`);
   }
 
   const config = api.pluginConfig as EkhoPluginConfig | undefined;

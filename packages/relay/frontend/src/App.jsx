@@ -20,6 +20,7 @@ import {
   resolveApproval,
   sendOperatorMessage,
   getFleetHealth,
+  getAttention,
   getTopology,
   getActivity,
   getRooms,
@@ -288,6 +289,7 @@ export default function App() {
   const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [roomSaving, setRoomSaving] = useState(false);
   const [fleetHealth, setFleetHealth] = useState([]);
+  const [attention, setAttention] = useState({ items: [], counts: { critical: 0, warn: 0 } });
   const [topology, setTopology] = useState({ nodes: [], edges: [], window_minutes: 60 });
   const [activity, setActivity] = useState([]);
   const [activityFilter, setActivityFilter] = useState("");
@@ -377,10 +379,23 @@ export default function App() {
     }
   };
 
-  const healthyCount = useMemo(
-    () => (overview.agents || []).filter((a) => a.status === "healthy").length,
-    [overview.agents]
-  );
+  // Truthful fleet counts from the health verdict (connection + cognitive),
+  // NOT the raw connection status — so the HUD agrees with the Health board.
+  // Falls back to the connection status only until the first health poll lands.
+  const fleetCounts = useMemo(() => {
+    if (fleetHealth.length) {
+      let ok = 0, down = 0;
+      for (const a of fleetHealth) {
+        const lvl = a.health?.level;
+        if (lvl === "ok") ok++;
+        else if (lvl === "down") down++;
+      }
+      return { healthy: ok, total: fleetHealth.length, down };
+    }
+    const agents = overview.agents || [];
+    return { healthy: agents.filter((a) => a.status === "healthy").length, total: agents.length, down: 0 };
+  }, [fleetHealth, overview.agents]);
+  const healthyCount = fleetCounts.healthy;
 
   /* ---------------- data fetchers (in-place updates, no skeleton churn) ---------------- */
 
@@ -422,6 +437,17 @@ export default function App() {
       const result = await getFleetHealth(session.token);
       setFleetHealth(result.agents || []);
       markInit("health");
+    } catch (error) {
+      noteConnectionTrouble(error); // background refresh — mark stale, no modal
+    }
+  }
+
+  async function refreshAttention() {
+    if (!session.token) return;
+    try {
+      const result = await getAttention(session.token);
+      setAttention({ items: result.items || [], counts: result.counts || { critical: 0, warn: 0 } });
+      markInit("attention");
     } catch (error) {
       noteConnectionTrouble(error); // background refresh — mark stale, no modal
     }
@@ -1066,7 +1092,7 @@ export default function App() {
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshTopology(), refreshActivity(), refreshFeeds()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshAttention(), refreshTopology(), refreshActivity(), refreshFeeds()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1095,6 +1121,7 @@ export default function App() {
         refreshPolicies(),
         refreshDeadLetters(),
         refreshFleetHealth(),
+        refreshAttention(),
         refreshTopology(),
         refreshActivity(),
         selectedConversationId ? refreshTimeline(selectedConversationId) : Promise.resolve(),
@@ -1299,8 +1326,8 @@ export default function App() {
         </div>
         {/* Live fleet status line — colour-coded mono telemetry chips. */}
         <div className="appbar__hud" role="status" aria-label="Fleet status">
-          <span className="hud-chip hud-chip--ok" title="Agents reporting healthy">
-            <span className="hud-chip__v mono">{healthyCount}/{overview.agents?.length ?? 0}</span>
+          <span className={`hud-chip ${fleetCounts.down ? "hud-chip--danger" : "hud-chip--ok"}`} title="Agents healthy (connection + model turns)">
+            <span className="hud-chip__v mono">{healthyCount}/{fleetCounts.total}</span>
             <span className="hud-chip__l">healthy</span>
           </span>
           <span className={`hud-chip${overview.pendingApprovals ? " hud-chip--warn" : ""}`} title="Approvals awaiting decision">
@@ -1604,6 +1631,7 @@ export default function App() {
           <div className="tabs tabs--grouped">
             {[
               ["Monitor", [
+                ["attention", `Needs You${attention.items.length ? ` (${attention.items.length})` : ""}`],
                 ["health", "Health"],
                 ["topology", "Map"],
                 ["activity", "Activity"],
@@ -1641,6 +1669,15 @@ export default function App() {
                 onApprove={(id) => handleApproval(id, "approve")}
                 onReject={(id) => handleApproval(id, "reject")}
                 onTrace={traceFromOps}
+              />
+            )}
+
+            {rightTab === "attention" && (
+              <AttentionTab
+                data={attention}
+                initialized={initialized.current.attention}
+                onSelectAgent={selectAgent}
+                onOpenConversation={traceFromOps}
               />
             )}
 
@@ -2365,21 +2402,103 @@ function ActivityTab({ events, agents, initialized, filter, onFilter, onOpenConv
   );
 }
 
+// The "Needs You" queue: the operator's single ranked to-do list of things
+// that actually need a human — dead/degraded models, stalled hand-offs, and
+// undeliverable messages. Empty = genuinely nothing on fire.
+const ATTN_GLYPH = { agent_down: "⏻", agent_degraded: "▽", stalled: "⏸", dead_letter: "✉" };
+const ATTN_TONE = { critical: "danger", warn: "warn" };
+
+function AttentionTab({ data, initialized, onSelectAgent, onOpenConversation }) {
+  if (!initialized) return <Skeleton count={3} height="64px" />;
+  const items = data?.items || [];
+  if (!items.length) {
+    return <EmptyState title="All clear">Nothing needs you right now — no down agents, stalled hand-offs, or dropped messages.</EmptyState>;
+  }
+  const counts = data.counts || { critical: 0, warn: 0 };
+  return (
+    <div className="cards">
+      <div className="health-summary">
+        <StatChip label="Critical" value={counts.critical || 0} tone={counts.critical ? "danger" : "muted"} />
+        <StatChip label="Warnings" value={counts.warn || 0} tone={counts.warn ? "warn" : "muted"} />
+      </div>
+      {items.map((it) => {
+        const tone = ATTN_TONE[it.severity] || "muted";
+        const clickable = Boolean(it.conversationId || it.agentId);
+        const onClick = () => {
+          if (it.conversationId) onOpenConversation?.(it.conversationId);
+          else if (it.agentId) onSelectAgent?.(it.agentId);
+        };
+        return (
+          <article
+            className={`rcard attn-item attn-item--${tone}${clickable ? " attn-item--click" : ""}`}
+            key={it.id}
+            onClick={clickable ? onClick : undefined}
+            role={clickable ? "button" : undefined}
+            tabIndex={clickable ? 0 : undefined}
+          >
+            <div className="attn-item__head">
+              <span className={`attn-item__glyph attn-item__glyph--${tone}`} aria-hidden="true">{ATTN_GLYPH[it.kind] || "•"}</span>
+              <span className="attn-item__title">{it.title}</span>
+              <Badge tone={tone}>{it.severity === "critical" ? "CRITICAL" : "WARN"}</Badge>
+            </div>
+            <div className="attn-item__detail">{it.detail}</div>
+            <div className="attn-item__foot">
+              <span className="mono muted">{it.kind.replace("_", " ")}</span>
+              {it.at ? <span className="muted">· {relativeTime(it.at)}</span> : null}
+              {clickable ? <span className="attn-item__cta">{it.conversationId ? "open thread ›" : "view agent ›"}</span> : null}
+            </div>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+// Fleet-health verdict → visual tone. The verdict is computed server-side
+// (deriveAgentHealth) combining connection liveness with the model's real
+// turn outcomes, so a connected-but-brain-dead agent lands on "down", not "ok".
+const HEALTH_TONE = { down: "danger", degraded: "warn", ok: "ok" };
+const HEALTH_RANK = { down: 0, degraded: 1, ok: 2 };
+const HEALTH_LABEL = { down: "DOWN", degraded: "DEGRADED", ok: "OK" };
+
+// Defensive fallback for a relay that predates the verdict (old build): derive
+// a coarse level from the raw fields so the board never renders blank.
+function agentHealth(a) {
+  if (a.health && a.health.level) return a.health;
+  if (a.status === "quarantined" || a.status === "revoked") return { level: "down", reason: a.status };
+  if ((a.consecutive_missed_heartbeats || 0) > 0 || !a.last_heartbeat_at) return { level: "degraded", reason: "missing heartbeats" };
+  return { level: "ok", reason: "healthy" };
+}
+
 function HealthTab({ agents, initialized }) {
   if (!initialized) return <Skeleton count={3} height="80px" />;
   if (!agents.length) return <EmptyState title="No agents">Enroll an agent to see fleet health here.</EmptyState>;
+
+  // Sort worst-first so anything needing attention sits at the top of the board.
+  const ranked = [...agents].sort((x, y) => {
+    const hx = agentHealth(x), hy = agentHealth(y);
+    const d = (HEALTH_RANK[hx.level] ?? 3) - (HEALTH_RANK[hy.level] ?? 3);
+    return d !== 0 ? d : String(x.display_name || x.id).localeCompare(String(y.display_name || y.id));
+  });
+  const counts = ranked.reduce((acc, a) => { acc[agentHealth(a).level] = (acc[agentHealth(a).level] || 0) + 1; return acc; }, {});
+
   return (
     <div className="cards">
-      <div className="access-caption">
-        Live fleet health — model, current activity, and message throughput (last hour) per agent.
+      <div className="health-summary">
+        <StatChip label="OK" value={counts.ok || 0} tone="ok" />
+        <StatChip label="Degraded" value={counts.degraded || 0} tone="warn" />
+        <StatChip label="Down" value={counts.down || 0} tone={counts.down ? "danger" : "muted"} />
       </div>
-      {agents.map((a) => {
+      {ranked.map((a) => {
+        const h = agentHealth(a);
+        const tone = HEALTH_TONE[h.level] || "muted";
         const model = a.metrics?.model;
         const provider = a.metrics?.provider;
+        const turnHealth = a.metrics?.turn_health;
+        const errs = Number(a.metrics?.model_errors_1h ?? 0) || 0;
         const active = a.active_conversations?.length || 0;
-        const missed = a.consecutive_missed_heartbeats || 0;
         return (
-          <article className="rcard health-row" key={a.id}>
+          <article className={`rcard health-row health-row--${tone}`} key={a.id}>
             <div className="access-row__head">
               <Avatar id={a.id} label={a.display_name || a.id} size={34} />
               <div className="access-row__id">
@@ -2387,14 +2506,17 @@ function HealthTab({ agents, initialized }) {
                 <div className="rcard__meta">
                   <span className="mono">{a.runtime || "custom"}</span>
                   {model ? (
-                    <> · {model}{provider ? <span className="muted"> ({provider})</span> : null}</>
+                    <> · <span className="mono">{model}</span>{provider ? <span className="muted"> ({provider})</span> : null}</>
                   ) : (
                     <span className="muted"> · model —</span>
                   )}
                 </div>
               </div>
-              <StatusDot status={a.status} title={a.status} />
+              <Badge tone={tone}>{HEALTH_LABEL[h.level] || "?"}</Badge>
             </div>
+            {h.level !== "ok" && h.reason ? (
+              <div className={`health-reason health-reason--${tone}`}>▸ {h.reason}</div>
+            ) : null}
             <div className="health-row__stats">
               <span className="health-stat"><strong>{a.sent_1h ?? 0}</strong> sent</span>
               <span className="health-stat"><strong>{a.received_1h ?? 0}</strong> recv</span>
@@ -2404,9 +2526,15 @@ function HealthTab({ agents, initialized }) {
               <span className="muted">beat {relativeTime(a.last_heartbeat_at)}</span>
             </div>
             <div className="health-row__flags">
+              {turnHealth ? (
+                <Badge tone={turnHealth === "down" ? "danger" : turnHealth === "degraded" ? "warn" : "ok"}>
+                  turns {turnHealth}{errs ? ` · ${errs} err/1h` : ""}
+                </Badge>
+              ) : (
+                <Badge tone="muted" title="Agent plugin predates turn telemetry">turns —</Badge>
+              )}
               {a.operator_trusted ? <Badge tone="ok">trusted</Badge> : null}
               {a.peer_autoreply ? <Badge>delegation · {a.peer_turn_budget}</Badge> : <Badge>solo</Badge>}
-              {missed > 0 ? <Badge tone="warn">missed {missed}</Badge> : null}
             </div>
           </article>
         );
