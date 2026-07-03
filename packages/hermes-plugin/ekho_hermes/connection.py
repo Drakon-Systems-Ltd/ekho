@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -50,10 +51,102 @@ _heartbeat_stop = threading.Event()
 _autoreply_stop: Optional[Callable[[], None]] = None
 
 
+# ---- Turn / model-call health (operator health board) --------------------
+# Parity with the OpenClaw plugin: the heartbeat status is always "healthy" (it
+# only proves the CONNECTION is up). An agent whose model fails every turn (bad
+# auth/404/quota) keeps heartbeating while its brain is dead. The host calls
+# note_model_call_ended(outcome, category) per finished model call; we fold each
+# into a rolling window and report a truthful turn_health in the heartbeat.
+
+_TURN_HEALTH_WINDOW_MS = 60 * 60_000  # 1h rolling window
+_TURN_HEALTH_MAX = 200  # cap retained samples
+_model_calls: list[tuple[float, bool, str]] = []  # (epoch_ms, ok, category)
+_turn_lock = threading.Lock()
+
+
+def note_model_call_ended(outcome: Optional[str], category: Optional[str] = None, now_ms: Optional[float] = None) -> None:
+    """Fold a finished model call into the rolling window (pruning old/oversized)."""
+    ts = now_ms if now_ms is not None else time.time() * 1000.0
+    ok = outcome == "completed"
+    with _turn_lock:
+        _model_calls.append((ts, ok, "" if ok else (category or "error")))
+        if len(_model_calls) > _TURN_HEALTH_MAX:
+            del _model_calls[:-_TURN_HEALTH_MAX]
+        cutoff = ts - _TURN_HEALTH_WINDOW_MS
+        while _model_calls and _model_calls[0][0] < cutoff:
+            _model_calls.pop(0)
+
+
+def derive_turn_health(calls: list[tuple[float, bool, str]], now_ms: float) -> dict:
+    """Truthful cognitive-health verdict from recent outcomes (pure — tested directly).
+    down: calls exist but none completed (brain failing every attempt), or a run of
+    >=3 consecutive failures after health. degraded: errors mixed with successes.
+    ok: recent success, no error tail. unknown: no calls in window (never invented)."""
+    cutoff = now_ms - _TURN_HEALTH_WINDOW_MS
+    win = [c for c in calls if c[0] >= cutoff]
+    if not win:
+        return {"turn_health": "unknown", "errors_1h": 0, "calls_1h": 0}
+    errors = [c for c in win if not c[1]]
+    has_success = any(c[1] for c in win)
+    tail = 0
+    for c in reversed(win):
+        if c[1]:
+            break
+        tail += 1
+    if not has_success:
+        verdict = "down"
+    elif tail >= 3:
+        verdict = "down"
+    elif errors:
+        verdict = "degraded"
+    else:
+        verdict = "ok"
+    last_err = next((c[2] for c in reversed(win) if not c[1]), "")
+    last_ok = next((c[0] for c in reversed(win) if c[1]), None)
+    return {
+        "turn_health": verdict,
+        "errors_1h": len(errors),
+        "calls_1h": len(win),
+        "last_error": None if verdict == "ok" else (last_err or None),
+        "last_ok_ms": last_ok,
+    }
+
+
+def _turn_health_metrics(now_ms: Optional[float] = None) -> dict:
+    """Snapshot the current turn-health metrics for the heartbeat (string-valued)."""
+    ts = now_ms if now_ms is not None else time.time() * 1000.0
+    with _turn_lock:
+        h = derive_turn_health(list(_model_calls), ts)
+    if h["turn_health"] == "unknown":
+        return {}
+    m = {
+        "turn_health": h["turn_health"],
+        "model_errors_1h": str(h["errors_1h"]),
+        "model_calls_1h": str(h["calls_1h"]),
+    }
+    if h.get("last_error"):
+        m["last_error"] = h["last_error"]
+    if h.get("last_ok_ms"):
+        m["last_ok_at"] = _iso_from_ms(h["last_ok_ms"])
+    return m
+
+
+def _iso_from_ms(ms: float) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(ms % 1000):03d}Z"
+
+
+def _reset_turn_health() -> None:
+    """Test seam: clear the rolling turn-health window."""
+    with _turn_lock:
+        _model_calls.clear()
+
+
 def _report_metrics() -> dict:
-    """Best-effort agent metrics for the operator health board. Sourced from env
-    so it's generic + robust (no fragile runtime introspection): set
-    EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER to surface them in the console."""
+    """Best-effort agent metrics for the operator health board. Model/provider from
+    env (EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER); turn_health from real model-call
+    outcomes so a connected-but-brain-dead agent reads red, not green."""
     metrics: dict = {}
     model = (os.environ.get("EKHO_REPORT_MODEL") or "").strip()
     provider = (os.environ.get("EKHO_REPORT_PROVIDER") or "").strip()
@@ -61,6 +154,7 @@ def _report_metrics() -> dict:
         metrics["model"] = model
     if provider:
         metrics["provider"] = provider
+    metrics.update(_turn_health_metrics())
     return metrics
 
 
