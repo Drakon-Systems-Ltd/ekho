@@ -64,3 +64,22 @@ def test_metrics_module_state_down_then_ok():
     m2 = _turn_health_metrics(T0)
     assert m2["turn_health"] == "degraded"  # success after the failing run
     _reset_turn_health()
+
+
+def test_reply_turn_outcome_feeds_health():
+    """The autoreply reply-turn exit status is Hermes' cognitive-health signal."""
+    from ekho_hermes.autoreply import _note_turn_outcome
+    from ekho_hermes import connection as conn
+
+    conn._reset_turn_health()
+    # A reply turn that keeps failing (e.g. every call 404s) → down.
+    _note_turn_outcome("error", "exit_1")
+    _note_turn_outcome("error", "exit_1")
+    m = conn._turn_health_metrics()
+    assert m["turn_health"] == "down"
+    assert m["last_error"] == "exit_1"
+    conn._reset_turn_health()
+    # A clean reply turn → ok.
+    _note_turn_outcome("completed")
+    assert conn._turn_health_metrics()["turn_health"] == "ok"
+    conn._reset_turn_health()

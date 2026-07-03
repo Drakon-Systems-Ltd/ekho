@@ -653,6 +653,20 @@ def build_oneshot_command(
     return [python_exe or resolve_python_exe(), "-m", module, "-z", prompt]
 
 
+def _note_turn_outcome(outcome: str, category: Optional[str] = None) -> None:
+    """Fold a reply-turn outcome into the operator health board's turn-health
+    window. Hermes exposes no host model-call hook, so the reply turn's own exit
+    status is our truthful cognitive-health signal — an agent whose every reply
+    turn fails (bad auth/404) then reads red on the board (the Tars case). Lazy
+    import breaks the connection<->autoreply cycle; never let telemetry throw."""
+    try:
+        from .connection import note_model_call_ended
+
+        note_model_call_ended(outcome, category)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[ekho-autoreply] turn-health note failed: %s", exc)
+
+
 def _default_spawn(
     cmd: List[str],
     env: Dict[str, str],
@@ -677,7 +691,12 @@ def _default_spawn(
         proc_holder["proc"] = proc
     try:
         _out, err = proc.communicate(timeout=TURN_TIMEOUT_S)
-        if proc.returncode not in (0, -9, -15):  # 0 ok; -9/-15 = killed by stop()
+        if proc.returncode in (-9, -15):
+            pass  # killed by stop()/shutdown — not a real turn outcome
+        elif proc.returncode == 0:
+            _note_turn_outcome("completed")
+        else:
+            _note_turn_outcome("error", f"exit_{proc.returncode}")
             logger.warning(
                 "[ekho-autoreply] reply turn exit %s: %s",
                 proc.returncode,
@@ -690,6 +709,7 @@ def _default_spawn(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
+        _note_turn_outcome("error", "timeout")
         logger.warning(
             "[ekho-autoreply] reply turn timed out after %ss", TURN_TIMEOUT_S
         )
