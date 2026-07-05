@@ -270,7 +270,7 @@ export default function App() {
   // ui state
   const [agentStatusFilter, setAgentStatusFilter] = useState("all");
   const [agentSearch, setAgentSearch] = useState("");
-  const [rightTab, setRightTab] = useState("approvals");
+  const [rightTab, setRightTab] = useState("health");
   const [showSystem, setShowSystem] = useState(false);
   // Mobile navigation (no effect on desktop — gated by CSS media query):
   // 'list' shows the fleet/conversations rail; 'chat' shows the conversation.
