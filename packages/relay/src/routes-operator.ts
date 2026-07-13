@@ -4,7 +4,7 @@ import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
 import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -409,6 +409,41 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     const ok = db.deleteRoom(request.operator.fleetId, params.roomId, request.operator.id);
     if (!ok) return reply.code(404).send({ error: "room not found" });
     return reply.send({ ok: true });
+  });
+
+  // Project mode: a higher per-room peer budget for designated working rooms.
+  // Members read the override live on their next inbox poll — no restart.
+  app.post("/v1/operator/rooms/:roomId/project-mode", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = projectModeSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const params = request.params as { roomId: string };
+    const result = db.setRoomProjectMode(
+      request.operator.fleetId,
+      params.roomId,
+      request.operator.id,
+      parsed.data.enabled,
+      parsed.data.budget
+    );
+    if (result === null) return reply.code(404).send({ error: "room not found" });
+    return reply.send({ room_id: params.roomId, ...result });
+  });
+
+  // One-click resume for a thread that stalled on budget exhaustion: a relay-
+  // minted operator nudge re-opens every participant's latch, wakes them, and —
+  // as operator engagement — re-arms the once-per-close stall escalation.
+  app.post("/v1/operator/conversations/:conversationId/resume", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = resumeConversationSchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const params = request.params as { conversationId: string };
+    const result = db.resumeConversation(request.operator.fleetId, request.operator.id, params.conversationId, parsed.data.text);
+    if (result === null) return reply.code(404).send({ error: "conversation not found" });
+    return reply.code(201).send({
+      message_id: result.messageId,
+      conversation_id: result.conversationId,
+      queued_at: result.createdAt
+    });
   });
 
   // Feeds — operator-configured sources delivered to subscribed agents as

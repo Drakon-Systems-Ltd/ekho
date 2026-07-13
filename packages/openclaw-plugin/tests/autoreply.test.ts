@@ -10,6 +10,7 @@ import {
   planFloorTurn,
   createAutoReplyState,
   effectivePeerSettings,
+  effectiveConversationBudget,
   recordPeerUsage,
   getCachedInbox,
   DEFAULT_PEER_TURN_BUDGET
@@ -280,8 +281,27 @@ describe("bounded peer delegation", () => {
     expect(p).toContain("on it");
   });
 
-  it("defaults the per-conversation budget to 6", () => {
-    expect(DEFAULT_PEER_TURN_BUDGET).toBe(6);
+  it("defaults the per-conversation budget to 25", () => {
+    expect(DEFAULT_PEER_TURN_BUDGET).toBe(25);
+  });
+
+  it("a project room's budget overrides the per-agent budget for that conversation only", () => {
+    const batch: any = { conversation_budgets: { room_x: 100 } };
+    expect(effectiveConversationBudget(batch, "room_x", 25)).toBe(100);
+    expect(effectiveConversationBudget(batch, "other-conv", 25)).toBe(25);
+    expect(effectiveConversationBudget({} as any, "room_x", 25)).toBe(25); // older relay: field absent
+    expect(effectiveConversationBudget({ conversation_budgets: { room_x: 0 } } as any, "room_x", 25)).toBe(25); // nonsense ignored
+  });
+
+  it("budget line uses the project room's own cap for the turn arithmetic", () => {
+    const m = msg({ sender_kind: "agent", sender_agent_id: "jarvis", conversation_id: "room-proj" });
+    const batch = {
+      messages: [m], operator_trusted: false, roster: [],
+      conversation_budgets: { "room-proj": 100 }
+    } as any;
+    const p = buildPrompt([m], batch, undefined, "self", 6, { "room-proj": 99 });
+    expect(p).toContain("peer turn 1 of 100");
+    expect(p).toContain("99 wake(s) left");
   });
 
   it("tells a peer-woken agent how much turn budget remains", () => {

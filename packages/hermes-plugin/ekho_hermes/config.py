@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
-DEFAULT_PEER_TURN_BUDGET = 6
+DEFAULT_PEER_TURN_BUDGET = 25
 
 _TRUTHY = {"1", "true", "yes", "on"}
 

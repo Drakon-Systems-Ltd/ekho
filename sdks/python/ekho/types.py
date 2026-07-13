@@ -181,6 +181,9 @@ class InboxResponse:
     # predates the feature — the client then falls back to its local default).
     peer_autoreply: Optional[bool] = None
     peer_turn_budget: Optional[int] = None
+    # Project-mode rooms this agent belongs to: conversation id -> the higher
+    # per-room budget that overrides peer_turn_budget there ({} on older relays).
+    conversation_budgets: Dict[str, int] = field(default_factory=dict)
     # Pinned operator signing keys (incl. revoked, so the agent can drop them).
     operator_keys: List[OperatorKeyEntry] = field(default_factory=list)
     # Recent thread per room conversation (conversation_id -> chronological list
@@ -217,6 +220,7 @@ class InboxResponse:
             ],
             peer_autoreply=data.get("peer_autoreply"),
             peer_turn_budget=data.get("peer_turn_budget"),
+            conversation_budgets=data.get("conversation_budgets") or {},
             operator_keys=[
                 OperatorKeyEntry.from_dict(k)
                 for k in data.get("operator_keys", [])

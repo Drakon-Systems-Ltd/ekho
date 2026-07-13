@@ -26,6 +26,8 @@ import {
   getRooms,
   createRoom,
   deleteRoom,
+  setRoomProjectMode,
+  resumeConversation,
   getFeeds,
   createFeedSource,
   deleteFeedSource,
@@ -107,7 +109,11 @@ function describeEvent(event) {
   // stream, labelled by the feed name rather than an agent/operator.
   const isFeed = isMessage && (event.actor_kind === "feed" || payload.message_type === "feed");
   const feedName = isFeed ? (payload.feed || "Feed") : undefined;
-  const isSystem = !isMessage && (event.actor_kind === "system" || /^(approval|policy|agent)\./.test(type));
+  // Bounded-delegation lifecycle: rendered as timeline chips, with a Resume
+  // button on the stall so a budget-paused thread is one click from moving.
+  const isStalled = type === "conversation.stalled";
+  const isResumed = type === "conversation.resumed";
+  const isSystem = !isMessage && (isStalled || isResumed || event.actor_kind === "system" || /^(approval|policy|agent)\./.test(type));
 
   // Prefer the real message body (attached by the API for agent + operator
   // sends) so agent messages render as actual chat bubbles, not activity lines.
@@ -137,6 +143,9 @@ function describeEvent(event) {
     id: event.id,
     kind: isSystem ? "system" : "message",
     side: isOperator ? "operator" : "agent",
+    variant: isStalled ? "stalled" : isResumed ? "resumed" : undefined,
+    // Budget that ran out (stall chips only) — the chip renderer words the line.
+    stallBudget: isStalled ? payload.budget ?? null : undefined,
     feed: isFeed,
     feedName,
     senderId: event.actor_id || "system",
@@ -174,6 +183,10 @@ function humanizeEvent(type, payload) {
     case "agent.quarantine":
     case "agent.auto_quarantined":
       return `Agent quarantined${payload.reason ? ` — ${payload.reason}` : ""}`;
+    case "conversation.stalled":
+      return `⏸ hit the agent-to-agent turn budget${payload.budget ? ` (${payload.budget})` : ""} — thread paused until you nudge or resume`;
+    case "conversation.resumed":
+      return "▶ Thread resumed — everyone has a fresh turn budget";
     case "message.delivered":
       return "Message delivered";
     case "message.acked":
@@ -288,6 +301,7 @@ export default function App() {
   const [rooms, setRooms] = useState([]);
   const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [roomSaving, setRoomSaving] = useState(false);
+  const [resumePending, setResumePending] = useState(false); // resume-thread call in flight
   const [fleetHealth, setFleetHealth] = useState([]);
   const [attention, setAttention] = useState({ items: [], counts: { critical: 0, warn: 0 } });
   const [topology, setTopology] = useState({ nodes: [], edges: [], window_minutes: 60 });
@@ -554,6 +568,28 @@ export default function App() {
       await refreshRooms();
     } catch (error) {
       handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function handleSetProjectMode(roomId, enabled, budget) {
+    try {
+      await setRoomProjectMode(session.token, roomId, { enabled, budget });
+      await refreshRooms();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    }
+  }
+
+  async function handleResumeConversation() {
+    if (!selectedConversationId || resumePending) return;
+    setResumePending(true);
+    try {
+      await resumeConversation(session.token, selectedConversationId);
+      await refreshTimeline();
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    } finally {
+      setResumePending(false);
     }
   }
 
@@ -1499,6 +1535,8 @@ export default function App() {
             token={session.token}
             onReply={setReplyTarget}
             mentionNames={mentionNames}
+            onResume={handleResumeConversation}
+            resumePending={resumePending}
           />
 
           <div
@@ -1808,6 +1846,7 @@ export default function App() {
           saving={roomSaving}
           onCreate={handleCreateRoom}
           onDelete={handleDeleteRoom}
+          onSetProjectMode={handleSetProjectMode}
           onClose={() => setRoomModalOpen(false)}
         />
       )}
@@ -1879,7 +1918,7 @@ function DeliveryTicks({ status, deliveredN = 0, ackedN = 0 }) {
   );
 }
 
-function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow, token, onReply, mentionNames }) {
+function ChatScroller({ items, hasConversation, now, settings, typingAgents, nameFor, animatedIds, typingNow, token, onReply, mentionNames, onResume, resumePending }) {
   const ref = useRef(null);
   const nearBottomRef = useRef(true);
 
@@ -1932,11 +1971,31 @@ function ChatScroller({ items, hasConversation, now, settings, typingAgents, nam
         // (pending sends). Both are unique; idx is only a last-ditch fallback.
         const key = item.id || `${item.type}-${item.createdAt}-${idx}`;
         if (item.kind === "system") {
+          const isStalled = item.variant === "stalled";
+          // Offer Resume only while the stall is still "live": no operator
+          // message or resume chip after it (either one re-opened the latch).
+          const laterOperatorActivity = isStalled && items.slice(idx + 1).some(
+            (x) => (x.kind === "message" && x.side === "operator") || x.variant === "resumed"
+          );
+          const text = isStalled
+            ? `⏸ ${nameFor(item.senderId)} hit the agent-to-agent turn budget${item.stallBudget ? ` (${item.stallBudget})` : ""} — thread paused for them until you nudge or resume`
+            : item.text;
           return (
             <React.Fragment key={key}>
               {dayLabel ? <div className="day-divider"><span>{dayLabel}</span></div> : null}
-              <div className="sys-chip">
-                <span>{item.text}</span>
+              <div className={`sys-chip${isStalled ? " sys-chip--stalled" : ""}${item.variant === "resumed" ? " sys-chip--resumed" : ""}`}>
+                <span>{text}</span>
+                {isStalled && !laterOperatorActivity && onResume ? (
+                  <button
+                    type="button"
+                    className="sys-chip__resume"
+                    disabled={resumePending}
+                    onClick={onResume}
+                    title="Send an operator nudge that gives every participant a fresh turn budget"
+                  >
+                    {resumePending ? "Resuming…" : "▶ Resume"}
+                  </button>
+                ) : null}
                 <span className="sys-chip__time">{clockTime(item.createdAt)}</span>
               </div>
             </React.Fragment>
@@ -2716,12 +2775,12 @@ function TopologyTab({ data, initialized, onSelect, settings }) {
 
 function PeerControl({ agent, pending, onSet }) {
   const enabled = Boolean(agent.peer_autoreply);
-  const savedBudget = agent.peer_turn_budget ?? 6;
+  const savedBudget = agent.peer_turn_budget ?? 25;
   const [budget, setBudget] = useState(savedBudget);
   useEffect(() => { setBudget(savedBudget); }, [savedBudget]);
 
   const commitBudget = () => {
-    const next = Math.max(1, Math.min(50, Math.trunc(Number(budget) || savedBudget)));
+    const next = Math.max(1, Math.min(200, Math.trunc(Number(budget) || savedBudget)));
     setBudget(next);
     if (enabled && next !== savedBudget) onSet(agent.id, true, next);
   };
@@ -2745,7 +2804,7 @@ function PeerControl({ agent, pending, onSet }) {
             className="access-row__budget-input"
             type="number"
             min={1}
-            max={50}
+            max={200}
             value={budget}
             disabled={pending}
             onChange={(e) => setBudget(e.target.value)}
@@ -2856,7 +2915,39 @@ function PoliciesTab({ policies, initialized, onCreate, onEdit, onDelete }) {
   );
 }
 
-function RoomModal({ agents, rooms, saving, onCreate, onDelete, onClose }) {
+/** Per-room project-mode control: OFF by default; when ON the room carries its
+ *  own (higher) agent-to-agent turn budget, so long working sessions don't
+ *  stall on the per-agent default. */
+function RoomProjectMode({ room, onSet }) {
+  const saved = room.project_turn_budget ?? 100;
+  const [budget, setBudget] = useState(saved);
+  useEffect(() => { setBudget(saved); }, [saved, room.id]);
+  const clamp = (v) => Math.max(1, Math.min(500, Math.trunc(Number(v) || saved)));
+  return (
+    <label className="room-project" title="Project mode: this room gets its own, higher agent-to-agent turn budget for long working sessions">
+      <input
+        type="checkbox"
+        checked={Boolean(room.project_mode)}
+        onChange={(e) => onSet(room.id, e.target.checked, clamp(budget))}
+      />
+      <span>Project mode</span>
+      {room.project_mode ? (
+        <input
+          className="room-project__budget"
+          type="number"
+          min="1"
+          max="500"
+          value={budget}
+          onChange={(e) => setBudget(e.target.value)}
+          onBlur={() => { const next = clamp(budget); setBudget(next); if (next !== saved) onSet(room.id, true, next); }}
+          title="Turns each member may be woken by teammates in this room before pausing"
+        />
+      ) : null}
+    </label>
+  );
+}
+
+function RoomModal({ agents, rooms, saving, onCreate, onDelete, onSetProjectMode, onClose }) {
   const [name, setName] = useState("");
   const [memberIds, setMemberIds] = useState([]);
   const toggle = (id) =>
@@ -2912,7 +3003,9 @@ function RoomModal({ agents, rooms, saving, onCreate, onDelete, onClose }) {
               <div className="room-list__meta">
                 <strong># {r.name}</strong>
                 <span className="muted"> · {r.members?.length ?? 0} member{(r.members?.length ?? 0) === 1 ? "" : "s"}</span>
+                {r.project_mode ? <span className="room-list__project">project · {r.project_turn_budget}</span> : null}
               </div>
+              <RoomProjectMode room={r} onSet={onSetProjectMode} />
               <button className="button button--sm button--danger" onClick={() => onDelete(r.id)}>Delete</button>
             </div>
           ))}

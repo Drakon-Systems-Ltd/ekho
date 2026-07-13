@@ -8,7 +8,7 @@ def test_peer_autoreply_defaults_on_when_unset():
     # latch still caps peer ping-pong per conversation).
     cfg = EkhoConfig.from_env(env={"EKHO_RELAY_URL": "http://relay"})
     assert cfg.peer_autoreply is True
-    assert cfg.peer_turn_budget == 6
+    assert cfg.peer_turn_budget == 25
 
 
 def test_peer_autoreply_truthy_values():
@@ -48,11 +48,11 @@ def test_peer_turn_budget_invalid_falls_back_to_default():
     cfg = EkhoConfig.from_env(
         env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": "nope"}
     )
-    assert cfg.peer_turn_budget == 6
+    assert cfg.peer_turn_budget == 25
 
 
 def test_peer_turn_budget_floor_of_one():
     cfg = EkhoConfig.from_env(
         env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": "0"}
     )
-    assert cfg.peer_turn_budget == 6  # <=0 is meaningless -> default
+    assert cfg.peer_turn_budget == 25  # <=0 is meaningless -> default

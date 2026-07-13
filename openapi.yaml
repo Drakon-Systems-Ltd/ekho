@@ -1627,6 +1627,62 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/operator/conversations/{conversationId}/resume:
+    post:
+      operationId: resumeConversation
+      tags: [Operator]
+      summary: Resume a stalled conversation
+      description: >
+        One-click recovery for a thread that stalled on peer turn-budget
+        exhaustion (surfaced as a `conversation.stalled` event). Mints an
+        operator nudge message into the conversation: a room fans out to its
+        members, any other conversation fans out to its historical participants.
+        Operator engagement resets every recipient's per-conversation peer latch,
+        wakes them, and re-arms the once-per-close stall escalation.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                  description: Optional custom nudge text (a sensible default is used when omitted).
+      responses:
+        "201":
+          description: Nudge queued into the conversation.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message_id:
+                    type: string
+                  conversation_id:
+                    type: string
+                  queued_at:
+                    type: string
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Conversation has no participants to wake.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/operator/policies:
     get:
       operationId: listPolicies

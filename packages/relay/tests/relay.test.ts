@@ -345,16 +345,16 @@ describe("Relay integration", () => {
     it("toggles per-agent peer-autoreply + budget, live on the inbox", async () => {
       const agent = await relay.enrollAgent("peer-agent");
 
-      // Defaults: ON, budget 6 — both in the agent list and the agent's inbox.
+      // Defaults: ON, budget 25 — both in the agent list and the agent's inbox.
       // Peer auto-reply is on by default now; the latch still caps ping-pong.
       const list = await relay.operatorRequest("GET", "/v1/operator/agents");
       const row = list.body.agents.find((a: { id: string }) => a.id === agent.agent_id);
       expect(row.peer_autoreply).toBe(true);
-      expect(row.peer_turn_budget).toBe(6);
+      expect(row.peer_turn_budget).toBe(25);
 
       const inbox0 = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox");
       expect(inbox0.body.peer_autoreply).toBe(true);
-      expect(inbox0.body.peer_turn_budget).toBe(6);
+      expect(inbox0.body.peer_turn_budget).toBe(25);
 
       // The operator can still raise the budget for an already-on agent.
       const on = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/peer-autoreply`, {

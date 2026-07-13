@@ -43,6 +43,15 @@ export interface AgentIdentityKeyRow {
 
 const IDEMPOTENT_DDL_ERROR = /duplicate column|already exists/i;
 
+// Per-agent peer turn budget applied to new enrollments and used as the read
+// fallback. The rolling per-peer rate gate, the per-conversation latch, and the
+// stall escalation keep runaway loops bounded even at this size.
+export const DEFAULT_PEER_TURN_BUDGET = 25;
+
+// Per-room budget while project mode is ON — high enough for a real working
+// session; the operator toggle (default OFF) is the opt-in.
+export const DEFAULT_PROJECT_TURN_BUDGET = 100;
+
 /** Split a migration file into individual statements. A naive ';' split is safe
  *  here: every migration is pure DDL with no ';' inside a string literal
  *  (verified across migrations/001..015). */
@@ -384,9 +393,11 @@ export class EkhoDb {
       // migration 009 with DEFAULT 0, so an implicit insert would land a fresh
       // agent OFF. Setting it here makes newly enrolled agents land ON on both
       // fresh (schema.ts DEFAULT 1) and migrated databases.
+      // peer_turn_budget likewise set explicitly: migrated DBs carry the old
+      // column DEFAULT (6), so an implicit insert would under-budget new agents.
       this.db.prepare(
-        "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at, peer_autoreply) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)"
-      ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now);
+        "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at, peer_autoreply, peer_turn_budget) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"
+      ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now, DEFAULT_PEER_TURN_BUDGET);
 
       this.db.prepare(
         "INSERT INTO agent_credentials (id, agent_id, secret_hash, status, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -810,8 +821,8 @@ export class EkhoDb {
   /** List a fleet's rooms with their members (id + display name). */
   listRooms(fleetId: string) {
     const rooms = this.db.prepare(
-      "SELECT id, name, created_at FROM rooms WHERE fleet_id = ? ORDER BY created_at DESC"
-    ).all(fleetId) as Array<{ id: string; name: string; created_at: string }>;
+      "SELECT id, name, created_at, project_mode, project_turn_budget FROM rooms WHERE fleet_id = ? ORDER BY created_at DESC"
+    ).all(fleetId) as Array<{ id: string; name: string; created_at: string; project_mode: number; project_turn_budget: number }>;
     const memberStmt = this.db.prepare(
       `SELECT rm.agent_id, a.display_name, a.status FROM room_members rm
        JOIN agents a ON a.id = rm.agent_id
@@ -820,8 +831,95 @@ export class EkhoDb {
     );
     return rooms.map((room) => ({
       ...room,
+      project_mode: Boolean(room.project_mode),
+      project_turn_budget: Number(room.project_turn_budget) || DEFAULT_PROJECT_TURN_BUDGET,
       members: memberStmt.all(room.id) as Array<{ agent_id: string; display_name: string; status: string }>
     }));
+  }
+
+  /** Toggle a room's project mode (higher per-room peer budget). Returns the
+   *  new settings, or null if the room doesn't exist in this fleet. */
+  setRoomProjectMode(fleetId: string, roomId: string, operatorId: string, enabled: boolean, budget?: number) {
+    const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(roomId, fleetId);
+    if (!room) return null;
+    if (typeof budget === "number" && budget > 0) {
+      this.db.prepare("UPDATE rooms SET project_mode = ?, project_turn_budget = ? WHERE id = ? AND fleet_id = ?")
+        .run(enabled ? 1 : 0, budget, roomId, fleetId);
+    } else {
+      this.db.prepare("UPDATE rooms SET project_mode = ? WHERE id = ? AND fleet_id = ?")
+        .run(enabled ? 1 : 0, roomId, fleetId);
+    }
+    const row = this.db.prepare("SELECT project_mode, project_turn_budget FROM rooms WHERE id = ? AND fleet_id = ?")
+      .get(roomId, fleetId) as { project_mode: number; project_turn_budget: number };
+    const result = {
+      project_mode: Boolean(row.project_mode),
+      project_turn_budget: Number(row.project_turn_budget) || DEFAULT_PROJECT_TURN_BUDGET
+    };
+    this.recordEvent(fleetId, "room.project_mode_changed", "operator", operatorId, "room", roomId, roomId, result);
+    return result;
+  }
+
+  /** One-click resume for a stalled thread: mint an operator nudge into the
+   *  conversation. Operator messages reset every recipient's peer latch and wake
+   *  them, and — being operator engagement — re-arm recordConversationStall's
+   *  once-per-close boundary. Rooms fan out to members; other conversations fan
+   *  out to their historical participants. Returns null when there is nobody to
+   *  wake. */
+  resumeConversation(fleetId: string, operatorId: string, conversationId: string, text?: string) {
+    const nudge = text?.trim() || "▶ Operator resumed this thread — fresh turn budget, continue where you left off.";
+    const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId);
+    if (room) {
+      const result = this.createOperatorMessage({ fleetId, operatorId, roomId: conversationId, text: nudge });
+      this.recordEvent(fleetId, "conversation.resumed", "operator", operatorId, "conversation", conversationId, conversationId, {});
+      return result;
+    }
+
+    // Participants: every live, non-operator agent that ever sent or received in
+    // this conversation (same definition isConversationParticipant uses).
+    const participants = (this.db.prepare(
+      `SELECT DISTINCT a.id FROM agents a
+       WHERE a.fleet_id = ? AND a.runtime != 'operator' AND a.revoked_at IS NULL AND (
+         EXISTS (SELECT 1 FROM messages m WHERE m.fleet_id = ? AND m.conversation_id = ? AND m.sender_agent_id = a.id)
+         OR EXISTS (
+           SELECT 1 FROM messages m JOIN message_deliveries d ON d.message_id = m.id
+           WHERE m.fleet_id = ? AND m.conversation_id = ? AND d.recipient_agent_id = a.id
+         )
+       )`
+    ).all(fleetId, fleetId, conversationId, fleetId, conversationId) as Array<{ id: string }>).map((r) => r.id);
+    if (participants.length === 0) return null;
+
+    const messageId = id("msg");
+    const createdAt = nowIso();
+    const ttlSeconds = 900;
+    const senderId = this.ensureOperatorAgent(fleetId);
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO messages (
+          id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+          message_type, priority, requires_approval, body_json, metadata_json, ttl_seconds, created_at, expires_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        messageId, fleetId, conversationId, id("cor"), senderId, "broadcast", null,
+        "broadcast", "normal", 0,
+        JSON.stringify({ text: nudge }),
+        JSON.stringify({ sender_label: "Operator", operator_id: operatorId, resumed: true }),
+        ttlSeconds, createdAt, addSeconds(createdAt, ttlSeconds), "queued"
+      );
+      const deliveryStmt = this.db.prepare(
+        "INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, status) VALUES (?, ?, ?, ?, ?)"
+      );
+      for (const rid of participants) deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
+      this.recordEvent(fleetId, "message.queued", "operator", senderId, "message", messageId, conversationId, {
+        recipient_kind: "broadcast",
+        recipient_id: null,
+        message_type: "broadcast",
+        sender_label: "Operator",
+        text: nudge
+      });
+      this.recordEvent(fleetId, "conversation.resumed", "operator", operatorId, "conversation", conversationId, conversationId, {});
+    });
+    tx();
+    return { messageId, conversationId, createdAt };
   }
 
   /** Delete a room (and its membership). Returns false if it doesn't exist. */
@@ -887,7 +985,7 @@ export class EkhoDb {
     const fleetId = self ? String(self.fleet_id) : null;
     const operatorTrusted = Boolean(self?.operator_trusted);
     const peerAutoreply = Boolean(self?.peer_autoreply);
-    const peerTurnBudget = Number(self?.peer_turn_budget) || 6;
+    const peerTurnBudget = Number(self?.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET;
 
     // Resolve each distinct sender's runtime so messages can be tagged
     // operator vs agent. The synthetic op_<fleetId> sender has runtime
@@ -1025,6 +1123,21 @@ export class EkhoDb {
     const conversation_history: Record<string, Array<ReturnType<typeof snapshotOf>>> = {};
     for (const [cid, rows] of historyByConv) conversation_history[cid] = rows.map(snapshotOf);
 
+    // Per-conversation budget overrides: rooms this agent belongs to that are in
+    // project mode. Sent on EVERY poll (not just when a delivery is present) so
+    // the plugin's latch always has the live per-room ceiling.
+    const conversation_budgets: Record<string, number> = {};
+    if (fleetId) {
+      const projectRooms = this.db.prepare(
+        `SELECT r.id, r.project_turn_budget FROM rooms r
+           JOIN room_members rm ON rm.room_id = r.id
+         WHERE r.fleet_id = ? AND rm.agent_id = ? AND r.project_mode = 1`
+      ).all(fleetId, agentId) as Array<{ id: string; project_turn_budget: number }>;
+      for (const r of projectRooms) {
+        conversation_budgets[r.id] = Number(r.project_turn_budget) || DEFAULT_PROJECT_TURN_BUDGET;
+      }
+    }
+
     return {
       messages: deliveries.map((row, i) => {
         const body = parsedBodies[i];
@@ -1075,6 +1188,8 @@ export class EkhoDb {
       operator_trusted: operatorTrusted,
       peer_autoreply: peerAutoreply,
       peer_turn_budget: peerTurnBudget,
+      // Project-mode rooms override the per-agent budget for that conversation.
+      conversation_budgets,
       roster,
       // Recent thread history per room conversation in this batch (keyed by
       // conversation_id), so an agent always has the room context, not just the
@@ -1390,7 +1505,7 @@ export class EkhoDb {
       this.db.prepare("UPDATE agents SET peer_autoreply = ? WHERE id = ? AND fleet_id = ?").run(autoreply ? 1 : 0, agentId, fleetId);
     }
     const row = this.db.prepare("SELECT peer_autoreply, peer_turn_budget FROM agents WHERE id = ? AND fleet_id = ?").get(agentId, fleetId) as Record<string, unknown>;
-    const result = { peer_autoreply: Boolean(row.peer_autoreply), peer_turn_budget: Number(row.peer_turn_budget) || 6 };
+    const result = { peer_autoreply: Boolean(row.peer_autoreply), peer_turn_budget: Number(row.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET };
     this.recordEvent(fleetId, "agent.peer_autoreply_changed", "operator", operatorId, "agent", agentId, null, result);
     return result;
   }
@@ -1608,7 +1723,7 @@ export class EkhoDb {
         consecutive_missed_heartbeats: Number(a.consecutive_missed_heartbeats) || 0,
         operator_trusted: Boolean(a.operator_trusted),
         peer_autoreply: Boolean(a.peer_autoreply),
-        peer_turn_budget: Number(a.peer_turn_budget) || 6,
+        peer_turn_budget: Number(a.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET,
         last_heartbeat_at: hb?.received_at ?? null,
         metrics,
         health,
@@ -1889,7 +2004,7 @@ export class EkhoDb {
       ...row,
       operator_trusted: Boolean(row.operator_trusted),
       peer_autoreply: Boolean(row.peer_autoreply),
-      peer_turn_budget: Number(row.peer_turn_budget) || 6
+      peer_turn_budget: Number(row.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET
     }));
 
     const totalRow = this.db.prepare(

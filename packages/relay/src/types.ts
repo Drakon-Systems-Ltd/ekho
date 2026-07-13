@@ -163,7 +163,19 @@ export const endorseAgentKeySchema = z.object({
 export const peerAutoreplySchema = z.object({
   autoreply: z.boolean(),
   // Optional — when omitted, the existing per-agent budget is left untouched.
-  budget: z.number().int().min(1).max(50).optional()
+  budget: z.number().int().min(1).max(200).optional()
+});
+
+// Room project mode: a higher per-room peer budget for designated working rooms.
+export const projectModeSchema = z.object({
+  enabled: z.boolean(),
+  // Optional — when omitted, the room's existing budget is left untouched.
+  budget: z.number().int().min(1).max(500).optional()
+});
+
+// Operator resume of a stalled thread: optional custom nudge text.
+export const resumeConversationSchema = z.object({
+  text: z.string().min(1).max(2000).optional()
 });
 
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;

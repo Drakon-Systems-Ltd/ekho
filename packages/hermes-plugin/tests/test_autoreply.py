@@ -19,11 +19,13 @@ from ekho import InboxMessage, InboxResponse, RosterEntry
 
 from ekho_hermes import autoreply
 from ekho_hermes.autoreply import (
+    DEFAULT_PEER_TURN_BUDGET,
     AutoReplyState,
     apply_peer_rate_gate,
     build_oneshot_command,
     build_prompt,
     consume_peer_latch,
+    effective_conversation_budget,
     get_cached_inbox,
     is_real_inbound,
     mark_seen,
@@ -1120,3 +1122,73 @@ def test_tick_escalation_failure_never_breaks_the_tick():
         boom, "self", state, spawn=spawn, now=1.0, peer_enabled=True, peer_turn_budget=1,
     )
     assert summary["latched"] == 1  # tick completed despite the escalation failure
+
+
+# --- project mode (per-conversation budget override) + default budget --------
+
+
+def test_default_budget_is_25():
+    assert DEFAULT_PEER_TURN_BUDGET == 25
+
+
+def test_effective_conversation_budget_prefers_project_room_override():
+    inbox = InboxResponse(
+        messages=[], controls=[], operator_trusted=False, roster=[],
+        conversation_budgets={"room_x": 100},
+    )
+    assert effective_conversation_budget(inbox, "room_x", 25) == 100
+    assert effective_conversation_budget(inbox, "other-conv", 25) == 25
+    bare = InboxResponse(messages=[], controls=[], operator_trusted=False, roster=[])
+    assert effective_conversation_budget(bare, "room_x", 25) == 25  # older relay
+    junk = InboxResponse(
+        messages=[], controls=[], operator_trusted=False, roster=[],
+        conversation_budgets={"room_x": 0},
+    )
+    assert effective_conversation_budget(junk, "room_x", 25) == 25  # nonsense ignored
+
+
+def test_tick_project_room_budget_overrides_agent_budget():
+    # Agent budget 1, but the room is in project mode with budget 3 -> 3 wakes.
+    events = []
+    state = _state()
+    spawned = 0
+    for i in range(4):
+        inbox = InboxResponse(
+            messages=[_peer(i)], controls=[], operator_trusted=False, roster=[],
+            conversation_budgets={"proj-1": 3},
+        )
+        s = process_inbox_once(
+            FakeClient(inbox), "self", state, spawn=_spawn_recorder(events),
+            now=float(i), peer_enabled=True, peer_turn_budget=1,
+        )
+        spawned += s["spawned"]
+    assert spawned == 3
+
+
+def test_tick_escalation_reports_the_project_rooms_own_budget():
+    # When a project room stalls, the notice carries ITS budget, not the agent's.
+    state = _state()
+    notices = []
+    for i in range(3):
+        inbox = InboxResponse(
+            messages=[_peer(i)], controls=[], operator_trusted=False, roster=[],
+            conversation_budgets={"proj-1": 2},
+        )
+        process_inbox_once(
+            _notice_client(inbox, notices), "self", state,
+            spawn=_spawn_recorder([]), now=float(i),
+            peer_enabled=True, peer_turn_budget=1,
+        )
+    assert len(notices) == 1
+    assert notices[0]["budget"] == 2
+
+
+def test_build_prompt_budget_line_uses_project_cap():
+    m = _peer(0, conversation_id="room-proj")
+    p = build_prompt(
+        [m], False, self_agent_id="self", peer_turn_budget=6,
+        peer_budget_remaining={"room-proj": 99},
+        conversation_budgets={"room-proj": 100},
+    )
+    assert "peer turn 1 of 100" in p
+    assert "99 wake(s) left" in p

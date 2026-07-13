@@ -132,6 +132,17 @@ export const createRoom = (token, { name, memberAgentIds }) =>
   request("/v1/operator/rooms", { token, method: "POST", body: { name, member_agent_ids: memberAgentIds } });
 export const deleteRoom = (token, roomId) =>
   request(`/v1/operator/rooms/${encodeURIComponent(roomId)}`, { token, method: "DELETE" });
+export const setRoomProjectMode = (token, roomId, { enabled, budget }) =>
+  request(`/v1/operator/rooms/${encodeURIComponent(roomId)}/project-mode`, {
+    token,
+    method: "POST",
+    body: budget ? { enabled, budget } : { enabled },
+  });
+
+// Resume a thread stalled on turn-budget exhaustion: the relay mints an operator
+// nudge that re-opens every participant's latch and wakes them.
+export const resumeConversation = (token, conversationId) =>
+  request(`/v1/operator/conversations/${encodeURIComponent(conversationId)}/resume`, { token, method: "POST", body: {} });
 
 // Feeds — operator-configured sources delivered to agents as non-waking context.
 export const getFeeds = (token) => request("/v1/operator/feeds", { token });

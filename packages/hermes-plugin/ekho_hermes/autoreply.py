@@ -61,9 +61,11 @@ PEER_RATE_WINDOW_S = 60.0
 
 # Bounded delegation: a peer may wake this agent at most this many times per
 # conversation before the latch closes (delivered + visible via ekho_inbox, but
-# no turn). An operator message in the conversation re-opens it. Caps degenerate
-# agent<->agent ping-pong without starving productive collaboration.
-DEFAULT_PEER_TURN_BUDGET = 6
+# no turn). An operator message or progress signal re-opens it, and closure
+# escalates a conversation.stalled notice. Sized for real working sessions —
+# the per-peer rate gate still caps runaway loops, and project-mode rooms can
+# override it per conversation.
+DEFAULT_PEER_TURN_BUDGET = 25
 # Floor TTL covers a max-length turn (~180s) + margin; the relay auto-releases on
 # expiry so a crashed holder never wedges a conversation.
 FLOOR_TTL_SECONDS = 240
@@ -229,6 +231,16 @@ def mark_seen(state: AutoReplyState, message_id: str) -> None:
 def peer_latch_open(state: AutoReplyState, conversation_id: str, budget: int) -> bool:
     """True while this conversation still has peer-turn budget left."""
     return state.peer_turns_by_conversation.get(conversation_id, 0) < budget
+
+
+def effective_conversation_budget(inbox: Any, conversation_id: str, fallback: int) -> int:
+    """The peer budget in force for ONE conversation: a project-mode room's own
+    budget when the relay supplies one, otherwise the per-agent budget."""
+    budgets = getattr(inbox, "conversation_budgets", None) or {}
+    value = budgets.get(conversation_id) if isinstance(budgets, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return fallback
 
 
 def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
@@ -499,6 +511,7 @@ def build_prompt(
     peer_turn_budget: Optional[int] = None,
     peer_budget_remaining: Optional[Dict[str, int]] = None,
     rooms: Optional[Sequence[Any]] = None,
+    conversation_budgets: Optional[Dict[str, int]] = None,
 ) -> str:
     """Build the one-shot turn prompt. Tells the agent its ONLY reply channel is
     ``ekho_send`` with the exact recipient + conversation id, surfaces trust,
@@ -567,7 +580,9 @@ def build_prompt(
             and conv in peer_budget_remaining
             and conv not in annotated_convs
         ):
-            cap = peer_turn_budget or 0
+            # A project-mode room's own cap wins for that conversation's arithmetic.
+            room_cap = (conversation_budgets or {}).get(conv)
+            cap = room_cap if isinstance(room_cap, int) and room_cap > 0 else (peer_turn_budget or 0)
             remaining = peer_budget_remaining[conv]
             turn = cap - remaining  # post-consumption count = this wake's number
             budget = _budget_note(turn, cap, remaining, conv in operator_convs)
@@ -732,6 +747,7 @@ def trigger_turn(
     peer_turn_budget: Optional[int] = None,
     peer_budget_remaining: Optional[Dict[str, int]] = None,
     rooms: Optional[Sequence[Any]] = None,
+    conversation_budgets: Optional[Dict[str, int]] = None,
 ) -> None:
     """Wake the agent to handle ``messages`` by spawning a one-shot reply turn."""
     prompt = build_prompt(
@@ -745,6 +761,7 @@ def trigger_turn(
         peer_turn_budget=peer_turn_budget,
         peer_budget_remaining=peer_budget_remaining,
         rooms=rooms,
+        conversation_budgets=conversation_budgets,
     )
     cmd = build_oneshot_command(prompt)
     env = dict(os.environ)
@@ -970,7 +987,9 @@ def process_inbox_once(
             kept.append(m)
             continue
         conv = getattr(m, "conversation_id", "")
-        if peer_latch_open(state, conv, eff_budget):
+        # Project-mode rooms carry their own (higher) budget for this conversation.
+        conv_budget = effective_conversation_budget(inbox, conv, eff_budget)
+        if peer_latch_open(state, conv, conv_budget):
             consume_peer_latch(state, conv)
             kept.append(m)
         else:
@@ -980,7 +999,7 @@ def process_inbox_once(
                 "[ekho-autoreply] peer latch closed for conversation %s "
                 "(budget %d reached); delivered without a turn",
                 conv,
-                eff_budget,
+                conv_budget,
             )
 
     # No silent death: when a real peer message is withheld on a closed latch,
@@ -999,7 +1018,7 @@ def process_inbox_once(
                 conversation_id=conv,
                 reason="peer_turn_budget_exhausted",
                 pending_count=pending,
-                budget=eff_budget,
+                budget=effective_conversation_budget(inbox, conv, eff_budget),
             )
         except Exception as exc:  # noqa: BLE001 — escalation is best-effort
             log.debug("[ekho-autoreply] stall escalation failed for %s: %s", conv, exc)
@@ -1013,7 +1032,8 @@ def process_inbox_once(
             continue
         conv = getattr(m, "conversation_id", "")
         used = state.peer_turns_by_conversation.get(conv, 0)
-        peer_budget_remaining[conv] = max(0, eff_budget - used)
+        conv_budget = effective_conversation_budget(inbox, conv, eff_budget)
+        peer_budget_remaining[conv] = max(0, conv_budget - used)
 
     # Expose the post-consumption per-conversation counts to ekho_inbox.
     record_peer_usage(state.peer_turns_by_conversation)
@@ -1061,6 +1081,7 @@ def process_inbox_once(
                 peer_turn_budget=eff_budget,
                 peer_budget_remaining=peer_budget_remaining,
                 rooms=getattr(inbox, "rooms", None),
+                conversation_budgets=getattr(inbox, "conversation_budgets", None),
             )
             spawned = 1
         except Exception as exc:  # noqa: BLE001

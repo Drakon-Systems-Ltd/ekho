@@ -89,6 +89,6 @@ describe("atomic enrollment-token consumption", () => {
       .prepare("SELECT peer_autoreply, peer_turn_budget FROM agents WHERE id = ?")
       .get(created!.agentId) as { peer_autoreply: number; peer_turn_budget: number };
     expect(row.peer_autoreply).toBe(1);
-    expect(row.peer_turn_budget).toBe(6); // budget default unchanged
+    expect(row.peer_turn_budget).toBe(25); // working-session default, set explicitly at enroll
   });
 });

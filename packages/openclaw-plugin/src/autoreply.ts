@@ -93,6 +93,9 @@ interface InboxBatch {
   // Rooms (among this batch) this agent is a member of — so a reply to a room
   // message can be framed as going to the named room. Absent on older relays.
   rooms?: Array<{ id: string; name: string }>;
+  // Project-mode rooms this agent belongs to: conversation id -> the higher
+  // per-room budget that overrides peer_turn_budget there. Absent on older relays.
+  conversation_budgets?: Record<string, number> | null;
 }
 
 /**
@@ -110,6 +113,17 @@ export function effectivePeerSettings(
   const peerTurnBudget =
     typeof relayBudget === "number" && relayBudget > 0 ? relayBudget : defaults.peerTurnBudget;
   return { peerEnabled, peerTurnBudget };
+}
+
+/** The peer budget in force for ONE conversation: a project-mode room's own
+ *  budget when the relay supplies one, otherwise the per-agent budget. */
+export function effectiveConversationBudget(
+  batch: { conversation_budgets?: Record<string, number> | null },
+  conversationId: string,
+  fallback: number
+): number {
+  const v = batch.conversation_budgets?.[conversationId];
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
 // Message types that warrant waking the agent. Everything else (heartbeat,
@@ -130,9 +144,11 @@ const PEER_RATE_WINDOW_MS = 60_000;
 
 // Bounded delegation: a teammate may wake this agent at most this many times per
 // conversation before the latch closes (delivered + visible via ekho_inbox, but
-// no turn). An operator message in the conversation re-opens it. Caps degenerate
-// agent↔agent ping-pong without starving productive collaboration.
-export const DEFAULT_PEER_TURN_BUDGET = 6;
+// no turn). An operator message or progress signal re-opens it, and closure
+// escalates a conversation.stalled notice. Sized for real working sessions —
+// the per-peer rate gate still caps runaway loops, and project-mode rooms can
+// override it per conversation.
+export const DEFAULT_PEER_TURN_BUDGET = 25;
 const FLOOR_TTL_SECONDS = 240; // covers a max-length turn (~180s) + margin; relay auto-releases on expiry
 const PEER_LATCH_CONVERSATION_CAP = 500; // FIFO-evicted per-conversation counter map
 
@@ -587,7 +603,8 @@ export function buildPrompt(
       Object.prototype.hasOwnProperty.call(peerBudgetRemaining, m.conversation_id) &&
       !annotatedConvs.has(m.conversation_id)
     ) {
-      const cap = peerTurnBudget ?? 0;
+      // A project-mode room's own cap wins for that conversation's arithmetic.
+      const cap = effectiveConversationBudget(batch, m.conversation_id, peerTurnBudget ?? 0);
       const remaining = peerBudgetRemaining[m.conversation_id];
       const turn = cap - remaining; // post-consumption count = this wake's number
       budget = budgetNote(turn, cap, remaining, operatorConvs.has(m.conversation_id));
@@ -872,13 +889,15 @@ export function startAutoReply(opts: {
         kept.push(m);
         continue;
       }
-      if (peerLatchOpen(state, m.conversation_id, eff.peerTurnBudget)) {
+      // Project-mode rooms carry their own (higher) budget for this conversation.
+      const convBudget = effectiveConversationBudget(batch, m.conversation_id, eff.peerTurnBudget);
+      if (peerLatchOpen(state, m.conversation_id, convBudget)) {
         consumePeerLatch(state, m.conversation_id);
         kept.push(m);
       } else {
         latchedConvs.set(m.conversation_id, (latchedConvs.get(m.conversation_id) ?? 0) + 1);
         log?.info?.(
-          `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${eff.peerTurnBudget} reached); delivered without a turn`
+          `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${convBudget} reached); delivered without a turn`
         );
       }
     }
@@ -894,7 +913,7 @@ export function startAutoReply(opts: {
           conversation_id: conv,
           reason: "peer_turn_budget_exhausted",
           pending_count: pending,
-          budget: eff.peerTurnBudget
+          budget: effectiveConversationBudget(batch, conv, eff.peerTurnBudget)
         });
       } catch (err) {
         log?.debug?.(`[ekho-autoreply] stall escalation failed for ${conv}: ${String(err)}`);
@@ -908,7 +927,8 @@ export function startAutoReply(opts: {
     for (const m of kept) {
       if (m.sender_kind === "operator") continue;
       const used = state.peerTurnsByConversation.get(m.conversation_id) ?? 0;
-      peerBudgetRemaining[m.conversation_id] = Math.max(0, eff.peerTurnBudget - used);
+      const convBudget = effectiveConversationBudget(batch, m.conversation_id, eff.peerTurnBudget);
+      peerBudgetRemaining[m.conversation_id] = Math.max(0, convBudget - used);
     }
     // Expose the post-consumption per-conversation counts to ekho_inbox.
     recordPeerUsage(state.peerTurnsByConversation);

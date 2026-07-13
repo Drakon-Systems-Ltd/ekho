@@ -70,6 +70,9 @@ export type InboxResponse = {
   peer_autoreply?: boolean;
   /** Per-conversation peer-turn budget set by the operator. */
   peer_turn_budget?: number;
+  /** Project-mode rooms this agent belongs to: conversation id -> the higher
+   *  per-room budget that overrides peer_turn_budget there (absent on older relays). */
+  conversation_budgets?: Record<string, number>;
   /** Recent thread per room conversation (id -> chronological snapshots); {} for direct. */
   conversation_history?: Record<string, MessageSnapshot[]>;
   /** Rooms (among this batch) the polling agent is a member of, so a reply can be framed as going to the named room. */
