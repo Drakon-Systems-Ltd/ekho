@@ -39,11 +39,11 @@
       },
       "peerAutoreply": {
         "type": "boolean",
-        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default false)"
+        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true)"
       },
       "peerTurnBudget": {
         "type": "number",
-        "description": "Max times a teammate may wake this agent per conversation before the latch closes (default 6)"
+        "description": "Max times a teammate may wake this agent per conversation before the latch closes (default 25)"
       }
     }
   },
