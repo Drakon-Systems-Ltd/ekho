@@ -71,6 +71,14 @@ DEFAULT_PEER_TURN_BUDGET = 25
 FLOOR_TTL_SECONDS = 240
 PEER_LATCH_CONVERSATION_CAP = 500  # FIFO-evicted per-conversation counter map
 
+# Deferred-retry: a conversation whose floor another agent held is retried on
+# later ticks — its messages were already consumed + acked (at-most-once), so
+# this in-memory stash is their ONLY remaining path to a turn. TTL-bounded so a
+# permanently busy room can't queue stale work forever.
+DEFERRED_RETRY_TTL_S = 600.0  # 10 min from the FIRST deferral
+DEFERRED_CONVERSATION_CAP = 50   # FIFO-evicted map of stashes
+DEFERRED_MESSAGES_PER_CONV = 10  # keep the newest N messages per stash
+
 SEEN_CAP = 500  # FIFO-evicted dedupe set
 LAST_BATCH_CAP = 25  # ring exposed to ekho_inbox
 
@@ -203,6 +211,12 @@ class AutoReplyState:
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
     peer_conv_order: List[str] = field(default_factory=list)
+    # conversation_id -> {"messages": [...], "verifications": {...},
+    # "first_deferred_at": float} for messages held back because another agent
+    # had the floor. Retried on later ticks until DEFERRED_RETRY_TTL_S; without
+    # this a deferred message (already consumed + acked) silently never reaches
+    # the agent. Insertion-ordered dict doubles as the FIFO cap order.
+    deferred_by_conversation: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Conversations we've already raised a stall escalation for (so we escalate
     # at most once per close). Cleared per conversation by reset_peer_latch, so the
     # next operator engagement / progress signal re-arms a future escalation.
@@ -241,6 +255,58 @@ def effective_conversation_budget(inbox: Any, conversation_id: str, fallback: in
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return fallback
+
+
+def stash_deferred(
+    state: AutoReplyState,
+    conversation_id: str,
+    messages: List[Any],
+    verifications: Optional[Dict[str, Any]],
+    now: float,
+) -> None:
+    """Stash (or merge into) a conversation's deferred messages so a later tick
+    can retry the floor. Dedupes by message id, keeps the newest slice, and
+    preserves the FIRST deferral time (the TTL clock)."""
+    existing = state.deferred_by_conversation.pop(conversation_id, None) or {}
+    by_id: Dict[Any, Any] = {}
+    for m in existing.get("messages", []):
+        by_id[getattr(m, "message_id", None)] = m
+    for m in messages:
+        by_id[getattr(m, "message_id", None)] = m
+    merged = list(by_id.values())[-DEFERRED_MESSAGES_PER_CONV:]
+    kept_verifications: Dict[str, Any] = {}
+    for m in merged:
+        mid = getattr(m, "message_id", None)
+        v = (verifications or {}).get(mid)
+        if v is None:
+            v = existing.get("verifications", {}).get(mid)
+        kept_verifications[mid] = v
+    state.deferred_by_conversation[conversation_id] = {
+        "messages": merged,
+        "verifications": kept_verifications,
+        "first_deferred_at": existing.get("first_deferred_at", now),
+    }
+    while len(state.deferred_by_conversation) > DEFERRED_CONVERSATION_CAP:
+        state.deferred_by_conversation.pop(next(iter(state.deferred_by_conversation)))
+
+
+def list_retryable_deferred(state: AutoReplyState, now: float) -> List[str]:
+    """Conversations whose stash is still within the retry TTL, oldest deferral
+    first. Prunes expired stashes as a side effect (dropped, not retried
+    forever — the operator timeline already saw the holder's turn)."""
+    alive: List[Any] = []
+    for conv in list(state.deferred_by_conversation.keys()):
+        stash = state.deferred_by_conversation[conv]
+        if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S:
+            state.deferred_by_conversation.pop(conv, None)
+            continue
+        alive.append((stash["first_deferred_at"], conv))
+    return [conv for _, conv in sorted(alive)]
+
+
+def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
+    """Drop a conversation's stash — a turn that covered it supersedes the retry."""
+    state.deferred_by_conversation.pop(conversation_id, None)
 
 
 def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
@@ -774,17 +840,21 @@ def trigger_turn(
 
 def plan_floor_turn(kept, acquire, log=None):
     """Floor planning (turn-taking). For each conversation in ``kept``, try to
-    acquire its floor. Returns ``(floored, to_release, tails)``: conversations
-    whose floor we get are responded to (with the fresh catch-up tail from the
-    acquire); the rest are deferred to whichever agent holds the floor. A relay
-    without floor support (``acquire`` raises) degrades to responding without a
-    floor, preserving the old behavior."""
+    acquire its floor. Returns ``(floored, to_release, tails, deferred)``:
+    conversations whose floor we get are responded to (with the fresh catch-up
+    tail from the acquire); the rest are deferred to whichever agent holds the
+    floor — ``deferred`` maps those conversation ids to their messages so the
+    caller can stash them for a later retry (without that, a deferred message —
+    already consumed + acked — is simply lost). A relay without floor support
+    (``acquire`` raises) degrades to responding without a floor, preserving the
+    old behavior."""
     by_conv: Dict[str, List[Any]] = {}
     for m in kept:
         by_conv.setdefault(getattr(m, "conversation_id", ""), []).append(m)
     floored: List[Any] = []
     to_release: List[str] = []
     tails: Dict[str, Any] = {}
+    deferred: Dict[str, List[Any]] = {}
     for conv, msgs in by_conv.items():
         # The floor serializes AGENT-to-agent turns so peers don't talk over each
         # other. An operator-addressed turn (the operator messaging a room or
@@ -804,11 +874,13 @@ def plan_floor_turn(kept, acquire, log=None):
                 tail = res.get("conversation_tail")
                 if isinstance(tail, list):
                     tails[conv] = tail
-            elif log:
-                log.info(
-                    "[ekho-autoreply] floor for %s held by %s; deferring",
-                    conv, res.get("holder_agent_id") or "another agent",
-                )
+            else:
+                deferred[conv] = msgs
+                if log:
+                    log.info(
+                        "[ekho-autoreply] floor for %s held by %s; deferring (will retry)",
+                        conv, res.get("holder_agent_id") or "another agent",
+                    )
         except Exception as exc:  # noqa: BLE001 — older relay without floor support
             if log:
                 log.debug(
@@ -818,7 +890,7 @@ def plan_floor_turn(kept, acquire, log=None):
             granted = True
         if granted:
             floored.extend(msgs)
-    return floored, to_release, tails
+    return floored, to_release, tails, deferred
 
 
 # --- The tick + the loop ---------------------------------------------------
@@ -957,13 +1029,83 @@ def process_inbox_once(
             log.warning("[ekho-autoreply] ack failed: %s", exc)
         return len(ack_all)
 
+    def _release_floor(conv: str) -> None:
+        release = getattr(client, "release_floor", None)
+        if not callable(release):
+            return
+        try:
+            release(conv)
+        except Exception as exc:  # noqa: BLE001 — relay auto-releases on TTL
+            log.debug("[ekho-autoreply] floor release failed for %s: %s", conv, exc)
+
+    def _retry_deferred_turn() -> int:
+        """Deferred-retry: a conversation deferred to a floor holder is retried
+        on later ticks — its messages were consumed + acked, so the stash is
+        their only path to a turn. At most ONE retry-turn per tick (bounded
+        burst); the fresh catch-up tail from the acquire carries what the
+        holder said meanwhile. Returns the number of turns spawned (0 or 1)."""
+        if state.in_flight:
+            return 0
+        acquire = getattr(client, "acquire_floor", None)
+        if not callable(acquire):
+            return 0
+        for conv in list_retryable_deferred(state, now):
+            try:
+                res = acquire(conv, FLOOR_TTL_SECONDS) or {}
+            except Exception as exc:  # noqa: BLE001 — keep the stash, retry later
+                log.debug("[ekho-autoreply] deferred-retry acquire failed for %s: %s", conv, exc)
+                continue
+            if not bool(res.get("granted")):
+                continue  # still held — keep waiting
+            stash = state.deferred_by_conversation.get(conv)
+            clear_deferred(state, conv)
+            if not stash:
+                _release_floor(conv)
+                continue
+            log.info(
+                "[ekho-autoreply] deferred conversation %s floor is free — "
+                "running the held-back turn (%d msg(s))", conv, len(stash["messages"]),
+            )
+            tail = res.get("conversation_tail")
+            base_hist = getattr(inbox, "conversation_history", None) or {}
+            hist = {**base_hist, **({conv: tail} if isinstance(tail, list) else {})}
+            used = state.peer_turns_by_conversation.get(conv, 0)
+            conv_budget = effective_conversation_budget(inbox, conv, eff_budget)
+            state.in_flight = True
+            try:
+                trigger_turn(
+                    stash["messages"],
+                    operator_trusted,
+                    roster=getattr(inbox, "roster", None),
+                    spawn=spawn,
+                    log=log,
+                    verifications=stash["verifications"],
+                    self_agent_id=self_agent_id,
+                    conversation_history=hist,
+                    peer_turn_budget=eff_budget,
+                    peer_budget_remaining={conv: max(0, conv_budget - used)},
+                    rooms=getattr(inbox, "rooms", None),
+                    conversation_budgets=getattr(inbox, "conversation_budgets", None),
+                )
+                spawned_retry = 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[ekho-autoreply] deferred-retry turn failed: %s", exc)
+                spawned_retry = 0
+            finally:
+                state.in_flight = False
+                _release_floor(conv)
+            return spawned_retry  # at most one retry-turn per tick
+        return 0
+
     if not real:
         acked = _ack()
+        # Quiet tick — the moment a busy floor frees up, the held-back turn runs.
+        retried = _retry_deferred_turn()
         return {
             "polled": len(messages),
             "real": 0,
             "kept": 0,
-            "spawned": 0,
+            "spawned": retried,
             "latched": 0,
             "acked": acked,
         }
@@ -1049,10 +1191,16 @@ def process_inbox_once(
     spawned = 0
     # Floor control: take each conversation's floor before replying so agents
     # take turns instead of all answering at once. Conversations whose floor
-    # another agent holds are deferred to it; the holder gets a fresh tail.
-    floored, to_release, tails = plan_floor_turn(
+    # another agent holds are deferred to it — stashed for retry so they can't
+    # silently vanish; the holder gets a fresh tail.
+    floored, to_release, tails, deferred = plan_floor_turn(
         kept, lambda c: client.acquire_floor(c, FLOOR_TTL_SECONDS), log
-    ) if kept else ([], [], {})
+    ) if kept else ([], [], {}, {})
+    for conv, msgs in deferred.items():
+        stash_deferred(state, conv, msgs, verifications, now)
+    # A conversation that got a turn now supersedes any stale stash for it.
+    for m in floored:
+        clear_deferred(state, getattr(m, "conversation_id", ""))
     if floored:
         base_hist = getattr(inbox, "conversation_history", None) or {}
         fresh_hist = {**base_hist, **tails}
@@ -1093,6 +1241,8 @@ def process_inbox_once(
                     client.release_floor(conv)
                 except Exception as exc:  # noqa: BLE001
                     log.debug("[ekho-autoreply] floor release failed for %s: %s", conv, exc)
+
+    spawned += _retry_deferred_turn()
 
     return {
         "polled": len(messages),

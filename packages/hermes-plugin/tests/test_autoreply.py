@@ -19,6 +19,10 @@ from ekho import InboxMessage, InboxResponse, RosterEntry
 
 from ekho_hermes import autoreply
 from ekho_hermes.autoreply import (
+    DEFERRED_RETRY_TTL_S,
+    clear_deferred,
+    list_retryable_deferred,
+    stash_deferred,
     DEFAULT_PEER_TURN_BUDGET,
     AutoReplyState,
     apply_peer_rate_gate,
@@ -828,7 +832,7 @@ def test_plan_floor_turn_agent_responds_only_to_granted_conversations():
             return {"granted": True, "conversation_tail": []}
         return {"granted": False, "holder_agent_id": "other"}
 
-    floored, to_release, tails = plan_floor_turn(kept, acquire)
+    floored, to_release, tails, _deferred = plan_floor_turn(kept, acquire)
     assert [m.conversation_id for m in floored] == ["c1"]
     assert to_release == ["c1"]
 
@@ -841,7 +845,7 @@ def test_plan_floor_turn_carries_fresh_tail():
             {"message_id": "h1", "text": "earlier", "sender_kind": "agent",
              "sender_agent_id": "x", "sender_label": "X", "created_at": "t"}]}
 
-    _, _, tails = plan_floor_turn(kept, acquire)
+    _, _, tails, _deferred = plan_floor_turn(kept, acquire)
     assert tails["c1"][0]["text"] == "earlier"
 
 
@@ -851,7 +855,7 @@ def test_plan_floor_turn_degrades_without_floor_endpoint():
     def acquire(conv):
         raise RuntimeError("404 not found")
 
-    floored, to_release, _ = plan_floor_turn(kept, acquire)
+    floored, to_release, _, _deferred = plan_floor_turn(kept, acquire)
     assert len(floored) == 1   # still responds (back-compat)
     assert to_release == []     # nothing acquired -> nothing to release
 
@@ -866,7 +870,7 @@ def test_plan_floor_turn_operator_messages_bypass_floor():
         calls["n"] += 1
         return {"granted": False, "holder_agent_id": "other"}
 
-    floored, to_release, _ = plan_floor_turn(kept, acquire)
+    floored, to_release, _, _deferred = plan_floor_turn(kept, acquire)
     assert calls["n"] == 0  # never contends for an operator turn
     assert [m.conversation_id for m in floored] == ["room1", "bcast"]
     assert to_release == []
@@ -881,7 +885,7 @@ def test_plan_floor_turn_contends_when_peer_shares_conversation():
         calls["n"] += 1
         return {"granted": True, "conversation_tail": []}
 
-    _, to_release, _ = plan_floor_turn(kept, acquire)
+    _, to_release, _, _deferred = plan_floor_turn(kept, acquire)
     assert calls["n"] == 1
     assert to_release == ["room1"]
 
@@ -1192,3 +1196,136 @@ def test_build_prompt_budget_line_uses_project_cap():
     )
     assert "peer turn 1 of 100" in p
     assert "99 wake(s) left" in p
+
+
+# --- deferred-retry (a deferred floor must not drop messages) ----------------
+
+
+class FloorClient(FakeClient):
+    """FakeClient with scriptable floor state for defer/retry scenarios."""
+
+    def __init__(self, inbox, granted=True, holder="agent_case"):
+        super().__init__(inbox)
+        self.granted = granted
+        self.holder = holder
+        self.acquires = []
+        self.releases = []
+
+    def acquire_floor(self, conversation_id, ttl_seconds=None):
+        self.acquires.append(conversation_id)
+        if self.granted:
+            return {"granted": True, "conversation_tail": [
+                {"message_id": "t1", "sender_agent_id": "agent_case",
+                 "sender_kind": "agent", "sender_label": "Case",
+                 "text": "holder said things meanwhile", "created_at": "t"},
+            ]}
+        return {"granted": False, "holder_agent_id": self.holder}
+
+    def release_floor(self, conversation_id):
+        self.releases.append(conversation_id)
+        return {"released": True}
+
+
+def test_plan_floor_turn_reports_deferred_grouped_by_conversation():
+    kept = [_peer(0, conversation_id="c2"), _peer(1, conversation_id="c2")]
+
+    def acquire(conv):
+        return {"granted": False, "holder_agent_id": "case"}
+
+    floored, to_release, _, deferred = plan_floor_turn(kept, acquire)
+    assert floored == [] and to_release == []
+    assert list(deferred.keys()) == ["c2"]
+    assert [m.message_id for m in deferred["c2"]] == ["p0", "p1"]
+
+
+def test_stash_deferred_merges_dedupes_and_keeps_first_clock():
+    state = _state()
+    stash_deferred(state, "c1", [_peer(0)], {"p0": None}, 1.0)
+    stash_deferred(state, "c1", [_peer(0), _peer(1)], {"p1": None}, 5.0)
+    stash = state.deferred_by_conversation["c1"]
+    assert [m.message_id for m in stash["messages"]] == ["p0", "p1"]
+    assert stash["first_deferred_at"] == 1.0  # TTL runs from the FIRST deferral
+    assert sorted(stash["verifications"].keys()) == ["p0", "p1"]
+
+
+def test_list_retryable_deferred_oldest_first_and_prunes_expired():
+    state = _state()
+    stash_deferred(state, "old", [_peer(0, conversation_id="old")], {}, 0.0)
+    stash_deferred(state, "newer", [_peer(1, conversation_id="newer")], {}, 10.0)
+    assert list_retryable_deferred(state, 20.0) == ["old", "newer"]
+    past = DEFERRED_RETRY_TTL_S + 5.0
+    assert list_retryable_deferred(state, past) == ["newer"]
+    assert "old" not in state.deferred_by_conversation
+
+
+def test_tick_deferred_message_is_retried_when_floor_frees():
+    events = []
+    state = _state()
+    # Tick 1: peer message, floor held by Case -> defer, no spawn, stash kept.
+    c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
+    s1 = process_inbox_once(c1, "self", state, spawn=_spawn_recorder(events),
+                            now=0.0, peer_enabled=True, peer_turn_budget=25)
+    assert s1["spawned"] == 0
+    assert "proj-1" in state.deferred_by_conversation
+    # Tick 2: EMPTY inbox, floor now free -> the held-back turn runs.
+    c2 = FloorClient(InboxResponse([], [], False, []), granted=True)
+    s2 = process_inbox_once(c2, "self", state, spawn=_spawn_recorder(events),
+                            now=5.0, peer_enabled=True, peer_turn_budget=25)
+    assert s2["spawned"] == 1
+    assert events.count("spawn") == 1
+    assert "proj-1" not in state.deferred_by_conversation
+    assert c2.releases == ["proj-1"]  # retry turn released the floor it took
+    # Tick 3: stash consumed — nothing retries again.
+    c3 = FloorClient(InboxResponse([], [], False, []), granted=True)
+    s3 = process_inbox_once(c3, "self", state, spawn=_spawn_recorder(events),
+                            now=10.0, peer_enabled=True, peer_turn_budget=25)
+    assert s3["spawned"] == 0
+
+
+def test_tick_retry_prompt_carries_original_text_and_fresh_tail():
+    prompts = []
+
+    def spawn(cmd, env):
+        prompts.append(" ".join(cmd))
+
+    state = _state()
+    c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
+    process_inbox_once(c1, "self", state, spawn=spawn, now=0.0,
+                       peer_enabled=True, peer_turn_budget=25)
+    c2 = FloorClient(InboxResponse([], [], False, []), granted=True)
+    process_inbox_once(c2, "self", state, spawn=spawn, now=5.0,
+                       peer_enabled=True, peer_turn_budget=25)
+    assert len(prompts) == 1
+    assert "teammate message 0" in prompts[0]           # the held-back message
+    assert "holder said things meanwhile" in prompts[0]  # fresh catch-up tail
+
+
+def test_tick_deferred_stash_expires_after_ttl():
+    events = []
+    state = _state()
+    c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
+    process_inbox_once(c1, "self", state, spawn=_spawn_recorder(events),
+                       now=0.0, peer_enabled=True, peer_turn_budget=25)
+    c2 = FloorClient(InboxResponse([], [], False, []), granted=True)
+    s2 = process_inbox_once(c2, "self", state, spawn=_spawn_recorder(events),
+                            now=DEFERRED_RETRY_TTL_S + 60.0,
+                            peer_enabled=True, peer_turn_budget=25)
+    assert s2["spawned"] == 0
+    assert "proj-1" not in state.deferred_by_conversation  # dropped, not retried
+
+
+def test_tick_new_granted_turn_supersedes_the_stash():
+    events = []
+    state = _state()
+    c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
+    process_inbox_once(c1, "self", state, spawn=_spawn_recorder(events),
+                       now=0.0, peer_enabled=True, peer_turn_budget=25)
+    assert "proj-1" in state.deferred_by_conversation
+    # A NEW message in the same conversation arrives and the floor is granted:
+    # the normal turn covers the conversation; the stash must not double-fire.
+    c2 = FloorClient(InboxResponse([_peer(1)], [], False, []), granted=True)
+    s2 = process_inbox_once(c2, "self", state, spawn=_spawn_recorder(events),
+                            now=5.0, peer_enabled=True, peer_turn_budget=25)
+    assert s2["spawned"] == 1
+    assert events.count("spawn") == 1
+    assert "proj-1" not in state.deferred_by_conversation

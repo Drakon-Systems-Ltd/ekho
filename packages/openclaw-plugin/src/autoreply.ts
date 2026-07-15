@@ -152,6 +152,14 @@ export const DEFAULT_PEER_TURN_BUDGET = 25;
 const FLOOR_TTL_SECONDS = 240; // covers a max-length turn (~180s) + margin; relay auto-releases on expiry
 const PEER_LATCH_CONVERSATION_CAP = 500; // FIFO-evicted per-conversation counter map
 
+// Deferred-retry: a conversation whose floor another agent held is retried on
+// later ticks — its messages were already consumed + acked (at-most-once), so
+// this in-memory stash is their ONLY remaining path to a turn. TTL-bounded so a
+// permanently busy room can't queue stale work forever.
+export const DEFERRED_RETRY_TTL_MS = 600_000; // 10 min from the FIRST deferral
+const DEFERRED_CONVERSATION_CAP = 50;   // FIFO-evicted map of stashes
+const DEFERRED_MESSAGES_PER_CONV = 10;  // keep the newest N messages per stash
+
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
 const LAST_BATCH_CAP = 25; // ring exposed to ekho_inbox (Part B1)
 
@@ -271,6 +279,16 @@ export interface AutoReplyState {
   // once per close). Cleared per conversation by resetPeerLatch, so the next
   // operator engagement / progress signal re-arms a future escalation.
   escalatedClosedConvs: Set<string>;
+  // conversation_id -> messages held back because another agent had the floor.
+  // Retried on later ticks until DEFERRED_RETRY_TTL_MS; without this a deferred
+  // message (already consumed + acked) would silently never reach the agent.
+  deferredByConversation: Map<string, DeferredStash>;
+}
+
+export interface DeferredStash {
+  messages: InboxMessage[];
+  verifications: Record<string, VerifyResult | null>;
+  firstDeferredAtMs: number;
 }
 
 export function createAutoReplyState(): AutoReplyState {
@@ -282,8 +300,63 @@ export function createAutoReplyState(): AutoReplyState {
     recentInboundByPeer: new Map(),
     inFlight: false,
     peerTurnsByConversation: new Map(),
-    escalatedClosedConvs: new Set()
+    escalatedClosedConvs: new Set(),
+    deferredByConversation: new Map()
   };
+}
+
+/** Stash (or merge into) a conversation's deferred messages so a later tick can
+ *  retry the floor. Dedupes by message id, keeps the newest per-conversation
+ *  slice, and preserves the FIRST deferral time (the TTL clock). */
+export function stashDeferred(
+  state: AutoReplyState,
+  conversationId: string,
+  messages: InboxMessage[],
+  verifications: Record<string, VerifyResult | null>,
+  nowMs: number
+): void {
+  const existing = state.deferredByConversation.get(conversationId);
+  const byId = new Map<string, InboxMessage>();
+  for (const m of existing?.messages ?? []) byId.set(m.message_id, m);
+  for (const m of messages) byId.set(m.message_id, m);
+  const merged = Array.from(byId.values()).slice(-DEFERRED_MESSAGES_PER_CONV);
+  const keptVerifications: Record<string, VerifyResult | null> = {};
+  for (const m of merged) {
+    const v = verifications[m.message_id] ?? existing?.verifications[m.message_id] ?? null;
+    keptVerifications[m.message_id] = v;
+  }
+  // Re-insert so keys() stays oldest-first for the FIFO cap below.
+  state.deferredByConversation.delete(conversationId);
+  state.deferredByConversation.set(conversationId, {
+    messages: merged,
+    verifications: keptVerifications,
+    firstDeferredAtMs: existing?.firstDeferredAtMs ?? nowMs
+  });
+  while (state.deferredByConversation.size > DEFERRED_CONVERSATION_CAP) {
+    const oldest = state.deferredByConversation.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    state.deferredByConversation.delete(oldest);
+  }
+}
+
+/** Conversations whose stash is still within the retry TTL, oldest deferral
+ *  first. Prunes expired stashes as a side effect (they are dropped, not
+ *  retried forever — the operator timeline already saw the holder's turn). */
+export function listRetryableDeferred(state: AutoReplyState, nowMs: number): string[] {
+  const alive: Array<{ conv: string; at: number }> = [];
+  for (const [conv, stash] of state.deferredByConversation) {
+    if (nowMs - stash.firstDeferredAtMs > DEFERRED_RETRY_TTL_MS) {
+      state.deferredByConversation.delete(conv);
+      continue;
+    }
+    alive.push({ conv, at: stash.firstDeferredAtMs });
+  }
+  return alive.sort((a, b) => a.at - b.at).map((e) => e.conv);
+}
+
+/** Drop a conversation's stash — a turn that covered it supersedes the retry. */
+export function clearDeferred(state: AutoReplyState, conversationId: string): void {
+  state.deferredByConversation.delete(conversationId);
 }
 
 function markSeen(state: AutoReplyState, messageId: string) {
@@ -663,7 +736,14 @@ export async function planFloorTurn(
   kept: InboxMessage[],
   acquire: FloorAcquire,
   log?: { info?: (m: string) => void; debug?: (m: string) => void }
-): Promise<{ floored: InboxMessage[]; toRelease: string[]; tails: Record<string, MsgSnapshot[]> }> {
+): Promise<{
+  floored: InboxMessage[];
+  toRelease: string[];
+  tails: Record<string, MsgSnapshot[]>;
+  // What was deferred, grouped by conversation — the caller stashes these for a
+  // later retry; without that a deferred message (already acked) is simply lost.
+  deferred: Record<string, InboxMessage[]>;
+}> {
   const byConv = new Map<string, InboxMessage[]>();
   for (const m of kept) {
     const arr = byConv.get(m.conversation_id) ?? [];
@@ -673,6 +753,7 @@ export async function planFloorTurn(
   const floored: InboxMessage[] = [];
   const toRelease: string[] = [];
   const tails: Record<string, MsgSnapshot[]> = {};
+  const deferred: Record<string, InboxMessage[]> = {};
   for (const [conv, msgs] of byConv) {
     // The floor serializes AGENT-to-agent turns so peers don't talk over each
     // other. An operator-addressed turn (the operator messaging a room or
@@ -692,7 +773,8 @@ export async function planFloorTurn(
         toRelease.push(conv);
         if (Array.isArray(res.conversation_tail)) tails[conv] = res.conversation_tail;
       } else {
-        log?.info?.(`[ekho-autoreply] floor for ${conv} held by ${res.holder_agent_id ?? "another agent"}; deferring`);
+        log?.info?.(`[ekho-autoreply] floor for ${conv} held by ${res.holder_agent_id ?? "another agent"}; deferring (will retry)`);
+        deferred[conv] = msgs;
       }
     } catch (err) {
       // Older relay without floor support — respond without a floor (no release).
@@ -701,7 +783,7 @@ export async function planFloorTurn(
     }
     if (granted) floored.push(...msgs);
   }
-  return { floored, toRelease, tails };
+  return { floored, toRelease, tails, deferred };
 }
 
 async function triggerTurn(
@@ -862,6 +944,65 @@ export function startAutoReply(opts: {
     // budget without waking. `direct`/`broadcast` keep consuming the latch.
     refreshBudgetForProgressSignals(state, batch.messages, selfAgentId);
 
+    // Deferred-retry: a conversation deferred to a floor holder is retried on
+    // later ticks — its messages were consumed + acked, so the stash is their
+    // only path to a turn. At most ONE retry-turn per tick (bounded burst); the
+    // fresh catch-up tail from the acquire carries what the holder said since.
+    const retryDeferredTurn = async () => {
+      if (state.inFlight) return;
+      for (const conv of listRetryableDeferred(state, Date.now())) {
+        let res: { granted: boolean; holder_agent_id?: string; conversation_tail?: MsgSnapshot[] };
+        try {
+          res = await client.acquireFloor(conv, FLOOR_TTL_SECONDS);
+        } catch (err) {
+          log?.debug?.(`[ekho-autoreply] deferred-retry acquire failed for ${conv}: ${String(err)}`);
+          continue; // relay hiccup — keep the stash, try again next tick
+        }
+        if (!res?.granted) continue; // still held — keep waiting
+        const stash = state.deferredByConversation.get(conv);
+        clearDeferred(state, conv);
+        if (!stash) {
+          try { await client.releaseFloor(conv); } catch { /* best-effort */ }
+          continue;
+        }
+        log?.info?.(
+          `[ekho-autoreply] deferred conversation ${conv} floor is free — running the held-back turn (${stash.messages.length} msg(s))`
+        );
+        const used = state.peerTurnsByConversation.get(conv) ?? 0;
+        const convBudget = effectiveConversationBudget(batch, conv, eff.peerTurnBudget);
+        state.inFlight = true;
+        try {
+          const retryBatch: InboxBatch = {
+            ...batch,
+            conversation_history: {
+              ...(batch.conversation_history ?? {}),
+              ...(Array.isArray(res.conversation_tail) ? { [conv]: res.conversation_tail } : {})
+            }
+          };
+          await triggerTurn(
+            stash.messages,
+            retryBatch,
+            api,
+            log,
+            stash.verifications,
+            selfAgentId,
+            eff.peerTurnBudget,
+            { [conv]: Math.max(0, convBudget - used) }
+          );
+        } catch (err) {
+          log?.warn?.(`[ekho-autoreply] deferred-retry turn threw: ${String(err)}`);
+        } finally {
+          state.inFlight = false;
+          try {
+            await client.releaseFloor(conv);
+          } catch (err) {
+            log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+          }
+        }
+        break; // at most one retry-turn per tick
+      }
+    };
+
     if (real.length === 0) {
       if (ackAll.length > 0) {
         try {
@@ -870,7 +1011,8 @@ export function startAutoReply(opts: {
           log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
         }
       }
-      return; // nothing real → no tokens
+      await retryDeferredTurn(); // quiet tick — the moment a busy floor frees up
+      return;
     }
 
     // Operator engagement re-energises the peer latch for its conversation.
@@ -946,42 +1088,55 @@ export function startAutoReply(opts: {
       }
     }
 
-    if (kept.length === 0) return; // suppressed by rate gate; consumed, no turn
+    if (kept.length === 0) {
+      await retryDeferredTurn(); // consumed, no new turn — still service the stash
+      return;
+    }
 
     // Floor control: take each conversation's floor before replying so agents take
     // turns instead of all answering at once. Conversations whose floor another
-    // agent already holds are deferred to it; the floor holder gets a fresh tail.
+    // agent already holds are deferred to it — stashed for retry so they can't
+    // silently vanish; the floor holder gets a fresh tail.
     const plan = await planFloorTurn(kept, (conv) => client.acquireFloor(conv, FLOOR_TTL_SECONDS), log);
-    if (plan.floored.length === 0) return; // every conversation deferred to its holder
+    const nowMs = Date.now();
+    for (const [conv, msgs] of Object.entries(plan.deferred)) {
+      stashDeferred(state, conv, msgs, verifications, nowMs);
+    }
+    // A conversation that got a turn now supersedes any stale stash for it.
+    for (const m of plan.floored) clearDeferred(state, m.conversation_id);
 
-    state.inFlight = true;
-    try {
-      const flooredBatch: InboxBatch = {
-        ...batch,
-        conversation_history: { ...(batch.conversation_history ?? {}), ...plan.tails }
-      };
-      await triggerTurn(
-        plan.floored,
-        flooredBatch,
-        api,
-        log,
-        verifications,
-        selfAgentId,
-        eff.peerTurnBudget,
-        peerBudgetRemaining
-      );
-    } catch (err) {
-      log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
-    } finally {
-      state.inFlight = false;
-      for (const conv of plan.toRelease) {
-        try {
-          await client.releaseFloor(conv);
-        } catch (err) {
-          log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+    if (plan.floored.length > 0) {
+      state.inFlight = true;
+      try {
+        const flooredBatch: InboxBatch = {
+          ...batch,
+          conversation_history: { ...(batch.conversation_history ?? {}), ...plan.tails }
+        };
+        await triggerTurn(
+          plan.floored,
+          flooredBatch,
+          api,
+          log,
+          verifications,
+          selfAgentId,
+          eff.peerTurnBudget,
+          peerBudgetRemaining
+        );
+      } catch (err) {
+        log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
+      } finally {
+        state.inFlight = false;
+        for (const conv of plan.toRelease) {
+          try {
+            await client.releaseFloor(conv);
+          } catch (err) {
+            log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+          }
         }
       }
     }
+
+    await retryDeferredTurn();
   };
 
   const timer = setInterval(() => {

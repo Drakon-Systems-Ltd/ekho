@@ -13,6 +13,10 @@ import {
   effectiveConversationBudget,
   recordPeerUsage,
   getCachedInbox,
+  stashDeferred,
+  listRetryableDeferred,
+  clearDeferred,
+  DEFERRED_RETRY_TTL_MS,
   DEFAULT_PEER_TURN_BUDGET
 } from "../src/autoreply";
 
@@ -450,6 +454,51 @@ describe("floor planning (turn-taking)", () => {
     const plan = await planFloorTurn(kept, acquire);
     expect(acquired).toBe(1);
     expect(plan.toRelease).toEqual(["room1"]);
+  });
+});
+
+describe("deferred-retry (a deferred floor must not drop messages)", () => {
+  function amsg(conv: string, id: string, text = "hi"): any {
+    return { message_id: id, conversation_id: conv, sender_agent_id: "jarvis", sender_kind: "agent", message_type: "direct", body: { text } };
+  }
+
+  it("planFloorTurn reports what it deferred, grouped by conversation", async () => {
+    const kept = [amsg("c1", "m1"), amsg("c2", "m2"), amsg("c2", "m3")];
+    const acquire = async (conv: string) =>
+      conv === "c1" ? { granted: true, conversation_tail: [] } : { granted: false, holder_agent_id: "case" };
+    const plan = await planFloorTurn(kept, acquire);
+    expect(plan.floored.map((m: any) => m.message_id)).toEqual(["m1"]);
+    expect(Object.keys(plan.deferred)).toEqual(["c2"]);
+    expect(plan.deferred["c2"].map((m: any) => m.message_id)).toEqual(["m2", "m3"]);
+  });
+
+  it("stash merges repeat deferrals, dedupes by id, and keeps the first-deferred clock", () => {
+    const s = createAutoReplyState();
+    stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: null }, 1_000);
+    stashDeferred(s, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m2: null }, 5_000);
+    const stash = s.deferredByConversation.get("c1")!;
+    expect(stash.messages.map((m: any) => m.message_id)).toEqual(["m1", "m2"]);
+    expect(stash.firstDeferredAtMs).toBe(1_000); // TTL runs from the FIRST deferral
+    expect(Object.keys(stash.verifications).sort()).toEqual(["m1", "m2"]);
+  });
+
+  it("retryable list is oldest-first and prunes expired stashes", () => {
+    const s = createAutoReplyState();
+    stashDeferred(s, "old", [amsg("old", "m1")], {}, 0);
+    stashDeferred(s, "newer", [amsg("newer", "m2")], {}, 10_000);
+    expect(listRetryableDeferred(s, 20_000)).toEqual(["old", "newer"]);
+    // beyond the TTL the old stash is dropped, not retried forever
+    const past = DEFERRED_RETRY_TTL_MS + 5_000;
+    expect(listRetryableDeferred(s, past)).toEqual(["newer"]);
+    expect(s.deferredByConversation.has("old")).toBe(false);
+  });
+
+  it("a turn that covers the conversation clears its stash", () => {
+    const s = createAutoReplyState();
+    stashDeferred(s, "c1", [amsg("c1", "m1")], {}, 0);
+    clearDeferred(s, "c1");
+    expect(s.deferredByConversation.has("c1")).toBe(false);
+    expect(listRetryableDeferred(s, 1)).toEqual([]);
   });
 });
 
