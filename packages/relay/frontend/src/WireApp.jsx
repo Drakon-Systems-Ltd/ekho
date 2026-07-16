@@ -247,7 +247,7 @@ function WireScroller({ S }) {
             </React.Fragment>
           );
         })}
-        {S.typingAgents.map(({ agentId, label }) => {
+        {S.typingAgents.filter(({ agentId }) => S.agents.some((a) => a.id === agentId)).map(({ agentId, label }) => {
           const hueOverride = S.settings.agentColors?.[agentId];
           const slug = hueOverride ? null : castSlug(label);
           return (
