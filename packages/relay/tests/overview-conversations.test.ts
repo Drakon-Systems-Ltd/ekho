@@ -55,4 +55,38 @@ describe("overview recent conversations", () => {
     expect(xs.length).toBe(1);
     expect(xs[0].preview).toContain("newer");
   });
+
+  it("reports participants + kind so a multi-agent thread can never masquerade as a DM", async () => {
+    const a = await relay.enrollAgent("part-a");
+    const b = await relay.enrollAgent("part-b");
+
+    // A true 1:1 DM: operator ↔ a.
+    await relay.operatorRequest("POST", "/v1/operator/messages", {
+      recipient_agent_id: a.agent_id, text: "just us", conversation_id: "dm-solo"
+    });
+
+    // A multi-agent working thread: a↔b talk, then a reports to the operator —
+    // the LAST speaker is a, which used to title (and classify) it like a's DM.
+    await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id }, message_type: "direct",
+      body: { text: "b, take a look" }, conversation_id: "thread-ab", correlation_id: "c1"
+    });
+    await relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: a.agent_id }, message_type: "direct",
+      body: { text: "on it" }, conversation_id: "thread-ab", correlation_id: "c2"
+    });
+
+    const ov = await relay.operatorRequest("GET", "/v1/operator/overview");
+    const byId = Object.fromEntries(ov.body.recentConversations.map((c: { conversation_id: string }) => [c.conversation_id, c]));
+
+    expect(byId["dm-solo"].kind).toBe("dm");
+    expect(byId["dm-solo"].participants).toEqual([a.agent_id]);
+
+    expect(byId["thread-ab"].kind).toBe("group");
+    expect(byId["thread-ab"].participants.sort()).toEqual([a.agent_id, b.agent_id].sort());
+    // Group titles name the cast, not one agent — so the row can't be mistaken
+    // for (or hijack) either agent's 1:1 thread.
+    expect(byId["thread-ab"].title).toContain("part-a");
+    expect(byId["thread-ab"].title).toContain("part-b");
+  });
 });

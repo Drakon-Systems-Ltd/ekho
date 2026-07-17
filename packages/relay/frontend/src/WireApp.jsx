@@ -516,6 +516,7 @@ export default function WireApp() {
     return m;
   }, [S.agents]);
   const roomById = useMemo(() => new Map((S.rooms || []).map((r) => [r.id, r])), [S.rooms]);
+  const convById = useMemo(() => new Map(S.conversationList.map((c) => [c.id, c])), [S.conversationList]);
 
   const classify = (convId) => {
     if (!convId) return null;
@@ -527,10 +528,24 @@ export default function WireApp() {
       const room = roomById.get(convId);
       return { kind: "room", room, title: `# ${room.name}` };
     }
+    // Relay-truthful classification: "dm" = exactly one agent participant, so a
+    // multi-agent thread whose last speaker happens to be Jarvis can never
+    // masquerade as (or hijack) the Jarvis DM. Title-matching remains only as
+    // the fallback for relays that predate kind/participants.
+    const entry = convById.get(convId);
+    if (entry?.kind === "dm" && entry.participants?.length === 1) {
+      const agent = S.agents.find((a) => a.id === entry.participants[0]);
+      if (agent) return { kind: "dm", agentId: agent.id, title: agent.display_name };
+    }
+    if (entry?.kind === "group") {
+      return { kind: "thread", title: entry.title || S.convTitle(convId) || "" };
+    }
+    if (convId === bcastConv) return { kind: "broadcast", title: "Everyone" };
+    if (entry?.kind) return { kind: "thread", title: entry.title || S.convTitle(convId) || "" };
+    // Older relay without kind/participants: the old title heuristic.
     const title = S.convTitle(convId) || "";
     const agent = agentByName.get(title.toLowerCase());
     if (agent) return { kind: "dm", agentId: agent.id, title: agent.display_name };
-    if (convId === bcastConv) return { kind: "broadcast", title: "Everyone" };
     return { kind: "thread", title };
   };
 
@@ -628,7 +643,7 @@ export default function WireApp() {
       }
     }
     return null;
-  }, [S.selectedConversationId, S.composerRecipient, S.rooms, S.agents, S.feeds, S.mobileView, bcastConv]);
+  }, [S.selectedConversationId, S.composerRecipient, S.rooms, S.agents, S.feeds, S.mobileView, bcastConv, S.conversationList]);
 
   // Keep composer target + dm map in sync when a conversation is selected via
   // ops/trace/search rather than openChat.
@@ -642,7 +657,7 @@ export default function WireApp() {
     } else if (cls.kind === "broadcast") S.setComposerRecipient("broadcast");
     // feeds: leave the recipient (composer is disabled); threads are handled by
     // the thread-target effect below so a stale room/DM target can never leak.
-  }, [S.selectedConversationId, S.rooms, S.agents]);
+  }, [S.selectedConversationId, S.rooms, S.agents, S.conversationList]);
 
   // Unclassified threads (agent↔agent or historical broadcasts): target the
   // thread's most recent agent speaker, shown explicitly via the composer chip.

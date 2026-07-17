@@ -1186,7 +1186,14 @@ export function useConsoleState() {
     // Primary source: latest message per conversation (from the messages table,
     // immune to the heartbeat noise that floods recentEvents on a busy fleet).
     (overview.recentConversations || []).forEach((c) => {
-      if (c.conversation_id) map.set(c.conversation_id, { id: c.conversation_id, ts: c.last_at || "", preview: c.preview || "", title: c.title || "" });
+      if (c.conversation_id) {
+        map.set(c.conversation_id, {
+          id: c.conversation_id, ts: c.last_at || "", preview: c.preview || "", title: c.title || "",
+          // Relay-truthful classification (absent on older relays): "dm" means
+          // exactly one agent participant; "group" is a multi-agent thread.
+          kind: c.kind, participants: c.participants,
+        });
+      }
     });
     // Fallbacks only fill in conversations the messages query didn't return —
     // they never override a real message preview.

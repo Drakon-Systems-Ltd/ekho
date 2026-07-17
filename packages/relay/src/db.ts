@@ -1907,26 +1907,65 @@ export class EkhoDb {
       (this.db.prepare("SELECT id, display_name FROM agents WHERE fleet_id = ? AND runtime != 'operator'").all(fleetId) as Array<{ id: string; display_name: string }>)
         .map((a) => [a.id, a.display_name])
     );
-    const recentConversations = (this.db.prepare(
+    const recentRows = this.db.prepare(
       `SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id FROM (
          SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id,
                 ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC, id DESC) AS rn
          FROM messages WHERE fleet_id = ?
        ) WHERE rn = 1 ORDER BY created_at DESC LIMIT 25`
-    ).all(fleetId) as Array<Record<string, unknown>>).map((r) => {
+    ).all(fleetId) as Array<Record<string, unknown>>;
+
+    // Distinct AGENT participants per conversation (senders + agent recipients,
+    // operator excluded) — the truthful basis for dm-vs-group classification.
+    // A last-speaker title alone lets a multi-agent thread masquerade as (and
+    // hijack) an agent's 1:1 DM in the console.
+    const participantsByConv = new Map<string, Set<string>>();
+    if (recentRows.length) {
+      const ph = recentRows.map(() => "?").join(",");
+      const ids = recentRows.map((r) => String(r.conversation_id));
+      const rows = this.db.prepare(
+        `SELECT DISTINCT conversation_id, sender_agent_id, recipient_kind, recipient_id
+         FROM messages WHERE fleet_id = ? AND conversation_id IN (${ph})`
+      ).all(fleetId, ...ids) as Array<Record<string, unknown>>;
+      for (const row of rows) {
+        const cid = String(row.conversation_id);
+        const set = participantsByConv.get(cid) ?? new Set<string>();
+        const sender = String(row.sender_agent_id ?? "");
+        if (sender && sender !== opId && agentTitles.has(sender)) set.add(sender);
+        if (String(row.recipient_kind) === "agent") {
+          const rec = String(row.recipient_id ?? "");
+          if (rec && rec !== opId && agentTitles.has(rec)) set.add(rec);
+        }
+        participantsByConv.set(cid, set);
+      }
+    }
+
+    const recentConversations = recentRows.map((r) => {
       let preview = "";
       try {
         const body = JSON.parse(String(r.body_json) || "{}") as Record<string, unknown>;
         if (typeof body.text === "string") preview = body.text.slice(0, 100);
       } catch { /* malformed body — empty preview */ }
       const cid = String(r.conversation_id);
+      const participants = Array.from(participantsByConv.get(cid) ?? []).slice(0, 6);
       let title: string;
+      let kind: string;
       if (roomTitles.has(cid)) {
+        kind = "room";
         title = "# " + roomTitles.get(cid);
       } else if (cid.startsWith("feed-")) {
+        kind = "feed";
         title = "📰 News feed";
+      } else if (participants.length === 1) {
+        kind = "dm";
+        title = agentTitles.get(participants[0]) || "Direct message";
+      } else if (participants.length > 1) {
+        kind = "group";
+        const names = participants.map((p) => agentTitles.get(p) || p);
+        title = names.slice(0, 2).join(" + ") + (names.length > 2 ? ` +${names.length - 2}` : "");
       } else {
-        // Direct conversation: title by the non-operator participant.
+        // No agent participant found (e.g. operator-only thread) — old fallback.
+        kind = "direct";
         const other = String(r.sender_agent_id) === opId ? String(r.recipient_id ?? "") : String(r.sender_agent_id);
         title = agentTitles.get(other) || agentTitles.get(String(r.recipient_id ?? "")) || "Direct message";
       }
@@ -1935,7 +1974,9 @@ export class EkhoDb {
         last_at: r.created_at,
         sender_agent_id: r.sender_agent_id,
         preview,
-        title
+        title,
+        kind,
+        participants
       };
     });
     return {
