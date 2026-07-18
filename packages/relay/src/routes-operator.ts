@@ -313,6 +313,10 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       dateTo: typeof query.dateTo === "string" ? query.dateTo : undefined,
       sortBy: typeof query.sortBy === "string" ? query.sortBy : undefined,
       sortOrder: typeof query.sortOrder === "string" ? query.sortOrder : undefined,
+      // Keyset cursor for infinite scroll-back: return events strictly older
+      // than (before_at, before_id).
+      beforeAt: typeof query.before_at === "string" ? query.before_at : undefined,
+      beforeId: typeof query.before_id === "string" ? query.before_id : undefined,
       limit,
       offset
     });

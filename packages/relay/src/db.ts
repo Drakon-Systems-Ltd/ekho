@@ -2201,13 +2201,19 @@ export class EkhoDb {
   private getFeedConversation(
     fleetId: string,
     conversationId: string,
-    options?: { search?: string; limit?: number; offset?: number }
+    options?: { search?: string; limit?: number; offset?: number; beforeAt?: string; beforeId?: string }
   ) {
     const limit = options?.limit ?? 100;
     const offset = options?.offset ?? 0;
     const search = this.buildLikeSearch(options?.search);
+    const beforeAt = options?.beforeAt?.trim();
+    const beforeId = options?.beforeId?.trim();
     const where = ["fleet_id = ?", "conversation_id = ?"];
     const params: Array<string | number> = [fleetId, conversationId];
+    if (beforeAt && beforeId) {
+      where.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      params.push(beforeAt, beforeAt, beforeId);
+    }
     if (search) {
       where.push("LOWER(COALESCE(body_json, '')) LIKE ? ESCAPE '\\'");
       params.push(search);
@@ -2243,7 +2249,7 @@ export class EkhoDb {
     return { items, total };
   }
 
-  getConversation(fleetId: string, conversationId: string, options?: { search?: string; type?: string; dateFrom?: string; dateTo?: string; sortBy?: string; sortOrder?: string; limit?: number; offset?: number }) {
+  getConversation(fleetId: string, conversationId: string, options?: { search?: string; type?: string; dateFrom?: string; dateTo?: string; sortBy?: string; sortOrder?: string; limit?: number; offset?: number; beforeAt?: string; beforeId?: string }) {
     if (conversationId.startsWith("feed-")) {
       return this.getFeedConversation(fleetId, conversationId, options);
     }
@@ -2253,6 +2259,13 @@ export class EkhoDb {
     const dateTo = this.normalizeDateEnd(options?.dateTo);
     const limit = options?.limit ?? 100;
     const offset = options?.offset ?? 0;
+    // Keyset cursor for infinite scroll-back: everything strictly OLDER than
+    // (beforeAt, beforeId). Compound so events sharing a millisecond can never
+    // be skipped or duplicated across pages (a plain created_at cursor loses
+    // ties at the page boundary).
+    const beforeAt = options?.beforeAt?.trim();
+    const beforeId = options?.beforeId?.trim();
+    const cursor = beforeAt && beforeId;
     const sortable: Record<string, string> = {
       created_at: "created_at",
       event_type: "event_type",
@@ -2267,6 +2280,7 @@ export class EkhoDb {
       type ? "event_type LIKE ?" : "",
       dateFrom ? "created_at >= ?" : "",
       dateTo ? "created_at <= ?" : "",
+      cursor ? "(created_at < ? OR (created_at = ? AND id < ?))" : "",
       search
         ? "(LOWER(event_type) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(actor_id, '')) LIKE ? ESCAPE '\\' OR LOWER(resource_kind) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(resource_id, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(payload_json, '')) LIKE ? ESCAPE '\\')"
         : ""
@@ -2276,13 +2290,14 @@ export class EkhoDb {
     if (type) params.push(type);
     if (dateFrom) params.push(dateFrom);
     if (dateTo) params.push(dateTo);
+    if (cursor) params.push(beforeAt, beforeAt, beforeId);
     if (search) params.push(search, search, search, search, search);
 
     const rows = this.db.prepare(
       `SELECT id, event_type, actor_kind, actor_id, resource_kind, resource_id, payload_json, created_at
        FROM events
        WHERE ${where}
-       ORDER BY ${sortBy} ${sortOrder}
+       ORDER BY ${sortBy} ${sortOrder}, id ${sortOrder}
        LIMIT ? OFFSET ?`
     ).all(...params, limit, offset) as Array<Record<string, unknown>>;
 

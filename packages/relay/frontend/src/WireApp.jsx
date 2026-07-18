@@ -100,20 +100,44 @@ function WireLogin({ S }) {
 
 function WireScroller({ S }) {
   const ref = useRef(null);
+  const topSentinelRef = useRef(null);
   const nearBottomRef = useRef(true);
+  const prependHeightRef = useRef(null); // scrollHeight captured before a load-older
   const items = S.chatItems;
   const animate = S.settings.typingAnimation && !prefersReducedMotion();
+  const histCount = S.olderEvents.length;
+
+  const requestOlder = () => {
+    const el = ref.current;
+    if (!el || !S.hasMoreHistory || S.loadingHistory) return;
+    // Capture height so the layout effect can hold the reading position steady
+    // once the older page prepends.
+    prependHeightRef.current = el.scrollHeight;
+    S.loadOlderTimeline();
+  };
 
   const handleScroll = () => {
     const el = ref.current;
     if (!el) return;
     nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (el.scrollTop < 160) requestOlder();
   };
   const stickToBottom = () => {
     const el = ref.current;
     if (el && nearBottomRef.current) el.scrollTop = el.scrollHeight;
   };
   useLayoutEffect(() => { stickToBottom(); }, [items.length, S.typingAgents.length, S.selectedConversationId]);
+
+  // Older page arrived → keep the operator on the same message by growing the
+  // scrollTop by exactly the prepended height (no jump).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && prependHeightRef.current != null) {
+      el.scrollTop += el.scrollHeight - prependHeightRef.current;
+      prependHeightRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [histCount]);
 
   if (!items.length && !S.typingAgents.length) {
     return (
@@ -133,6 +157,15 @@ function WireScroller({ S }) {
   return (
     <div className="msgs" ref={ref} onScroll={handleScroll} aria-live="polite">
       <div className="msgs-inner">
+        <div className="history-top" ref={topSentinelRef}>
+          {S.loadingHistory ? (
+            <span className="history-spin"><span className="att-spinner" /> Loading earlier messages…</span>
+          ) : S.hasMoreHistory ? (
+            <button className="history-more" onClick={requestOlder}>Load earlier messages</button>
+          ) : (
+            <span className="history-start">Beginning of conversation</span>
+          )}
+        </div>
         {visible.map((item, idx) => {
           const prev = visible[idx - 1];
           const next = visible[idx + 1];

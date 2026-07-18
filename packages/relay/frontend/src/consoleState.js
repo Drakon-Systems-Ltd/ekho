@@ -276,6 +276,11 @@ export function useConsoleState() {
   const [agentDetail, setAgentDetail] = useState(null);
   const [selectedConversationId, setSelectedConversationId] = useState("");
   const [timelineEvents, setTimelineEvents] = useState([]);
+  // Infinite scroll-back: events OLDER than the live window, loaded on demand
+  // and kept across polls. Reset per conversation (effect below).
+  const [olderEvents, setOlderEvents] = useState([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   // ui state
   const [agentStatusFilter, setAgentStatusFilter] = useState("all");
@@ -624,11 +629,65 @@ export function useConsoleState() {
       page: "1",
       limit: String(TIMELINE_LIMIT),
     });
-    setTimelineEvents((result.events || []).slice().reverse());
+    const events = (result.events || []).slice().reverse();
+    // Seam guard: once the operator has scrolled back, new arrivals push the
+    // oldest events out of the newest-100 window. Migrate anything that fell
+    // below the new window's floor into olderEvents so nothing the operator was
+    // already reading silently vanishes.
+    if (olderEvents.length && events.length) {
+      const floor = events[0];
+      const below = (e) => e.created_at < floor.created_at || (e.created_at === floor.created_at && String(e.id) < String(floor.id));
+      const slidOut = (timelineEvents || []).filter(below);
+      if (slidOut.length) {
+        setOlderEvents((prev) => {
+          const seen = new Set(prev.map((e) => String(e.id)));
+          const add = slidOut.filter((e) => !seen.has(String(e.id)));
+          return add.length ? [...prev, ...add] : prev;
+        });
+      }
+    }
+    setTimelineEvents(events);
+    // A newest window shorter than a full page means there is nothing older to
+    // scroll back to. Never flip this back to true here — only loadOlderTimeline
+    // decides history is exhausted; a full window leaves it as-is.
+    if (events.length < TIMELINE_LIMIT) setHasMoreHistory(false);
     // Drop optimistic items the server has now echoed back, matched by their real
     // message id (bound at send time) — not by text, so identical-text messages
     // reconcile independently. See optimistic.js.
     setOptimistic((items) => reconcileOptimistic(items, result.events, conversationId));
+  }
+
+  // Load one page of OLDER events (Telegram-style scroll-back), keyset-paged so
+  // it can never skip or duplicate across the boundary. Prepends to olderEvents;
+  // the merged timeline (chatItems) shows them above the live window.
+  async function loadOlderTimeline() {
+    if (!session.token || !selectedConversationId || loadingHistory || !hasMoreHistory) return;
+    const merged = [...olderEvents, ...timelineEvents];
+    if (!merged.length) return;
+    // Oldest currently loaded = the keyset cursor (created_at, id).
+    let cursor = merged[0];
+    for (const e of merged) {
+      if (e.created_at < cursor.created_at || (e.created_at === cursor.created_at && String(e.id) < String(cursor.id))) cursor = e;
+    }
+    setLoadingHistory(true);
+    try {
+      const result = await getConversationEvents(session.token, selectedConversationId, {
+        sortBy: "created_at",
+        sortOrder: "desc",
+        before_at: cursor.created_at,
+        before_id: String(cursor.id),
+        limit: String(TIMELINE_LIMIT),
+      });
+      const fetched = (result.events || []).slice().reverse(); // chronological
+      const known = new Set(merged.map((e) => String(e.id)));
+      const fresh = fetched.filter((e) => !known.has(String(e.id)));
+      if (fresh.length) setOlderEvents((prev) => [...fresh, ...prev]);
+      if ((result.events || []).length < TIMELINE_LIMIT) setHasMoreHistory(false);
+    } catch (error) {
+      handleApiError(error, { allowSessionReset: true });
+    } finally {
+      setLoadingHistory(false);
+    }
   }
 
   async function refreshAgentDetail(agentId = selectedAgentId) {
@@ -1161,6 +1220,14 @@ export function useConsoleState() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activityFilter]);
 
+  // Switching conversations discards any scrolled-back history and re-arms the
+  // "more to load" flag — path-independent (poll, trace, openChat, send-switch).
+  useEffect(() => {
+    setOlderEvents([]);
+    setHasMoreHistory(true);
+    setLoadingHistory(false);
+  }, [selectedConversationId]);
+
   useAutoRefresh(
     Boolean(session.token),
     POLL_INTERVAL_MS,
@@ -1239,8 +1306,21 @@ export function useConsoleState() {
   }, [agents]);
   const nameFor = (agentId) => agentNames.get(agentId) || agentId;
 
+  // The full timeline = loaded-older history + the live newest window, deduped
+  // by event id (the keyset boundary can re-surface an event) and chronological.
+  const timelineMerged = useMemo(() => {
+    if (!olderEvents.length) return timelineEvents || [];
+    const byId = new Map();
+    for (const e of olderEvents) byId.set(String(e.id), e);
+    for (const e of timelineEvents || []) byId.set(String(e.id), e);
+    return Array.from(byId.values()).sort((a, b) => {
+      if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+      return String(a.id) < String(b.id) ? -1 : 1;
+    });
+  }, [olderEvents, timelineEvents]);
+
   const chatItems = useMemo(() => {
-    const events = timelineEvents || [];
+    const events = timelineMerged;
     // Delivery/ack receipts are collapsed into per-message ticks (WhatsApp-style)
     // instead of their own bubbles. Aggregate them by the message id they target.
     const receipts = new Map(); // messageId → { delivered:Set<actor>, acked:Set<actor> }
@@ -1274,7 +1354,7 @@ export function useConsoleState() {
       .filter((o) => o.conversationId === selectedConversationId)
       .map((o) => ({ id: o.id, kind: "message", side: "operator", senderId: "operator", senderLabel: "Operator", text: o.text, attachments: o.attachments || [], type: "message.queued", createdAt: o.createdAt, pending: true, status: "pending" }));
     return [...visible, ...pending];
-  }, [timelineEvents, showSystem, optimistic, selectedConversationId]);
+  }, [timelineMerged, showSystem, optimistic, selectedConversationId]);
 
   /* Who is currently "typing"? Derived purely from the polled timeline, so it
      survives refresh and never relies on ephemeral state:
@@ -1350,6 +1430,10 @@ export function useConsoleState() {
     agentDetail,
     selectedConversationId,
     timelineEvents,
+    olderEvents,
+    hasMoreHistory,
+    loadingHistory,
+    loadOlderTimeline,
     agentStatusFilter,
     agentSearch,
     rightTab,
