@@ -2607,6 +2607,26 @@ export class EkhoDb {
 
   // --- Quarantine automation ---
 
+  /**
+   * The system operator sentinel for a fleet — a non-loginable operators row
+   * that owns control actions the relay issues on its own behalf (auto-quarantine
+   * from heartbeat timeout or rate-limit abuse). control_actions.issued_by_operator_id
+   * is NOT NULL with a FK to operators(id), so system-issued actions need a real
+   * operator row to reference; the literal "system" isn't one, and inserting it
+   * throws FOREIGN KEY constraint failed — rolling back the entire sweep. Created
+   * once per fleet, reused thereafter. The password hash is a sentinel that can
+   * never match any password, so this operator can't be logged into.
+   */
+  ensureSystemOperator(fleetId: string): string {
+    const systemOperatorId = `opr_system_${fleetId}`;
+    const existing = this.db.prepare("SELECT id FROM operators WHERE id = ?").get(systemOperatorId);
+    if (existing) return systemOperatorId;
+    this.db.prepare(
+      "INSERT INTO operators (id, fleet_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(systemOperatorId, fleetId, "system@ekho.internal", "!system-no-login", "system", nowIso());
+    return systemOperatorId;
+  }
+
   sweepHeartbeatLiveness(): number {
     const now = Date.now();
     const agents = this.db.prepare(
@@ -2622,13 +2642,14 @@ export class EkhoDb {
         this.db.prepare("UPDATE agents SET consecutive_missed_heartbeats = ? WHERE id = ?").run(missed, agent.id);
 
         if (missed >= config.heartbeatLivenessThreshold) {
+          const systemOperatorId = this.ensureSystemOperator(String(agent.fleet_id));
           this.db.prepare(
             "UPDATE agents SET status = 'quarantined', auto_quarantined_at = ?, quarantine_reason = 'heartbeat_timeout', consecutive_missed_heartbeats = ? WHERE id = ?"
           ).run(nowIso(), missed, agent.id);
 
           this.db.prepare(
             "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-          ).run(id("ctl"), agent.fleet_id, "agent", agent.id, "quarantine", JSON.stringify({ reason: "heartbeat_timeout", missed_count: missed }), "system", nowIso());
+          ).run(id("ctl"), agent.fleet_id, "agent", agent.id, "quarantine", JSON.stringify({ reason: "heartbeat_timeout", missed_count: missed }), systemOperatorId, nowIso());
 
           this.recordEvent(
             String(agent.fleet_id), "agent.auto_quarantined", "system", null,
@@ -2651,13 +2672,14 @@ export class EkhoDb {
 
     if (row.count >= config.rateLimitViolationThreshold) {
       const now = nowIso();
+      const systemOperatorId = this.ensureSystemOperator(fleetId);
       this.db.prepare(
         "UPDATE agents SET status = 'quarantined', auto_quarantined_at = ?, quarantine_reason = 'rate_limit_abuse' WHERE id = ? AND status NOT IN ('quarantined', 'paused')"
       ).run(now, agentId);
 
       this.db.prepare(
         "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-      ).run(id("ctl"), fleetId, "agent", agentId, "quarantine", JSON.stringify({ reason: "rate_limit_abuse", violation_count: row.count }), "system", now);
+      ).run(id("ctl"), fleetId, "agent", agentId, "quarantine", JSON.stringify({ reason: "rate_limit_abuse", violation_count: row.count }), systemOperatorId, now);
 
       this.recordEvent(fleetId, "agent.auto_quarantined", "system", null, "agent", agentId, null, {
         reason: "rate_limit_abuse", violation_count: row.count
