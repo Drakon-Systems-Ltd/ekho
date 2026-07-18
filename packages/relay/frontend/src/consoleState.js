@@ -614,13 +614,17 @@ export function useConsoleState() {
 
   async function refreshTimeline(conversationId = selectedConversationId) {
     if (!session.token || !conversationId) return;
+    // Fetch the NEWEST page, then flip to chronological. Ascending page 1 shows
+    // a busy conversation's beginning forever — past 100 events the operator
+    // stops seeing new replies entirely (they exist, delivered and acked, but
+    // never enter the window).
     const result = await getConversationEvents(session.token, conversationId, {
       sortBy: "created_at",
-      sortOrder: "asc",
+      sortOrder: "desc",
       page: "1",
       limit: String(TIMELINE_LIMIT),
     });
-    setTimelineEvents(result.events || []);
+    setTimelineEvents((result.events || []).slice().reverse());
     // Drop optimistic items the server has now echoed back, matched by their real
     // message id (bound at send time) — not by text, so identical-text messages
     // reconcile independently. See optimistic.js.
