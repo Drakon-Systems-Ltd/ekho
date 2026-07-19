@@ -38,12 +38,12 @@ describe("overview recent conversations", () => {
       name: "ProjectX", member_agent_ids: [a.agent_id]
     })).body;
     await relay.operatorRequest("POST", "/v1/operator/messages", { room_id: room.id, text: "in the room" });
-    await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: a.agent_id, text: "direct one", conversation_id: "dm-1" });
+    await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: a.agent_id, text: "direct one", conversation_id: "direct-1" });
 
     const ov = await relay.operatorRequest("GET", "/v1/operator/overview");
     const byId = Object.fromEntries(ov.body.recentConversations.map((c: { conversation_id: string }) => [c.conversation_id, c]));
     expect(byId[room.id].title).toBe("# ProjectX");
-    expect(byId["dm-1"].title).toContain("ov-titled");
+    expect(byId["direct-1"].title).toContain("ov-titled");
   });
 
   it("returns one entry per conversation (latest message wins)", async () => {
@@ -62,7 +62,7 @@ describe("overview recent conversations", () => {
 
     // A true 1:1 DM: operator ↔ a.
     await relay.operatorRequest("POST", "/v1/operator/messages", {
-      recipient_agent_id: a.agent_id, text: "just us", conversation_id: "dm-solo"
+      recipient_agent_id: a.agent_id, text: "just us", conversation_id: "solo-1"
     });
 
     // A multi-agent working thread: a↔b talk, then a reports to the operator —
@@ -79,8 +79,8 @@ describe("overview recent conversations", () => {
     const ov = await relay.operatorRequest("GET", "/v1/operator/overview");
     const byId = Object.fromEntries(ov.body.recentConversations.map((c: { conversation_id: string }) => [c.conversation_id, c]));
 
-    expect(byId["dm-solo"].kind).toBe("dm");
-    expect(byId["dm-solo"].participants).toEqual([a.agent_id]);
+    expect(byId["solo-1"].kind).toBe("dm");
+    expect(byId["solo-1"].participants).toEqual([a.agent_id]);
 
     expect(byId["thread-ab"].kind).toBe("group");
     expect(byId["thread-ab"].participants.sort()).toEqual([a.agent_id, b.agent_id].sort());

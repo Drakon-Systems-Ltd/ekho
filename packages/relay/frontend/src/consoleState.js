@@ -18,6 +18,8 @@ import {
   getDeadLetterDetail,
   getDeadLetters,
   getOverview,
+  getOperatorProfile,
+  setOperatorProfile,
   getPolicies,
   issueEnrollmentToken,
   loadSession,
@@ -348,6 +350,8 @@ export function useConsoleState() {
   // settings (per-agent colours + typing animation), persisted to localStorage
   const [settings, setSettings] = useState(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The operator's team-visible display name (server-side). "" = unset ("Operator").
+  const [operatorName, setOperatorName] = useState("");
   const [helpOpen, setHelpOpen] = useState(false);
   const updateSettings = (next) => {
     setSettings(next);
@@ -759,6 +763,7 @@ export function useConsoleState() {
       const nextSession = { token: response.token, fleetId: response.fleet_id, email: formState.email };
       storeSession(nextSession);
       setSession(nextSession);
+      setOperatorName(response.display_name || "");
       setLoginTone("ok");
       setLoginStatus("");
     } catch (error) {
@@ -1198,11 +1203,26 @@ export function useConsoleState() {
     }
   }
 
+  // Operator display name — refetched on load (the token survives reloads, so the
+  // login response isn't available then), and set optimistically after a change.
+  async function refreshOperatorProfile() {
+    if (!session.token) return;
+    const profile = await getOperatorProfile(session.token);
+    setOperatorName(profile?.display_name || "");
+  }
+
+  async function handleSetOperatorName(name) {
+    const profile = await setOperatorProfile(session.token, name);
+    setOperatorName(profile?.display_name || "");
+    // The operator node was relabelled server-side — refresh views that read it.
+    await Promise.all([refreshOverview(), refreshAgents()]).catch(() => {});
+  }
+
   /* ---------------- effects ---------------- */
 
   useEffect(() => {
     if (!session.token) return;
-    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshAttention(), refreshTopology(), refreshActivity(), refreshFeeds()]).catch((error) =>
+    Promise.all([refreshOverview(), refreshAgents(), refreshApprovals(), refreshPolicies(), refreshDeadLetters(), refreshRooms(), refreshFleetHealth(), refreshAttention(), refreshTopology(), refreshActivity(), refreshFeeds(), refreshOperatorProfile()]).catch((error) =>
       handleApiError(error, { allowSessionReset: true })
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1594,6 +1614,8 @@ export function useConsoleState() {
     handleCreateRoom,
     handleDeleteRoom,
     handleSetProjectMode,
+    operatorName,
+    handleSetOperatorName,
     handleResumeConversation,
     resetState,
     clearStoredSession,

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS operators (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  display_name TEXT,
   UNIQUE (fleet_id, email),
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );

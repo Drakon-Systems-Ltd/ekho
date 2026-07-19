@@ -343,7 +343,7 @@ export function Skeleton({ width = "100%", height = "16px", count = 1, radius = 
 
 /* ---------- settings + help panels ---------- */
 
-export function SettingsModal({ agents, settings, onChange, onClose }) {
+export function SettingsModal({ agents, settings, onChange, onClose, operatorName, onSetOperatorName }) {
   const setAgentColor = (agentId, color) => {
     onChange({ ...settings, agentColors: { ...settings.agentColors, [agentId]: color } });
   };
@@ -352,9 +352,41 @@ export function SettingsModal({ agents, settings, onChange, onClose }) {
     delete next[agentId];
     onChange({ ...settings, agentColors: next });
   };
+  const [nameInput, setNameInput] = useState(operatorName || "");
+  const [nameSaving, setNameSaving] = useState(false);
+  useEffect(() => { setNameInput(operatorName || ""); }, [operatorName]);
+  const nameDirty = nameInput.trim() && nameInput.trim() !== (operatorName || "");
+  const saveName = async () => {
+    if (!nameDirty || nameSaving) return;
+    setNameSaving(true);
+    try { await onSetOperatorName(nameInput.trim()); } finally { setNameSaving(false); }
+  };
   return (
     <Modal title="Settings" onClose={onClose} actions={[{ label: "Done", onClick: onClose, variant: "primary" }]}>
       <div className="settings">
+        {onSetOperatorName ? (
+          <>
+            <div className="rsection-title">Your name</div>
+            <div className="settings__opname">
+              <input
+                type="text"
+                maxLength={40}
+                placeholder="e.g. Michael"
+                aria-label="Your name, shown to the team"
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveName(); } }}
+              />
+              <button className="button button--sm button--primary" onClick={saveName} disabled={!nameDirty || nameSaving}>
+                {nameSaving ? "Saving…" : "Save"}
+              </button>
+            </div>
+            <p className="settings__hint">
+              Shown to the whole team — agents see this as the sender of your messages instead of “Operator”.
+            </p>
+          </>
+        ) : null}
+
         <label className="toggle settings__master">
           <input
             type="checkbox"

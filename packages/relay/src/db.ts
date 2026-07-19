@@ -48,6 +48,14 @@ const IDEMPOTENT_DDL_ERROR = /duplicate column|already exists/i;
 // stall escalation keep runaway loops bounded even at this size.
 export const DEFAULT_PEER_TURN_BUDGET = 25;
 
+/** The canonical per-agent DM conversation id. Keyed by the AGENT — never the
+ *  shared op_<fleetId> operator — so every operator↔agent 1:1 exchange threads
+ *  into one stable conversation instead of scattering across op-/oc- ids.
+ *  Mirrored client-side in frontend/src/channels.js; keep the two in lockstep. */
+export function canonicalDmId(fleetId: string, agentId: string): string {
+  return `dm-${fleetId}-${agentId}`;
+}
+
 // Per-room budget while project mode is ON — high enough for a real working
 // session; the operator toggle (default OFF) is the opt-in.
 export const DEFAULT_PROJECT_TURN_BUDGET = 100;
@@ -548,7 +556,14 @@ export class EkhoDb {
     // recipient and the conversation (mirroring the operator->room path), so the
     // message threads under the room regardless of the conversation_id passed.
     const conversationId =
-      input.recipientKind === "group" && input.recipientId ? input.recipientId : input.conversationId;
+      input.recipientKind === "group" && input.recipientId
+        ? input.recipientId
+        : input.recipientKind === "agent" && input.recipientId === `op_${input.fleetId}`
+          // Agent replying to the operator (a 1:1) → the sender's canonical DM,
+          // normalizing any plugin-minted oc-/hermes- id. Derived from the
+          // AUTHENTICATED sender, so an agent can never post into another's DM.
+          ? canonicalDmId(input.fleetId, input.senderAgentId)
+          : input.conversationId;
 
     const tx = this.db.transaction(() => {
       this.db.prepare(
@@ -645,6 +660,38 @@ export class EkhoDb {
     return operatorAgentId;
   }
 
+  /** The team-visible label for an operator's messages — the operator's chosen
+   *  display name, or "Operator" when unset. Used as sender_label so agents see
+   *  who is talking to them. */
+  operatorLabel(operatorId: string): string {
+    const row = this.db.prepare("SELECT display_name FROM operators WHERE id = ?").get(operatorId) as { display_name?: string | null } | undefined;
+    const name = row?.display_name?.trim();
+    return name && name.length ? name : "Operator";
+  }
+
+  getOperatorProfile(operatorId: string): { id: string; email: string; display_name: string | null } | null {
+    const row = this.db.prepare("SELECT id, email, display_name FROM operators WHERE id = ?").get(operatorId) as
+      | { id: string; email: string; display_name: string | null }
+      | undefined;
+    if (!row) return null;
+    return { id: row.id, email: row.email, display_name: row.display_name ?? null };
+  }
+
+  /** Set the operator's display name and mirror it onto the synthetic operator
+   *  node so topology/health/roster show it too. The node (op_<fleetId>) is
+   *  shared per fleet, so it reflects whoever last named themselves — fine for
+   *  the single-operator fleets this targets; per-message sender_label remains
+   *  the authoritative per-operator attribution. */
+  setOperatorDisplayName(operatorId: string, displayName: string): { id: string; email: string; display_name: string | null } | null {
+    const op = this.db.prepare("SELECT fleet_id FROM operators WHERE id = ?").get(operatorId) as { fleet_id: string } | undefined;
+    if (!op) return null;
+    const name = displayName.trim();
+    this.db.prepare("UPDATE operators SET display_name = ? WHERE id = ?").run(name, operatorId);
+    const opAgentId = this.ensureOperatorAgent(op.fleet_id);
+    this.db.prepare("UPDATE agents SET display_name = ? WHERE id = ?").run(name, opAgentId);
+    return this.getOperatorProfile(operatorId);
+  }
+
   /**
    * Operator-originated send. Mirrors createMessage exactly (same messages +
    * message_deliveries inserts) but stamps the sender as the synthetic operator
@@ -670,6 +717,7 @@ export class EkhoDb {
     const ttlSeconds = 900;
     const expiresAt = addSeconds(createdAt, ttlSeconds);
     const senderId = this.ensureOperatorAgent(input.fleetId);
+    const senderLabel = this.operatorLabel(input.operatorId);
     const correlationId = id("cor");
 
     let conversationId: string;
@@ -686,11 +734,18 @@ export class EkhoDb {
       recipientId = roomId;
       messageType = "direct";
     } else {
-      conversationId = input.conversationId?.trim() || `op-${Date.now()}-${id("conv").slice(-8)}`;
       const isBroadcast = input.recipientId === "broadcast";
       recipientKind = isBroadcast ? "broadcast" : "agent";
       recipientId = isBroadcast ? null : input.recipientId ?? null;
       messageType = isBroadcast ? "broadcast" : "direct";
+      const passed = input.conversationId?.trim();
+      // A FRESH 1:1 to an agent threads into the canonical per-agent DM; an
+      // explicitly-passed id (the open DM, a group thread, or a room reply) is
+      // honored so group/room replies are never hijacked into a DM. Broadcast
+      // keeps its own op- conversation.
+      conversationId = passed
+        ? passed
+        : (!isBroadcast && recipientId ? canonicalDmId(input.fleetId, recipientId) : `op-${Date.now()}-${id("conv").slice(-8)}`);
     }
 
     // Validate operator-owned attachments before binding them into the body.
@@ -723,7 +778,7 @@ export class EkhoDb {
         0,
         JSON.stringify(body),
         JSON.stringify({
-          sender_label: "Operator",
+          sender_label: senderLabel,
           operator_id: input.operatorId,
           ...(input.mentions && input.mentions.length ? { mentions: input.mentions } : {}),
           ...(input.replyTo ? { reply_to_message_id: input.replyTo } : {}),
@@ -764,7 +819,7 @@ export class EkhoDb {
         recipient_kind: recipientKind,
         recipient_id: recipientId,
         message_type: messageType,
-        sender_label: "Operator",
+        sender_label: senderLabel,
         text: input.text,
         attachments: attachmentIds
       });
@@ -892,6 +947,7 @@ export class EkhoDb {
     const createdAt = nowIso();
     const ttlSeconds = 900;
     const senderId = this.ensureOperatorAgent(fleetId);
+    const senderLabel = this.operatorLabel(operatorId);
     const tx = this.db.transaction(() => {
       this.db.prepare(
         `INSERT INTO messages (
@@ -902,7 +958,7 @@ export class EkhoDb {
         messageId, fleetId, conversationId, id("cor"), senderId, "broadcast", null,
         "broadcast", "normal", 0,
         JSON.stringify({ text: nudge }),
-        JSON.stringify({ sender_label: "Operator", operator_id: operatorId, resumed: true }),
+        JSON.stringify({ sender_label: senderLabel, operator_id: operatorId, resumed: true }),
         ttlSeconds, createdAt, addSeconds(createdAt, ttlSeconds), "queued"
       );
       const deliveryStmt = this.db.prepare(
@@ -913,7 +969,7 @@ export class EkhoDb {
         recipient_kind: "broadcast",
         recipient_id: null,
         message_type: "broadcast",
-        sender_label: "Operator",
+        sender_label: senderLabel,
         text: nudge
       });
       this.recordEvent(fleetId, "conversation.resumed", "operator", operatorId, "conversation", conversationId, conversationId, {});
@@ -1911,7 +1967,7 @@ export class EkhoDb {
       `SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id FROM (
          SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id,
                 ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC, id DESC) AS rn
-         FROM messages WHERE fleet_id = ?
+         FROM messages WHERE fleet_id = ? AND conversation_id NOT LIKE 'feed-%'
        ) WHERE rn = 1 ORDER BY created_at DESC LIMIT 25`
     ).all(fleetId) as Array<Record<string, unknown>>;
 
@@ -1969,6 +2025,15 @@ export class EkhoDb {
         const other = String(r.sender_agent_id) === opId ? String(r.recipient_id ?? "") : String(r.sender_agent_id);
         title = agentTitles.get(other) || agentTitles.get(String(r.recipient_id ?? "")) || "Direct message";
       }
+      // The channel a row collapses into: the DM/room id is a real conversation
+      // (opened directly); a grp- key is display-only (the console dedupes rows
+      // by it and opens the representative conversation_id). Mirrors the console's
+      // channels.js key derivation.
+      const channel_key =
+        kind === "room" ? cid
+        : kind === "dm" ? canonicalDmId(fleetId, participants[0])
+        : kind === "group" ? `grp-${fleetId}-${[...participants].sort().join(".")}`
+        : cid;
       return {
         conversation_id: r.conversation_id,
         last_at: r.created_at,
@@ -1976,10 +2041,12 @@ export class EkhoDb {
         preview,
         title,
         kind,
-        participants
+        participants,
+        channel_key
       };
     });
     return {
+      fleetId,
       agents,
       pendingApprovals: pendingApprovals.count,
       queuedMessages: queuedMessages.count,
@@ -2274,9 +2341,29 @@ export class EkhoDb {
     };
     const sortBy = sortable[options?.sortBy ?? "created_at"] ?? "created_at";
     const sortOrder = options?.sortOrder === "desc" ? "DESC" : "ASC";
+
+    // A canonical dm-<fleet>-<agent> read MERGES the agent's full 1:1 history:
+    // every op↔agent message wherever it is physically threaded (legacy op-/oc-/
+    // hermes- ids fold in), matched at the MESSAGE level so a legacy thread that
+    // also holds op↔otherAgent messages can never bleed the other agent in. Plus
+    // any conversation-level events (stall/resume) under the canonical id itself.
+    // Every other id reads its single conversation exactly as before.
+    let convClause: string;
+    let convParams: Array<string | number>;
+    if (conversationId.startsWith(`dm-${fleetId}-`)) {
+      const agentX = conversationId.slice(`dm-${fleetId}-`.length);
+      const opId = `op_${fleetId}`;
+      convClause =
+        "(resource_id IN (SELECT id FROM messages WHERE fleet_id = ? AND recipient_kind = 'agent' AND ((sender_agent_id = ? AND recipient_id = ?) OR (sender_agent_id = ? AND recipient_id = ?))) OR conversation_id = ?)";
+      convParams = [fleetId, opId, agentX, agentX, opId, conversationId];
+    } else {
+      convClause = "conversation_id = ?";
+      convParams = [conversationId];
+    }
+
     const where = [
       "fleet_id = ?",
-      "conversation_id = ?",
+      convClause,
       type ? "event_type LIKE ?" : "",
       dateFrom ? "created_at >= ?" : "",
       dateTo ? "created_at <= ?" : "",
@@ -2286,7 +2373,7 @@ export class EkhoDb {
         : ""
     ].filter(Boolean).join(" AND ");
 
-    const params: Array<string | number> = [fleetId, conversationId];
+    const params: Array<string | number> = [fleetId, ...convParams];
     if (type) params.push(type);
     if (dateFrom) params.push(dateFrom);
     if (dateTo) params.push(dateTo);

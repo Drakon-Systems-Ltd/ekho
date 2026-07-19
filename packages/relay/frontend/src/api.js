@@ -139,6 +139,13 @@ export const setRoomProjectMode = (token, roomId, { enabled, budget }) =>
     body: budget ? { enabled, budget } : { enabled },
   });
 
+// Operator profile — the team-visible display name (e.g. "Michael"). GET on load
+// (the token survives reloads), PATCH to set. The name is stamped into the
+// sender_label agents receive and mirrored onto the operator node.
+export const getOperatorProfile = (token) => request("/v1/operator/profile", { token });
+export const setOperatorProfile = (token, display_name) =>
+  request("/v1/operator/profile", { token, method: "PATCH", body: { display_name } });
+
 // Resume a thread stalled on turn-budget exhaustion: the relay mints an operator
 // nudge that re-opens every participant's latch and wakes them.
 export const resumeConversation = (token, conversationId) =>

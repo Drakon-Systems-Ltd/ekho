@@ -114,6 +114,9 @@ describe("transactional migrations (M6)", () => {
     // migration 016 (ALTER TABLE rooms) applies cleanly when runMigrationsOn runs
     // every migration after 014.
     db.exec("CREATE TABLE rooms (id TEXT PRIMARY KEY, fleet_id TEXT, name TEXT, created_at TEXT, created_by_operator_id TEXT)");
+    // …and the operators table (migration 001) so migration 018 (ALTER TABLE
+    // operators ADD COLUMN display_name) applies cleanly too.
+    db.exec("CREATE TABLE operators (id TEXT PRIMARY KEY, fleet_id TEXT, email TEXT, password_hash TEXT, role TEXT, created_at TEXT)");
     // Mark every migration through 014 as applied so runMigrationsOn runs 015+.
     const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
     for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");

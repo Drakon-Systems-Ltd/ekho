@@ -4,7 +4,7 @@ import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
 import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorProfileSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -43,8 +43,27 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     const tokenCore = `${operator.id}.${operator.fleet_id}`;
     return reply.send({
       token: `${tokenCore}.${sign(config.operatorSessionSecret, tokenCore)}`,
-      fleet_id: operator.fleet_id
+      fleet_id: operator.fleet_id,
+      display_name: (operator as Record<string, unknown>).display_name ?? null
     });
+  });
+
+  // Operator profile: the team-visible display name. GET on load (the token in
+  // localStorage survives reloads, so the name must be refetchable), PATCH to set.
+  app.get("/v1/operator/profile", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const profile = db.getOperatorProfile(request.operator.id);
+    if (!profile) return reply.code(404).send({ error: "operator not found" });
+    return reply.send(profile);
+  });
+
+  app.patch("/v1/operator/profile", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = operatorProfileSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    const profile = db.setOperatorDisplayName(request.operator.id, parsed.data.display_name);
+    if (!profile) return reply.code(404).send({ error: "operator not found" });
+    return reply.send(profile);
   });
 
   app.get("/v1/operator/overview", { preHandler: requireOperatorAuth }, async (request, reply) => {
@@ -233,6 +252,16 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     const parsed = operatorMessageSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    // Guard canonical channel ids: a client may only post into dm-<fleet>-<recipient>
+    // for the agent it is actually addressing — never another agent's or fleet's DM
+    // by naming the id. grp- keys are display-only and never a real send target.
+    const convId = parsed.data.conversation_id;
+    if (convId && convId.startsWith("dm-") && convId !== `dm-${request.operator.fleetId}-${parsed.data.recipient_agent_id}`) {
+      return reply.code(400).send({ error: "conversation_id does not match the addressed agent's DM" });
+    }
+    if (convId && convId.startsWith("grp-")) {
+      return reply.code(400).send({ error: "grp- is a display channel, not a send target" });
     }
     let result: { messageId: string; conversationId: string; createdAt: string };
     try {

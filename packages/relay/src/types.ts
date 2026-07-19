@@ -173,6 +173,12 @@ export const projectModeSchema = z.object({
   budget: z.number().int().min(1).max(500).optional()
 });
 
+// Operator profile: the team-visible display name (e.g. "Michael"). Trimmed,
+// 1–40 chars — a name, not a bio.
+export const operatorProfileSchema = z.object({
+  display_name: z.string().trim().min(1).max(40)
+});
+
 // Operator resume of a stalled thread: optional custom nudge text.
 export const resumeConversationSchema = z.object({
   text: z.string().min(1).max(2000).optional()

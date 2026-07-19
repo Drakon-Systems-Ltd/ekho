@@ -810,6 +810,24 @@ export default function WireApp() {
     return "conversation";
   })();
 
+  // The agent-to-agent turn budget governing the open conversation — a glanceable
+  // read-only chip; the info panel holds the editable control. Rooms in project
+  // mode carry their own ceiling; a DM shows that agent's peer budget (or "solo"
+  // when delegation is off). Feeds/broadcasts have no budget.
+  const budgetChip = (() => {
+    if (!active) return null;
+    if (active.kind === "dm") {
+      const agent = S.agents.find((a) => a.id === active.agentId);
+      if (!agent) return null;
+      return agent.peer_autoreply ? { label: `budget ${agent.peer_turn_budget ?? 25}` } : { label: "solo" };
+    }
+    if (active.kind === "room") {
+      const room = active.room || {};
+      return room.project_mode ? { label: `budget ${room.project_turn_budget ?? 100}`, tag: "project" } : { label: "budget 25" };
+    }
+    return null;
+  })();
+
   return (
     <div className={`app${S.mobileView === "chat" ? " chat-open" : ""}${infoOpen && active ? " info-open" : ""}`}>
       <header className="topbar">
@@ -926,6 +944,13 @@ export default function WireApp() {
                   <div className="sub">{headSub}</div>
                 </div>
                 <div className="acts">
+                  {budgetChip ? (
+                    <button className={`budgetchip${budgetChip.tag ? " budgetchip--project" : ""}`}
+                      title="Agent-to-agent turn budget for this conversation — click for details"
+                      onClick={() => { setInfoOpen(true); setBellOpen(false); }}>
+                      {budgetChip.label}{budgetChip.tag ? <span className="bc-tag">{budgetChip.tag}</span> : null}
+                    </button>
+                  ) : null}
                   {S.traceReturn ? <button className="trace-back" onClick={() => { S.setOpsOpen(true); S.returnFromTrace(); }}>↩ Ops</button> : null}
                   <label className="sysevents toggle" title="Show delivery receipts and heartbeats">
                     <input type="checkbox" checked={S.showSystem} onChange={(e) => S.setShowSystem(e.target.checked)} />system
@@ -1018,7 +1043,7 @@ export default function WireApp() {
       {/* ---------- modals ---------- */}
       {wireRoomOpen ? <WireRoomModal S={S} onClose={() => setWireRoomOpen(false)} /> : null}
       <WirePolicyModal S={S} />
-      {S.settingsOpen ? <SettingsModal agents={S.agents} settings={S.settings} onChange={S.updateSettings} onClose={() => S.setSettingsOpen(false)} /> : null}
+      {S.settingsOpen ? <SettingsModal agents={S.agents} settings={S.settings} onChange={S.updateSettings} operatorName={S.operatorName} onSetOperatorName={S.handleSetOperatorName} onClose={() => S.setSettingsOpen(false)} /> : null}
       {S.helpOpen ? <HelpModal onClose={() => S.setHelpOpen(false)} /> : null}
       {S.modal?.type === "alert" ? (
         <Modal title={S.modal.title} onClose={() => S.setModal(null)} actions={[{ label: "OK", onClick: () => S.setModal(null), variant: "primary" }]}>

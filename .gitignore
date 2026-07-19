@@ -6,6 +6,14 @@ ui-dist
 *.license
 license-private-key.pem
 
+# Screenshots / scratch image dumps at the repo root — console captures leak the
+# fleet id, agent names, room ids and message text, so never let them be added.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
+
 # Internal docs
 docs/plans/
 docs/internal/
