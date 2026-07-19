@@ -1282,7 +1282,9 @@ export function useConsoleState() {
           id: c.conversation_id, ts: c.last_at || "", preview: c.preview || "", title: c.title || "",
           // Relay-truthful classification (absent on older relays): "dm" means
           // exactly one agent participant; "group" is a multi-agent thread.
-          kind: c.kind, participants: c.participants,
+          // channel_key collapses scattered conversations into one Telegram-style
+          // channel (dm-<fleet>-<agent> / grp-<fleet>-<sorted> / room id).
+          kind: c.kind, participants: c.participants, channel_key: c.channel_key,
         });
       }
     });

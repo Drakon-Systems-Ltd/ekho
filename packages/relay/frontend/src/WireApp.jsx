@@ -17,6 +17,7 @@ import {
 } from "./components.jsx";
 import { WireAvatar, RoomAvatar, ChannelMark, Tick, castSlug, fallbackHue, presenceOf } from "./wireIdentity.jsx";
 import { OpsCenter, LedgerItems, WirePolicyModal } from "./WireOps.jsx";
+import { dmChannelKey, groupConversationsByChannel } from "./channels.js";
 import { resumeConversation as apiResumeConversation } from "./api.js";
 
 /* ================= small utilities ================= */
@@ -521,7 +522,8 @@ export default function WireApp() {
   const [density, setDensity] = useLocalPref("ekho.density.v1", "comfortable");
   const [pins, setPins] = useLocalPref("ekho.pins.v1", []);
   const [lastRead, setLastRead] = useLocalPref("ekho.lastread.v1", {});
-  const [dmConvMap, setDmConvMap] = useLocalPref("ekho.dmconv.v1", {});
+  // NB: no ekho.dmconv.v1 cache — a DM's conversation is now the pure function
+  // dmChannelKey(fleetId, agentId), so a row's label and target can never drift.
   const [bcastConv, setBcastConv] = useLocalPref("ekho.bcastconv.v1", null);
 
   // --- Wire-only UI state ---
@@ -551,8 +553,16 @@ export default function WireApp() {
   const roomById = useMemo(() => new Map((S.rooms || []).map((r) => [r.id, r])), [S.rooms]);
   const convById = useMemo(() => new Map(S.conversationList.map((c) => [c.id, c])), [S.conversationList]);
 
+  const fleetId = S.session.fleetId;
   const classify = (convId) => {
     if (!convId) return null;
+    // A canonical DM id classifies purely from the id — no participant lookup,
+    // no cache — so the row label always matches the conversation it opens.
+    if (fleetId && String(convId).startsWith(`dm-${fleetId}-`)) {
+      const agentId = String(convId).slice(`dm-${fleetId}-`.length);
+      const agent = S.agents.find((a) => a.id === agentId);
+      return { kind: "dm", agentId, title: agent?.display_name || "Direct message" };
+    }
     if (String(convId).startsWith("feed-")) {
       const feed = (S.feeds || []).find((f) => convId === `feed-${f.id}` || convId.includes(f.id));
       return { kind: "feed", feed, title: feed ? feed.name : S.convTitle(convId) };
@@ -582,33 +592,19 @@ export default function WireApp() {
     return { kind: "thread", title };
   };
 
-  // Newest conversation per agent that the relay titles as a plain DM — the
-  // canonical thread the strip / New-DM / topology shortcuts open, so an agent
-  // with history never forks a fresh conversation.
-  const newestDmByAgent = useMemo(() => {
-    const m = new Map();
-    for (const c of S.conversationList) {
-      const cls = classify(c.id);
-      if (cls?.kind === "dm" && !m.has(cls.agentId)) m.set(cls.agentId, c.id); // list is ts-desc
-    }
-    return m;
-  }, [S.conversationList, S.rooms, S.agents, S.feeds]);
-  const dmConvFor = (agentId) => newestDmByAgent.get(agentId) || dmConvMap[agentId] || null;
-
   const chatsAll = useMemo(() => {
     const list = [];
     const seen = new Set();
-    for (const c of S.conversationList) {
-      const cls = classify(c.id);
+    // One row per CHANNEL: scattered conversations sharing a channel_key collapse
+    // into a single DM/room/group row (newest wins), feeds excluded. A DM opens
+    // its canonical merged id; a group opens its representative conversation.
+    for (const ch of groupConversationsByChannel(S.conversationList)) {
+      const cls = classify(ch.convId);
       if (!cls) continue;
-      // Only the NEWEST agent-titled conversation collapses into the canonical
-      // DM row; older ones stay visible as their own rows instead of vanishing.
-      const canonicalDm = cls.kind === "dm" && newestDmByAgent.get(cls.agentId) === c.id;
-      const key = canonicalDm ? `dm:${cls.agentId}` : cls.kind === "broadcast" ? "broadcast" : c.id;
+      const key = cls.kind === "dm" ? `dm:${cls.agentId}` : cls.kind === "broadcast" ? "broadcast" : ch.channelKey;
       if (seen.has(key)) continue;
       seen.add(key);
-      const title = cls.kind === "dm" && !canonicalDm ? `${cls.title} ⋯` : cls.title;
-      list.push({ key, convId: c.id, ts: c.ts, preview: c.preview, ...cls, title });
+      list.push({ key, convId: ch.convId, ts: ch.ts, preview: ch.preview, ...cls });
     }
     // Rooms with no recent traffic still deserve a row.
     for (const r of S.rooms || []) {
@@ -616,19 +612,20 @@ export default function WireApp() {
       seen.add(r.id);
       list.push({ key: r.id, convId: r.id, ts: r.created_at, preview: "No messages yet", kind: "room", room: r, title: `# ${r.name}` });
     }
-    // Feeds without traffic yet.
+    // Feeds (their own tab; the folder filter keeps them out of All/Agents/Rooms).
     for (const f of S.feeds || []) {
       const fid = `feed-${f.id}`;
-      if (seen.has(fid) || [...seen].some((k) => String(k).startsWith("feed-") && String(k).includes(f.id))) continue;
+      if (seen.has(fid)) continue;
       seen.add(fid);
       list.push({ key: fid, convId: fid, ts: f.last_polled_at || f.created_at || "", preview: "No items yet", kind: "feed", feed: f, title: f.name });
     }
-    // Every agent gets a DM entry even before a thread exists.
+    // Every agent gets a DM row keyed by the PURE channel id — label and target
+    // are the same function of the agent, so the mismatch bug cannot recur.
     for (const a of S.agents) {
       const key = `dm:${a.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      list.push({ key, convId: dmConvFor(a.id), ts: a.last_seen_at || "", preview: "No messages yet", kind: "dm", agentId: a.id, title: a.display_name });
+      list.push({ key, convId: dmChannelKey(fleetId, a.id), ts: a.last_seen_at || "", preview: "No messages yet", kind: "dm", agentId: a.id, title: a.display_name });
     }
     if (!seen.has("broadcast")) {
       list.push({ key: "broadcast", convId: bcastConv, ts: "", preview: "Message every agent at once", kind: "broadcast", title: "Everyone" });
@@ -640,7 +637,7 @@ export default function WireApp() {
       stalled: c.convId ? stalledConvs.has(c.convId) : false,
       unread: Boolean(c.convId && c.ts && c.ts > (lastRead[c.convId] || "") && c.convId !== S.selectedConversationId),
     }));
-  }, [S.conversationList, S.rooms, S.agents, S.feeds, S.attention, pins, lastRead, S.selectedConversationId, dmConvMap, bcastConv, newestDmByAgent]);
+  }, [S.conversationList, S.rooms, S.agents, S.feeds, S.attention, pins, lastRead, S.selectedConversationId, bcastConv, fleetId]);
 
   const chats = useMemo(() => {
     const q = chatSearch.trim().toLowerCase();
@@ -650,7 +647,7 @@ export default function WireApp() {
         if (folder === "agents") return c.kind === "dm";
         if (folder === "rooms") return c.kind === "room" || c.kind === "thread";
         if (folder === "feeds") return c.kind === "feed";
-        return true;
+        return c.kind !== "feed"; // All = everything EXCEPT feeds (own tab)
       })
       .sort((a, b) => Number(b.pinned) - Number(a.pinned) || String(b.ts).localeCompare(String(a.ts)));
   }, [chatsAll, chatSearch, folder]);
@@ -659,9 +656,7 @@ export default function WireApp() {
   const active = useMemo(() => {
     if (S.selectedConversationId) {
       const cls = classify(S.selectedConversationId);
-      const key = cls.kind === "dm"
-        ? (newestDmByAgent.get(cls.agentId) === S.selectedConversationId ? `dm:${cls.agentId}` : S.selectedConversationId)
-        : cls.kind === "broadcast" ? "broadcast" : S.selectedConversationId;
+      const key = cls.kind === "dm" ? `dm:${cls.agentId}` : cls.kind === "broadcast" ? "broadcast" : S.selectedConversationId;
       return { ...cls, key, convId: S.selectedConversationId };
     }
     // No conversation yet: derive from the composer target (fresh DM/broadcast)
@@ -684,10 +679,8 @@ export default function WireApp() {
     if (!S.selectedConversationId) return;
     const cls = classify(S.selectedConversationId);
     if (cls.kind === "room") S.setComposerRecipient(`room:${cls.room.id}`);
-    else if (cls.kind === "dm") {
-      S.setComposerRecipient(cls.agentId);
-      setDmConvMap((m) => (m[cls.agentId] === S.selectedConversationId ? m : { ...m, [cls.agentId]: S.selectedConversationId }));
-    } else if (cls.kind === "broadcast") S.setComposerRecipient("broadcast");
+    else if (cls.kind === "dm") S.setComposerRecipient(cls.agentId);
+    else if (cls.kind === "broadcast") S.setComposerRecipient("broadcast");
     // feeds: leave the recipient (composer is disabled); threads are handled by
     // the thread-target effect below so a stale room/DM target can never leak.
   }, [S.selectedConversationId, S.rooms, S.agents, S.conversationList]);
@@ -756,7 +749,7 @@ export default function WireApp() {
 
   function openDmByAgentId(agentId) {
     const a = S.agents.find((x) => x.id === agentId);
-    openChat({ kind: "dm", agentId, convId: dmConvFor(agentId), title: a?.display_name || agentId });
+    openChat({ kind: "dm", agentId, convId: dmChannelKey(fleetId, agentId), title: a?.display_name || agentId });
     setInfoOpen(false);
   }
 
