@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { config } from "./config";
 import { db } from "./db";
 import { loadLicense, assertFleetCreationAllowed, getLoadedLicense } from "./license";
+import { resolveBootstrapPassword } from "./bootstrap-credentials";
 
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
@@ -140,18 +141,34 @@ function runSetup() {
   }
 
   const email = process.env.EKHO_BOOTSTRAP_EMAIL ?? "admin@example.com";
-  const password = process.env.EKHO_BOOTSTRAP_PASSWORD ?? "changeme123";
-  const bootstrap = db.createBootstrap("default", email, password);
+  // No hardcoded fallback: an unset password is generated, not guessed at.
+  const credential = resolveBootstrapPassword(process.env.EKHO_BOOTSTRAP_PASSWORD);
+  const bootstrap = db.createBootstrap("default", email, credential.password);
   const token = db.issueEnrollmentToken(bootstrap.fleetId, bootstrap.operatorId);
 
   pass("Fleet", `default ${dim(`(${bootstrap.fleetId})`)}`);
   pass("Operator", email);
+  if (credential.generated) {
+    pass("Password", `generated ${dim("(shown once, below)")}`);
+  } else if (credential.warning) {
+    warn("Password", credential.warning);
+  } else {
+    pass("Password", `set from ${dim("EKHO_BOOTSTRAP_PASSWORD")}`);
+  }
   pass("Token", token);
   pass("Relay", config.baseUrl);
+
+  if (credential.generated) {
+    // Shown once and never recoverable — it is stored only as a scrypt hash.
+    console.log(`\n  ${bold(yellow("Save this password now — it will not be shown again:"))}`);
+    console.log(`    ${bold(credential.password)}`);
+    console.log(`    ${dim("Only its scrypt hash is stored; there is no recovery.")}`);
+  }
 
   console.log(`\n  ${bold("Next steps:")}`);
   console.log(`    1. ${dim("Start the relay:")}  npm start`);
   console.log(`    2. ${dim("Open the UI:")}      ${config.baseUrl}/ui/`);
+  console.log(`    3. ${dim("Sign in as:")}       ${email}`);
   console.log("");
 }
 

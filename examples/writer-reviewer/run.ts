@@ -55,7 +55,8 @@ function checkPrereqs() {
   console.error("");
   console.error("  3. Generate a second token via the operator console at");
   console.error(colour.dim("       http://localhost:4000/ui/"));
-  console.error("     (login with admin@example.com / changeme123, then Agents → Enroll Agent),");
+  console.error("     (sign in as admin@example.com with the password `npm run setup` printed,");
+  console.error("      then Agents → Enroll Agent),");
   console.error("     or via the API:");
   console.error(colour.dim("       curl -X POST http://localhost:4000/v1/operator/enrollment-tokens \\"));
   console.error(colour.dim("            -H \"authorization: Bearer <operator_token>\""));

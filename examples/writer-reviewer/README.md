@@ -57,7 +57,8 @@ The whole thing takes under 30 seconds.
    you need two. Get a second token via either:
 
    - **Operator console:** open [http://localhost:4000/ui/](http://localhost:4000/ui/),
-     sign in with `admin@example.com` / `changeme123`, then
+     sign in as `admin@example.com` with the password `npm run setup` printed
+     (it is shown once, at setup time), then
      **Agents → Enroll Agent**, copy the token.
    - **API:**
      ```bash
