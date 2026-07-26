@@ -1,6 +1,7 @@
 import type { EkhoDb } from "./db";
 import { config } from "./config";
 import { fetchFeedUrl } from "./feeds";
+import { loginThrottle } from "./login-throttle";
 
 export function startSweepJob(db: EkhoDb): { stop: () => void } {
   const handle = setInterval(() => {
@@ -35,6 +36,14 @@ export function startSweepJob(db: EkhoDb): { stop: () => void } {
       db.sweepStaleRateLimitCounters();
     } catch (err) {
       console.error("[sweep] rate limit counter cleanup failed:", err);
+    }
+
+    try {
+      // In-memory login failure buckets: drop expired windows so a sustained
+      // spray across many accounts/IPs can't grow the map without bound.
+      loginThrottle.sweep();
+    } catch (err) {
+      console.error("[sweep] login throttle cleanup failed:", err);
     }
 
     try {

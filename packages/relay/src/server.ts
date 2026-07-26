@@ -11,6 +11,7 @@ import { registerHealthRoutes } from "./health";
 import { buildHttpsOptions } from "./tls";
 import { startSweepJob } from "./sweep";
 import { loadLicense, registerExtension } from "./license";
+import { registerSecurityHeaders } from "./security-headers";
 
 async function buildServer() {
   assertOperatorSecret(config.operatorSessionSecret, Boolean(process.env.EKHO_DEV_INSECURE));
@@ -24,6 +25,9 @@ async function buildServer() {
   if (https) {
     app.log.info("TLS enabled — serving HTTPS");
   }
+
+  // Baseline security headers on EVERY response (console, API, errors, 404s).
+  registerSecurityHeaders(app);
 
   // Tolerate an empty body on application/json requests (e.g. a bodyless DELETE
   // that still carries a content-type header) instead of 400-ing on it.

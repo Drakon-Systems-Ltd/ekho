@@ -25,6 +25,9 @@ export const config = {
   // tailnet (via the header tailscale serve injects), optionally a specific user.
   operatorRequireTailnet: (process.env.EKHO_OPERATOR_REQUIRE_TAILNET ?? "") === "1",
   operatorTailnetUser: (process.env.EKHO_OPERATOR_TAILNET_USER ?? "").trim(),
+  // Maximum age of an operator session token. Bounds the damage of a stolen
+  // token, which the console necessarily stores in the browser.
+  operatorSessionTtlSeconds: resolveNumber(process.env.EKHO_OPERATOR_SESSION_TTL_SECONDS, 86_400), // 24h
   timestampSkewSeconds: resolveNumber(process.env.EKHO_TIMESTAMP_SKEW_SECONDS, 300),
   pollIntervalSeconds: resolveNumber(process.env.EKHO_POLL_INTERVAL_SECONDS, 5),
   heartbeatIntervalSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_INTERVAL_SECONDS, 30),

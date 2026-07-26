@@ -32,6 +32,7 @@ export async function createTestRelay() {
   const { registerMetricsRoute } = await import("../src/metrics");
   const { registerHealthRoutes } = await import("../src/health");
   const { sign } = await import("../src/utils");
+  const { issueOperatorSession } = await import("../src/operator-session");
 
   const app = fastify({ logger: false });
   // Mirror production (server.ts): tolerate an empty body on application/json
@@ -52,8 +53,9 @@ export async function createTestRelay() {
   registerMetricsRoute(app);
 
   const { fleetId, operatorId } = db.createBootstrap(fleetName, `admin-${testId}@test.com`, "testpassword1");
-  const tokenCore = `${operatorId}.${fleetId}`;
-  const operatorToken = `${tokenCore}.${sign("test-secret", tokenCore)}`;
+  // Mint through the real issuer so fixtures exercise the same signed, expiring
+  // session format the login route hands out.
+  const operatorToken = issueOperatorSession("test-secret", operatorId, fleetId, Math.floor(Date.now() / 1000));
 
   async function enrollAgent(displayName: string) {
     const enrollmentToken = db.issueEnrollmentToken(fleetId, operatorId);
@@ -107,5 +109,6 @@ export async function createTestRelay() {
     app.close();
   }
 
-  return { app, db, fleetId, operatorId, operatorToken, enrollAgent, agentRequest, operatorRequest, cleanup };
+  // fleetName/operatorEmail are exposed so tests can drive the real login route.
+  return { app, db, fleetId, fleetName, operatorId, operatorEmail: `admin-${testId}@test.com`, operatorToken, enrollAgent, agentRequest, operatorRequest, cleanup };
 }

@@ -8,6 +8,8 @@ import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoo
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
+import { loginThrottle } from "./login-throttle";
+import { issueOperatorSession } from "./operator-session";
 import { sign } from "./utils";
 
 function parsePagination(query: Record<string, unknown>) {
@@ -35,14 +37,30 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const operator = db.authenticateOperator(parsed.data.fleet_name, parsed.data.email, parsed.data.password);
-    if (!operator) {
-      return reply.code(401).send({ error: "invalid credentials" });
+    // Brute-force throttle: check BEFORE spending a scrypt verification, so a
+    // flood of guesses can't also be used as a CPU exhaustion lever.
+    const clientIp = request.ip;
+    const gateDecision = loginThrottle.check(parsed.data.fleet_name, parsed.data.email, clientIp);
+    if (!gateDecision.allowed) {
+      reply.header("Retry-After", String(gateDecision.retryAfterSeconds ?? 60));
+      return reply.code(429).send({ error: "too many failed login attempts" });
     }
 
-    const tokenCore = `${operator.id}.${operator.fleet_id}`;
+    const operator = db.authenticateOperator(parsed.data.fleet_name, parsed.data.email, parsed.data.password);
+    if (!operator) {
+      loginThrottle.recordFailure(parsed.data.fleet_name, parsed.data.email, clientIp);
+      return reply.code(401).send({ error: "invalid credentials" });
+    }
+    loginThrottle.recordSuccess(parsed.data.fleet_name, parsed.data.email);
+
     return reply.send({
-      token: `${tokenCore}.${sign(config.operatorSessionSecret, tokenCore)}`,
+      token: issueOperatorSession(
+        config.operatorSessionSecret,
+        String(operator.id),
+        String(operator.fleet_id),
+        Math.floor(Date.now() / 1000)
+      ),
+      expires_in: config.operatorSessionTtlSeconds,
       fleet_id: operator.fleet_id,
       display_name: (operator as Record<string, unknown>).display_name ?? null
     });

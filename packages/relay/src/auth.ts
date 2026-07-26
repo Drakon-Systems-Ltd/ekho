@@ -3,6 +3,7 @@ import { config } from "./config";
 import { db } from "./db";
 import { hashSecret, sha256, sign, timingSafeEqualStr } from "./utils";
 import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
+import { verifyOperatorSession } from "./operator-session";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -83,21 +84,22 @@ export async function requireOperatorAuth(request: FastifyRequest, reply: Fastif
   }
 
   const token = session.slice("Bearer ".length);
-  const [operatorId, fleetId, signature] = token.split(".");
-  if (!operatorId || !fleetId || !signature) {
-    return unauthorized(reply, "malformed operator session");
-  }
-
-  const expected = sign(config.operatorSessionSecret, `${operatorId}.${fleetId}`);
-  if (!timingSafeEqualStr(expected, signature)) {
-    return unauthorized(reply, "invalid operator session");
+  // Verifies the HMAC AND the token's age — sessions are no longer immortal.
+  const verdict = verifyOperatorSession(
+    config.operatorSessionSecret,
+    token,
+    Math.floor(Date.now() / 1000),
+    config.operatorSessionTtlSeconds
+  );
+  if (!verdict.valid || !verdict.operatorId || !verdict.fleetId) {
+    return unauthorized(reply, verdict.reason ?? "invalid operator session");
   }
 
   // The token asserts (operatorId, fleetId), but authorization must come from the
   // DB — a deleted/reassigned operator's still-valid token must not keep access.
-  if (!db.operatorBelongsToFleet(operatorId, fleetId)) {
+  if (!db.operatorBelongsToFleet(verdict.operatorId, verdict.fleetId)) {
     return unauthorized(reply, "operator not found");
   }
 
-  request.operator = { id: operatorId, fleetId };
+  request.operator = { id: verdict.operatorId, fleetId: verdict.fleetId };
 }
