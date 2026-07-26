@@ -68,13 +68,15 @@ async function buildServer() {
     root: uiRoot,
     prefix: "/ui/",
     cacheControl: false, // we set Cache-Control ourselves below (no-cache for html, immutable for assets)
-    setHeaders: (res, filePath) => {
+    // @fastify/static v10 hands this callback a FastifyReply (v9 passed the raw
+    // ServerResponse), so headers are set with reply.header, not res.setHeader.
+    setHeaders: (reply, filePath) => {
       // index.html must always revalidate so a new build is picked up on reload;
       // hashed assets are content-addressed and safe to cache forever.
       if (filePath.endsWith("index.html")) {
-        res.setHeader("Cache-Control", "no-cache");
+        reply.header("Cache-Control", "no-cache");
       } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        reply.header("Cache-Control", "public, max-age=31536000, immutable");
       }
     }
   });

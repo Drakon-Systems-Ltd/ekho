@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@drakon-systems/ekho-sdk": "*",
-    "@fastify/static": "^9.0.0",
+    "@fastify/static": "^10.1.2",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "better-sqlite3": "^12.8.0",
