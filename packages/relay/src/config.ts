@@ -42,6 +42,12 @@ export const config = {
   rateLimitWindowSeconds: resolveNumber(process.env.EKHO_RATE_LIMIT_WINDOW_SECONDS, 60),
   rateLimitMaxMessages: resolveNumber(process.env.EKHO_RATE_LIMIT_MAX_MESSAGES, 30),
 
+  // Operator login brute-force throttle. Counted per account AND per client IP
+  // on a rolling window; generous for a human who mistypes, punishing for a
+  // guessing loop.
+  loginMaxFailures: resolveNumber(process.env.EKHO_LOGIN_MAX_FAILURES, 10),
+  loginWindowSeconds: resolveNumber(process.env.EKHO_LOGIN_WINDOW_SECONDS, 900), // 15 min
+
   // Conversation floor control (agent turn-taking). The floor auto-releases
   // after floorTtlSeconds so a crashed holder never wedges a conversation; the
   // catch-up tail handed to the floor holder is capped at floorTailLimit.

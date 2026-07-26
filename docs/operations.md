@@ -40,6 +40,11 @@ npm install && npm run build && npm run setup && npm start
 | `EKHO_PORT` | `4000` | Listen port. |
 | `EKHO_DB_PATH` | `./data/ekho.sqlite` | SQLite path. Point at a durable volume. |
 | `EKHO_BASE_URL` | `http://127.0.0.1:4000` | Public URL advertised in A2A agent cards. |
+| `EKHO_OPERATOR_SESSION_TTL_SECONDS` | `86400` | Max age of an operator session token. Bounds how long a stolen token stays usable; operators re-login when it lapses. |
+| `EKHO_LOGIN_MAX_FAILURES` | `10` | Failed operator logins tolerated per account **and** per client IP within the window before `429`. |
+| `EKHO_LOGIN_WINDOW_SECONDS` | `900` | Rolling window for the above. Counters decay rather than latch, and clear on a successful login. |
+| `EKHO_OPERATOR_REQUIRE_TAILNET` | `0` | Set `1` to reject operator requests carrying no Tailscale identity, before credentials are processed. Recommended whenever the console is reachable beyond a private network. |
+| `EKHO_OPERATOR_TAILNET_USER` | — | Optional: restrict operator access to a single Tailscale login. |
 
 A full list lives in [`packages/relay/.env.example`](../packages/relay/.env.example).
 

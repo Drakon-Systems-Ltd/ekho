@@ -21,6 +21,8 @@
 // DB path. Persistence would only matter for forensics, and failures are
 // already recorded as relay events by the caller.
 
+import { config } from "./config";
+
 export interface ThrottleDecision {
   allowed: boolean;
   /** Seconds until the caller may retry — set only when blocked. */
@@ -40,9 +42,10 @@ export interface LoginThrottleOptions {
   windowSeconds: number;
 }
 
+/** Deployment-configurable limits (EKHO_LOGIN_MAX_FAILURES / _WINDOW_SECONDS). */
 export const DEFAULT_LOGIN_THROTTLE: LoginThrottleOptions = {
-  maxFailures: 10,
-  windowSeconds: 900 // 15 minutes
+  maxFailures: config.loginMaxFailures,
+  windowSeconds: config.loginWindowSeconds
 };
 
 /**

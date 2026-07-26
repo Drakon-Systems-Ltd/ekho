@@ -215,6 +215,10 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_OPERATOR_SESSION_SECRET` | — (required) | Operator auth secret. Relay refuses to start without it; `npm run setup` generates one |
 | `EKHO_TLS_CERT_PATH` / `EKHO_TLS_KEY_PATH` | — | Serve HTTPS directly (set both); omit to run behind a TLS proxy |
 | `EKHO_RATE_LIMIT_MAX_MESSAGES` | `30` | Messages per agent per minute |
+| `EKHO_OPERATOR_SESSION_TTL_SECONDS` | `86400` | Max age of an operator session token before re-login is required |
+| `EKHO_LOGIN_MAX_FAILURES` | `10` | Failed operator logins (per account and per IP) before throttling |
+| `EKHO_LOGIN_WINDOW_SECONDS` | `900` | Rolling window over which those failures are counted |
+| `EKHO_OPERATOR_REQUIRE_TAILNET` | `0` | Set `1` to require operator requests to carry a Tailscale identity |
 | `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Heartbeat liveness threshold |
 | `EKHO_LICENSE_KEY` | — | Pro license JWT (optional) |
 
