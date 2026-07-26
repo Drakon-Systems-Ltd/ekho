@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-26
+
+A security release. Upgrading is recommended for every deployment, and required
+for any relay reachable beyond a private network.
+
 ### Security
 - **Baseline HTTP security headers on every response.** The relay previously emitted none, which mattered most for the operator console: a browser app holding a bearer session token, with no CSP to stop an injected script reading it and no frame-ancestors to stop clickjacking. Applied in an `onSend` hook so static assets, error replies and framework 404s are covered too.
   - Two profiles: the console gets `default-src 'self'` plus the Google Fonts origins it genuinely loads, with **`script-src 'self'` and no `'unsafe-inline'`**; every other response gets `default-src 'none'`.
