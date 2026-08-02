@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-02
+
 ### Added
 - **The OpenClaw plugin now has a release path.** It is published to npm as **`@drakon-systems/ekho-openclaw-plugin`** (renamed from the unpublishable `@ekho/openclaw-plugin`) by the release workflow, in lockstep with the relay. Install or upgrade with `npm install -g @drakon-systems/ekho-openclaw-plugin`.
   - Previously the plugin was never published anywhere, so it was deployed by copying `dist/` onto each machine and patching it in place. Every agent in a four-machine fleet reported version `0.2.1` while running `0.3.0` code — a version number that actively misleads is worse than none, and it makes "what is actually deployed?" unanswerable.

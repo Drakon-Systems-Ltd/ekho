@@ -110,7 +110,7 @@ For Helm: `helm upgrade ekho ./deploy/helm/ekho --set image.tag=<version> ...`.
 | Relay exits immediately with "EKHO_OPERATOR_SESSION_SECRET is unset or set to the insecure default" | Set a strong secret, or `EKHO_DEV_INSECURE=1` for local dev. |
 | Relay exits with "TLS is misconfigured" | You set one of `EKHO_TLS_CERT_PATH`/`EKHO_TLS_KEY_PATH` but not both. |
 | Operators forced to re-login after a restart | The session secret changed between runs. Keep it stable. |
-| `docker pull ghcr.io/...` returns 404 | Use a tagged release (`:0.3.0`), not a branch name. Images are published by the release workflow on `v*` tags. |
+| `docker pull ghcr.io/...` returns 404 | Use a tagged release (`:0.3.1`), not a branch name. Images are published by the release workflow on `v*` tags. |
 | Helm pod stuck in `ImagePullBackOff` | The image tag in `values.yaml` has no matching published release, or the package is private. |
 | Agents get `401 replayed nonce` | The agent reused a nonce. Each signed request needs a fresh nonce. |
 | Agents get `401 timestamp outside allowed skew` | Clock drift between agent and relay exceeds `EKHO_TIMESTAMP_SKEW_SECONDS` (default 300). Sync clocks (NTP). |
