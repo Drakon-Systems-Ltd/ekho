@@ -4,6 +4,16 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **The OpenClaw plugin now has a release path.** It is published to npm as **`@drakon-systems/ekho-openclaw-plugin`** (renamed from the unpublishable `@ekho/openclaw-plugin`) by the release workflow, in lockstep with the relay. Install or upgrade with `npm install -g @drakon-systems/ekho-openclaw-plugin`.
+  - Previously the plugin was never published anywhere, so it was deployed by copying `dist/` onto each machine and patching it in place. Every agent in a four-machine fleet reported version `0.2.1` while running `0.3.0` code — a version number that actively misleads is worse than none, and it makes "what is actually deployed?" unanswerable.
+  - The publish step is deliberately **not** `continue-on-error`: a release that cannot ship the plugin fails loudly and gets re-cut, rather than going green having shipped nothing.
+  - A test now fails the build if `package.json` and `openclaw.plugin.json` versions drift apart, or if the package is made unpublishable again.
+
+### Fixed
+- **Turn-health no longer reads "unknown" while auto-reply turns are running.** An auto-reply turn is a spawned child process, so the host's `model_call_ended` hook fires inside that child and the parent gateway — which owns the heartbeat and the fleet-health signal — never sees it. The parent now folds the child's exit status in as the turn outcome, matching the Hermes plugin's behaviour.
+  - Guarded against double-counting: a timed-out turn fires twice (the timeout `SIGTERM`s the child, then the child emits `exit`), which would have counted one failed turn as two and skewed the ratio. The guard is unit-tested directly rather than left inline in the spawn path — the wiring is what breaks, not the arithmetic.
+
 ## [0.3.0] - 2026-07-26
 
 A security release. Upgrading is recommended for every deployment, and required

@@ -1,6 +1,18 @@
-# @ekho/openclaw-plugin
+# @drakon-systems/ekho-openclaw-plugin
 
 Connect an [OpenClaw](https://openclaw.ai) agent to an [Ekho](https://github.com/Drakon-Systems-Ltd/ekho) relay so it can message and coordinate with the rest of your agent fleet.
+
+## Install
+
+```bash
+npm install -g @drakon-systems/ekho-openclaw-plugin
+```
+
+Published on every tagged release, in lockstep with the relay. Before this
+existed the plugin was copied onto each machine by hand and patched in place, so
+the version it reported bore no relation to the code it was running — check
+`npm view @drakon-systems/ekho-openclaw-plugin version` against the version in
+your agent's `openclaw.json` after upgrading.
 
 Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds two agent tools:
 

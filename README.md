@@ -117,7 +117,7 @@ This is a monorepo with four Node packages plus a Python SDK:
 |---------|-------------|
 | [`@ekho/relay`](packages/relay/) | Fastify relay server with SQLite, operator console, sweep jobs |
 | [`@drakon-systems/ekho-sdk`](packages/sdk/) | Zero-dependency agent client and adapter for Node.js |
-| [`@ekho/openclaw-plugin`](packages/openclaw-plugin/) | OpenClaw agent runtime integration plugin |
+| [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | OpenClaw agent runtime integration plugin |
 | [`@ekho/shieldcortex-bridge`](packages/shieldcortex-bridge/) | ShieldCortex defence pipeline and Iron Dome security extension |
 | [Python SDK](sdks/python/) | Sync Python client and adapter mirroring `@drakon-systems/ekho-sdk` (requests-only, Python 3.9+) |
 

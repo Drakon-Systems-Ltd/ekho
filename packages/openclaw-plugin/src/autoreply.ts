@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
+import { noteModelCallEnded } from "./connection.js";
 
 import type { EkhoIdentity } from "./credentials.js";
 import {
@@ -235,6 +236,34 @@ function recordBatch(batch: InboxBatch) {
  * much delegation budget each conversation has left. Called by the loop after
  * it consumes the latch for a batch.
  */
+/**
+ * Report a spawned reply turn's outcome into turn-health, exactly once.
+ *
+ * An auto-reply turn runs as a spawned CHILD process, so the host's
+ * `model_call_ended` hook fires inside that child. The parent gateway — where
+ * the heartbeat and the fleet-health signal live — never sees it, so without
+ * this the board reports "unknown" no matter how many turns actually ran. We
+ * take the child's exit status as the truthful outcome and fold it in here.
+ *
+ * The once-guard matters because a timed-out turn fires twice: the timeout
+ * SIGTERMs the child, and the child then emits `exit`. Without it a single
+ * failed turn would be counted twice and skew the health ratio.
+ *
+ * Extracted from the spawn path so the guard is directly testable — the wiring
+ * is the part that breaks, not the arithmetic.
+ */
+export function createTurnOutcomeReporter(
+  report: (outcome: string, category?: string) => void = noteModelCallEnded
+): (outcome: string, category?: string) => void {
+  let noted = false;
+  return (outcome: string, category?: string) => {
+    if (noted) return;
+    noted = true;
+    // Telemetry must never break a turn.
+    try { report(outcome, category); } catch { /* swallowed on purpose */ }
+  };
+}
+
 export function recordPeerUsage(usedByConversation: Map<string, number>): void {
   const snapshot: Record<string, number> = {};
   for (const [conv, used] of usedByConversation) snapshot[conv] = used;
@@ -814,6 +843,7 @@ async function triggerTurn(
         resolve();
       }
     };
+    const noteOnce = createTurnOutcomeReporter();
     try {
       const child = spawn(node, [entry, "agent", "--agent", agentId, "-m", prompt], {
         stdio: "ignore",
@@ -822,19 +852,24 @@ async function triggerTurn(
       const timer = setTimeout(() => {
         try { child.kill("SIGTERM"); } catch { /* already gone */ }
         log?.warn?.("[ekho-autoreply] turn timed out after 180s");
+        noteOnce("error", "timeout");
         done();
       }, 180_000);
       child.on("exit", (code) => {
         clearTimeout(timer);
+        if (code === 0) noteOnce("completed");
+        else noteOnce("error", `exit_${code ?? "signal"}`);
         log?.info?.(`[ekho-autoreply] turn finished (exit ${code ?? "?"})`);
         done();
       });
       child.on("error", (err) => {
         clearTimeout(timer);
+        noteOnce("error", "spawn_error");
         log?.warn?.(`[ekho-autoreply] turn failed to start: ${String(err)}`);
         done();
       });
     } catch (err) {
+      noteOnce("error", "spawn_error");
       log?.warn?.(`[ekho-autoreply] turn spawn threw: ${String(err)}`);
       done();
     }

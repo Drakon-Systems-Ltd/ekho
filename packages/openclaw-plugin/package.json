@@ -1,5 +1,5 @@
 {
-  "name": "@ekho/openclaw-plugin",
+  "name": "@drakon-systems/ekho-openclaw-plugin",
   "version": "0.3.0",
   "description": "OpenClaw plugin that connects agents to an Ekho relay so they can message and coordinate with the rest of the fleet.",
   "type": "module",
@@ -38,5 +38,8 @@
     "@types/node": "^25.5.0",
     "esbuild": "^0.27.7",
     "typebox": "^1.1.38"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
