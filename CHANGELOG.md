@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-02
+
 ### Fixed
 - **The container image is now built for `linux/arm64` as well as `linux/amd64`.** Every image through 0.3.1 was amd64-only, because the build never specified a platform and inherited the runner's. Ekho is aimed at Tailscale meshes, homelabs and edge nodes — Raspberry Pis, Apple Silicon, Oracle's ARM free tier — so a large share of its intended users could not run the published image at all. Our own relay host is aarch64 and could not have run it either.
   - arm64 is cross-built under QEMU, which is slow here because the Dockerfile compiles `better-sqlite3` from source in both stages; the release job's timeout is raised accordingly. If that proves too slow or flaky, the better fix is a native ARM runner building in parallel with a merged manifest.

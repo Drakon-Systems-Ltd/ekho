@@ -42,7 +42,7 @@ Create a `values.prod.yaml`:
 ```yaml
 image:
   repository: ghcr.io/drakon-systems-ltd/ekho
-  tag: "0.3.1"
+  tag: "0.3.2"
 
 persistence:
   enabled: true
@@ -108,7 +108,7 @@ helm upgrade ekho ./deploy/helm/ekho \
   -n ekho \
   -f values.prod.yaml \
   --reuse-values \
-  --set image.tag=0.3.1
+  --set image.tag=0.3.2
 ```
 
 The StatefulSet rolls pods one at a time, terminating the old pod before
@@ -158,7 +158,7 @@ networked backend.
 | Key | Default | Description |
 |---|---|---|
 | `image.repository` | `ghcr.io/drakon-systems-ltd/ekho` | Container image |
-| `image.tag` | `0.3.1` | Image tag |
+| `image.tag` | `0.3.2` | Image tag |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `replicaCount` | `1` | Must stay 1 — see above |
 | `service.type` | `ClusterIP` | Service type |
