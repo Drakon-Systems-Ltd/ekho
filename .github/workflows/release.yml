@@ -12,7 +12,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 0.3.1 finished in under two minutes, but that was amd64 only. The emulated
+    # arm64 build compiles native modules from source, so the ceiling is raised
+    # to leave real headroom rather than have a release fail at the last step.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -57,6 +60,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Required to cross-build the arm64 image on an amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -75,11 +82,22 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
 
+      # Through 0.3.1 this built only for the runner's own architecture, so the
+      # published image was amd64-only. Ekho targets Tailscale meshes, homelabs
+      # and edge nodes — Raspberry Pis, Apple Silicon, Oracle's ARM free tier —
+      # where arm64 is the common case, not the exception. Our own relay host is
+      # aarch64 and could not have run the image we were publishing.
+      #
+      # arm64 is cross-built under QEMU, which is slow here: the Dockerfile
+      # compiles better-sqlite3 from source in both stages. Hence the raised
+      # job timeout below. If this proves too slow or flaky, the better fix is
+      # a native ARM runner building in parallel and a merged manifest.
       - name: Build and push image
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
