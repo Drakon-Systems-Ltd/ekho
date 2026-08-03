@@ -9,6 +9,10 @@ Only ``register`` touches the Hermes runtime; every other module is importable
 on its own (pure-ish), which is what the test suite relies on.
 """
 
-from .plugin import register
+from ._sdk_path import ensure_sdk_importable as _ensure_sdk_importable
+
+_ensure_sdk_importable()
+
+from .plugin import register  # noqa: E402 — needs the SDK path shim above
 
 __all__ = ["register"]
