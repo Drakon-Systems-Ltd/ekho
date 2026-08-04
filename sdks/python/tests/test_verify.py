@@ -106,9 +106,27 @@ def test_operator_body_tamper():
     assert r.verified is False and r.reason == "body-mismatch"
 
 
+def test_operator_delayed_delivery_within_ttl_is_valid():
+    # The relay can hold a message for its whole TTL (up to 24h) while the
+    # recipient is down; delivery hours later must still verify. Regression for
+    # the 4 Aug 2026 fleet drop: 300s skew silently discarded queued messages.
+    later = datetime(2026, 6, 7, 1, 0, 0, tzinfo=timezone.utc)  # +1h
+    assert _verify(_op_msg(), now=later).verified is True
+    much_later = datetime(2026, 6, 7, 23, 0, 0, tzinfo=timezone.utc)  # +23h
+    assert _verify(_op_msg(), now=much_later).verified is True
+
+
 def test_operator_stale_timestamp():
-    later = datetime(2026, 6, 7, 1, 0, 0, tzinfo=timezone.utc)  # +1h, beyond 5m skew
+    later = datetime(2026, 6, 8, 1, 0, 0, tzinfo=timezone.utc)  # +25h, beyond 24h+300s
     r = _verify(_op_msg(), now=later)
+    assert r.verified is False and r.reason == "stale"
+
+
+def test_operator_future_timestamp_rejected():
+    # sent_at ahead of our clock is clock skew at best, forgery at worst — the
+    # future window stays tight (300s) even though the past window is 24h.
+    earlier = datetime(2026, 6, 6, 23, 45, 0, tzinfo=timezone.utc)  # sent 15m in "future"
+    r = _verify(_op_msg(), now=earlier)
     assert r.verified is False and r.reason == "stale"
 
 

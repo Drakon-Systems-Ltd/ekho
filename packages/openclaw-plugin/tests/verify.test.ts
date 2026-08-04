@@ -86,8 +86,18 @@ describe("verifyInbound — operator", () => {
     m.body = { text: "do evil" };
     expect(verify(m).reason).toBe("body-mismatch");
   });
+  it("delayed delivery within the relay TTL is valid", () => {
+    // The relay holds messages up to 24h while the recipient is down; delivery
+    // hours later must still verify. Regression for the 4 Aug 2026 fleet drop:
+    // 300s skew silently discarded queued messages after restarts/sleep.
+    expect(verify(opMsg(), { now: new Date("2026-06-07T13:00:00Z") }).verified).toBe(true); // +1h
+    expect(verify(opMsg(), { now: new Date("2026-06-08T11:00:00Z") }).verified).toBe(true); // +23h
+  });
   it("stale timestamp", () => {
-    expect(verify(opMsg(), { now: new Date("2026-06-07T13:00:00Z") }).reason).toBe("stale");
+    expect(verify(opMsg(), { now: new Date("2026-06-08T13:00:00Z") }).reason).toBe("stale"); // +25h
+  });
+  it("future timestamp beyond clock skew is rejected", () => {
+    expect(verify(opMsg(), { now: new Date("2026-06-07T11:45:00Z") }).reason).toBe("stale"); // sent 15m ahead
   });
   it("replay", () => {
     expect(verify(opMsg({ nonce: "used" }), { seenNonces: new Set(["used"]) }).reason).toBe("replay");

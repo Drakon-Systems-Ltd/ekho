@@ -11,7 +11,7 @@ export const sendMessageSchema = z.object({
   recipient: recipientSchema,
   message_type: z.enum(["direct", "broadcast", "alert", "handoff", "claim", "complete", "heartbeat", "control"]),
   priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
-  ttl_seconds: z.number().int().positive().max(86400).default(900),
+  ttl_seconds: z.number().int().positive().max(86400).default(86400),
   requires_approval: z.boolean().optional().default(false),
   body: z.record(z.string(), z.unknown()).or(z.object({ text: z.string() }))
     .refine((b) => JSON.stringify(b).length <= 16384, { message: "message body too large (max 16KB)" }),

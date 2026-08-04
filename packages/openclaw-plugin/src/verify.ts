@@ -39,7 +39,18 @@ export interface VerifyOpts {
   seenNonces: Set<string>;
   now: Date;
   maxSkewSeconds?: number;
+  maxFutureSkewSeconds?: number;
 }
+
+// The past-window must cover the relay's max message TTL (86400s) plus delivery
+// slack: the relay legitimately holds a message for its whole TTL while the
+// recipient is down (gateway restart, sleeping laptop), and 300s of "staleness"
+// was silently discarding every signed peer message delivered 5-15+ min late —
+// acked but never waking the recipient. Replay is defended by the nonce burn
+// and the relay's server-side replay_nonces, not by this window. The
+// future-window stays tight: a sent_at ahead of our clock is only clock skew.
+export const MAX_PAST_SKEW_SECONDS = 86400 + 300;
+export const MAX_FUTURE_SKEW_SECONDS = 300;
 
 export function verifyInbound(msg: SignedMessage, opts: VerifyOpts): VerifyResult {
   const isOperator = msg.sender_kind === "operator";
@@ -94,7 +105,13 @@ export function verifyInbound(msg: SignedMessage, opts: VerifyOpts): VerifyResul
 
   const sentAt = Date.parse(String(c.sent_at));
   if (Number.isNaN(sentAt)) return fail("bad-timestamp");
-  if (Math.abs(opts.now.getTime() - sentAt) > (opts.maxSkewSeconds ?? 300) * 1000) return fail("stale");
+  const ageMs = opts.now.getTime() - sentAt;
+  if (
+    ageMs > (opts.maxSkewSeconds ?? MAX_PAST_SKEW_SECONDS) * 1000 ||
+    -ageMs > (opts.maxFutureSkewSeconds ?? MAX_FUTURE_SKEW_SECONDS) * 1000
+  ) {
+    return fail("stale");
+  }
 
   const nonce = c.nonce;
   if (!nonce || opts.seenNonces.has(String(nonce))) return fail("replay");

@@ -34,6 +34,18 @@ def _parse_iso(value: Any) -> datetime:
     return dt
 
 
+# The past-window must cover the relay's max message TTL (86400s) plus delivery
+# slack: the relay legitimately holds a message for its whole TTL while the
+# recipient is down (gateway restart, sleeping laptop), and 300s of "staleness"
+# was silently discarding every signed peer message delivered 5-15+ min late —
+# acked but never waking the recipient. Replay is defended by the nonce burn
+# (below) and the relay's own server-side replay_nonces, not by this window.
+# The future-window stays tight: a sent_at ahead of our clock is only ever
+# clock skew, never queueing delay.
+MAX_PAST_SKEW_SECONDS = 86400 + 300
+MAX_FUTURE_SKEW_SECONDS = 300
+
+
 def verify_inbound(
     msg: InboxMessage,
     *,
@@ -43,7 +55,8 @@ def verify_inbound(
     roster_by_agent: Mapping[str, RosterEntry],
     seen_nonces: AbstractSet[str],
     now: datetime,
-    max_skew_seconds: int = 300,
+    max_skew_seconds: int = MAX_PAST_SKEW_SECONDS,
+    max_future_skew_seconds: int = MAX_FUTURE_SKEW_SECONDS,
 ) -> VerificationResult:
     is_operator = msg.sender_kind == "operator"
     kind = "operator" if is_operator else "peer"
@@ -98,7 +111,8 @@ def verify_inbound(
         sent = _parse_iso(canonical.get("sent_at"))
     except Exception:
         return VerificationResult(False, kind, "bad-timestamp", msg.key_id)
-    if abs((now - sent).total_seconds()) > max_skew_seconds:
+    age = (now - sent).total_seconds()
+    if age > max_skew_seconds or -age > max_future_skew_seconds:
         return VerificationResult(False, kind, "stale", msg.key_id)
 
     nonce = canonical.get("nonce")

@@ -714,7 +714,7 @@ export class EkhoDb {
   }) {
     const messageId = id("msg");
     const createdAt = nowIso();
-    const ttlSeconds = 900;
+    const ttlSeconds = 86400; // survive recipient downtime (sleeping laptop, gateway restart)
     const expiresAt = addSeconds(createdAt, ttlSeconds);
     const senderId = this.ensureOperatorAgent(input.fleetId);
     const senderLabel = this.operatorLabel(input.operatorId);
@@ -945,7 +945,7 @@ export class EkhoDb {
 
     const messageId = id("msg");
     const createdAt = nowIso();
-    const ttlSeconds = 900;
+    const ttlSeconds = 86400; // survive recipient downtime (sleeping laptop, gateway restart)
     const senderId = this.ensureOperatorAgent(fleetId);
     const senderLabel = this.operatorLabel(operatorId);
     const tx = this.db.transaction(() => {
