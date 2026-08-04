@@ -67,7 +67,9 @@ def sanitize_filename(raw: Any) -> str:
 
 def attachments_download_dir() -> str:
     """Absolute scoped dir where ``ekho_inbox`` writes downloaded bytes."""
-    return os.path.join(os.path.expanduser("~"), ".hermes", "ekho", "attachments")
+    from .connection import DEFAULT_CONFIG_DIR
+
+    return os.path.join(DEFAULT_CONFIG_DIR, "attachments")
 
 
 def attachment_local_path(attachment_id: str, filename: str, base_dir: Optional[str] = None) -> str:

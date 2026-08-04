@@ -28,8 +28,34 @@ from .credentials import enroll_or_load, load_or_create_identity, save_identity
 logger = logging.getLogger("ekho_hermes.connection")
 
 # Where saved credentials live. Hermes deploys this plugin under
-# ~/.hermes/plugins/ekho/, so we scope state under ~/.hermes/ekho/.
-DEFAULT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".hermes", "ekho")
+# ~/.hermes/plugins/ekho/. State used to live in ~/.hermes/ekho/, but the
+# gateway runs with cwd ~/.hermes, so a bare importable-named ekho/ dir there
+# satisfies find_spec("ekho") as an empty namespace package and shadows the
+# real SDK the moment the venv copy goes missing (field case: Tars, 2-3 Aug
+# 2026 — silent plugin death). "ekho-state" contains a dash, which can never
+# be a Python module name, so the class of failure is structurally gone.
+DEFAULT_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".hermes", "ekho-state")
+_LEGACY_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".hermes", "ekho")
+
+
+def _migrate_legacy_config_dir() -> None:
+    """One-shot rename of the legacy ~/.hermes/ekho state dir to ekho-state.
+
+    Only fires when the legacy dir exists, the new one doesn't, and the legacy
+    dir really is plugin state (has credentials/identity) — never touches an
+    unrelated dir that merely shares the name.
+    """
+    legacy, target = _LEGACY_CONFIG_DIR, DEFAULT_CONFIG_DIR
+    if os.path.isdir(target) or not os.path.isdir(legacy):
+        return
+    markers = ("credentials.json", "identity.json", ".ekho-credentials.json")
+    if not any(os.path.exists(os.path.join(legacy, m)) for m in markers):
+        return
+    try:
+        os.rename(legacy, target)
+        logger.info("[ekho] migrated state dir %s -> %s", legacy, target)
+    except OSError as exc:
+        logger.warning("[ekho] could not migrate state dir %s: %s", legacy, exc)
 
 
 @dataclass
@@ -229,6 +255,8 @@ def ensure_connected(
         if _connection is not None:
             return _connection
 
+        if config_dir == DEFAULT_CONFIG_DIR:
+            _migrate_legacy_config_dir()
         credentials = enroll_or_load(config, config_dir)
         client = EkhoAgentClient(credentials)
         connection = Connection(client=client, credentials=credentials, config_dir=config_dir)
