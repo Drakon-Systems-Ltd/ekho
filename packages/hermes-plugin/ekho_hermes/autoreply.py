@@ -66,9 +66,25 @@ PEER_RATE_WINDOW_S = 60.0
 # the per-peer rate gate still caps runaway loops, and project-mode rooms can
 # override it per conversation.
 DEFAULT_PEER_TURN_BUDGET = 25
-# Floor TTL covers a max-length turn (~180s) + margin; the relay auto-releases on
-# expiry so a crashed holder never wedges a conversation.
-FLOOR_TTL_SECONDS = 240
+
+
+def _turn_timeout_s() -> float:
+    """Reply-turn kill timeout. 180s only fitted trivial acks — real handoffs
+    (read files, run tools, think) routinely need minutes, and a killed turn is
+    a silently consumed message: acked, no reply, work lost (observed live
+    4 Aug 2026, OpenClaw side, exit 143 at 180s). Env-overridable per box."""
+    try:
+        raw = float(os.environ.get("EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS", ""))
+    except ValueError:
+        return 900.0
+    return raw if raw >= 60 else 900.0
+
+
+TURN_TIMEOUT_S = _turn_timeout_s()
+# The floor must outlive the longest turn or a teammate barges in mid-reply;
+# the relay auto-releases on expiry so a crashed holder never wedges a
+# conversation.
+FLOOR_TTL_SECONDS = int(TURN_TIMEOUT_S) + 60
 PEER_LATCH_CONVERSATION_CAP = 500  # FIFO-evicted per-conversation counter map
 
 # Deferred-retry: a conversation whose floor another agent held is retried on
@@ -82,7 +98,6 @@ DEFERRED_MESSAGES_PER_CONV = 10  # keep the newest N messages per stash
 SEEN_CAP = 500  # FIFO-evicted dedupe set
 LAST_BATCH_CAP = 25  # ring exposed to ekho_inbox
 
-TURN_TIMEOUT_S = 180.0
 DEFAULT_POLL_INTERVAL_S = 5.0
 
 # The one-shot CLI entry: `python -m hermes_cli.main -z "<prompt>"`.

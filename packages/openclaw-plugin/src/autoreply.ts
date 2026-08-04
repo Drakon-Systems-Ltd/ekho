@@ -150,7 +150,17 @@ const PEER_RATE_WINDOW_MS = 60_000;
 // the per-peer rate gate still caps runaway loops, and project-mode rooms can
 // override it per conversation.
 export const DEFAULT_PEER_TURN_BUDGET = 25;
-const FLOOR_TTL_SECONDS = 240; // covers a max-length turn (~180s) + margin; relay auto-releases on expiry
+// A spawned reply turn gets this long before SIGTERM. 180s only fitted trivial
+// acks — real handoffs (read files, run tools, think) routinely need minutes,
+// and a killed turn is a silently consumed message: acked, no reply, work
+// lost (observed live 4 Aug 2026 on the Jarvis box: exit 143 at 180s while
+// handling a 5-message batch). Env-overridable per box.
+const TURN_TIMEOUT_SECONDS = (() => {
+  const raw = Number(process.env.EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS);
+  return Number.isFinite(raw) && raw >= 60 ? raw : 900;
+})();
+// The floor must outlive the longest turn or a teammate barges in mid-reply.
+const FLOOR_TTL_SECONDS = TURN_TIMEOUT_SECONDS + 60; // relay auto-releases on expiry
 const PEER_LATCH_CONVERSATION_CAP = 500; // FIFO-evicted per-conversation counter map
 
 // Deferred-retry: a conversation whose floor another agent held is retried on
@@ -851,10 +861,10 @@ async function triggerTurn(
       });
       const timer = setTimeout(() => {
         try { child.kill("SIGTERM"); } catch { /* already gone */ }
-        log?.warn?.("[ekho-autoreply] turn timed out after 180s");
+        log?.warn?.(`[ekho-autoreply] turn timed out after ${TURN_TIMEOUT_SECONDS}s`);
         noteOnce("error", "timeout");
         done();
-      }, 180_000);
+      }, TURN_TIMEOUT_SECONDS * 1000);
       child.on("exit", (code) => {
         clearTimeout(timer);
         if (code === 0) noteOnce("completed");
