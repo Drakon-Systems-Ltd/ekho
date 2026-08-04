@@ -63,3 +63,55 @@ describe("auto-quarantine attributes control actions to a real operator", () => 
     expect(row.status).toBe("quarantined");
   });
 });
+
+// Quarantine controls are inserted with expires_at = NULL and the agent inbox
+// serves every unexpired control on every poll — so an agent that had EVER been
+// auto-quarantined carried stale "quarantine" controls forever (observed live:
+// Jarvis polling two quarantine controls weeks after recovering). Restoring an
+// agent must retire the controls that announced the state it left.
+describe("stale quarantine controls are retired on restore", () => {
+  it("heartbeat-resume expires the agent's standing quarantine controls", async () => {
+    const relay = await createTestRelay();
+    const { agent_id } = await relay.enrollAgent("SleepyBot");
+    const stale = new Date(Date.now() - 30_000).toISOString();
+    relay.db.raw().prepare("UPDATE agents SET status = 'healthy', last_seen_at = ? WHERE id = ?").run(stale, agent_id);
+    relay.db.sweepHeartbeatLiveness();
+
+    const pending = () =>
+      relay.db.raw().prepare(
+        "SELECT COUNT(*) AS n FROM control_actions WHERE target_id = ? AND action = 'quarantine' AND (expires_at IS NULL OR expires_at > ?)"
+      ).get(agent_id, new Date().toISOString()) as { n: number };
+    expect(pending().n).toBeGreaterThanOrEqual(1);
+
+    relay.db.insertHeartbeat(agent_id, "healthy", {});
+
+    expect(pending().n).toBe(0);
+    const row = relay.db.raw().prepare("SELECT status FROM agents WHERE id = ?").get(agent_id) as { status: string };
+    expect(row.status).toBe("healthy");
+  });
+
+  it("operator resume expires pause/quarantine controls and its own control gets a TTL", async () => {
+    const relay = await createTestRelay();
+    const { agent_id, fleet_id, operator_id } = await relay.enrollAgentWithMeta
+      ? await relay.enrollAgentWithMeta("PausedBot")
+      : { ...(await relay.enrollAgent("PausedBot")), fleet_id: undefined, operator_id: undefined } as any;
+    const db = relay.db.raw();
+    const agentRow = db.prepare("SELECT fleet_id FROM agents WHERE id = ?").get(agent_id) as { fleet_id: string };
+    const opRow = db.prepare("SELECT id FROM operators WHERE fleet_id = ? LIMIT 1").get(agentRow.fleet_id) as { id: string } | undefined;
+    const fleetId = fleet_id ?? agentRow.fleet_id;
+    const operatorId = operator_id ?? opRow?.id ?? relay.db.ensureSystemOperator(fleetId);
+
+    relay.db.controlAgent(fleetId, agent_id, operatorId, "quarantine", { reason: "test" });
+    relay.db.controlAgent(fleetId, agent_id, operatorId, "resume", { reason: "test-over" });
+
+    const standing = db.prepare(
+      "SELECT action FROM control_actions WHERE target_id = ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at"
+    ).all(agent_id, new Date().toISOString()) as Array<{ action: string }>;
+    // Only the resume survives, and it carries a TTL rather than NULL.
+    expect(standing.map((r) => r.action)).toEqual(["resume"]);
+    const resumeRow = db.prepare(
+      "SELECT expires_at FROM control_actions WHERE target_id = ? AND action = 'resume'"
+    ).get(agent_id) as { expires_at: string | null };
+    expect(resumeRow.expires_at).not.toBeNull();
+  });
+});

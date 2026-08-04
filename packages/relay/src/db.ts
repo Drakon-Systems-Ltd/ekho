@@ -1414,6 +1414,15 @@ export class EkhoDb {
         this.db.prepare(
           "UPDATE agents SET status = ?, last_seen_at = ?, consecutive_missed_heartbeats = 0, auto_quarantined_at = NULL, quarantine_reason = NULL WHERE id = ?"
         ).run(newStatus, receivedAt, agentId);
+        // Retire the quarantine control(s) that announced the state we just
+        // left. They are inserted with expires_at = NULL, and the inbox serves
+        // every unexpired control on every poll — without this, an agent that
+        // was ever quarantined carries stale "quarantine" controls forever
+        // (and would re-quarantine itself the day a plugin starts honouring
+        // them).
+        this.db.prepare(
+          "UPDATE control_actions SET expires_at = ? WHERE target_kind = 'agent' AND target_id = ? AND action = 'quarantine' AND (expires_at IS NULL OR expires_at > ?)"
+        ).run(receivedAt, agentId, receivedAt);
         this.recordEvent(String(agent.fleet_id), "agent.auto_unquarantined", "system", null, "agent", agentId, null, { reason: "heartbeat_resumed" });
       } else {
         this.db.prepare(
@@ -1511,9 +1520,19 @@ export class EkhoDb {
     const controlId = id("ctl");
     const now = nowIso();
     const tx = this.db.transaction(() => {
+      // A resume supersedes any standing pause/quarantine controls — expire
+      // them so the inbox stops re-serving a state the agent has left.
+      if (action === "resume") {
+        this.db.prepare(
+          "UPDATE control_actions SET expires_at = ? WHERE target_kind = 'agent' AND target_id = ? AND action IN ('pause', 'quarantine') AND (expires_at IS NULL OR expires_at > ?)"
+        ).run(now, agentId, now);
+      }
+      // A resume is a transition signal, not standing state — give it a short
+      // TTL instead of serving it on every poll forever.
+      const expiresAt = action === "resume" ? addSeconds(now, 3600) : null;
       this.db.prepare(
-        "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-      ).run(controlId, fleetId, "agent", agentId, action, JSON.stringify(payload), operatorId, now);
+        "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(controlId, fleetId, "agent", agentId, action, JSON.stringify(payload), operatorId, now, expiresAt);
       this.db.prepare("UPDATE agents SET status = ? WHERE id = ? AND fleet_id = ?").run(nextStatus, agentId, fleetId);
       this.recordEvent(fleetId, `agent.${action}`, "operator", operatorId, "agent", agentId, null, payload);
     });
