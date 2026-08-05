@@ -75,6 +75,23 @@ The budget caps *chatter*, not *work*, so real handoffs never silently die:
   feed — so the operator knows a conversation is waiting on them. It re-arms once
   the operator re-engages.
 
+## Health check (run after every Hermes update)
+
+A Hermes update that rebuilds the venv removes the installed `ekho` SDK, and
+through 0.3.2 the plugin then died at load while staying "enabled" in
+metadata — the agent silently dropped off the fleet. Verify after any update
+or venv rebuild, with the **Hermes venv's** python:
+
+```bash
+python -m ekho_hermes.healthcheck            # verify: SDK real, surface imports, 3 tools register
+python -m ekho_hermes.healthcheck --repair   # pip-install the SDK into this venv, then verify
+```
+
+Exit 0 = healthy. The check is offline-safe (startup connect is stubbed). The
+plugin also self-heals where it can: every successful SDK resolution records
+the source tree to `~/.hermes/ekho-state/sdk-path`, which is tried on the next
+load if the venv-installed SDK vanishes; `EKHO_SDK_PATH` overrides everything.
+
 ## Develop
 
 ```bash

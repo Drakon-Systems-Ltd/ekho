@@ -28,6 +28,9 @@ ensure_sdk_importable = _shim.ensure_sdk_importable
 
 def _run(payload: str, cwd: Path, env_extra: dict) -> subprocess.CompletedProcess:
     env = dict(os.environ)
+    # The shim records its last-good SDK path under ~/.hermes/ekho-state;
+    # pin HOME inside the test dir so tests never touch the real home.
+    env["HOME"] = str(cwd)
     env.update(env_extra)
     return subprocess.run(
         [sys.executable, "-c", _LOAD_SHIM + textwrap.dedent(payload)],
@@ -120,6 +123,127 @@ def test_missing_sdk_and_no_checkout_is_a_quiet_noop(tmp_path):
         payload,
         cwd=tmp_path,
         env_extra={"EKHO_SDK_PATH": str(tmp_path / "nope")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_recorded_path_survives_venv_wipe(tmp_path):
+    """A previously recorded SDK source tree (~/.hermes/ekho-state/sdk-path)
+    must restore importability with no env var and no install — the durable
+    path across Hermes venv rebuilds."""
+    sdk_root = tmp_path / "checkout" / "sdks" / "python"
+    (sdk_root / "ekho").mkdir(parents=True)
+    (sdk_root / "ekho" / "__init__.py").write_text("SENTINEL = 'recorded'\n")
+    record = tmp_path / ".hermes" / "ekho-state" / "sdk-path"
+    record.parent.mkdir(parents=True)
+    record.write_text(str(sdk_root) + "\n")
+
+    payload = """
+        ensure_sdk_importable()
+        import ekho
+        assert getattr(ekho, "SENTINEL", None) == "recorded", repr(ekho)
+        print("OK")
+        """
+    result = _run(payload, cwd=tmp_path, env_extra={})
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_successful_resolution_is_recorded(tmp_path):
+    """Resolving via EKHO_SDK_PATH must persist the tree to the record file so
+    later loads survive without the env var."""
+    sdk_root = tmp_path / "sdk"
+    (sdk_root / "ekho").mkdir(parents=True)
+    (sdk_root / "ekho" / "__init__.py").write_text("SENTINEL = 'real-sdk'\n")
+
+    payload = """
+        ensure_sdk_importable()
+        import ekho
+        print("OK")
+        """
+    result = _run(payload, cwd=tmp_path, env_extra={"EKHO_SDK_PATH": str(sdk_root)})
+    assert result.returncode == 0, result.stderr
+    record = tmp_path / ".hermes" / "ekho-state" / "sdk-path"
+    assert record.read_text().strip() == str(sdk_root)
+
+
+def test_plugin_repo_checkout_is_a_candidate(tmp_path):
+    """A shim living at <repo>/packages/hermes-plugin/ekho_hermes must find
+    <repo>/sdks/python with no env var and no record — covers editable
+    installs straight from a checkout."""
+    import shutil
+
+    repo = tmp_path / "repo"
+    pkg_dir = repo / "packages" / "hermes-plugin" / "ekho_hermes"
+    pkg_dir.mkdir(parents=True)
+    shutil.copy(SHIM_PATH, pkg_dir / "_sdk_path.py")
+    sdk_root = repo / "sdks" / "python"
+    (sdk_root / "ekho").mkdir(parents=True)
+    (sdk_root / "ekho" / "__init__.py").write_text("SENTINEL = 'repo-relative'\n")
+
+    load_copied = f"""
+import importlib.util
+_spec = importlib.util.spec_from_file_location("sdk_path_under_test", {str(pkg_dir / "_sdk_path.py")!r})
+_shim = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_shim)
+ensure_sdk_importable = _shim.ensure_sdk_importable
+"""
+    payload = textwrap.dedent(
+        """
+        assert ensure_sdk_importable() is True
+        import ekho
+        assert getattr(ekho, "SENTINEL", None) == "repo-relative", repr(ekho)
+        print("OK")
+        """
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-c", load_copied + payload],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_unresolvable_returns_false(tmp_path):
+    """With no SDK anywhere reachable (shim copied outside the real repo so the
+    repo-relative candidate is dead too), the shim reports failure via its
+    return value — the loud-failure signal for __init__."""
+    import shutil
+
+    lone_dir = tmp_path / "isolated" / "pkg"
+    lone_dir.mkdir(parents=True)
+    shutil.copy(SHIM_PATH, lone_dir / "_sdk_path.py")
+
+    load_copied = f"""
+import importlib.util
+_spec = importlib.util.spec_from_file_location("sdk_path_under_test", {str(lone_dir / "_sdk_path.py")!r})
+_shim = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_shim)
+ensure_sdk_importable = _shim.ensure_sdk_importable
+"""
+    payload = textwrap.dedent(
+        """
+        assert ensure_sdk_importable() is False
+        print("OK")
+        """
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path)
+    env["EKHO_SDK_PATH"] = str(tmp_path / "nope")
+    result = subprocess.run(
+        [sys.executable, "-c", load_copied + payload],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout

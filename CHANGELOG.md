@@ -4,6 +4,14 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **The Hermes plugin now survives Hermes venv rebuilds losing its Python SDK — and fails loudly when it can't.** A Hermes update that rebuilds the venv silently removes the installed `ekho` SDK; the plugin then dies at load while staying "enabled" in metadata, so the agent drops off the fleet with zero journal signal (field cases: Tars 2 Aug, Vision 29 Jul–5 Aug 2026 — Vision was dark for a week).
+  - The SDK-path shim now tries, in order: `EKHO_SDK_PATH`, the last source tree that successfully resolved (persisted to `~/.hermes/ekho-state/sdk-path` on every good load, including editable installs — this is what makes a venv wipe recoverable), the repo checkout the plugin itself lives in, and `~/ekho/sdks/python`. Trees inside `site-packages` are never recorded, since they die with the venv.
+  - If the SDK still can't be resolved, the plugin no longer fails silently: package import logs an ERROR (Hermes' loader swallows anything quieter) and writes the remediation to stderr before raising.
+
+### Added
+- **`python -m ekho_hermes.healthcheck [--repair]`** — post-update health check for the Hermes plugin. Verifies with evidence, not metadata: the `ekho` SDK resolves to a real package (not a bare-directory namespace phantom), the SDK surface the plugin needs imports, and `register()` wires all three tools (`ekho_send`/`ekho_open_room`/`ekho_inbox`) — captured on a stub runtime with the startup connect stubbed, so it is safe offline. `--repair` pip-installs the first discoverable SDK source tree (editable) into the invoking interpreter and re-verifies. Run it with the Hermes venv's python after every Hermes update or venv rebuild.
+
 ## [0.3.2] - 2026-08-02
 
 ### Fixed
