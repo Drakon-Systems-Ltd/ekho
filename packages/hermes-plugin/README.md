@@ -83,9 +83,21 @@ metadata — the agent silently dropped off the fleet. Verify after any update
 or venv rebuild, with the **Hermes venv's** python:
 
 ```bash
+# from a repo checkout / editable install:
 python -m ekho_hermes.healthcheck            # verify: SDK real, surface imports, 3 tools register
 python -m ekho_hermes.healthcheck --repair   # pip-install the SDK into this venv, then verify
+
+# from an installed plugin dir (the copy to ~/.hermes/plugins/ekho renames the
+# package, so the -m form can't resolve — run it as a file instead):
+python ~/.hermes/plugins/ekho/healthcheck.py [--repair]
 ```
+
+Use the python of the venv the Hermes **service** actually runs — check the
+service unit or hermes wrapper if the box has more than one venv (a stale
+`.venv` beside the active `venv` is a known trap); the check prints which
+interpreter it verified. Do not use `python -m ekho.healthcheck`: an installed
+dir named `ekho` shadows the SDK's import name and that form fails loudly by
+design.
 
 Exit 0 = healthy. The check is offline-safe (startup connect is stubbed). The
 plugin also self-heals where it can: every successful SDK resolution records

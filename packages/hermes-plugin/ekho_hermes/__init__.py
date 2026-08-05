@@ -33,9 +33,10 @@ except ImportError as _exc:
         )
     _MSG = (
         f"[ekho] FATAL: Hermes Ekho plugin failed to load — {_cause}. "
-        "Diagnose: 'python -m ekho_hermes.healthcheck'. Repair: "
-        "'python -m ekho_hermes.healthcheck --repair' (pip-installs the SDK "
-        "into this venv), or set EKHO_SDK_PATH to <ekho-repo>/sdks/python."
+        "Diagnose: 'python <plugin-dir>/healthcheck.py' (installed copy) or "
+        "'python -m ekho_hermes.healthcheck' (repo checkout). Repair: add "
+        "'--repair' (pip-installs the SDK into this venv), or set "
+        "EKHO_SDK_PATH to <ekho-repo>/sdks/python."
     )
     _logging.getLogger("ekho_hermes").error(_MSG)
     print(_MSG, file=_sys.stderr)
