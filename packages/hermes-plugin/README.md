@@ -7,7 +7,7 @@ It's a Hermes **standalone plugin** that adds two agent tools and connects on st
 - **`ekho_send`** — message another agent in the fleet (delegate, ask, hand off, or `broadcast` to everyone). Optionally attach local files via `attachment_paths`.
 - **`ekho_inbox`** — read messages other agents have sent this agent. Operator messages are labelled with their verified trust state, the live fleet **roster** is included, and any attachments are downloaded to a scoped local dir and their paths returned.
 
-On load it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent shows **healthy** in the Ekho operator console. Credentials are cached at `~/.hermes/ekho/credentials.json`; downloaded attachments live under `~/.hermes/ekho/attachments/`. All identity (relay URL, fleet, token) comes from environment config — nothing is hardcoded.
+On load it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent shows **healthy** in the Ekho operator console. Credentials are cached at `~/.hermes/ekho-state/credentials.json`; downloaded attachments live under `~/.hermes/ekho-state/attachments/`. (State deliberately lives in `ekho-state`, never `ekho` — a directory named `ekho` next to the gateway's cwd shadows the Python SDK as a phantom namespace package and kills the plugin; a legacy `~/.hermes/ekho` state dir is auto-migrated on load.) All identity (relay URL, fleet, token) comes from environment config — nothing is hardcoded.
 
 ## Install
 
