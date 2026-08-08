@@ -24,6 +24,8 @@ without Hermes or a real relay present.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import os
 import subprocess
@@ -420,6 +422,105 @@ def apply_peer_rate_gate(
             PEER_RATE_WINDOW_S,
         )
     return kept
+
+
+# --- Verification dead-letter ------------------------------------------------
+#
+# The tick acks every delivered batch wholesale (at-most-once consumption), so
+# a signed message rejected by the signature gate has no redelivery path:
+# without a record it is acked, binned, and unrecoverable — while the sender
+# believes it was received. That silent bin is how the fleet's unendorsed
+# operator-key drops stayed undiagnosed (Aug 2026). Every reject is logged at
+# warning AND appended as JSONL beside the plugin's other state.
+
+DEAD_LETTER_FILE = "dead-letter.jsonl"
+_DEAD_LETTER_MAX_BYTES = 5 * 1024 * 1024
+
+
+def collect_verification_rejects(
+    messages: Sequence[Any],
+    verifications: Dict[Any, Any],
+    self_agent_id: str,
+) -> List[tuple]:
+    """(message, verdict) pairs for signed messages that FAILED verification.
+    Unsigned messages are not rejects — they take the graceful relay-attested
+    fallback in ``should_autowake``."""
+    rejects: List[tuple] = []
+    for m in messages:
+        message_id = getattr(m, "message_id", None)
+        if not message_id:
+            continue
+        if getattr(m, "sender_agent_id", None) == self_agent_id:
+            continue
+        v = verifications.get(message_id)
+        if v is None or getattr(v, "verified", False):
+            continue
+        is_operator = getattr(m, "sender_kind", None) == "operator"
+        signed = bool(
+            getattr(m, "operator_sig", None) if is_operator else getattr(m, "agent_sig", None)
+        )
+        if not signed:
+            continue
+        rejects.append((m, v))
+    return rejects
+
+
+def _message_snapshot(msg: Any) -> Any:
+    """Best-effort JSON-serializable copy of an inbox message."""
+    try:
+        if dataclasses.is_dataclass(msg) and not isinstance(msg, type):
+            return dataclasses.asdict(msg)
+    except Exception:  # noqa: BLE001 — snapshotting must never raise
+        pass
+    d = getattr(msg, "__dict__", None)
+    if isinstance(d, dict):
+        try:
+            json.dumps(d)
+            return d
+        except (TypeError, ValueError):
+            return {k: repr(v) for k, v in d.items()}
+    return repr(msg)
+
+
+def default_dead_letter_path() -> str:
+    # Imported lazily: connection imports this module at load time.
+    from .connection import DEFAULT_CONFIG_DIR
+
+    return os.path.join(DEFAULT_CONFIG_DIR, DEAD_LETTER_FILE)
+
+
+def append_dead_letters(
+    rejects: Sequence[tuple],
+    path: Optional[str] = None,
+    now_iso: Optional[str] = None,
+) -> None:
+    """Append one JSONL record per (message, verdict) reject. A single rotation
+    at the size cap keeps the file bounded with the freshest evidence current."""
+    if not rejects:
+        return
+    target = path or default_dead_letter_path()
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    try:
+        if os.path.getsize(target) > _DEAD_LETTER_MAX_BYTES:
+            os.replace(target, target + ".1")
+    except OSError:
+        pass  # no existing file — nothing to rotate
+    stamp = now_iso or iso_now()
+    lines = []
+    for m, v in rejects:
+        lines.append(
+            json.dumps(
+                {
+                    "rejected_at": stamp,
+                    "reason": getattr(v, "reason", None),
+                    "kind": getattr(v, "kind", None),
+                    "key_id": getattr(v, "key_id", None),
+                    "message": _message_snapshot(m),
+                }
+            )
+        )
+    with open(target, "a", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 # --- Prompt + command construction -----------------------------------------
@@ -924,6 +1025,7 @@ def process_inbox_once(
     identity_obj: Any = None,
     on_identity_changed: Optional[Callable[[Any], None]] = None,
     wall_now: Optional[datetime] = None,
+    dead_letter_path: Optional[str] = None,
 ) -> Dict[str, int]:
     """One poll cycle: read + cache the inbox, ack the whole batch (real or not)
     BEFORE any turn (at-most-once), and on a qualifying message wake the agent.
@@ -974,6 +1076,25 @@ def process_inbox_once(
             now=wall_now or datetime.now(timezone.utc),
         )
         record_verifications(verifications)
+
+        # Signed-but-invalid = about to be acked and binned. Never silent: log
+        # the reason and dead-letter the message so it stays diagnosable.
+        rejects = collect_verification_rejects(messages, verifications, self_agent_id)
+        for m, v in rejects:
+            log.warning(
+                "[ekho-autoreply] verification FAILED for message %s from %s/%s "
+                "key=%s reason=%s — dead-lettered, not acted on",
+                getattr(m, "message_id", "?"),
+                getattr(m, "sender_kind", "?"),
+                getattr(m, "sender_agent_id", "?"),
+                getattr(v, "key_id", None) or "?",
+                getattr(v, "reason", None) or "?",
+            )
+        if rejects:
+            try:
+                append_dead_letters(rejects, path=dead_letter_path)
+            except Exception as exc:  # noqa: BLE001 — the sink must never break the tick
+                log.warning("[ekho-autoreply] dead-letter write failed: %s", exc)
 
     # The console is the live source of truth for delegation: when the relay
     # surfaces peer_autoreply / peer_turn_budget, they override the bootstrap

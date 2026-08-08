@@ -12,6 +12,7 @@ import {
 } from "./credentials.js";
 import { fromB64url, keyId as deriveKeyId } from "./identity.js";
 import { startAutoReply } from "./autoreply.js";
+import { appendDeadLetters } from "./dead-letter.js";
 
 export interface EkhoPluginConfig {
   relayBaseUrl: string;
@@ -385,6 +386,19 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     identity: identity ?? undefined,
     onIdentityChanged: (id) => {
       if (identityConfigDir) saveIdentity(identityConfigDir, id);
+    },
+    onVerificationReject: (rejects) => {
+      if (!identityConfigDir) return;
+      appendDeadLetters(
+        identityConfigDir,
+        rejects.map((r) => ({
+          rejected_at: new Date().toISOString(),
+          reason: r.verdict.reason,
+          kind: r.verdict.kind,
+          key_id: r.verdict.keyId,
+          message: r.message
+        }))
+      );
     }
   });
 }

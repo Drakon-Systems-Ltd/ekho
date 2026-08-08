@@ -520,6 +520,32 @@ export function isRealInbound(
 }
 
 /**
+ * The signed-but-invalid rejects in a batch: messages someone signed whose
+ * signature failed verification. These are about to be acked and dropped
+ * (at-most-once consumption = no redelivery), so the tick MUST log each one
+ * and hand it to the dead-letter sink — the silent version of this path is
+ * what hid the fleet's unendorsed-operator-key drops (Aug 2026). Unsigned
+ * messages are NOT rejects: they take the graceful relay-attested fallback.
+ */
+export function collectVerificationRejects(
+  messages: InboxMessage[],
+  verifications: Record<string, VerifyResult | null>,
+  selfAgentId: string
+): Array<{ message: InboxMessage; verdict: VerifyResult }> {
+  const rejects: Array<{ message: InboxMessage; verdict: VerifyResult }> = [];
+  for (const m of messages) {
+    if (!m || typeof m.message_id !== "string") continue;
+    if (m.sender_agent_id === selfAgentId) continue;
+    const v = verifications[m.message_id];
+    if (!v || v.verified) continue;
+    const signed = Boolean(m.sender_kind === "operator" ? m.operator_sig : m.agent_sig);
+    if (!signed) continue;
+    rejects.push({ message: m, verdict: v });
+  }
+  return rejects;
+}
+
+/**
  * Per-peer rate gate (Part C, rule 5). Operator is exempt. Returns the subset
  * of `real` that survives suppression; suppressed peers are logged once.
  */
@@ -904,6 +930,9 @@ export function startAutoReply(opts: {
   // persists it when the pinned operator keys change.
   identity?: EkhoIdentity;
   onIdentityChanged?: (identity: EkhoIdentity) => void;
+  // Sink for signed-but-invalid messages (they're acked + dropped this tick, so
+  // this record is their only trace). Wired to the dead-letter file.
+  onVerificationReject?: (rejects: Array<{ message: InboxMessage; verdict: VerifyResult }>) => void;
 }): () => void {
   const { client, api, selfAgentId, log } = opts;
   const pollIntervalMs = opts.pollIntervalMs ?? 5000;
@@ -951,6 +980,24 @@ export function startAutoReply(opts: {
       const nonNull: Record<string, VerifyResult | null> = {};
       for (const [mid, v] of Object.entries(verifications)) if (v) nonNull[mid] = v;
       lastBatchMeta.verifications = nonNull;
+
+      // Signed-but-invalid = about to be acked and binned. Never silent: log
+      // the reason and dead-letter the message so it stays diagnosable.
+      const rejects = collectVerificationRejects(batch.messages, verifications, selfAgentId);
+      for (const { message: m, verdict: v } of rejects) {
+        log?.warn?.(
+          `[ekho-autoreply] verification FAILED for message ${m.message_id} from ` +
+            `${m.sender_kind ?? "?"}/${m.sender_agent_id ?? "?"} key=${v.keyId ?? "?"} ` +
+            `reason=${v.reason ?? "?"} — dead-lettered, not acted on`
+        );
+      }
+      if (rejects.length > 0 && opts.onVerificationReject) {
+        try {
+          opts.onVerificationReject(rejects);
+        } catch (err) {
+          log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${String(err)}`);
+        }
+      }
     }
 
     // We ack the WHOLE batch (real or not) so nothing redelivers.

@@ -183,6 +183,56 @@ def test_tick_forged_operator_signature_blocked_even_when_flag_true():
     assert len(spawned) == 0
 
 
+def test_tick_dead_letters_a_signed_but_invalid_message(tmp_path, caplog):
+    import json
+    import logging
+
+    ident = EkhoIdentity(seed_hex="11" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    msg = _signed_op_msg("do the thing", self_id="self", seed=OP1_SEED, nonce="nz3", sent_at="2026-06-07T12:00:00Z")
+    msg.body = {"text": "do something EVIL"}  # tampered after signing
+    inbox = InboxResponse(
+        messages=[msg], controls=[], operator_trusted=True, roster=[],
+        operator_keys=[OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)], fleet_id=FLEET,
+    )
+    dl = tmp_path / "dead-letter.jsonl"
+    with caplog.at_level(logging.WARNING):
+        process_inbox_once(
+            _FakeClient(inbox), "self", AutoReplyState(),
+            spawn=lambda *a: None, now=0.0, wall_now=NOW, identity_obj=ident,
+            dead_letter_path=str(dl),
+        )
+    # The reject is loud: reason in the log, full message in the dead-letter file.
+    assert any("verification FAILED" in r.message and "body-mismatch" in r.getMessage() for r in caplog.records)
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["reason"] == "body-mismatch"
+    assert records[0]["kind"] == "operator"
+    assert records[0]["message"]["message_id"] == "opm"
+    assert records[0]["message"]["body"]["text"] == "do something EVIL"
+
+
+def test_tick_does_not_dead_letter_verified_or_unsigned_messages(tmp_path):
+    ident = EkhoIdentity(seed_hex="11" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    good = _signed_op_msg("do the thing", self_id="self", seed=OP1_SEED, nonce="nz4", sent_at="2026-06-07T12:00:00Z")
+    unsigned = InboxMessage(
+        message_id="um", conversation_id="c", correlation_id="cor",
+        sender_agent_id="op_" + FLEET, message_type="direct", priority="normal",
+        body={"text": "plain"}, metadata={}, created_at="t", deadline_at="t",
+        sender_kind="operator",
+    )
+    inbox = InboxResponse(
+        messages=[good, unsigned], controls=[], operator_trusted=True, roster=[],
+        operator_keys=[OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)], fleet_id=FLEET,
+    )
+    dl = tmp_path / "dead-letter.jsonl"
+    process_inbox_once(
+        _FakeClient(inbox), "self", AutoReplyState(),
+        spawn=lambda *a: None, now=0.0, wall_now=NOW, identity_obj=ident,
+        dead_letter_path=str(dl),
+    )
+    assert not dl.exists()
+
+
 # --- outbound signing (the symmetric half) ---
 def test_build_signed_send_fields_round_trips():
     ident = EkhoIdentity(seed_hex="0a" * 32)
