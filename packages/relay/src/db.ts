@@ -449,14 +449,33 @@ export class EkhoDb {
   }
 
   /**
-   * Prune replay nonces older than twice the timestamp-skew window. A request
-   * whose timestamp is outside the skew window is rejected before its nonce is
-   * ever checked, so older nonces can never enable a replay — keeping them only
-   * grows the table unbounded. Returns the number of rows deleted.
+   * Claim a message ENVELOPE nonce (sig_canonical.nonce) at ingest — the
+   * server-side half of the replay defence (#10). Same atomic INSERT OR IGNORE
+   * as claimNonce; the "env:" prefix namespaces these away from the transport
+   * HMAC nonces sharing the table, because the two have different retention.
+   */
+  claimEnvelopeNonce(agentId: string, nonce: string): boolean {
+    return this.claimNonce(agentId, `env:${nonce}`);
+  }
+
+  /**
+   * Prune replay nonces past their retention. Two tiers on one table:
+   * transport (per-request HMAC) nonces only matter inside the timestamp-skew
+   * window — a request outside it is rejected before its nonce is checked — so
+   * they go at 2x skew. Envelope nonces ("env:" prefix) must be remembered for
+   * the recipients' whole 24h acceptance window or a replay could slip in after
+   * the prune. Returns the number of rows deleted.
    */
   sweepStaleNonces(): number {
-    const cutoff = new Date(Date.now() - config.timestampSkewSeconds * 2 * 1000).toISOString();
-    return this.db.prepare("DELETE FROM replay_nonces WHERE created_at < ?").run(cutoff).changes;
+    const transportCutoff = new Date(Date.now() - config.timestampSkewSeconds * 2 * 1000).toISOString();
+    const envelopeCutoff = new Date(Date.now() - config.envelopeNonceRetentionSeconds * 1000).toISOString();
+    const transport = this.db
+      .prepare("DELETE FROM replay_nonces WHERE nonce NOT LIKE 'env:%' AND created_at < ?")
+      .run(transportCutoff).changes;
+    const envelope = this.db
+      .prepare("DELETE FROM replay_nonces WHERE nonce LIKE 'env:%' AND created_at < ?")
+      .run(envelopeCutoff).changes;
+    return transport + envelope;
   }
 
   /**

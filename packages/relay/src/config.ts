@@ -29,6 +29,12 @@ export const config = {
   // token, which the console necessarily stores in the browser.
   operatorSessionTtlSeconds: resolveNumber(process.env.EKHO_OPERATOR_SESSION_TTL_SECONDS, 86_400), // 24h
   timestampSkewSeconds: resolveNumber(process.env.EKHO_TIMESTAMP_SKEW_SECONDS, 300),
+  // How long claimed ENVELOPE nonces are remembered (#10). Must cover the
+  // recipients' whole acceptance window (24h past-skew, widened so queue-delayed
+  // messages aren't dropped) plus slack — pruning earlier would reopen the
+  // replay window the dedup exists to close. Transport (per-request HMAC)
+  // nonces keep their own short 2x-skew retention.
+  envelopeNonceRetentionSeconds: resolveNumber(process.env.EKHO_ENVELOPE_NONCE_RETENTION_SECONDS, 24 * 3600 + 1200),
   pollIntervalSeconds: resolveNumber(process.env.EKHO_POLL_INTERVAL_SECONDS, 5),
   heartbeatIntervalSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_INTERVAL_SECONDS, 30),
 

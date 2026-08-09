@@ -156,6 +156,24 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       parsed.data.agent_sig && parsed.data.key_id && parsed.data.sig_canonical
         ? { agent_sig: parsed.data.agent_sig, key_id: parsed.data.key_id, sig_canonical: parsed.data.sig_canonical }
         : {};
+
+    // Server-side envelope replay guard (#10): claim the signature nonce at
+    // ingest, so a captured envelope re-POSTed as a "new" message (fresh relay
+    // message_id, fresh transport auth) is refused here instead of relying on
+    // each recipient's in-memory nonce set. Recipient-side burning stays as the
+    // second line — this claim is per-SENDER, so it does not cover a
+    // compromised relay, only what the relay can honestly enforce.
+    if (parsed.data.sig_canonical) {
+      const rawNonce = (parsed.data.sig_canonical as Record<string, unknown>).nonce;
+      if (typeof rawNonce === "string" && rawNonce.length > 0) {
+        if (rawNonce.length > 256) {
+          return reply.code(400).send({ error: "envelope nonce too long" });
+        }
+        if (!db.claimEnvelopeNonce(request.agent.id, rawNonce)) {
+          return reply.code(409).send({ error: "envelope nonce already used (replay)" });
+        }
+      }
+    }
     const mergedMeta = { ...(parsed.data.metadata ?? {}), ...sigMeta };
 
     let result: { messageId: string; createdAt: string };
