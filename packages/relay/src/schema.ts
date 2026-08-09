@@ -291,7 +291,11 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_attachments_fleet_created ON attachments(fleet_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_attachments_bound_created ON attachments(bound_at, created_at);
+-- NOTE: the bound_at index is created by migration 019, NOT here. schema.sql is
+-- exec'd on every boot BEFORE migrations run, so on an existing DB (attachments
+-- predating 019) a CREATE INDEX on bound_at here throws "no such column" and
+-- crashes the relay before 019 can add the column. Owning it in 019 keeps both
+-- the fresh-install and the upgrade path working. Do not reintroduce it here.
 CREATE INDEX IF NOT EXISTS idx_heartbeats_agent_recency ON heartbeats(agent_id, received_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(fleet_id, sender_agent_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_queued ON message_deliveries(recipient_agent_id, queued_at);
