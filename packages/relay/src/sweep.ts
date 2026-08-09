@@ -55,6 +55,17 @@ export function startSweepJob(db: EkhoDb): { stop: () => void } {
       console.error("[sweep] nonce cleanup failed:", err);
     }
 
+    try {
+      // #7: attachment GC — unbound uploads past their TTL, bound ones past
+      // retention. The only path that ever frees attachment bytes on disk.
+      const attachments = db.sweepAttachments();
+      if (attachments.deleted > 0) {
+        console.log(`[sweep] attachments: ${attachments.deleted} GC'd`);
+      }
+    } catch (err) {
+      console.error("[sweep] attachment GC failed:", err);
+    }
+
     // Feeds: poll any source whose interval has elapsed. Fire-and-forget — the
     // network fetch is async; pollFeed stamps last_polled_at up-front so a feed
     // can't be double-polled across ticks.

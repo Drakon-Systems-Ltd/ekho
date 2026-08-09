@@ -95,7 +95,18 @@ export const config = {
     ? path.resolve(process.env.EKHO_ATTACHMENTS_DIR)
     : path.join(path.dirname(dbPath), "attachments"),
   attachmentMaxBytes: resolveNumber(process.env.EKHO_ATTACHMENT_MAX_BYTES, 25 * 1024 * 1024), // 25 MiB
-  attachmentMaxPerMessage: resolveNumber(process.env.EKHO_ATTACHMENT_MAX_PER_MESSAGE, 10)
+  attachmentMaxPerMessage: resolveNumber(process.env.EKHO_ATTACHMENT_MAX_PER_MESSAGE, 10),
+  // #7: the per-file cap alone left the upload path an open disk-DoS — no
+  // upload rate limit, no aggregate quota, no GC. These close it. All uploads
+  // (agent and operator) count against the same per-fleet byte quota; the
+  // upload rate limit shares the message rate-limit window but its own budget.
+  attachmentUploadMaxPerWindow: resolveNumber(process.env.EKHO_ATTACHMENT_UPLOAD_MAX_PER_WINDOW, 20),
+  attachmentFleetQuotaBytes: resolveNumber(process.env.EKHO_ATTACHMENT_FLEET_QUOTA_BYTES, 1024 * 1024 * 1024), // 1 GiB
+  // Uploaded but never referenced by a message → GC'd after this TTL (generous
+  // slack for the upload→send flow). Referenced ones are kept for the retention
+  // window so conversation history can still serve them, then GC'd with bytes.
+  attachmentUnboundTtlSeconds: resolveNumber(process.env.EKHO_ATTACHMENT_UNBOUND_TTL_SECONDS, 6 * 3600),
+  attachmentRetentionSeconds: resolveNumber(process.env.EKHO_ATTACHMENT_RETENTION_SECONDS, 30 * 24 * 3600)
 } as const;
 
 // base64 inflates by 4/3; add headroom for the JSON envelope + filename/mime fields.

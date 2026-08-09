@@ -212,6 +212,13 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const { filename, mime, size_bytes, data_base64 } = parsed.data;
 
+    // #7: rate-limit the upload path itself — the message limiter never covered
+    // it, so one agent could loop 25 MiB uploads unthrottled.
+    const uploadRate = db.checkAndIncrementUploadLimit(request.agent.id, request.agent.fleetId);
+    if (!uploadRate.allowed) {
+      return reply.code(429).send({ error: "upload rate limit exceeded", retry_after_seconds: config.rateLimitWindowSeconds });
+    }
+
     if (!isAllowedMime(mime)) return reply.code(415).send({ error: "unsupported media type", mime });
     if (size_bytes > config.attachmentMaxBytes) return reply.code(413).send({ error: "declared size exceeds cap", max_bytes: config.attachmentMaxBytes });
 
@@ -221,6 +228,11 @@ export async function registerAgentRoutes(app: FastifyInstance) {
 
     if (bytes.length > config.attachmentMaxBytes) return reply.code(413).send({ error: "decoded size exceeds cap", max_bytes: config.attachmentMaxBytes });
     if (!sniffImageMatches(mime, bytes)) return reply.code(415).send({ error: "file bytes do not match declared image type" });
+
+    // #7: per-fleet byte quota — the aggregate cap that actually bounds disk use.
+    if (db.getFleetAttachmentBytes(request.agent.fleetId) + bytes.length > config.attachmentFleetQuotaBytes) {
+      return reply.code(413).send({ error: "fleet attachment quota exceeded", quota_bytes: config.attachmentFleetQuotaBytes });
+    }
 
     const result = db.createAttachment({
       fleetId: request.agent.fleetId,

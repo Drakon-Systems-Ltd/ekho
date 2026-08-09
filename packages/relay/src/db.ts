@@ -654,6 +654,15 @@ export class EkhoDb {
         ...(bodyText !== undefined ? { text: bodyText } : {}),
         attachments: attachmentIds
       });
+
+      // Lifecycle stamp (#7): mark these uploads as referenced so the GC keeps
+      // them for the retention window instead of the short unbound TTL.
+      if (attachmentIds.length) {
+        const placeholders = attachmentIds.map(() => "?").join(",");
+        this.db.prepare(
+          `UPDATE attachments SET bound_message_id = ?, bound_at = ? WHERE id IN (${placeholders})`
+        ).run(messageId, createdAt, ...attachmentIds);
+      }
     });
 
     tx();
@@ -842,6 +851,14 @@ export class EkhoDb {
         text: input.text,
         attachments: attachmentIds
       });
+
+      // Lifecycle stamp (#7) — same as the agent send path.
+      if (attachmentIds.length) {
+        const placeholders = attachmentIds.map(() => "?").join(",");
+        this.db.prepare(
+          `UPDATE attachments SET bound_message_id = ?, bound_at = ? WHERE id IN (${placeholders})`
+        ).run(messageId, createdAt, ...attachmentIds);
+      }
     });
 
     tx();
@@ -2869,6 +2886,82 @@ export class EkhoDb {
       filename: input.filename, mime: input.mime, size_bytes: input.bytes.length
     });
     return { id: attachmentId, filename: input.filename, mime: input.mime, size_bytes: input.bytes.length, created_at: createdAt };
+  }
+
+  /**
+   * Upload-path rate limit (#7). Same windowed counter table as message sends
+   * but a namespaced key and its own budget — a chatty agent must not eat its
+   * upload allowance with messages, and vice versa. No quarantine escalation:
+   * a 429 on uploads is enough, and operators share this path.
+   */
+  checkAndIncrementUploadLimit(uploaderId: string, fleetId: string): { allowed: boolean; current: number; limit: number } {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const windowStart = new Date(Math.floor(nowSec / config.rateLimitWindowSeconds) * config.rateLimitWindowSeconds * 1000).toISOString();
+    const limit = config.attachmentUploadMaxPerWindow;
+    const key = `upload:${uploaderId}`;
+
+    let current = 0;
+    let allowed = true;
+    const tx = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT OR IGNORE INTO rate_limit_counters (agent_id, window_start, message_count) VALUES (?, ?, 0)"
+      ).run(key, windowStart);
+      const row = this.db.prepare(
+        "SELECT message_count FROM rate_limit_counters WHERE agent_id = ? AND window_start = ?"
+      ).get(key, windowStart) as { message_count: number };
+      if (row.message_count >= limit) {
+        current = row.message_count;
+        allowed = false;
+        this.recordEvent(fleetId, "attachment.rate_limit_exceeded", "agent", uploaderId, "agent", uploaderId, null, {
+          window_start: windowStart, upload_count: current, limit
+        });
+      } else {
+        this.db.prepare(
+          "UPDATE rate_limit_counters SET message_count = message_count + 1 WHERE agent_id = ? AND window_start = ?"
+        ).run(key, windowStart);
+        current = row.message_count + 1;
+      }
+    });
+    tx();
+    return { allowed, current, limit };
+  }
+
+  /** Total stored attachment bytes for a fleet — the quota denominator (#7). */
+  getFleetAttachmentBytes(fleetId: string): number {
+    const row = this.db.prepare(
+      "SELECT COALESCE(SUM(size_bytes), 0) AS total FROM attachments WHERE fleet_id = ?"
+    ).get(fleetId) as { total: number };
+    return row.total;
+  }
+
+  /**
+   * GC attachments past their lifecycle (#7): unbound uploads older than the
+   * unbound TTL, and bound ones past the retention window. Bytes are unlinked
+   * from disk with the row — this is the codebase's only delete path for
+   * attachment storage, which previously grew forever.
+   */
+  sweepAttachments(): { deleted: number } {
+    const unboundCutoff = new Date(Date.now() - config.attachmentUnboundTtlSeconds * 1000).toISOString();
+    const boundCutoff = new Date(Date.now() - config.attachmentRetentionSeconds * 1000).toISOString();
+    const rows = this.db.prepare(
+      `SELECT id, storage_path FROM attachments
+       WHERE (bound_at IS NULL AND created_at < ?)
+          OR (bound_at IS NOT NULL AND bound_at < ?)`
+    ).all(unboundCutoff, boundCutoff) as Array<{ id: string; storage_path: string }>;
+
+    let deleted = 0;
+    for (const row of rows) {
+      // Unlink first: if the row delete then failed we'd retry harmlessly next
+      // sweep, whereas deleting the row first would orphan the bytes forever.
+      try {
+        fs.unlinkSync(row.storage_path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") continue; // keep the row; retry next sweep
+      }
+      this.db.prepare("DELETE FROM attachments WHERE id = ?").run(row.id);
+      deleted += 1;
+    }
+    return { deleted };
   }
 
   // Returns the row ONLY if it belongs to fleetId. A mismatch returns undefined,

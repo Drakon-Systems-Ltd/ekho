@@ -328,6 +328,16 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     if (bytes.length > config.attachmentMaxBytes) return reply.code(413).send({ error: "decoded size exceeds cap", max_bytes: config.attachmentMaxBytes });
     if (!sniffImageMatches(mime, bytes)) return reply.code(415).send({ error: "file bytes do not match declared image type" });
 
+    // #7: operator uploads land on the same disk — same fleet quota and their
+    // own upload rate budget (keyed on the operator id).
+    const uploadRate = db.checkAndIncrementUploadLimit(request.operator.id, request.operator.fleetId);
+    if (!uploadRate.allowed) {
+      return reply.code(429).send({ error: "upload rate limit exceeded", retry_after_seconds: config.rateLimitWindowSeconds });
+    }
+    if (db.getFleetAttachmentBytes(request.operator.fleetId) + bytes.length > config.attachmentFleetQuotaBytes) {
+      return reply.code(413).send({ error: "fleet attachment quota exceeded", quota_bytes: config.attachmentFleetQuotaBytes });
+    }
+
     const result = db.createAttachment({
       fleetId: request.operator.fleetId,
       uploaderKind: "operator",

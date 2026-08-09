@@ -117,6 +117,9 @@ describe("transactional migrations (M6)", () => {
     // …and the operators table (migration 001) so migration 018 (ALTER TABLE
     // operators ADD COLUMN display_name) applies cleanly too.
     db.exec("CREATE TABLE operators (id TEXT PRIMARY KEY, fleet_id TEXT, email TEXT, password_hash TEXT, role TEXT, created_at TEXT)");
+    // …and the attachments table (migration 008) so migration 019 (ALTER TABLE
+    // attachments ADD COLUMN bound_message_id/bound_at) applies cleanly too.
+    db.exec("CREATE TABLE attachments (id TEXT PRIMARY KEY, fleet_id TEXT, uploader_kind TEXT, uploader_id TEXT, filename TEXT, mime TEXT, size_bytes INTEGER, storage_path TEXT, created_at TEXT)");
     // Mark every migration through 014 as applied so runMigrationsOn runs 015+.
     const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
     for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
