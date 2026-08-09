@@ -390,7 +390,7 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     if (params.decision !== "approve" && params.decision !== "reject") {
       return reply.code(400).send({ error: "unsupported decision" });
     }
-    const ok = db.approveOrReject(params.approvalId, request.operator.id, params.decision === "approve" ? "approved" : "rejected");
+    const ok = db.approveOrReject(params.approvalId, request.operator.fleetId, request.operator.id, params.decision === "approve" ? "approved" : "rejected");
     return reply.send({ ok });
   });
 

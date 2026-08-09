@@ -1494,13 +1494,21 @@ export class EkhoDb {
     return approval ?? null;
   }
 
-  approveOrReject(approvalId: string, operatorId: string, status: "approved" | "rejected") {
-    const approval = this.db.prepare("SELECT fleet_id, conversation_id FROM approvals WHERE id = ?").get(approvalId) as Record<string, unknown> | undefined;
+  approveOrReject(approvalId: string, fleetId: string, operatorId: string, status: "approved" | "rejected") {
+    // Scope to the operator's own fleet (IDOR: an operator must not resolve
+    // another tenant's approval by id) AND require the row to still be pending
+    // (no re-resolving an already-decided/executed approval). Both constraints
+    // live in the same guarded SELECT that every sibling approval method uses.
+    const approval = this.db.prepare(
+      "SELECT fleet_id, conversation_id FROM approvals WHERE id = ? AND fleet_id = ? AND status = 'pending'"
+    ).get(approvalId, fleetId) as Record<string, unknown> | undefined;
     if (!approval) {
       return false;
     }
 
-    this.db.prepare("UPDATE approvals SET status = ?, resolved_at = ?, resolved_by_operator_id = ? WHERE id = ?").run(status, nowIso(), operatorId, approvalId);
+    this.db.prepare(
+      "UPDATE approvals SET status = ?, resolved_at = ?, resolved_by_operator_id = ? WHERE id = ? AND fleet_id = ? AND status = 'pending'"
+    ).run(status, nowIso(), operatorId, approvalId, fleetId);
     this.recordEvent(String(approval.fleet_id), `approval.${status}`, "operator", operatorId, "approval", approvalId, String(approval.conversation_id ?? ""), {});
     return true;
   }
