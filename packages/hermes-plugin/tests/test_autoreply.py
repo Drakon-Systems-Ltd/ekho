@@ -1468,3 +1468,44 @@ def test_tick_require_mode_dead_letters_and_does_not_wake_unsigned_peer(tmp_path
     assert len(records) == 1
     assert records[0]["reason"] == "unsigned-require-signed"
     assert records[0]["message"]["message_id"] == "pm"
+
+
+def test_tick_require_mode_dead_letters_with_no_identity(tmp_path):
+    """Adversarial-review finding #2 (Python side): when identity bootstrap
+    FAILED, identity_obj is None and the whole verify/dead-letter block used to
+    be skipped — require mode still fails closed, but the withheld peer would be
+    binned with no trace. The dead-letter collection now runs outside the
+    identity gate, so the record is still written."""
+    import json
+
+    peer = _msg(message_id="pm", sender_kind="agent", sender_agent_id="peer1")
+    inbox = InboxResponse(
+        messages=[peer], controls=[], operator_trusted=False, roster=[],
+        peer_autoreply=True, fleet_id="flt",
+    )
+
+    class _Client:
+        def __init__(self):
+            self.acked = []
+
+        def get_inbox(self):
+            return inbox
+
+        def ack_messages(self, acks):
+            self.acked.append(acks)
+
+    dl = tmp_path / "dead-letter.jsonl"
+    spawned = []
+    client = _Client()
+    summary = process_inbox_once(
+        client, "self", _state(), spawn=lambda *a: spawned.append(a),
+        now=0.0, peer_enabled=True, identity_obj=None,   # <-- bootstrap failed
+        dead_letter_path=str(dl), require_signed="require",
+    )
+    assert spawned == []
+    assert summary["real"] == 0
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["reason"] == "unsigned-require-signed"
+    assert records[0]["message"]["message_id"] == "pm"
+    assert client.acked  # batch still acked so nothing redelivers

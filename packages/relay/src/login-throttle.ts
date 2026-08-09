@@ -66,12 +66,16 @@ export interface LoginThrottleOptions {
   maxFailures: number;
   /** Rolling window length in seconds. */
   windowSeconds: number;
+  /** Hard cap on live buckets — bounds memory against a garbage-credential
+   *  flood inflating the attacker-controlled (fleet,email) key space. */
+  maxBuckets: number;
 }
 
 /** Deployment-configurable limits (EKHO_LOGIN_MAX_FAILURES / _WINDOW_SECONDS). */
 export const DEFAULT_LOGIN_THROTTLE: LoginThrottleOptions = {
   maxFailures: config.loginMaxFailures,
-  windowSeconds: config.loginWindowSeconds
+  windowSeconds: config.loginWindowSeconds,
+  maxBuckets: config.loginThrottleMaxBuckets
 };
 
 /**
@@ -80,6 +84,9 @@ export const DEFAULT_LOGIN_THROTTLE: LoginThrottleOptions = {
  */
 export class LoginThrottle {
   private buckets = new Map<string, Bucket>();
+  /** Set once the bucket cap was hit and a new bucket had to be dropped. Read
+   *  (and cleared) by the sweep so the overflow is logged, not silent. */
+  private overflowed = false;
 
   constructor(
     private opts: LoginThrottleOptions = DEFAULT_LOGIN_THROTTLE,
@@ -118,7 +125,21 @@ export class LoginThrottle {
     for (const key of LoginThrottle.keysFor(fleetName, email, ip)) {
       const bucket = this.buckets.get(key);
       if (!bucket || bucket.resetAt <= t) {
-        // Start a fresh window on first failure (or after one expired).
+        // A new bucket. The account key is (fleet,email) — attacker-controlled
+        // and unbounded: a flood of random non-existent credentials (each a
+        // cheap null lookup, no scrypt spent) would otherwise grow this map
+        // until the process that serves the whole fleet OOMs. Cap it. When
+        // full, sweep expired first; if still full, DON'T create the bucket —
+        // existing tracked accounts and every IP bucket keep throttling, and a
+        // single-host spray is still caught by its IP bucket. Memory bounded;
+        // the degradation is loud (a warn) and partial, not a fleet outage.
+        if (!bucket && this.buckets.size >= this.opts.maxBuckets) {
+          this.sweep();
+          if (this.buckets.size >= this.opts.maxBuckets) {
+            this.overflowed = true;
+            continue;
+          }
+        }
         this.buckets.set(key, { failures: 1, resetAt: t + this.opts.windowSeconds * 1000 });
       } else {
         bucket.failures += 1;
@@ -141,6 +162,14 @@ export class LoginThrottle {
     for (const [key, bucket] of this.buckets) {
       if (bucket.resetAt <= t) this.buckets.delete(key);
     }
+  }
+
+  /** True (and reset) if the bucket cap was hit since the last check — lets the
+   *  sweep job surface a garbage-credential flood instead of hiding it. */
+  takeOverflowed(): boolean {
+    const was = this.overflowed;
+    this.overflowed = false;
+    return was;
   }
 
   /** Test/introspection helper. */

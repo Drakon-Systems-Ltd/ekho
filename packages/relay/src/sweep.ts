@@ -42,6 +42,9 @@ export function startSweepJob(db: EkhoDb): { stop: () => void } {
       // In-memory login failure buckets: drop expired windows so a sustained
       // spray across many accounts/IPs can't grow the map without bound.
       loginThrottle.sweep();
+      if (loginThrottle.takeOverflowed()) {
+        console.warn("[sweep] login throttle bucket cap hit — likely a garbage-credential flood; account-keyed throttling degraded, IP throttling intact");
+      }
     } catch (err) {
       console.error("[sweep] login throttle cleanup failed:", err);
     }

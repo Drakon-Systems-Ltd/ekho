@@ -76,6 +76,30 @@ describe("envelope nonce is deduped server-side (#10)", () => {
     expect(res.status).toBe(400);
   });
 
+  it("a NUMERIC nonce is claimed, not silently skipped (adversarial-review #4)", async () => {
+    // A non-string nonce used to skip db.claimEnvelopeNonce entirely, reopening
+    // the replay window for a malformed client. It's now normalised and claimed.
+    // Fresh sender: the shared one has spent the test suite's 5-msg rate budget.
+    const s = await relay.enrollAgent("numeric-nonce-sender");
+    const numericMsg = () => {
+      const m = signedMessage("ignored") as Record<string, unknown>;
+      (m.sig_canonical as Record<string, unknown>).nonce = 42;
+      return m;
+    };
+    const first = await relay.agentRequest(s.agent_id, s.secret, "POST", "/v1/messages", numericMsg());
+    expect(first.status).toBe(200);
+    const replay = await relay.agentRequest(s.agent_id, s.secret, "POST", "/v1/messages", numericMsg());
+    expect(replay.status).toBe(409);
+  });
+
+  it("an empty/whitespace nonce on a signed envelope is rejected, never skipped", async () => {
+    const s = await relay.enrollAgent("empty-nonce-sender");
+    const m = signedMessage("ignored") as Record<string, unknown>;
+    (m.sig_canonical as Record<string, unknown>).nonce = "   ";
+    const res = await relay.agentRequest(s.agent_id, s.secret, "POST", "/v1/messages", m);
+    expect(res.status).toBe(400);
+  });
+
   it("envelope nonces outlive the transport-nonce sweep for the full acceptance window", () => {
     const db = relay.db as unknown as {
       db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown; get: (...args: unknown[]) => unknown } };

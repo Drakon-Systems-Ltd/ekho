@@ -627,3 +627,53 @@ describe("collectRequireSignedWithheld (#5)", () => {
     expect(collectRequireSignedWithheld(msgs, verdicts, "self")).toEqual([]);
   });
 });
+
+// Adversarial-review finding #2: the dead-letter collection used to sit INSIDE
+// `if (opts.identity)`. When identity bootstrap fails (disk error/race) the
+// plugin still runs in require mode and correctly refuses to wake peers — but
+// used to bin them with zero trace. This drives the real tick with a fake
+// client and NO identity to prove the withheld peers are now dead-lettered.
+import { startAutoReply } from "../src/autoreply";
+
+describe("require mode dead-letters withheld peers even with no identity (finding #2)", () => {
+  it("calls onVerificationReject for an unsigned peer when identity bootstrap failed", async () => {
+    const inbox = {
+      messages: [
+        { message_id: "pm1", conversation_id: "c1", sender_kind: "agent", sender_agent_id: "peer1",
+          message_type: "direct", body: { text: "do a thing" } },
+      ],
+      operator_trusted: false,
+      peer_autoreply: true,
+      roster: [],
+    };
+    let inboxServed = false;
+    const acked: unknown[] = [];
+    const fakeClient = {
+      getInbox: async () => { if (inboxServed) return { messages: [] }; inboxServed = true; return inbox; },
+      ackMessages: async (a: unknown) => { acked.push(a); },
+      acquireFloor: async () => ({ granted: false }),
+      releaseFloor: async () => {},
+      raiseNotice: async () => {},
+    };
+    const rejects: any[] = [];
+    const stop = startAutoReply({
+      client: fakeClient as any,
+      api: { runTurn: async () => {} } as any,
+      selfAgentId: "self",
+      pollIntervalMs: 5,
+      peerEnabled: true,
+      identity: undefined,           // <-- bootstrap "failed": no trust root
+      requireSigned: "require",
+      onVerificationReject: (r) => { rejects.push(...r); },
+    });
+    // Let one tick run.
+    await new Promise((res) => setTimeout(res, 40));
+    stop();
+
+    expect(rejects.map((r) => [r.message.message_id, r.verdict.reason])).toEqual([
+      ["pm1", "unsigned-require-signed"],
+    ]);
+    // And the peer did NOT wake a turn (batch still acked so nothing redelivers).
+    expect(acked.length).toBeGreaterThan(0);
+  });
+});

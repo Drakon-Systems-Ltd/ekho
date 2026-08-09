@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { LoginThrottle } from "../src/login-throttle";
 
-const OPTS = { maxFailures: 3, windowSeconds: 60 };
+const OPTS = { maxFailures: 3, windowSeconds: 60, maxBuckets: 50_000 };
 
 /** A throttle with a hand-cranked clock so window expiry is testable. */
 function makeThrottle() {
@@ -116,5 +116,34 @@ describe2("resolveClientIp", () => {
 
   it2("no trusted proxies configured means the socket is always the answer", () => {
     expect2(resolveClientIp("127.0.0.1", "203.0.113.5", [])).toBe("127.0.0.1");
+  });
+});
+
+// Adversarial-review follow-up: the account key is (fleet,email) — fully
+// attacker-controlled — so an unbounded map is a memory-exhaustion DoS on the
+// single process serving the whole fleet. recordFailure caps live buckets.
+describe("LoginThrottle bucket cap (memory-DoS guard)", () => {
+  it("stops creating new buckets past the cap, and flags the overflow", () => {
+    let now = 1_000_000;
+    const t = new LoginThrottle({ maxFailures: 3, windowSeconds: 60, maxBuckets: 10 }, () => now);
+    // Each distinct (fleet,email) is a fresh account bucket + a shared IP bucket.
+    for (let i = 0; i < 100; i++) t.recordFailure("default", `garbage-${i}@x`, "9.9.9.9");
+    // 10 cap: never exceeded despite 100 distinct accounts.
+    expect(t.size()).toBeLessThanOrEqual(10);
+    expect(t.takeOverflowed()).toBe(true);
+    expect(t.takeOverflowed()).toBe(false); // cleared on read
+  });
+
+  it("expired buckets are swept to make room before the cap bites", () => {
+    let now = 1_000_000;
+    const t = new LoginThrottle({ maxFailures: 3, windowSeconds: 60, maxBuckets: 5 }, () => now);
+    for (let i = 0; i < 5; i++) t.recordFailure("default", `a-${i}@x`, `1.1.1.${i}`);
+    now += 61 * 1000; // every window expires
+    // A fresh failure now: the cap check sweeps the expired ones first, so this
+    // one is tracked rather than dropped.
+    t.recordFailure("default", "fresh@x", "2.2.2.2");
+    expect(t.check("default", "fresh@x", "2.2.2.2").allowed).toBe(true);
+    for (let i = 0; i < 3; i++) t.recordFailure("default", "fresh@x", "2.2.2.2");
+    expect(t.check("default", "fresh@x", "2.2.2.2").allowed).toBe(false); // it WAS tracked
   });
 });

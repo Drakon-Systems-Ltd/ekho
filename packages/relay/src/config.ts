@@ -53,6 +53,11 @@ export const config = {
   // guessing loop.
   loginMaxFailures: resolveNumber(process.env.EKHO_LOGIN_MAX_FAILURES, 10),
   loginWindowSeconds: resolveNumber(process.env.EKHO_LOGIN_WINDOW_SECONDS, 900), // 15 min
+  // Hard cap on live throttle buckets. The account key is (fleet,email) —
+  // attacker-controlled — so an unbounded map is a memory-exhaustion DoS on the
+  // single process serving the whole fleet. 50k buckets is far above any real
+  // operator population and still trivially small in memory.
+  loginThrottleMaxBuckets: resolveNumber(process.env.EKHO_LOGIN_THROTTLE_MAX_BUCKETS, 50_000),
   // Socket addresses allowed to speak for their clients via X-Forwarded-For.
   // The relay normally sits behind `tailscale serve` on loopback, so without
   // this every external client shares one loopback throttle bucket and ten bad

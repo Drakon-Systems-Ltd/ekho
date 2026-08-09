@@ -81,9 +81,11 @@ export const actionResultSchema = z.object({
 });
 
 export const operatorLoginSchema = z.object({
-  fleet_name: z.string().min(1),
-  email: z.string().email(),
-  password: z.string().min(8)
+  // Bounded so a garbage-credential flood can't inflate each throttle-bucket
+  // key toward the body limit (defence-in-depth alongside the bucket cap).
+  fleet_name: z.string().min(1).max(200),
+  email: z.string().email().max(320),
+  password: z.string().min(8).max(1024)
 });
 
 export const operatorMessageSchema = z

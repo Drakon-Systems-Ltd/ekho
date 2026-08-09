@@ -1167,30 +1167,33 @@ def process_inbox_once(
         )
         record_verifications(verifications)
 
-        # Signed-but-invalid = about to be acked and binned. Never silent: log
-        # the reason and dead-letter the message so it stays diagnosable.
-        # In "require" mode the unsigned/unverifiable peers about to be withheld
-        # get the same treatment — refused is fine, silent is not (#5).
-        rejects = collect_verification_rejects(messages, verifications, self_agent_id)
-        if require_signed == "require":
-            rejects.extend(
-                collect_require_signed_withheld(messages, verifications, self_agent_id)
-            )
-        for m, v in rejects:
-            log.warning(
-                "[ekho-autoreply] verification FAILED for message %s from %s/%s "
-                "key=%s reason=%s — dead-lettered, not acted on",
-                getattr(m, "message_id", "?"),
-                getattr(m, "sender_kind", "?"),
-                getattr(m, "sender_agent_id", "?"),
-                getattr(v, "key_id", None) or "?",
-                getattr(v, "reason", None) or "?",
-            )
-        if rejects:
-            try:
-                append_dead_letters(rejects, path=dead_letter_path)
-            except Exception as exc:  # noqa: BLE001 — the sink must never break the tick
-                log.warning("[ekho-autoreply] dead-letter write failed: %s", exc)
+    # Dead-letter EVERYTHING about to be acked-and-binned without acting on it.
+    # OUTSIDE the identity gate on purpose: if identity bootstrap failed
+    # identity_obj is None and verifications is empty, so require mode still
+    # fails closed — but the withheld peers would be binned with zero trace
+    # unless collected here too. Silent is the one thing this must never be (#5).
+    # collect_verification_rejects on empty verifications yields nothing, so
+    # warn mode is unaffected.
+    rejects = collect_verification_rejects(messages, verifications, self_agent_id)
+    if require_signed == "require":
+        rejects.extend(
+            collect_require_signed_withheld(messages, verifications, self_agent_id)
+        )
+    for m, v in rejects:
+        log.warning(
+            "[ekho-autoreply] verification FAILED for message %s from %s/%s "
+            "key=%s reason=%s — dead-lettered, not acted on",
+            getattr(m, "message_id", "?"),
+            getattr(m, "sender_kind", "?"),
+            getattr(m, "sender_agent_id", "?"),
+            getattr(v, "key_id", None) or "?",
+            getattr(v, "reason", None) or "?",
+        )
+    if rejects:
+        try:
+            append_dead_letters(rejects, path=dead_letter_path)
+        except Exception as exc:  # noqa: BLE001 — the sink must never break the tick
+            log.warning("[ekho-autoreply] dead-letter write failed: %s", exc)
 
     # The console is the live source of truth for delegation: when the relay
     # surfaces peer_autoreply / peer_turn_budget, they override the bootstrap

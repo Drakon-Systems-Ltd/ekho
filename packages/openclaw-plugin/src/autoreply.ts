@@ -1049,28 +1049,31 @@ export function startAutoReply(opts: {
       const nonNull: Record<string, VerifyResult | null> = {};
       for (const [mid, v] of Object.entries(verifications)) if (v) nonNull[mid] = v;
       lastBatchMeta.verifications = nonNull;
+    }
 
-      // Signed-but-invalid = about to be acked and binned. Never silent: log
-      // the reason and dead-letter the message so it stays diagnosable.
-      // In "require" mode the unsigned/unverifiable peers about to be withheld
-      // get the same treatment — refused is fine, silent is not (#5).
-      const rejects = collectVerificationRejects(batch.messages, verifications, selfAgentId);
-      if (requireSigned === "require") {
-        rejects.push(...collectRequireSignedWithheld(batch.messages, verifications, selfAgentId));
-      }
-      for (const { message: m, verdict: v } of rejects) {
-        log?.warn?.(
-          `[ekho-autoreply] verification FAILED for message ${m.message_id} from ` +
-            `${m.sender_kind ?? "?"}/${m.sender_agent_id ?? "?"} key=${v.keyId ?? "?"} ` +
-            `reason=${v.reason ?? "?"} — dead-lettered, not acted on`
-        );
-      }
-      if (rejects.length > 0 && opts.onVerificationReject) {
-        try {
-          opts.onVerificationReject(rejects);
-        } catch (err) {
-          log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${String(err)}`);
-        }
+    // Dead-letter EVERYTHING about to be acked-and-binned without acting on it.
+    // This runs OUTSIDE the identity gate on purpose: if identity bootstrap
+    // failed (disk error, race) opts.identity is null and verifications is
+    // empty, so require mode still fails closed — but the withheld peers would
+    // be binned with zero trace unless we collect them here too. Silent is the
+    // one thing this must never be (#5). collectVerificationRejects on empty
+    // verifications yields nothing, so warn mode is unaffected.
+    const rejects = collectVerificationRejects(batch.messages, verifications, selfAgentId);
+    if (requireSigned === "require") {
+      rejects.push(...collectRequireSignedWithheld(batch.messages, verifications, selfAgentId));
+    }
+    for (const { message: m, verdict: v } of rejects) {
+      log?.warn?.(
+        `[ekho-autoreply] verification FAILED for message ${m.message_id} from ` +
+          `${m.sender_kind ?? "?"}/${m.sender_agent_id ?? "?"} key=${v.keyId ?? "?"} ` +
+          `reason=${v.reason ?? "?"} — dead-lettered, not acted on`
+      );
+    }
+    if (rejects.length > 0 && opts.onVerificationReject) {
+      try {
+        opts.onVerificationReject(rejects);
+      } catch (err) {
+        log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${String(err)}`);
       }
     }
 
