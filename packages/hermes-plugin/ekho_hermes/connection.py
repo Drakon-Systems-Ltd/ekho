@@ -23,7 +23,13 @@ from ekho.identity import key_id as _derive_key_id
 
 from . import autoreply
 from .config import EkhoConfig
-from .credentials import enroll_or_load, load_or_create_identity, save_identity
+from .credentials import (
+    enroll_or_load,
+    load_or_create_identity,
+    save_identity,
+    take_enroll_operator_keys,
+)
+from .verification import sync_pinned_operator_keys
 
 logger = logging.getLogger("ekho_hermes.connection")
 
@@ -263,9 +269,26 @@ def ensure_connected(
 
         # Register our identity key + bootstrap-pin the operator key (best-effort).
         try:
-            register_and_bootstrap_identity(
+            identity = register_and_bootstrap_identity(
                 client, operator_pubkey=getattr(config, "operator_pubkey", None), config_dir=config_dir
             )
+            # TOFU (#5): pin the operator keys the relay handed us at enrollment —
+            # sent since the beginning, dropped on the floor until now. Only fires
+            # for a never-pinned identity (see sync_pinned_operator_keys); explicit
+            # config pins above always win.
+            enroll_keys = take_enroll_operator_keys()
+            if (
+                enroll_keys
+                and identity is not None
+                and sync_pinned_operator_keys(
+                    identity, enroll_keys, fleet_id=config.fleet_id
+                )
+            ):
+                save_identity(config_dir, identity)
+                logger.info(
+                    "[ekho] pinned %d operator key(s) from enrollment (TOFU)",
+                    len(identity.pinned_operator_keys),
+                )
         except Exception as exc:  # noqa: BLE001 — never block connecting
             logger.warning("[ekho] identity bootstrap failed: %s", exc)
 
@@ -297,6 +320,7 @@ def start_autoreply_once(
     start_fn: Optional[Callable[..., Callable[[], None]]] = None,
     peer_enabled: bool = False,
     peer_turn_budget: int = autoreply.DEFAULT_PEER_TURN_BUDGET,
+    require_signed: str = "warn",
 ) -> Optional[Callable[[], None]]:
     """Start the background auto-reply loop exactly once for this process.
 
@@ -304,7 +328,8 @@ def start_autoreply_once(
     ``EKHO_AUTOREPLY_DISABLE=1`` (the spawned one-shot reply turn) connects for
     the ``ekho_send`` tool but never starts its own loop — the structural
     loop-breaker. ``peer_enabled`` / ``peer_turn_budget`` drive bounded
-    agent-to-agent delegation. ``env`` and ``start_fn`` are injectable for tests.
+    agent-to-agent delegation; ``require_signed`` is the peer wake strictness
+    (#5). ``env`` and ``start_fn`` are injectable for tests.
     """
     global _autoreply_stop
     env = os.environ if env is None else env
@@ -340,6 +365,7 @@ def start_autoreply_once(
             peer_turn_budget=peer_turn_budget,
             identity_obj=identity_obj,
             on_identity_changed=on_identity_changed,
+            require_signed=require_signed,
         )
         return _autoreply_stop
 

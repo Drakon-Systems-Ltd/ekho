@@ -600,6 +600,19 @@ describe("collectRequireSignedWithheld (#5)", () => {
       ["m2", "unverifiable-require-signed"],
     ]);
   });
+  it("collects an unsigned peer even when pinned keys produced an 'unsigned' failed verdict", () => {
+    // With a trust root pinned, verifyBatch gives unsigned messages a failed
+    // verdict (reason "unsigned") instead of null — they must still be
+    // dead-lettered when require mode withholds them.
+    const msgs = [
+      { ...base, message_id: "m3", sender_kind: "agent", sender_agent_id: "p5", agent_sig: null },
+    ] as any[];
+    const verdicts = { m3: { verified: false, kind: "peer", reason: "unsigned", keyId: null } } as any;
+    const withheld = collectRequireSignedWithheld(msgs, verdicts, "self");
+    expect(withheld.map((w) => [w.message.message_id, w.verdict.reason])).toEqual([
+      ["m3", "unsigned-require-signed"],
+    ]);
+  });
   it("skips operators, self, verified peers, and signed-but-invalid (owned elsewhere)", () => {
     const msgs = [
       { ...base, message_id: "o1", sender_kind: "operator", operator_sig: null },

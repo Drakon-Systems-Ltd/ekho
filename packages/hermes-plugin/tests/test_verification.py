@@ -1,5 +1,6 @@
-"""Agent-side verification wiring: pin sync (endorsement-chained, no relay TOFU),
-per-message verdicts, and the graceful execution-authority gate."""
+"""Agent-side verification wiring: pin sync (endorsement-chained, plus the
+one-shot TOFU bootstrap), per-message verdicts, and the execution-authority
+gate."""
 
 import hashlib
 from datetime import datetime, timezone
@@ -26,11 +27,38 @@ OP2_KID = identity.key_id(OP2_PUB)
 
 
 # --- pin sync ---
-def test_sync_does_not_bootstrap_from_an_untrusted_relay():
+# #5: a never-pinned identity TOFUs the relay's key set exactly once —
+# "never adopt" left verification dormant on every unconfigured agent.
+def test_tofu_adopts_first_key_set_for_never_pinned_identity_and_latches():
     ident = EkhoIdentity(seed_hex="00" * 32)  # no pinned keys
     served = [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)]
-    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is True
+    assert ident.pinned_operator_keys[OP1_KID] == OP1_PUB
+    assert ident.tofu_at
+
+    # Once latched, an emptied pin set can never be re-seeded by the relay.
+    ident.pinned_operator_keys = {}
+    served2 = [OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB)]
+    assert sync_pinned_operator_keys(ident, served2, fleet_id=FLEET) is False
     assert ident.pinned_operator_keys == {}
+
+
+def test_tofu_skips_revoked_keys_and_empty_roster_does_not_burn_the_latch():
+    ident = EkhoIdentity(seed_hex="00" * 32)
+    assert sync_pinned_operator_keys(ident, [], fleet_id=FLEET) is False
+    assert ident.tofu_at is None  # nothing adopted — next contact may still TOFU
+    served = [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True)]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+    assert ident.tofu_at is None
+    assert ident.pinned_operator_keys == {}
+
+
+def test_pre_pinned_identity_never_tofus_unendorsed_keys_still_refused():
+    ident = EkhoIdentity(seed_hex="00" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    served = [OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB)]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+    assert OP2_KID not in ident.pinned_operator_keys
+    assert ident.tofu_at is None
 
 
 def test_sync_adds_a_key_endorsed_by_a_pinned_key():
@@ -101,6 +129,61 @@ def test_gate_peer_signed_but_invalid_is_blocked():
 def test_gate_peer_unsigned_legacy_acts_when_enabled():
     msg, _ = _peer(signed=False)
     assert should_autowake(msg, None, operator_trusted=False, peer_enabled=True) is True
+
+
+# --- #5: "require" closes the fail-open peer paths ---
+def test_require_mode_unsigned_peer_does_not_wake():
+    msg, _ = _peer(signed=False)
+    # warn: legacy fail-open
+    assert should_autowake(msg, None, operator_trusted=False, peer_enabled=True) is True
+    assert (
+        should_autowake(
+            msg, None, operator_trusted=False, peer_enabled=True, require_signed="require"
+        )
+        is False
+    )
+
+
+def test_require_mode_signed_but_unverifiable_does_not_wake():
+    msg, _ = _peer(signed=True)
+    # warn: dormant crypto waves it through
+    assert should_autowake(msg, None, operator_trusted=False, peer_enabled=True) is True
+    assert (
+        should_autowake(
+            msg, None, operator_trusted=False, peer_enabled=True, require_signed="require"
+        )
+        is False
+    )
+
+
+def test_require_mode_signed_and_verified_peer_wakes():
+    msg, v = _peer(verified=True)
+    assert (
+        should_autowake(
+            msg, v, operator_trusted=False, peer_enabled=True, require_signed="require"
+        )
+        is True
+    )
+
+
+def test_require_mode_operator_relay_trust_fallback_preserved():
+    msg, _ = _op(signed=False)
+    assert (
+        should_autowake(
+            msg, None, operator_trusted=True, peer_enabled=False, require_signed="require"
+        )
+        is True
+    )
+
+
+def test_parse_require_signed_mode():
+    from ekho_hermes.verification import parse_require_signed_mode
+
+    assert parse_require_signed_mode(None) == "warn"
+    assert parse_require_signed_mode("") == "warn"
+    assert parse_require_signed_mode("nonsense") == "warn"
+    assert parse_require_signed_mode(" REQUIRE ") == "require"
+    assert parse_require_signed_mode("off") == "off"
 
 
 # --- batch ---
@@ -240,6 +323,7 @@ def test_build_signed_send_fields_round_trips():
         identity_obj=ident, fleet_id="flt", self_agent_id="me",
         recipient={"kind": "agent", "id": "peer"}, conversation_id="c",
         body_text="hello", nonce="n1", sent_at="2026-06-07T00:00:00Z",
+        message_type="direct", priority="normal",
     )
     assert fields["key_id"] == identity.key_id(ident.public_key_b64url())
     assert fields["sig_canonical"]["sender_agent_id"] == "me"
@@ -247,4 +331,23 @@ def test_build_signed_send_fields_round_trips():
     # A recipient can verify it against our public key.
     assert verify_canonical(
         fields["sig_canonical"], fields["agent_sig"], ident.public_key_b64url()
+    ) is True
+
+
+def test_v2_envelope_binds_type_priority_and_sorted_attachment_ids():
+    # #9: the canonical binds what the relay could otherwise relabel/swap.
+    ident = EkhoIdentity(seed_hex="0a" * 32)
+    fields = build_signed_send_fields(
+        identity_obj=ident, fleet_id="flt", self_agent_id="me",
+        recipient={"kind": "agent", "id": "peer"}, conversation_id="c",
+        body_text="hello", nonce="n2", sent_at="2026-06-07T00:00:00Z",
+        message_type="direct", priority="high", attachments=["att_b", "att_a"],
+    )
+    canonical = fields["sig_canonical"]
+    assert canonical["v"] == 2
+    assert canonical["message_type"] == "direct"
+    assert canonical["priority"] == "high"
+    assert canonical["attachments"] == ["att_a", "att_b"]
+    assert verify_canonical(
+        canonical, fields["agent_sig"], ident.public_key_b64url()
     ) is True

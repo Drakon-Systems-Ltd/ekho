@@ -46,6 +46,18 @@ MAX_PAST_SKEW_SECONDS = 86400 + 300
 MAX_FUTURE_SKEW_SECONDS = 300
 
 
+def _canonical_version(canonical: Mapping[str, Any]) -> float:
+    """The envelope version, mirroring the TS ``Number(c.v ?? 1)``: a missing
+    ``v`` means 1, and a non-numeric ``v`` (NaN in TS) never satisfies >= 2."""
+    v = canonical.get("v")
+    if v is None:
+        return 1.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("-inf")  # NaN >= 2 is false in TS — treat as "not v2"
+
+
 def verify_inbound(
     msg: InboxMessage,
     *,
@@ -106,6 +118,21 @@ def verify_inbound(
     text = msg.body.get("text") if isinstance(msg.body, dict) else None
     if canonical.get("body_sha256") != hashlib.sha256((text or "").encode("utf-8")).hexdigest():
         return VerificationResult(False, kind, "body-mismatch", msg.key_id)
+
+    # v2 envelopes (#9) additionally bind type, priority and attachments — a
+    # relay relabelling a message or swapping its attachments breaks the binding.
+    # v1 envelopes (older signers) skip these checks during the transition.
+    if _canonical_version(canonical) >= 2:
+        if canonical.get("message_type") != (getattr(msg, "message_type", None) or ""):
+            return VerificationResult(False, kind, "type-mismatch", msg.key_id)
+        if canonical.get("priority") != (getattr(msg, "priority", None) or ""):
+            return VerificationResult(False, kind, "priority-mismatch", msg.key_id)
+        raw_declared = canonical.get("attachments")
+        declared = sorted(str(a) for a in raw_declared) if isinstance(raw_declared, list) else []
+        raw_actual = msg.body.get("attachments") if isinstance(msg.body, dict) else None
+        actual = sorted(str(a) for a in raw_actual) if isinstance(raw_actual, list) else []
+        if declared != actual:
+            return VerificationResult(False, kind, "attachments-mismatch", msg.key_id)
 
     try:
         sent = _parse_iso(canonical.get("sent_at"))

@@ -40,6 +40,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from datetime import datetime, timezone
 
+from ekho.verify import VerificationResult
+
 from .attachments import download_inbox_attachments
 from .messages import iso_now
 from .verification import should_autowake, sync_pinned_operator_keys, verify_batch
@@ -362,13 +364,15 @@ def is_real_inbound(
     *,
     peer_enabled: bool = False,
     verification: Any = None,
+    require_signed: str = "warn",
 ) -> bool:
     """Qualifying filter — an inbound message auto-wakes the agent only when ALL
     hold. The OPERATOR path is trust-gated (cryptographically, when signed; else
     relay-attested); the PEER path is gated on ``peer_enabled`` (bounded
     delegation) and additionally latched per conversation in
     ``process_inbox_once``. ``verification`` is this message's agent-computed
-    verdict (None when the agent has no trust root yet)."""
+    verdict (None when the agent has no trust root yet); ``require_signed`` is
+    the peer wake strictness (#5, see ``should_autowake``)."""
     message_id = getattr(msg, "message_id", None)
     if not isinstance(message_id, str):
         return False
@@ -386,7 +390,11 @@ def is_real_inbound(
         return False
     # 5. Principal gate + execution authority (graceful crypto verification).
     return should_autowake(
-        msg, verification, operator_trusted=operator_trusted, peer_enabled=peer_enabled
+        msg,
+        verification,
+        operator_trusted=operator_trusted,
+        peer_enabled=peer_enabled,
+        require_signed=require_signed,
     )
 
 
@@ -465,6 +473,57 @@ def collect_verification_rejects(
             continue
         rejects.append((m, v))
     return rejects
+
+
+def collect_require_signed_withheld(
+    messages: Sequence[Any],
+    verifications: Dict[Any, Any],
+    self_agent_id: str,
+) -> List[tuple]:
+    """The peers withheld by "require" mode for lacking a verifiable signature
+    (#5): trigger-type peer messages that are unsigned, or signed but
+    unverifiable (None verdict = no pinned keys). Disjoint from
+    ``collect_verification_rejects`` (signed-but-INVALID) — together they account
+    for every message require mode refuses, so nothing is ever binned without a
+    dead-letter trace."""
+    withheld: List[tuple] = []
+    for m in messages:
+        if not isinstance(getattr(m, "message_id", None), str):
+            continue
+        if getattr(m, "sender_agent_id", None) == self_agent_id:
+            continue
+        if getattr(m, "sender_kind", None) == "operator":
+            continue  # operator fallback is operator_trusted, not this gate
+        if getattr(m, "message_type", None) not in TRIGGER_TYPES:
+            continue
+        v = verifications.get(getattr(m, "message_id", None))
+        signed = bool(getattr(m, "agent_sig", None))
+        if signed:
+            if v is not None and not getattr(v, "verified", False):
+                continue  # signed-but-invalid — collect_verification_rejects owns it
+            if v is not None and getattr(v, "verified", False):
+                continue  # fine — wakes normally
+            # signed but None verdict: no pinned keys, verification never ran.
+        # Unsigned peers are withheld regardless of verdict shape — with pinned
+        # keys they carry a failed reason="unsigned" verdict (which the other
+        # collector deliberately skips), without keys a None one. Both land
+        # here, or they'd be binned with no trace.
+        withheld.append(
+            (
+                m,
+                VerificationResult(
+                    verified=False,
+                    kind="peer",
+                    reason=(
+                        "unverifiable-require-signed"
+                        if signed
+                        else "unsigned-require-signed"
+                    ),
+                    key_id=getattr(m, "key_id", None),
+                ),
+            )
+        )
+    return withheld
 
 
 def _message_snapshot(msg: Any) -> Any:
@@ -1056,6 +1115,7 @@ def process_inbox_once(
     on_identity_changed: Optional[Callable[[Any], None]] = None,
     wall_now: Optional[datetime] = None,
     dead_letter_path: Optional[str] = None,
+    require_signed: str = "warn",
 ) -> Dict[str, int]:
     """One poll cycle: read + cache the inbox, ack the whole batch (real or not)
     BEFORE any turn (at-most-once), and on a qualifying message wake the agent.
@@ -1109,7 +1169,13 @@ def process_inbox_once(
 
         # Signed-but-invalid = about to be acked and binned. Never silent: log
         # the reason and dead-letter the message so it stays diagnosable.
+        # In "require" mode the unsigned/unverifiable peers about to be withheld
+        # get the same treatment — refused is fine, silent is not (#5).
         rejects = collect_verification_rejects(messages, verifications, self_agent_id)
+        if require_signed == "require":
+            rejects.extend(
+                collect_require_signed_withheld(messages, verifications, self_agent_id)
+            )
         for m, v in rejects:
             log.warning(
                 "[ekho-autoreply] verification FAILED for message %s from %s/%s "
@@ -1148,6 +1214,7 @@ def process_inbox_once(
             operator_trusted,
             peer_enabled=eff_peer_enabled,
             verification=verifications.get(getattr(m, "message_id", None)),
+            require_signed=require_signed,
         )
     ]
     # Burn the nonce of every signature we accepted, so a captured-valid message
@@ -1431,13 +1498,15 @@ def start_autoreply(
     peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET,
     identity_obj: Any = None,
     on_identity_changed: Optional[Callable[[Any], None]] = None,
+    require_signed: str = "warn",
 ) -> Callable[[], None]:
     """Start the background poll loop in a daemon thread. Spends zero LLM tokens
     unless a real message arrives. ``peer_enabled`` turns on bounded
     agent-to-agent delegation (latched at ``peer_turn_budget`` per conversation).
     ``identity_obj`` (the agent's EkhoIdentity) enables cryptographic verification;
     ``on_identity_changed`` persists it when the pinned operator keys change.
-    Returns a ``stop()`` callable."""
+    ``require_signed`` is the peer wake strictness (#5). Returns a ``stop()``
+    callable."""
     log = log or logger
     state = AutoReplyState()
     stop_event = threading.Event()
@@ -1467,6 +1536,7 @@ def start_autoreply(
                     peer_turn_budget=peer_turn_budget,
                     identity_obj=identity_obj,
                     on_identity_changed=on_identity_changed,
+                    require_signed=require_signed,
                 )
             except Exception as exc:  # noqa: BLE001 — a relay blip must not kill the loop
                 log.debug("[ekho-autoreply] tick failed: %s", exc)

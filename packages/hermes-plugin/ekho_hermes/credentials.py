@@ -39,6 +39,10 @@ class EkhoIdentity:
 
     seed_hex: str
     pinned_operator_keys: Dict[str, str] = field(default_factory=dict)
+    # Set once, when the empty pin set trust-on-first-use adopted the relay's
+    # operator keys (#5). Latched forever so a later emptied pin set can never
+    # be re-seeded by whoever controls the relay at that moment.
+    tofu_at: Optional[str] = None
 
     def public_key_b64url(self) -> str:
         return public_key_b64url_from_seed(bytes.fromhex(self.seed_hex))
@@ -58,6 +62,7 @@ def load_or_create_identity(config_dir: str) -> EkhoIdentity:
                 return EkhoIdentity(
                     seed_hex=str(data["seed_hex"]),
                     pinned_operator_keys=dict(data.get("pinned_operator_keys") or {}),
+                    tofu_at=str(data["tofu_at"]) if data.get("tofu_at") else None,
                 )
         except (OSError, ValueError):
             pass
@@ -79,6 +84,8 @@ def save_identity(config_dir: str, identity: EkhoIdentity) -> None:
         "seed_hex": identity.seed_hex,
         "pinned_operator_keys": identity.pinned_operator_keys,
     }
+    if identity.tofu_at:
+        payload["tofu_at"] = identity.tofu_at
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -143,6 +150,20 @@ def save_credentials(config_dir: str, credentials: AgentCredentials) -> None:
             pass
 
 
+# Operator keys the relay handed us at enrollment — the trust bootstrap the
+# relay has always sent and this plugin used to drop on the floor (#5).
+# Consumed once by ensure_connected right after enrollment.
+_last_enroll_operator_keys: Optional[list] = None
+
+
+def take_enroll_operator_keys() -> Optional[list]:
+    """One-shot getter for the operator keys the last enrollment returned."""
+    global _last_enroll_operator_keys
+    keys = _last_enroll_operator_keys
+    _last_enroll_operator_keys = None
+    return keys
+
+
 def enroll_or_load(
     config: EkhoConfig,
     config_dir: str,
@@ -202,6 +223,11 @@ def enroll_or_load(
             "hostname": hostname,
         }
     )
+    # Stash the enroll response's operator keys (the trust bootstrap) so
+    # ensure_connected can TOFU-pin them right after enrollment (#5).
+    global _last_enroll_operator_keys
+    enroll_keys = getattr(response, "operator_keys", None)
+    _last_enroll_operator_keys = list(enroll_keys) if enroll_keys else None
     creds = response.to_credentials()
     # Enroll responses carry their own relay_base_url; keep the configured one
     # if the relay echoed an empty value back.

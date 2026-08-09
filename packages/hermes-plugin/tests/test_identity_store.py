@@ -26,3 +26,14 @@ def test_public_key_matches_sdk_derivation(tmp_path):
 
     a = load_or_create_identity(str(tmp_path))
     assert a.public_key_b64url() == public_key_b64url_from_seed(bytes.fromhex(a.seed_hex))
+
+
+def test_tofu_at_round_trip(tmp_path):
+    # #5: the TOFU latch must survive a restart, or an emptied pin set could be
+    # re-seeded by whoever controls the relay later.
+    a = load_or_create_identity(str(tmp_path))
+    assert a.tofu_at is None  # absent until TOFU fires
+    a.tofu_at = "2026-08-09T00:00:00.000Z"
+    save_identity(str(tmp_path), a)
+    b = load_or_create_identity(str(tmp_path))
+    assert b.tofu_at == "2026-08-09T00:00:00.000Z"

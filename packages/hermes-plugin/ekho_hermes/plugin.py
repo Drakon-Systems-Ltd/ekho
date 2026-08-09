@@ -208,6 +208,10 @@ def _handle_ekho_send(args: dict, **_kw) -> str:
                     body_text=message,
                     nonce=nonce,
                     sent_at=sent_at,
+                    # v2 (#9): bind what the relay could otherwise relabel/swap.
+                    message_type="direct",
+                    priority="normal",
+                    attachments=attachment_ids,
                 )
             )
     except Exception as exc:  # noqa: BLE001 — unsigned send is still valid
@@ -350,6 +354,9 @@ def register(ctx) -> None:
                 conn,
                 peer_enabled=config.peer_autoreply,
                 peer_turn_budget=config.peer_turn_budget,
+                # #5: how strictly peers must prove themselves before waking a
+                # turn ("warn" default; EKHO_REQUIRE_SIGNED sets it per process).
+                require_signed=config.require_signed,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ekho] auto-reply start failed: %s", exc)

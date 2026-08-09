@@ -1372,3 +1372,99 @@ def test_build_prompt_collapses_newline_in_display_name():
     prompt = build_prompt([m], operator_trusted=False, roster=roster)
     import re as _re
     assert len(_re.findall(r"(?m)^• From ", prompt)) == 1
+
+
+# --- #5: everything "require" mode refuses must leave a dead-letter trace ---
+
+from ekho_hermes.autoreply import collect_require_signed_withheld
+
+
+def test_require_signed_withheld_collects_unsigned_and_unverifiable_peers():
+    msgs = [
+        _msg(message_id="m1", sender_kind="agent", sender_agent_id="p1"),
+        _msg(
+            message_id="m2", sender_kind="agent", sender_agent_id="p2",
+            agent_sig="S", key_id="k2",
+        ),
+    ]
+    withheld = collect_require_signed_withheld(msgs, {}, "self")
+    assert [(m.message_id, v.reason) for m, v in withheld] == [
+        ("m1", "unsigned-require-signed"),
+        ("m2", "unverifiable-require-signed"),
+    ]
+    # The verdicts are dead-letterable: kind/key_id present, never verified.
+    assert all(v.verified is False and v.kind == "peer" for _, v in withheld)
+    assert withheld[1][1].key_id == "k2"
+
+
+def test_require_signed_withheld_collects_unsigned_peer_with_unsigned_verdict():
+    """With a trust root pinned, verify_batch gives unsigned messages a FAILED
+    verdict (reason "unsigned") instead of None — they must still be
+    dead-lettered when require mode withholds them, not silently binned."""
+    from ekho.verify import VerificationResult
+
+    msgs = [_msg(message_id="m3", sender_kind="agent", sender_agent_id="p5")]
+    verdicts = {"m3": VerificationResult(False, "peer", "unsigned", None)}
+    withheld = collect_require_signed_withheld(msgs, verdicts, "self")
+    assert [(m.message_id, v.reason) for m, v in withheld] == [
+        ("m3", "unsigned-require-signed"),
+    ]
+
+
+def test_require_signed_withheld_skips_operators_self_verified_and_invalid():
+    from ekho.verify import VerificationResult
+
+    msgs = [
+        _msg(message_id="o1", sender_kind="operator"),
+        _msg(message_id="s1", sender_kind="agent", sender_agent_id="self"),
+        _msg(message_id="ok", sender_kind="agent", sender_agent_id="p3", agent_sig="S"),
+        _msg(message_id="bad", sender_kind="agent", sender_agent_id="p4", agent_sig="S"),
+        _msg(message_id="hb", sender_kind="agent", sender_agent_id="p5",
+             message_type="heartbeat"),
+    ]
+    verdicts = {
+        "ok": VerificationResult(True, "peer", None, "k"),
+        # signed-but-invalid — collect_verification_rejects owns it
+        "bad": VerificationResult(False, "peer", "bad-signature", "k"),
+    }
+    assert collect_require_signed_withheld(msgs, verdicts, "self") == []
+
+
+def test_tick_require_mode_dead_letters_and_does_not_wake_unsigned_peer(tmp_path):
+    """End-to-end tick in "require" mode with no trust root yet (the dormant
+    state): an unsigned peer message neither wakes the agent nor vanishes
+    silently — it lands in the dead-letter file."""
+    import json
+
+    from ekho_hermes.credentials import EkhoIdentity
+
+    ident = EkhoIdentity(seed_hex="11" * 32)  # never pinned — verdicts are None
+    peer = _msg(message_id="pm", sender_kind="agent", sender_agent_id="peer1")
+    inbox = InboxResponse(
+        messages=[peer], controls=[], operator_trusted=True, roster=[],
+        peer_autoreply=True, fleet_id="flt",
+    )
+
+    class _Client:
+        def __init__(self):
+            self.acked = []
+
+        def get_inbox(self):
+            return inbox
+
+        def ack_messages(self, acks):
+            self.acked.append(acks)
+
+    dl = tmp_path / "dead-letter.jsonl"
+    spawned = []
+    summary = process_inbox_once(
+        _Client(), "self", _state(), spawn=lambda *a: spawned.append(a),
+        now=0.0, peer_enabled=True, identity_obj=ident,
+        dead_letter_path=str(dl), require_signed="require",
+    )
+    assert spawned == []
+    assert summary["real"] == 0
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["reason"] == "unsigned-require-signed"
+    assert records[0]["message"]["message_id"] == "pm"

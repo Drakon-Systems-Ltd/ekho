@@ -303,6 +303,10 @@ class EnrollResponse:
     heartbeat_interval_seconds: int
     poll_interval_seconds: int
     policy_profile: str
+    # Operator signing keys the relay hands out at enrollment — the trust
+    # bootstrap (#5). Consumers may TOFU-pin these for a never-pinned identity.
+    # Last field so positional EnrollResponse(...) construction stays stable.
+    operator_keys: List[OperatorKeyEntry] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "EnrollResponse":
@@ -313,6 +317,11 @@ class EnrollResponse:
             heartbeat_interval_seconds=data["heartbeat_interval_seconds"],
             poll_interval_seconds=data["poll_interval_seconds"],
             policy_profile=data.get("policy_profile", "default"),
+            operator_keys=[
+                OperatorKeyEntry.from_dict(k)
+                for k in data.get("operator_keys") or []
+                if isinstance(k, dict) and k.get("key_id") and k.get("public_key")
+            ],
         )
 
     def to_credentials(self) -> AgentCredentials:

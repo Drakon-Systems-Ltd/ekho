@@ -162,3 +162,72 @@ def test_peer_bad_endorsement_rejected():
 def test_peer_unknown_sender_rejected():
     r = _verify(_peer_msg(), roster={})  # sender not in roster
     assert r.verified is False and r.reason == "unknown-sender-key"
+
+
+# --- v2 bindings (#9) ---
+# v2 envelopes bind message_type, priority and attachments — a relay
+# relabelling a message or swapping attachments breaks the binding. v1 stays
+# accepted without those checks (transition compatibility).
+def _peer_v2(
+    *, msg_type="direct", priority="normal", body_att=None,
+    canon_type="direct", canon_priority="normal", canon_att=None, nonce="v2n",
+):
+    text = "hi"
+    canonical = {
+        "v": 2, "fleet_id": FLEET, "sender_agent_id": PEER_ID, "key_id": PEER_KID,
+        "recipient": {"kind": "agent", "id": SELF},
+        "conversation_id": "c", "body_sha256": _bh(text),
+        "sent_at": "2026-06-07T00:00:00Z", "nonce": nonce,
+        "message_type": canon_type, "priority": canon_priority,
+        "attachments": canon_att if canon_att is not None else [],
+    }
+    sig = identity.sign_canonical(canonical, PEER_SEED)
+    body = {"text": text}
+    if body_att is not None:
+        body["attachments"] = body_att
+    return InboxMessage(
+        message_id="pm2", conversation_id="c", correlation_id="cor",
+        sender_agent_id=PEER_ID, message_type=msg_type, priority=priority,
+        body=body, metadata={}, created_at="t", deadline_at="t",
+        sender_kind="agent", agent_sig=sig, key_id=PEER_KID,
+        sig_canonical=canonical,
+    )
+
+
+def test_v2_happy_path_verifies():
+    r = _verify(_peer_v2(), roster=_roster())
+    assert r.verified is True
+
+
+def test_v2_relabelled_message_type_rejected():
+    r = _verify(_peer_v2(msg_type="alert"), roster=_roster())
+    assert r.verified is False and r.reason == "type-mismatch"
+
+
+def test_v2_relabelled_priority_rejected():
+    r = _verify(_peer_v2(priority="urgent"), roster=_roster())
+    assert r.verified is False and r.reason == "priority-mismatch"
+
+
+def test_v2_swapped_attachments_rejected():
+    r = _verify(
+        _peer_v2(canon_att=["att_1"], body_att=["att_evil"]), roster=_roster()
+    )
+    assert r.verified is False and r.reason == "attachments-mismatch"
+
+
+def test_v2_attachment_order_does_not_matter():
+    r = _verify(
+        _peer_v2(canon_att=["att_b", "att_a"], body_att=["att_a", "att_b"]),
+        roster=_roster(),
+    )
+    assert r.verified is True
+
+
+def test_v1_envelopes_still_verify_without_the_new_bindings():
+    # _peer_msg() is v1: its canonical has no message_type/priority bound, so
+    # even a relabelled message stays valid during the transition.
+    msg = _peer_msg()
+    msg.message_type = "alert"
+    r = _verify(msg, roster=_roster())
+    assert r.verified is True

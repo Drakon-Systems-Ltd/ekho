@@ -56,3 +56,24 @@ def test_peer_turn_budget_floor_of_one():
         env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": "0"}
     )
     assert cfg.peer_turn_budget == 25  # <=0 is meaningless -> default
+
+
+def test_require_signed_defaults_to_warn():
+    cfg = EkhoConfig.from_env(env={"EKHO_RELAY_URL": "http://relay"})
+    assert cfg.require_signed == "warn"
+
+
+def test_require_signed_parsed_from_env():
+    # #5: EKHO_REQUIRE_SIGNED drives the peer-wake strictness; junk -> "warn".
+    for raw, expected in (
+        ("require", "require"),
+        (" REQUIRE ", "require"),
+        ("off", "off"),
+        ("warn", "warn"),
+        ("nonsense", "warn"),
+        ("", "warn"),
+    ):
+        cfg = EkhoConfig.from_env(
+            env={"EKHO_RELAY_URL": "http://relay", "EKHO_REQUIRE_SIGNED": raw}
+        )
+        assert cfg.require_signed == expected, repr(raw)

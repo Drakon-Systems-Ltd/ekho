@@ -187,3 +187,49 @@ def test_missing_relay_raises(tmp_path):
     factory, _ = _factory_capture()
     with pytest.raises(ValueError):
         enroll_or_load(config, str(tmp_path), client_factory=factory)
+
+
+# --- enroll operator-keys stash (#5) ----------------------------------------
+
+
+def test_enroll_stashes_operator_keys_and_take_is_one_shot(tmp_path):
+    from types import SimpleNamespace
+
+    from ekho_hermes import credentials as creds_mod
+    from ekho_hermes.credentials import take_enroll_operator_keys
+
+    class _KeyedStub(_StubEnrollResponse):
+        operator_keys = [SimpleNamespace(key_id="K", public_key="PUB", revoked=False)]
+
+    class _KeyedClient(_FakeClient):
+        def enroll(self, payload):
+            self.enroll_called_with = payload
+            return _KeyedStub(
+                agent_id="enrolled-agent",
+                secret="enrolled-secret",
+                relay_base_url=self.credentials.relay_base_url,
+            )
+
+    creds_mod._last_enroll_operator_keys = None  # isolate from other tests
+    config = EkhoConfig(
+        relay_url="https://relay.example", fleet_id="fleet-1", enrollment_token="tok"
+    )
+    enroll_or_load(config, str(tmp_path), client_factory=_KeyedClient)
+
+    keys = take_enroll_operator_keys()
+    assert keys is not None and keys[0].key_id == "K"
+    # One-shot: a second take yields nothing (mirrors takeEnrollOperatorKeys).
+    assert take_enroll_operator_keys() is None
+
+
+def test_enroll_without_operator_keys_stashes_none(tmp_path):
+    from ekho_hermes import credentials as creds_mod
+    from ekho_hermes.credentials import take_enroll_operator_keys
+
+    creds_mod._last_enroll_operator_keys = None
+    config = EkhoConfig(
+        relay_url="https://relay.example", fleet_id="fleet-1", enrollment_token="tok"
+    )
+    factory, _ = _factory_capture()  # stub response has no operator_keys attr
+    enroll_or_load(config, str(tmp_path), client_factory=factory)
+    assert take_enroll_operator_keys() is None

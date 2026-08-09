@@ -11,6 +11,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from .verification import parse_require_signed_mode
+
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 DEFAULT_PEER_TURN_BUDGET = 25
 
@@ -74,6 +76,11 @@ class EkhoConfig:
     # "<key_id>:<b64url>", comma-separated. Optional — the trusted out-of-band
     # channel (the Security screen shows the value to paste).
     operator_pubkey: Optional[str] = None
+    # #5: "warn" (default) | "require" | "off". "require" wakes on a peer message
+    # ONLY when it is signed and verifies; unsigned/unverifiable peers are
+    # dead-lettered. Set via EKHO_REQUIRE_SIGNED (which is both the config value
+    # and the per-process override in this env-driven config).
+    require_signed: str = "warn"
 
     @property
     def has_relay(self) -> bool:
@@ -124,4 +131,5 @@ class EkhoConfig:
             peer_autoreply=_truthy_default_true(env.get("EKHO_PEER_AUTOREPLY")),
             peer_turn_budget=budget,
             operator_pubkey=_clean(env.get("EKHO_OPERATOR_PUBKEY")),
+            require_signed=parse_require_signed_mode(env.get("EKHO_REQUIRE_SIGNED")),
         )

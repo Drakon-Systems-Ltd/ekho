@@ -541,9 +541,16 @@ export function collectRequireSignedWithheld(
     if (m.sender_kind === "operator") continue; // operator fallback is operator_trusted, not this gate
     if (!TRIGGER_TYPES.has(m.message_type)) continue;
     const v = verifications[m.message_id];
-    if (v && !v.verified) continue; // signed-but-invalid — collectVerificationRejects owns it
     const signed = Boolean(m.agent_sig);
-    if (signed && v?.verified) continue; // fine — wakes normally
+    if (signed) {
+      if (v && !v.verified) continue; // signed-but-invalid — collectVerificationRejects owns it
+      if (v?.verified) continue; // fine — wakes normally
+      // signed but null verdict: no pinned keys, verification never ran.
+    }
+    // Unsigned peers are withheld regardless of verdict shape — with pinned
+    // keys they carry a failed reason="unsigned" verdict (which the other
+    // collector deliberately skips), without keys a null one. Both land here,
+    // or they'd be binned with no trace.
     withheld.push({
       message: m,
       verdict: {
