@@ -8,7 +8,7 @@ import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoo
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
-import { loginThrottle } from "./login-throttle";
+import { loginThrottle, resolveClientIp } from "./login-throttle";
 import { issueOperatorSession } from "./operator-session";
 import { sign } from "./utils";
 
@@ -39,7 +39,9 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
 
     // Brute-force throttle: check BEFORE spending a scrypt verification, so a
     // flood of guesses can't also be used as a CPU exhaustion lever.
-    const clientIp = request.ip;
+    // request.ip is the raw socket peer (trustProxy is deliberately unset);
+    // resolveClientIp unwraps the one trusted forwarding hop. See #8.
+    const clientIp = resolveClientIp(request.ip, request.headers["x-forwarded-for"]);
     const gateDecision = loginThrottle.check(parsed.data.fleet_name, parsed.data.email, clientIp);
     if (!gateDecision.allowed) {
       reply.header("Retry-After", String(gateDecision.retryAfterSeconds ?? 60));

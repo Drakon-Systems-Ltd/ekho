@@ -23,6 +23,32 @@
 
 import { config } from "./config";
 
+/**
+ * The client address the throttle should key on. `socketIp` is what the TCP
+ * peer actually is; behind `tailscale serve` that is always the proxy's
+ * loopback, which collapsed every operator into one shared bucket (#8).
+ *
+ * Trust model: only when the socket itself is a configured trusted proxy do we
+ * read X-Forwarded-For, and then only the RIGHTMOST entry — the one our single
+ * trusted hop appended. Everything left of it, and the entire header on a
+ * direct connection, is attacker-controlled and ignored, so a spoofed header
+ * can never rotate an attacker out of their own bucket.
+ */
+export function resolveClientIp(
+  socketIp: string,
+  forwardedFor: unknown,
+  trustedProxies: readonly string[] = config.trustedProxyIps
+): string {
+  const sock = String(socketIp ?? "").trim();
+  if (!trustedProxies.includes(sock)) return sock;
+  // Repeated headers arrive as an array; the proxy appends to the last one.
+  const rawHeader = Array.isArray(forwardedFor) ? forwardedFor[forwardedFor.length - 1] : forwardedFor;
+  if (typeof rawHeader !== "string") return sock;
+  const parts = rawHeader.split(",");
+  const client = parts[parts.length - 1]!.trim();
+  return client.length > 0 ? client : sock;
+}
+
 export interface ThrottleDecision {
   allowed: boolean;
   /** Seconds until the caller may retry — set only when blocked. */

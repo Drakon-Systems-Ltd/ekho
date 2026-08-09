@@ -47,6 +47,17 @@ export const config = {
   // guessing loop.
   loginMaxFailures: resolveNumber(process.env.EKHO_LOGIN_MAX_FAILURES, 10),
   loginWindowSeconds: resolveNumber(process.env.EKHO_LOGIN_WINDOW_SECONDS, 900), // 15 min
+  // Socket addresses allowed to speak for their clients via X-Forwarded-For.
+  // The relay normally sits behind `tailscale serve` on loopback, so without
+  // this every external client shares one loopback throttle bucket and ten bad
+  // guesses lock out ALL operators (#8). Only the single trusted hop is
+  // believed, and only its own (rightmost) appended entry — never enable
+  // Fastify trustProxy wholesale, which would swallow attacker-supplied chains
+  // and turn the per-IP counter into an evasion lever instead.
+  trustedProxyIps: (process.env.EKHO_TRUSTED_PROXY_IPS ?? "127.0.0.1,::1,::ffff:127.0.0.1")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0) as readonly string[],
 
   // Conversation floor control (agent turn-taking). The floor auto-releases
   // after floorTtlSeconds so a crashed holder never wedges a conversation; the

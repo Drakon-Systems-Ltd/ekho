@@ -82,3 +82,39 @@ describe("LoginThrottle", () => {
     expect(throttle.size()).toBe(0);
   });
 });
+
+// resolveClientIp is the #8 fix: unwrap exactly one trusted forwarding hop,
+// believe nothing an untrusted peer says about itself.
+import { resolveClientIp } from "../src/login-throttle";
+import { describe as describe2, it as it2, expect as expect2 } from "vitest";
+
+describe2("resolveClientIp", () => {
+  const trusted = ["127.0.0.1", "::1"];
+
+  it2("returns the socket IP for a direct connection, ignoring any spoofed header", () => {
+    expect2(resolveClientIp("198.51.100.7", "10.0.0.1", trusted)).toBe("198.51.100.7");
+    expect2(resolveClientIp("198.51.100.7", undefined, trusted)).toBe("198.51.100.7");
+  });
+
+  it2("unwraps the forwarded IP when the socket is a trusted proxy", () => {
+    expect2(resolveClientIp("127.0.0.1", "203.0.113.5", trusted)).toBe("203.0.113.5");
+  });
+
+  it2("takes only the rightmost entry of a forwarded chain", () => {
+    expect2(resolveClientIp("127.0.0.1", "10.1.1.1, 10.2.2.2, 203.0.113.9", trusted)).toBe("203.0.113.9");
+  });
+
+  it2("takes the last header when the header is repeated (array)", () => {
+    expect2(resolveClientIp("127.0.0.1", ["10.1.1.1", "203.0.113.7"], trusted)).toBe("203.0.113.7");
+  });
+
+  it2("falls back to the socket IP when the trusted hop sends no/empty header", () => {
+    expect2(resolveClientIp("127.0.0.1", undefined, trusted)).toBe("127.0.0.1");
+    expect2(resolveClientIp("127.0.0.1", "", trusted)).toBe("127.0.0.1");
+    expect2(resolveClientIp("127.0.0.1", "  ,  ", trusted)).toBe("127.0.0.1");
+  });
+
+  it2("no trusted proxies configured means the socket is always the answer", () => {
+    expect2(resolveClientIp("127.0.0.1", "203.0.113.5", [])).toBe("127.0.0.1");
+  });
+});
