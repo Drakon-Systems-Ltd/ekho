@@ -583,3 +583,34 @@ describe("prompt-injection containment (buildPrompt body fence)", () => {
     expect((p.match(/^• From /gm) ?? []).length).toBe(1);
   });
 });
+
+// #5: everything "require" mode refuses must leave a dead-letter trace.
+import { collectRequireSignedWithheld } from "../src/autoreply";
+
+describe("collectRequireSignedWithheld (#5)", () => {
+  const base = { message_type: "direct", body: { text: "hi" } };
+  it("collects unsigned and unverifiable peers, with distinct reasons", () => {
+    const msgs = [
+      { ...base, message_id: "m1", sender_kind: "agent", sender_agent_id: "p1", agent_sig: null },
+      { ...base, message_id: "m2", sender_kind: "agent", sender_agent_id: "p2", agent_sig: "S", key_id: "k2" },
+    ] as any[];
+    const withheld = collectRequireSignedWithheld(msgs, {}, "self");
+    expect(withheld.map((w) => [w.message.message_id, w.verdict.reason])).toEqual([
+      ["m1", "unsigned-require-signed"],
+      ["m2", "unverifiable-require-signed"],
+    ]);
+  });
+  it("skips operators, self, verified peers, and signed-but-invalid (owned elsewhere)", () => {
+    const msgs = [
+      { ...base, message_id: "o1", sender_kind: "operator", operator_sig: null },
+      { ...base, message_id: "s1", sender_kind: "agent", sender_agent_id: "self", agent_sig: null },
+      { ...base, message_id: "ok", sender_kind: "agent", sender_agent_id: "p3", agent_sig: "S" },
+      { ...base, message_id: "bad", sender_kind: "agent", sender_agent_id: "p4", agent_sig: "S" },
+    ] as any[];
+    const verdicts = {
+      ok: { verified: true, kind: "peer", reason: null, keyId: "k" },
+      bad: { verified: false, kind: "peer", reason: "bad-signature", keyId: "k" },
+    } as any;
+    expect(collectRequireSignedWithheld(msgs, verdicts, "self")).toEqual([]);
+  });
+});

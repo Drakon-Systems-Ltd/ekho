@@ -7,9 +7,11 @@ import {
   loadOrCreateIdentity,
   saveIdentity,
   identityPublicKey,
+  takeEnrollOperatorKeys,
   type EkhoCredentials,
   type EkhoIdentity
 } from "./credentials.js";
+import { parseRequireSignedMode, syncPinnedOperatorKeys } from "./verification.js";
 import { fromB64url, keyId as deriveKeyId } from "./identity.js";
 import { startAutoReply } from "./autoreply.js";
 import { appendDeadLetters } from "./dead-letter.js";
@@ -29,6 +31,10 @@ export interface EkhoPluginConfig {
   // trusted out-of-band channel for agents that predate signing).
   // "<b64url>" or "<key_id>:<b64url>", comma-separated.
   operatorPubkey?: string;
+  // #5: "warn" (default) | "require" | "off". "require" wakes on a peer message
+  // ONLY when it is signed and verifies; unsigned/unverifiable peers are
+  // dead-lettered. EKHO_REQUIRE_SIGNED overrides per-process.
+  requireSigned?: string;
 }
 
 export interface EkhoConnection {
@@ -321,6 +327,15 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
         configDir,
         log
       });
+      // TOFU (#5): pin the operator keys the relay handed us at enrollment —
+      // sent since the beginning, dropped on the floor until now. Only fires
+      // for a never-pinned identity (see syncPinnedOperatorKeys); explicit
+      // config pins above always win.
+      const enrollKeys = takeEnrollOperatorKeys();
+      if (enrollKeys && identity && syncPinnedOperatorKeys(identity, enrollKeys, credentials.fleetId || config.fleetId)) {
+        saveIdentity(configDir, identity);
+        log?.info?.(`[ekho] pinned ${Object.keys(identity.pinnedOperatorKeys).length} operator key(s) from enrollment (TOFU)`);
+      }
     } catch (err) {
       log?.warn?.(`[ekho] identity bootstrap failed: ${String(err)}`);
     }
@@ -383,6 +398,9 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     log,
     peerEnabled: config?.peerAutoreply ?? true,
     peerTurnBudget: config?.peerTurnBudget,
+    // #5: how strictly peers must prove themselves before waking a turn.
+    // Env beats config so an operator can flip one box without a config deploy.
+    requireSigned: parseRequireSignedMode(process.env.EKHO_REQUIRE_SIGNED ?? config?.requireSigned),
     identity: identity ?? undefined,
     onIdentityChanged: (id) => {
       if (identityConfigDir) saveIdentity(identityConfigDir, id);

@@ -126,3 +126,57 @@ describe("verifyInbound — peer", () => {
     expect(verify(peerMsg(), { rosterByAgent: {} }).reason).toBe("unknown-sender-key");
   });
 });
+
+// #9: v2 envelopes bind message_type, priority and attachments — a relay
+// relabelling a message or swapping attachments breaks the binding. v1 stays
+// accepted without those checks (transition compatibility).
+describe("verifyInbound — v2 bindings (#9)", () => {
+  function peerV2(overrides: {
+    msgType?: string; priority?: string; bodyAtt?: string[];
+    canonType?: string; canonPriority?: string; canonAtt?: string[];
+  } = {}) {
+    const text = "hi";
+    const canonical = {
+      v: 2, fleet_id: FLEET, sender_agent_id: PEER_ID, key_id: PEER_KID,
+      recipient: { kind: "agent", id: SELF }, conversation_id: "c",
+      body_sha256: sha256Hex(text), sent_at: "2026-06-07T12:00:00Z", nonce: "v2n-" + Math.random(),
+      message_type: overrides.canonType ?? "direct",
+      priority: overrides.canonPriority ?? "normal",
+      attachments: overrides.canonAtt ?? [],
+    };
+    return {
+      message_id: "pm2", sender_kind: "agent", sender_agent_id: PEER_ID,
+      message_type: overrides.msgType ?? "direct",
+      priority: overrides.priority ?? "normal",
+      body: { text, ...(overrides.bodyAtt ? { attachments: overrides.bodyAtt } : {}) },
+      agent_sig: signCanonical(canonical, PEER_SEED), operator_sig: null,
+      key_id: PEER_KID, sig_canonical: canonical,
+    };
+  }
+
+  it("v2 happy path verifies", () => {
+    const r = verify(peerV2(), { rosterByAgent: roster() });
+    expect(r.verified).toBe(true);
+  });
+  it("relabelled message_type is rejected", () => {
+    const r = verify(peerV2({ msgType: "alert" }), { rosterByAgent: roster() });
+    expect(r).toMatchObject({ verified: false, reason: "type-mismatch" });
+  });
+  it("relabelled priority is rejected", () => {
+    const r = verify(peerV2({ priority: "urgent" }), { rosterByAgent: roster() });
+    expect(r).toMatchObject({ verified: false, reason: "priority-mismatch" });
+  });
+  it("swapped attachments are rejected", () => {
+    const r = verify(peerV2({ canonAtt: ["att_1"], bodyAtt: ["att_evil"] }), { rosterByAgent: roster() });
+    expect(r).toMatchObject({ verified: false, reason: "attachments-mismatch" });
+  });
+  it("attachment order does not matter", () => {
+    const r = verify(peerV2({ canonAtt: ["att_b", "att_a"], bodyAtt: ["att_a", "att_b"] }), { rosterByAgent: roster() });
+    expect(r.verified).toBe(true);
+  });
+  it("v1 envelopes still verify without the new bindings", () => {
+    // peerMsg() is v1 and its message has no message_type/priority fields bound.
+    const r = verify({ ...peerMsg(), message_type: "alert" }, { rosterByAgent: roster() });
+    expect(r.verified).toBe(true);
+  });
+});

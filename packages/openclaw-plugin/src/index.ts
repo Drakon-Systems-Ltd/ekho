@@ -193,7 +193,11 @@ const plugin = defineToolPlugin({
                 conversationId,
                 bodyText: message,
                 nonce: crypto.randomBytes(16).toString("base64url"),
-                sentAt: new Date().toISOString()
+                sentAt: new Date().toISOString(),
+                // v2 (#9): bind what the relay could otherwise relabel/swap.
+                messageType: "direct",
+                priority: "normal",
+                attachments: attachmentIds
               })
             );
           }

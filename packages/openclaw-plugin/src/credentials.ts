@@ -18,6 +18,10 @@ const IDENTITY_FILE = ".ekho-identity.json";
 export interface EkhoIdentity {
   seedHex: string;
   pinnedOperatorKeys: Record<string, string>;
+  /** Set once, when the empty pin set trust-on-first-use adopted the relay's
+   *  operator keys (#5). Latched forever so a later emptied pin set can never
+   *  be re-seeded by whoever controls the relay at that moment. */
+  tofuAt?: string;
 }
 
 export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
@@ -28,7 +32,8 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
       if (data?.seedHex) {
         return {
           seedHex: String(data.seedHex),
-          pinnedOperatorKeys: (data.pinnedOperatorKeys as Record<string, string>) ?? {}
+          pinnedOperatorKeys: (data.pinnedOperatorKeys as Record<string, string>) ?? {},
+          ...(data.tofuAt ? { tofuAt: String(data.tofuAt) } : {})
         };
       }
     } catch {
@@ -67,6 +72,22 @@ export function loadCredentials(configDir: string): EkhoCredentials | null {
 export function saveCredentials(configDir: string, credentials: EkhoCredentials) {
   fs.mkdirSync(configDir, { recursive: true });
   fs.writeFileSync(path.join(configDir, CREDENTIALS_FILE), JSON.stringify(credentials, null, 2));
+}
+
+/** Operator keys the relay handed us at enrollment — the trust bootstrap the
+ *  relay has always sent and this plugin used to drop on the floor (#5).
+ *  Consumed once by registerAndBootstrapIdentity right after enrollment. */
+export interface EnrollOperatorKey {
+  key_id?: string;
+  public_key?: string;
+  endorsed_by_key_id?: string | null;
+  endorsement_sig?: string | null;
+}
+let lastEnrollOperatorKeys: EnrollOperatorKey[] | null = null;
+export function takeEnrollOperatorKeys(): EnrollOperatorKey[] | null {
+  const keys = lastEnrollOperatorKeys;
+  lastEnrollOperatorKeys = null;
+  return keys;
 }
 
 export async function enrollOrLoad(config: {
@@ -115,7 +136,8 @@ export async function enrollOrLoad(config: {
     throw new Error(`[ekho-adapter] Enrollment failed: ${res.status} ${text}`);
   }
 
-  const body = await res.json() as { agent_id: string; secret: string };
+  const body = await res.json() as { agent_id: string; secret: string; operator_keys?: EnrollOperatorKey[] };
+  lastEnrollOperatorKeys = Array.isArray(body.operator_keys) ? body.operator_keys : null;
   const creds: EkhoCredentials = {
     agentId: body.agent_id,
     secret: body.secret,

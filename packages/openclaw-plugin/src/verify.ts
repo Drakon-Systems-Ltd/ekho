@@ -9,6 +9,8 @@ export interface SignedMessage {
   message_id?: string;
   sender_kind?: string;
   sender_agent_id?: string;
+  message_type?: string;
+  priority?: string;
   body?: { text?: string } & Record<string, unknown>;
   operator_sig?: string | null;
   agent_sig?: string | null;
@@ -102,6 +104,19 @@ export function verifyInbound(msg: SignedMessage, opts: VerifyOpts): VerifyResul
 
   const text = typeof msg.body?.text === "string" ? msg.body.text : "";
   if (c.body_sha256 !== sha256Hex(text)) return fail("body-mismatch");
+
+  // v2 envelopes (#9) additionally bind type, priority and attachments — a
+  // relay relabelling a message or swapping its attachments breaks the binding.
+  // v1 envelopes (older signers) skip these checks during the transition.
+  if (Number(c.v ?? 1) >= 2) {
+    if (c.message_type !== (msg.message_type ?? "")) return fail("type-mismatch");
+    if (c.priority !== (msg.priority ?? "")) return fail("priority-mismatch");
+    const declared = Array.isArray(c.attachments) ? (c.attachments as unknown[]).map(String).sort() : [];
+    const actual = Array.isArray(msg.body?.attachments) ? (msg.body.attachments as unknown[]).map(String).sort() : [];
+    if (declared.length !== actual.length || declared.some((a, i) => a !== actual[i])) {
+      return fail("attachments-mismatch");
+    }
+  }
 
   const sentAt = Date.parse(String(c.sent_at));
   if (Number.isNaN(sentAt)) return fail("bad-timestamp");

@@ -9,7 +9,8 @@ import {
   shouldAutowake,
   syncPinnedOperatorKeys,
   verifyBatch,
-  type OperatorKeyEntryLike
+  type OperatorKeyEntryLike,
+  type RequireSignedMode
 } from "./verification.js";
 import type { VerifyResult } from "./verify.js";
 
@@ -503,7 +504,8 @@ export function isRealInbound(
   state: AutoReplyState,
   operatorTrusted: boolean,
   peerEnabled = false,
-  verification?: VerifyResult | null
+  verification?: VerifyResult | null,
+  requireSigned: RequireSignedMode = "warn"
 ): boolean {
   if (!msg || typeof msg.message_id !== "string") return false;
   // 1. Never react to our own outbound.
@@ -517,7 +519,42 @@ export function isRealInbound(
   if (state.seen.has(msg.message_id)) return false;
   // 5. Principal gate + execution authority (graceful crypto verification).
   // Peers are additionally latched per conversation in the tick.
-  return shouldAutowake(msg, verification, operatorTrusted, peerEnabled);
+  return shouldAutowake(msg, verification, operatorTrusted, peerEnabled, requireSigned);
+}
+
+/**
+ * The peers withheld by "require" mode for lacking a verifiable signature (#5):
+ * trigger-type peer messages that are unsigned, or signed but unverifiable
+ * (null verdict = no pinned keys). Disjoint from collectVerificationRejects
+ * (signed-but-INVALID) — together they account for every message require mode
+ * refuses, so nothing is ever binned without a dead-letter trace.
+ */
+export function collectRequireSignedWithheld(
+  messages: InboxMessage[],
+  verifications: Record<string, VerifyResult | null>,
+  selfAgentId: string
+): Array<{ message: InboxMessage; verdict: VerifyResult }> {
+  const withheld: Array<{ message: InboxMessage; verdict: VerifyResult }> = [];
+  for (const m of messages) {
+    if (!m || typeof m.message_id !== "string") continue;
+    if (m.sender_agent_id === selfAgentId) continue;
+    if (m.sender_kind === "operator") continue; // operator fallback is operator_trusted, not this gate
+    if (!TRIGGER_TYPES.has(m.message_type)) continue;
+    const v = verifications[m.message_id];
+    if (v && !v.verified) continue; // signed-but-invalid — collectVerificationRejects owns it
+    const signed = Boolean(m.agent_sig);
+    if (signed && v?.verified) continue; // fine — wakes normally
+    withheld.push({
+      message: m,
+      verdict: {
+        verified: false,
+        kind: "peer",
+        reason: signed ? "unverifiable-require-signed" : "unsigned-require-signed",
+        keyId: m.key_id ?? null
+      }
+    });
+  }
+  return withheld;
 }
 
 /**
@@ -955,11 +992,14 @@ export function startAutoReply(opts: {
   // Sink for signed-but-invalid messages (they're acked + dropped this tick, so
   // this record is their only trace). Wired to the dead-letter file.
   onVerificationReject?: (rejects: Array<{ message: InboxMessage; verdict: VerifyResult }>) => void;
+  // #5: peer wake strictness — see RequireSignedMode. Default "warn".
+  requireSigned?: RequireSignedMode;
 }): () => void {
   const { client, api, selfAgentId, log } = opts;
   const pollIntervalMs = opts.pollIntervalMs ?? 5000;
   const peerEnabled = opts.peerEnabled ?? false;
   const peerTurnBudget = opts.peerTurnBudget ?? DEFAULT_PEER_TURN_BUDGET;
+  const requireSigned: RequireSignedMode = opts.requireSigned ?? "warn";
 
   const state = createAutoReplyState();
 
@@ -1005,7 +1045,12 @@ export function startAutoReply(opts: {
 
       // Signed-but-invalid = about to be acked and binned. Never silent: log
       // the reason and dead-letter the message so it stays diagnosable.
+      // In "require" mode the unsigned/unverifiable peers about to be withheld
+      // get the same treatment — refused is fine, silent is not (#5).
       const rejects = collectVerificationRejects(batch.messages, verifications, selfAgentId);
+      if (requireSigned === "require") {
+        rejects.push(...collectRequireSignedWithheld(batch.messages, verifications, selfAgentId));
+      }
       for (const { message: m, verdict: v } of rejects) {
         log?.warn?.(
           `[ekho-autoreply] verification FAILED for message ${m.message_id} from ` +
@@ -1032,7 +1077,7 @@ export function startAutoReply(opts: {
     // plugin-config bootstrap defaults when the relay omits the fields.
     const eff = effectivePeerSettings(batch, { peerEnabled, peerTurnBudget });
     const real = batch.messages.filter((m) =>
-      isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id])
+      isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
     // Burn the nonce of every signature we accepted (replay guard).
     for (const m of real) {
