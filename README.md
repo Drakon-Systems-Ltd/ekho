@@ -1,44 +1,76 @@
 <p align="center">
-  <img src="docs/images/ekho-architecture.svg" alt="Ekho architecture — signed messaging between agents via the Ekho relay" width="100%"/>
+  <img src="docs/images/ekho-logo.svg" alt="Ekho by Drakon Systems" width="520"/>
 </p>
-
-<h1 align="center">Ekho by Drakon Systems</h1>
 
 <p align="center"><strong>Private, signed, store-and-forward messaging for distributed AI agent fleets.</strong></p>
 
 <p align="center">
   <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
-  <img src="https://img.shields.io/badge/node-%E2%89%A520-0d9488" alt="Node 20+"/>
-  <img src="https://img.shields.io/badge/tests-706%20passing-34d399" alt="706 tests passing"/>
+  <img src="https://img.shields.io/badge/node-%E2%89%A522-0d9488" alt="Node 22+"/>
+  <img src="https://img.shields.io/badge/tests-797%20passing-34d399" alt="797 tests passing"/>
   <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
 </p>
 
-Ekho is a **one-binary relay** that gives AI agents an identity, an inbox, and delivery guarantees — without depending on a public broker. It speaks [A2A v1.0](https://a2a-protocol.org/latest/specification/) natively so any A2A client can talk to agents on your network out of the box.
+Ekho is a **self-hosted coordination layer for AI agent fleets**: a one-binary relay, operator console, runtime plugins, and SDKs that give every agent a verifiable identity, a durable inbox, and bounded agent-to-agent conversations. It works without a public broker and speaks [A2A v1.0](https://a2a-protocol.org/latest/specification/) natively, so standard A2A clients can discover and message agents on your network.
 
-Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any environment where agents need to coordinate securely.
+Use Ekho when agents live on different machines or runtimes and must keep coordinating through restarts, sleeping laptops, transient network loss, or operator intervention. The relay stores messages until recipients collect and acknowledge them; runtime adapters add heartbeats, trusted-operator framing, signed peer verification, attachment handling, and bounded auto-reply turns.
+
+Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
+
+**Current release:** `v0.4.0` — security hardening, end-to-end signature envelope v2, relay-side replay protection, bounded attachment storage, and self-healing Hermes SDK discovery. See [CHANGELOG.md](CHANGELOG.md).
+
+## How it works
+
+1. An operator creates a fleet and mints a one-time enrollment token.
+2. Each agent enrolls, receives relay credentials, and publishes an Ed25519 identity key.
+3. Senders sign message envelopes; the relay authenticates transport, stores each message, and routes it to an agent, room, or fleet broadcast.
+4. Recipients poll and ACK. Missed heartbeats, retries, dead letters, turn budgets, approvals, and policy violations remain visible in the operator console.
+5. Ekho carries coordination messages; the agents still execute with their own runtime, model provider, tools, and security policy.
+
+Ekho is **not** a model proxy, shared prompt, remote shell, or replacement for an agent runtime. It is the signed messaging and operator-control plane between those runtimes.
 
 ## Why Ekho
 
 | | Ekho | NATS / Kafka | A2A only |
 |---|---|---|---|
-| Single binary, zero infra | ✓ | — | — |
-| Signed per-agent auth | ✓ | build-your-own | build-your-own |
-| Delivery retry + dead-letter | ✓ | partial | — |
+| Single self-hosted relay | ✓ | — | — |
+| Durable inbox + ACK lifecycle | ✓ | build-your-own | — |
+| Signed agent identity | ✓ | build-your-own | build-your-own |
+| Runtime adapters | OpenClaw + Hermes | build-your-own | build-your-own |
+| Bounded peer auto-reply | ✓ | — | — |
+| Retry + dead-letter visibility | ✓ | partial | — |
 | Operator console included | ✓ | — | — |
-| Policy engine (deny/allow) | ✓ | — | — |
+| Policy + approval controls | ✓ | — | — |
 | A2A v1.0 native | ✓ | — | ✓ |
 | Open source core | ✓ (MIT) | ✓ | ✓ |
 | Paid tier pricing | $99 one-time Pro | infra cost / Enterprise quotes | — |
 
-## Quick Start (60 seconds)
+## Quick Start
+
+### Docker (recommended)
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/ekho.git
-cd ekho && npm install && npm run build && npm run setup && npm start
+cd ekho
+cp packages/relay/.env.example .env
+# Set EKHO_OPERATOR_SESSION_SECRET in .env (the Compose file reads it for substitution).
+# Add any additional EKHO_* variables you need under relay.environment in docker-compose.yml.
+docker compose up -d
 ```
 
-Open [http://localhost:4000/ui/](http://localhost:4000/ui/) — the operator console is waiting for you.
+Open [http://localhost:4000/ui/](http://localhost:4000/ui/) — the operator console is waiting for you. Docker stores relay state in the named `ekho-data` volume.
+
+### From source
+
+```bash
+git clone https://github.com/Drakon-Systems-Ltd/ekho.git
+cd ekho
+npm install
+npm run build
+npm run setup   # creates the fleet and operator login; save the one-time password
+npm start
+```
 
 <p align="center">
   <img src="docs/images/ekho-console.svg" alt="Ekho operator console preview" width="100%"/>
@@ -56,10 +88,12 @@ The same five steps appear in the console itself under the **?** (Help) icon —
 
 The console also includes a **Settings** panel (gear icon) for per-agent bubble colours and a typing-animation toggle, persisted locally in your browser.
 
-### Docker
+### Docker lifecycle
 
 ```bash
-docker compose up -d   # port 4000, SQLite persistence in ./data/
+docker compose up -d   # port 4000; SQLite persists in the named ekho-data volume
+docker compose ps
+docker compose logs -f relay
 ```
 
 ### Kubernetes
@@ -90,28 +124,48 @@ Runnable end-to-end demos live in [`examples/`](./examples).
 
 ## Features
 
-- **Signed messaging** — HMAC-SHA256 per-agent transport auth, plus an Ed25519 identity layer: each agent holds an identity key endorsed by an operator key, and every message carries a canonical signed envelope with nonce replay protection. Recipients verify sender identity end-to-end, not just relay auth. New operator keys must be pinned by (or endorsed to) each agent before their endorsements are trusted
-- **Store-and-forward delivery** — messages wait in recipient inboxes until collected
-- **Exponential backoff retry** — unacked messages retry with increasing delays, then dead-letter
+- **Signed messaging** — HMAC-SHA256 per-agent transport auth plus Ed25519 end-to-end identity. Current signers emit v2 envelopes binding message type, priority, and attachment ids; the relay rejects reused sender nonces during the full acceptance window
+- **Store-and-forward delivery** — messages wait in recipient inboxes until collected and acknowledged; retry and dead-letter state remains operator-visible
+- **Bounded peer conversations** — per-conversation turn budgets allow useful agent-to-agent work without unlimited chatter; handoffs and progress signals refresh the budget, and stalled work raises an operator-visible notice
+- **Trust-aware runtime adapters** — OpenClaw and Hermes plugins distinguish verified operator messages, signed peers, and untrusted external/feed data; strict signed-peer wake mode is available once a fleet is fully enrolled
 - **Rate limiting** — per-agent message throttling with automatic quarantine on abuse
 - **Policy engine** — deny/allow rules for message routing based on sender, recipient, type, priority
 - **Quarantine automation** — agents auto-quarantined on missed heartbeats or repeated violations
-- **Operator console** — React dashboard for fleet monitoring, approvals, policies, and intervention
+- **Operator console** — React dashboard for fleet monitoring, conversations, approvals, policies, trust, and intervention
 - **Approval workflows** — gate high-risk agent actions behind operator review
+- **Attachments with lifecycle controls** — per-file and fleet quotas, upload throttling, and retention sweeps prevent unbounded storage growth
 - **Extension hooks** — plugin system for custom message scanning, memory extraction, security gates
 - **A2A v1.0 native** — [A2A protocol](https://a2a-protocol.org/latest/specification/) endpoints alongside the proprietary API ([docs](./docs/a2a.md))
-- **Prometheus metrics** — scrapeable `/metrics` endpoint out of the box (agents, messages, deliveries, dead letters, rate violations, A2A tasks)
+- **Prometheus metrics** — scrapeable `/metrics` endpoint for agents, messages, deliveries, dead letters, rate violations, and A2A tasks
 - **Open-core licensing** — free OSS relay with Pro tier for multi-fleet, advanced policies, analytics
 
 ## Architecture
 
-See the [architecture diagram](docs/images/ekho-architecture.svg) at the top of this README, or the deep-dive in [ARCHITECTURE.md](ARCHITECTURE.md).
+See the [architecture diagram](docs/images/ekho-architecture.svg), or the deep-dive in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+<p align="center">
+  <img src="docs/images/ekho-architecture.svg" alt="Ekho architecture — signed messaging between agents via the Ekho relay" width="100%"/>
+</p>
 
 **Flow:** Agent enrolls → sends signed messages → relay stores in recipient inbox → recipient polls and ACKs → relay tracks delivery state with retry/dead-letter lifecycle. Operators monitor and intervene via the React console.
 
+## Runtime integrations
+
+Ekho supports mixed fleets. Agents do not need to share a runtime or model provider; they only need an Ekho adapter and network access to the relay.
+
+| Runtime | Integration | Install / verify |
+|---------|-------------|------------------|
+| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `npm install -g @drakon-systems/ekho-openclaw-plugin` |
+| Hermes Agent | [`ekho_hermes`](packages/hermes-plugin/) | Install the Python SDK and Hermes plugin; after Hermes/venv updates run `python ~/.hermes/plugins/ekho/healthcheck.py` |
+| Node.js / custom | [`@drakon-systems/ekho-sdk`](packages/sdk/) | `npm install @drakon-systems/ekho-sdk` |
+| Python / custom | [Python SDK](sdks/python/) | `pip install ./sdks/python` from a checkout |
+| Any A2A client | [A2A v1.0 endpoints](docs/a2a.md) | Discover via `/.well-known/agent-card.json` |
+
+Runtime plugins expose three core agent tools: `ekho_send`, `ekho_open_room`, and `ekho_inbox`. Enrollment secrets stay local to each agent. Message bodies and quoted conversation history are delivered as data; each runtime remains responsible for deciding which principals may issue instructions and which actions require human approval.
+
 ## Packages
 
-This is a monorepo with four Node packages, a Python Hermes plugin, and a Python SDK:
+This monorepo contains the relay, console, runtime plugins, SDKs, deployment assets, and optional security bridge:
 
 | Package | Description |
 |---------|-------------|
@@ -232,11 +286,13 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_OPERATOR_SESSION_TTL_SECONDS` | `86400` | Max age of an operator session token before re-login is required |
 | `EKHO_LOGIN_MAX_FAILURES` | `10` | Failed operator logins (per account and per IP) before throttling |
 | `EKHO_LOGIN_WINDOW_SECONDS` | `900` | Rolling window over which those failures are counted |
+| `EKHO_LOGIN_THROTTLE_MAX_BUCKETS` | `50000` | Memory bound for login-throttle account/IP buckets |
 | `EKHO_OPERATOR_REQUIRE_TAILNET` | `0` | Set `1` to require operator requests to carry a Tailscale identity |
 | `EKHO_TRUSTED_PROXY_IPS` | loopback | Socket addresses allowed to speak for clients via `X-Forwarded-For` (the reverse proxy in front of the relay) |
 | `EKHO_ATTACHMENT_FLEET_QUOTA_BYTES` | `1073741824` | Total attachment bytes per fleet (1 GiB) |
 | `EKHO_ATTACHMENT_UPLOAD_MAX_PER_WINDOW` | `20` | Attachment uploads per uploader per minute |
 | `EKHO_ATTACHMENT_UNBOUND_TTL_SECONDS` / `EKHO_ATTACHMENT_RETENTION_SECONDS` | `21600` / `2592000` | GC: unbound uploads after 6h, message-bound after 30 days |
+| `EKHO_ENVELOPE_NONCE_RETENTION_SECONDS` | `87600` | Signed-envelope nonce retention (24h acceptance window plus replay-safety slack) |
 | `EKHO_REQUIRE_SIGNED` (plugins) | `warn` | Peer wake strictness: `require` = only signed **and** verified peer messages wake a turn (withheld ones are dead-lettered) |
 | `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Heartbeat liveness threshold |
 | `EKHO_LICENSE_KEY` | — | Pro license JWT (optional) |
@@ -260,16 +316,25 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Node test suite (469 tests across relay, SDK, plugins)
+npm test                     # Node suite: 527 tests
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```
 
-Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (56 tests) and [`packages/hermes-plugin/`](packages/hermes-plugin/) (181 tests) — 706 tests total across the monorepo.
+Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (**64 tests**) and [`packages/hermes-plugin/`](packages/hermes-plugin/) (**206 tests**) — **797 tests total** across the monorepo, verified on 9 Aug 2026.
 
 ## Project Status
 
-Ekho is in **active development** and released: the relay ships as a multi-arch (amd64/arm64) container image, and the SDK and OpenClaw plugin are published to npm — see [CHANGELOG.md](CHANGELOG.md) for the current version. The core relay, SDKs, plugins, and operator console are functional, tested, and running a production fleet daily.
+Ekho `v0.4.0` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+
+## Brand assets
+
+- [`docs/images/ekho-logo.svg`](docs/images/ekho-logo.svg) — horizontal wordmark for README pages, websites, and presentations
+- [`docs/images/ekho-mark.svg`](docs/images/ekho-mark.svg) — square app/avatar mark
+- [`docs/images/ekho-architecture.svg`](docs/images/ekho-architecture.svg) — system architecture
+- [`docs/images/ekho-console.svg`](docs/images/ekho-console.svg) — operator console preview
+
+The logo uses the Ekho teal palette on a dark field. The signal stem and three expanding arcs form a compact **E** while representing a signed message echoing across a fleet. SVG is the source of truth so exports stay sharp at any size.
 
 ## License
 

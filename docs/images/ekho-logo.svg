@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 150" width="600" height="150" role="img" aria-label="Ekho by Drakon Systems — signed, store-and-forward messaging for AI agent fleets">
+  <defs>
+    <linearGradient id="ekhoLogoBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0f1a"/>
+      <stop offset="1" stop-color="#0c1222"/>
+    </linearGradient>
+    <linearGradient id="ekhoLogoStem" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#14b8a6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="600" height="150" rx="18" fill="url(#ekhoLogoBg)"/>
+  <rect x="0.5" y="0.5" width="599" height="149" rx="17.5" fill="none" stroke="rgba(45,212,191,0.10)"/>
+
+  <!-- Mark: signal stem + three echo arcs -->
+  <g transform="translate(36,43) scale(1.15)">
+    <rect x="0" y="0" width="5" height="28" rx="2.5" fill="url(#ekhoLogoStem)"/>
+    <g fill="none" stroke="#2dd4bf" stroke-linecap="round" transform="translate(-18,-18)">
+      <path d="M26.66 24.12 A 10 10 0 0 1 26.66 39.88" stroke-width="4.5" opacity="1"/>
+      <path d="M30.35 19.39 A 16 16 0 0 1 30.35 44.61" stroke-width="4" opacity="0.62"/>
+      <path d="M34.05 14.66 A 22 22 0 0 1 34.05 49.34" stroke-width="3.5" opacity="0.34"/>
+    </g>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="128" y="76" fill="#e2e8f0" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="46" font-weight="700" letter-spacing="1">Ekho</text>
+  <text x="130" y="101" fill="#5eead4" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="11" font-weight="600" letter-spacing="2.1">BY DRAKON SYSTEMS</text>
+
+  <line x1="360" y1="46" x2="360" y2="104" stroke="rgba(45,212,191,0.18)"/>
+
+  <g fill="#94a3b8" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="12.5">
+    <text x="386" y="62">signed agent messaging</text>
+    <text x="386" y="82">store &amp; forward delivery</text>
+    <text x="386" y="102">operator console + audit</text>
+  </g>
+</svg>

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Ekho logo: a signal stem with three expanding echo arcs">
+  <defs>
+    <linearGradient id="ekhoMarkBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0f1a"/>
+      <stop offset="1" stop-color="#0c1222"/>
+    </linearGradient>
+    <linearGradient id="ekhoMarkStem" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#14b8a6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="url(#ekhoMarkBg)"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="none" stroke="rgba(45,212,191,0.28)"/>
+
+  <g transform="translate(-2,0)">
+    <!-- Stem: the voice at the origin -->
+    <rect x="18" y="18" width="5" height="28" rx="2.5" fill="url(#ekhoMarkStem)"/>
+
+    <!-- Three arcs: the echo that carries, fading as it travels -->
+    <g fill="none" stroke="#2dd4bf" stroke-linecap="round">
+      <path d="M26.66 24.12 A 10 10 0 0 1 26.66 39.88" stroke-width="4.5" opacity="1"/>
+      <path d="M30.35 19.39 A 16 16 0 0 1 30.35 44.61" stroke-width="4" opacity="0.62"/>
+      <path d="M34.05 14.66 A 22 22 0 0 1 34.05 49.34" stroke-width="3.5" opacity="0.34"/>
+    </g>
+  </g>
+</svg>
