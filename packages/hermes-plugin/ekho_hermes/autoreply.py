@@ -61,6 +61,13 @@ TRIGGER_TYPES = frozenset({"direct", "broadcast", "handoff", "claim", "alert"})
 # the budget without waking. A handoff can therefore never silently die on an
 # exhausted budget — it always lands on a fresh one.
 PROGRESS_SIGNAL_TYPES = frozenset({"handoff", "claim", "complete"})
+# #11: how many times a peer's progress signals may re-energise ONE
+# conversation's budget within a rolling window. Generous enough for real
+# handoff-heavy work, small enough that a peer spamming `complete` — which is
+# never a trigger type, so it spawns no turn and passes no rate gate — cannot
+# hold the latch open forever and defeat the peer budget entirely.
+PROGRESS_REFRESH_MAX_PER_WINDOW = 5
+PROGRESS_REFRESH_WINDOW_S = 3600.0
 
 PEER_RATE_MAX = 5  # turns per peer per window before suppression
 PEER_RATE_WINDOW_S = 60.0
@@ -242,6 +249,9 @@ class AutoReplyState:
     # at most once per close). Cleared per conversation by reset_peer_latch, so the
     # next operator engagement / progress signal re-arms a future escalation.
     escalated_closed_convs: set = field(default_factory=set)
+    # conversation_id -> timestamps of peer progress-signal budget refreshes,
+    # rolling-window capped so `complete` spam can't defeat the peer budget (#11).
+    progress_refreshes_by_conversation: Dict[str, List[float]] = field(default_factory=dict)
 
 
 def mark_nonce_seen(state: AutoReplyState, nonce: str) -> None:
@@ -340,6 +350,29 @@ def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
     while len(state.peer_conv_order) > PEER_LATCH_CONVERSATION_CAP:
         evicted = state.peer_conv_order.pop(0)
         state.peer_turns_by_conversation.pop(evicted, None)
+
+
+def note_progress_refresh(
+    state: "AutoReplyState", conversation_id: str, now: float
+) -> bool:
+    """Record a budget refresh for a conversation; False when it has spent its
+    allowance for the current window (#11). Prunes as it goes, and the map is
+    FIFO-capped like the latch map so it cannot grow without bound."""
+    stamps = [
+        t
+        for t in state.progress_refreshes_by_conversation.get(conversation_id, [])
+        if now - t < PROGRESS_REFRESH_WINDOW_S
+    ]
+    if len(stamps) >= PROGRESS_REFRESH_MAX_PER_WINDOW:
+        state.progress_refreshes_by_conversation[conversation_id] = stamps
+        return False
+    stamps.append(now)
+    state.progress_refreshes_by_conversation[conversation_id] = stamps
+    while len(state.progress_refreshes_by_conversation) > PEER_LATCH_CONVERSATION_CAP:
+        state.progress_refreshes_by_conversation.pop(
+            next(iter(state.progress_refreshes_by_conversation))
+        )
+    return True
 
 
 def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
@@ -689,14 +722,24 @@ def _reply_quote(m: Any, names: Dict[str, str]) -> str:
 
 
 def _history_block(
-    conversation_history: Optional[Dict[str, Any]], names: Dict[str, str]
+    conversation_history: Optional[Dict[str, Any]],
+    names: Dict[str, str],
+    deferred_conv: Optional[str] = None,
 ) -> str:
     """The recent room thread as read-only context, so the agent can track who
-    said what instead of reasoning blind to the conversation."""
+    said what instead of reasoning blind to the conversation.
+
+    ``deferred_conv`` splits that in two (#16). For a held-back turn the tail of
+    THAT conversation is not old news the agent has seen — it is what the thread
+    said while the turn sat in the stash, and it is the only thing that can tell
+    the agent its trigger has been superseded. Rendering it under the standard
+    "you have already seen this; do NOT re-answer it" header is worse than
+    omitting it: on 10 Aug 2026 that header sat directly above the retractions
+    the fleet needed each woken agent to read."""
     if not conversation_history:
         return ""
-    blocks: List[str] = []
-    for entries in conversation_history.values():
+
+    def _render(entries: Any) -> str:
         rendered = []
         for e in entries or []:
             if not isinstance(e, dict):
@@ -709,15 +752,51 @@ def _history_block(
                 txt = txt[:240] + "…"
             if txt:
                 rendered.append(f"    {who}: {txt}")
-        if rendered:
-            blocks.append("\n".join(rendered))
-    if not blocks:
-        return ""
+        return "\n".join(rendered)
+
+    seen: List[str] = []
+    unseen = ""
+    for conv, entries in conversation_history.items():
+        rendered = _render(entries)
+        if not rendered:
+            continue
+        if deferred_conv and conv == deferred_conv:
+            unseen = rendered
+        else:
+            seen.append(rendered)
+    out = ""
+    if unseen:
+        out += (
+            "Posted in this conversation WHILE YOUR TURN WAS HELD BACK — you have NOT "
+            "seen these, and they are newer than the message(s) you were woken for. Read "
+            "them first. If they already answer, correct, retract or supersede what you "
+            "were about to say, do NOT send it — stay silent or respond to where the "
+            "thread actually is now. Never re-assert something this tail has retracted:\n"
+            + unseen
+            + "\n\n"
+        )
+    if seen:
+        out += (
+            "Recent thread in this room (context — you have already seen this; do "
+            "NOT re-answer it, it's here so you know who said what):\n"
+            + "\n".join(seen)
+            + "\n\n"
+        )
+    return out
+
+
+def _deferred_banner(deferred: Dict[str, Any]) -> str:
+    """The banner a held-back turn opens with. Deliberately the first thing in
+    the prompt: by the time the agent reaches its trigger message it must already
+    know the message is old and the thread has moved."""
+    mins = max(1, round(float(deferred.get("held_ms") or 0) / 60_000))
     return (
-        "Recent thread in this room (context — you have already seen this; do "
-        "NOT re-answer it, it's here so you know who said what):\n"
-        + "\n".join(blocks)
-        + "\n\n"
+        f"⏳ THIS TURN WAS HELD BACK for about {mins} min — a teammate held this "
+        "conversation's floor when the message(s) below arrived, so you are seeing them "
+        "late and the thread has moved on since. Anything you were going to say may "
+        "already be answered, corrected or retracted. Read the \"WHILE YOUR TURN WAS "
+        "HELD BACK\" tail below BEFORE composing, and if it has overtaken your reply, do "
+        "NOT send it. Do not repeat a claim the thread has since withdrawn.\n\n"
     )
 
 
@@ -765,6 +844,7 @@ def build_prompt(
     peer_budget_remaining: Optional[Dict[str, int]] = None,
     rooms: Optional[Sequence[Any]] = None,
     conversation_budgets: Optional[Dict[str, int]] = None,
+    deferred: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the one-shot turn prompt. Tells the agent its ONLY reply channel is
     ``ekho_send`` with the exact recipient + conversation id, surfaces trust,
@@ -882,7 +962,9 @@ def build_prompt(
         if has_peer
         else ""
     )
-    history = _history_block(conversation_history, names)
+    history = _history_block(
+        conversation_history, names, (deferred or {}).get("conversation_id")
+    )
     has_context = bool(history) or any(
         isinstance(getattr(m, "reply_to", None), dict) for m in messages
     )
@@ -894,7 +976,8 @@ def build_prompt(
         else ""
     )
     return (
-        f"You have {len(messages)} new Ekho fleet message(s) below.\n\n"
+        (_deferred_banner(deferred) if deferred else "")
+        + f"You have {len(messages)} new Ekho fleet message(s) below.\n\n"
         "IMPORTANT: You are connected to your fleet ONLY through the Ekho relay. "
         "Your normal text output here is NOT delivered to anyone — the ONLY way "
         "to reply or acknowledge is to call the ekho_send tool with the exact "
@@ -1019,6 +1102,7 @@ def trigger_turn(
     peer_budget_remaining: Optional[Dict[str, int]] = None,
     rooms: Optional[Sequence[Any]] = None,
     conversation_budgets: Optional[Dict[str, int]] = None,
+    deferred: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Wake the agent to handle ``messages`` by spawning a one-shot reply turn."""
     prompt = build_prompt(
@@ -1033,6 +1117,7 @@ def trigger_turn(
         peer_budget_remaining=peer_budget_remaining,
         rooms=rooms,
         conversation_budgets=conversation_budgets,
+        deferred=deferred,
     )
     cmd = build_oneshot_command(prompt)
     env = dict(os.environ)
@@ -1248,13 +1333,23 @@ def process_inbox_once(
     # a handoff lands on a fresh budget instead of silently stalling, and a
     # ``complete`` (never a trigger type, so not in ``real``) still refreshes the
     # budget without waking. ``direct``/``broadcast`` keep consuming the latch.
+    # Two bounds (#11): a signal whose signature FAILED verification never
+    # refreshes (an ABSENT verdict still does — unsigned fleets must keep
+    # working), and refreshes are capped per conversation per rolling window.
+    _now = time.time()
     for m in messages:
         if (
             getattr(m, "sender_kind", None) != "operator"
             and getattr(m, "sender_agent_id", None) != self_agent_id
             and getattr(m, "message_type", None) in PROGRESS_SIGNAL_TYPES
         ):
-            reset_peer_latch(state, getattr(m, "conversation_id", ""))
+            conv = getattr(m, "conversation_id", "")
+            verdict = (verifications or {}).get(getattr(m, "message_id", None))
+            if verdict is not None and getattr(verdict, "verified", None) is False:
+                continue
+            if not note_progress_refresh(state, conv, _now):
+                continue
+            reset_peer_latch(state, conv)
 
     def _ack() -> int:
         if not ack_all:
@@ -1322,6 +1417,12 @@ def process_inbox_once(
                     peer_budget_remaining={conv: max(0, conv_budget - used)},
                     rooms=getattr(inbox, "rooms", None),
                     conversation_budgets=getattr(inbox, "conversation_budgets", None),
+                    # #16: tell the turn it is late, and how late. Without this it
+                    # answers a 10-minute-old message as if it were the thread head.
+                    deferred={
+                        "conversation_id": conv,
+                        "held_ms": max(0.0, (time.time() - stash["first_deferred_at"]) * 1000),
+                    },
                 )
                 spawned_retry = 1
             except Exception as exc:  # noqa: BLE001

@@ -434,10 +434,21 @@ describe("Relay integration", () => {
         name: "P2", member_agent_ids: [a.agent_id, b.agent_id]
       })).body;
 
-      // A posts into the room. Its stated recipient is B, but room membership
-      // (keyed on the room conversation_id) drives delivery.
-      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      // A posts into the room, addressed to the room (#12). Addressing a single
+      // agent while threading under a room id is now refused: the envelope
+      // signature binds the stated recipient, so fanning that out delivers to
+      // members who cannot verify it.
+      const bad = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
         recipient: { kind: "agent", id: b.agent_id },
+        message_type: "direct",
+        body: { text: "signed to b, threaded under the room" },
+        conversation_id: room.id,
+        correlation_id: "rr-c0"
+      });
+      expect(bad.status).toBe(400);
+
+      await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+        recipient: { kind: "group", id: room.id },
         message_type: "direct",
         body: { text: "hi team from a" },
         conversation_id: room.id,

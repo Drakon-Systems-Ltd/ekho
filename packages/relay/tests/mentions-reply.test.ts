@@ -104,8 +104,11 @@ describe("mentions, reply-to, and room history", () => {
     })).body;
 
     await relay.operatorRequest("POST", "/v1/operator/messages", { room_id: room.id, text: "first" });
+    // Addressed to the room, not to A — an agent-addressed send under a room
+    // conversation_id is refused since #12 (it would reach members whose
+    // verifiers reject it).
     await relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/messages", {
-      recipient: { kind: "agent", id: a.agent_id },
+      recipient: { kind: "group", id: room.id },
       message_type: "direct",
       body: { text: "b reply" },
       conversation_id: room.id,

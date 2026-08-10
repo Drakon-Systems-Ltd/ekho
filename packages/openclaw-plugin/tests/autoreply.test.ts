@@ -17,6 +17,7 @@ import {
   listRetryableDeferred,
   clearDeferred,
   DEFERRED_RETRY_TTL_MS,
+  PROGRESS_REFRESH_MAX_PER_WINDOW,
   DEFAULT_PEER_TURN_BUDGET
 } from "../src/autoreply";
 
@@ -675,5 +676,132 @@ describe("require mode dead-letters withheld peers even with no identity (findin
     ]);
     // And the peer did NOT wake a turn (batch still acked so nothing redelivers).
     expect(acked.length).toBeGreaterThan(0);
+  });
+});
+
+// #16: a deferred turn runs up to 10 minutes after its trigger messages arrived.
+// The thread moves on while it waits — on 10 Aug 2026 the fleet spent an hour
+// re-asserting claims that had already been retracted, because the held-back
+// turn was handed the newer messages under a header telling it they were old
+// news it must not answer, and nothing told it its own trigger was stale.
+describe("deferred (held-back) turn staleness", () => {
+  const held = (over: Record<string, unknown> = {}) =>
+    msg({ sender_kind: "agent", sender_agent_id: "agent_peer", conversation_id: "room_1", ...over });
+
+  const batchWith = (tail: unknown[]): any => ({
+    messages: [],
+    operator_trusted: false,
+    roster: [{ agent_id: "agent_peer", display_name: "Peer" }],
+    rooms: [{ id: "room_1", name: "Incident" }],
+    conversation_history: { room_1: tail }
+  });
+
+  it("warns the agent that its turn was held back, and for how long", () => {
+    const m = held({ body: { text: "confirm the key" } });
+    const p = buildPrompt([m], batchWith([]), undefined, "self", undefined, undefined, {
+      conversationId: "room_1",
+      heldMs: 7 * 60_000
+    });
+    expect(p).toContain("HELD BACK");
+    expect(p).toContain("7 min");
+  });
+
+  it("labels messages that arrived during the wait as UNSEEN, not as already-seen context", () => {
+    const m = held({ body: { text: "confirm the key" } });
+    const batch = batchWith([
+      { sender_agent_id: "agent_peer", text: "RETRACTED — that confirmation was false" }
+    ]);
+    const p = buildPrompt([m], batch, undefined, "self", undefined, undefined, {
+      conversationId: "room_1",
+      heldMs: 7 * 60_000
+    });
+    expect(p).toContain("RETRACTED — that confirmation was false");
+    // The old header actively told the agent to ignore exactly this.
+    const idx = p.indexOf("RETRACTED — that confirmation was false");
+    const headerBefore = p.slice(0, idx);
+    expect(headerBefore).not.toContain("you have already seen this");
+    expect(p).toMatch(/while your turn was held back/i);
+    // And it must be told to drop the reply if the thread already moved past it.
+    expect(p).toMatch(/do NOT send/i);
+  });
+
+  it("keeps the already-seen framing for conversations that were NOT deferred", () => {
+    const m = held({ conversation_id: "c_other" });
+    const batch: any = {
+      messages: [],
+      operator_trusted: false,
+      roster: [],
+      conversation_history: { c_other: [{ sender_agent_id: "agent_peer", text: "earlier chatter" }] }
+    };
+    const p = buildPrompt([m], batch, undefined, "self", undefined, undefined, {
+      conversationId: "room_1", // a DIFFERENT conversation was the deferred one
+      heldMs: 60_000
+    });
+    expect(p).toContain("you have already seen this");
+  });
+
+  it("says nothing about staleness on a normal, non-deferred turn", () => {
+    const m = held();
+    const p = buildPrompt([m], batchWith([{ sender_agent_id: "agent_peer", text: "earlier chatter" }]));
+    expect(p).not.toContain("HELD BACK");
+    expect(p).toContain("you have already seen this");
+  });
+});
+
+// #11: `complete` is a progress signal but never a trigger type, so it spawns no
+// turn and passes no rate gate — yet it reset the conversation's peer latch.
+// A peer could interleave unlimited `complete`s and hold the budget at zero
+// forever, defeating the 25-wake cap it is supposed to bound.
+describe("progress-signal budget refresh is bounded (#11)", () => {
+  const complete = (conv = "c1") => ({
+    sender_kind: "agent",
+    sender_agent_id: "agent_peer",
+    message_type: "complete",
+    conversation_id: conv
+  });
+
+  it("refreshes the budget for the first few progress signals", () => {
+    const state = createAutoReplyState();
+    for (let i = 0; i < 3; i++) {
+      state.peerTurnsByConversation.set("c1", 25);
+      expect(refreshBudgetForProgressSignals(state, [complete()], "self").has("c1")).toBe(true);
+      expect(state.peerTurnsByConversation.get("c1")).toBe(0);
+    }
+  });
+
+  it("stops refreshing once a conversation exceeds the per-window cap", () => {
+    const state = createAutoReplyState();
+    for (let i = 0; i < PROGRESS_REFRESH_MAX_PER_WINDOW; i++) {
+      refreshBudgetForProgressSignals(state, [complete()], "self");
+    }
+    state.peerTurnsByConversation.set("c1", 25);
+    expect(refreshBudgetForProgressSignals(state, [complete()], "self").has("c1")).toBe(false);
+    expect(state.peerTurnsByConversation.get("c1")).toBe(25); // latch NOT reopened
+  });
+
+  it("caps per conversation, so a busy thread can't starve a quiet one", () => {
+    const state = createAutoReplyState();
+    for (let i = 0; i < PROGRESS_REFRESH_MAX_PER_WINDOW + 2; i++) {
+      refreshBudgetForProgressSignals(state, [complete("c1")], "self");
+    }
+    state.peerTurnsByConversation.set("c2", 25);
+    expect(refreshBudgetForProgressSignals(state, [complete("c2")], "self").has("c2")).toBe(true);
+  });
+
+  it("never refreshes from a signal whose signature FAILED verification", () => {
+    const state = createAutoReplyState();
+    state.peerTurnsByConversation.set("c1", 25);
+    const msgs = [{ ...complete(), message_id: "m9" }];
+    const refreshed = refreshBudgetForProgressSignals(state, msgs, "self", {
+      m9: { verified: false, reason: "bad-signature" } as any
+    });
+    expect(refreshed.has("c1")).toBe(false);
+    expect(state.peerTurnsByConversation.get("c1")).toBe(25);
+  });
+
+  it("still refreshes when verification is absent (unsigned fleets keep working)", () => {
+    const state = createAutoReplyState();
+    state.peerTurnsByConversation.set("c1", 25);
+    expect(refreshBudgetForProgressSignals(state, [complete()], "self", {}).has("c1")).toBe(true);
   });
 });

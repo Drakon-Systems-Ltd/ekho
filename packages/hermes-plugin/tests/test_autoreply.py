@@ -1509,3 +1509,88 @@ def test_tick_require_mode_dead_letters_with_no_identity(tmp_path):
     assert records[0]["reason"] == "unsigned-require-signed"
     assert records[0]["message"]["message_id"] == "pm"
     assert client.acked  # batch still acked so nothing redelivers
+
+
+# #16: a deferred turn runs up to 10 minutes after its trigger arrived, by which
+# time the thread has moved on. On 10 Aug 2026 held-back turns across the fleet
+# re-asserted claims that had already been retracted, because the newer messages
+# were handed to them under a header saying they were old news not to answer.
+def test_build_prompt_warns_a_held_back_turn_that_it_is_late():
+    m = _msg(conversation_id="room_1", body={"text": "confirm the key"})
+    prompt = build_prompt(
+        [m],
+        operator_trusted=False,
+        conversation_history={"room_1": []},
+        deferred={"conversation_id": "room_1", "held_ms": 7 * 60_000},
+    )
+    assert "HELD BACK" in prompt
+    assert "7 min" in prompt
+
+
+def test_build_prompt_labels_the_deferred_tail_as_unseen():
+    m = _msg(conversation_id="room_1", body={"text": "confirm the key"})
+    history = {"room_1": [{"sender_label": "Peer", "text": "RETRACTED — that was false"}]}
+    prompt = build_prompt(
+        [m],
+        operator_trusted=False,
+        conversation_history=history,
+        deferred={"conversation_id": "room_1", "held_ms": 7 * 60_000},
+    )
+    idx = prompt.index("RETRACTED — that was false")
+    assert "you have already seen this" not in prompt[:idx]
+    assert "while your turn was held back" in prompt.lower()
+    assert "do NOT send" in prompt
+
+
+def test_build_prompt_keeps_already_seen_framing_for_other_conversations():
+    m = _msg(conversation_id="c_other")
+    history = {"c_other": [{"sender_label": "Peer", "text": "earlier chatter"}]}
+    prompt = build_prompt(
+        [m],
+        operator_trusted=False,
+        conversation_history=history,
+        deferred={"conversation_id": "room_1", "held_ms": 60_000},
+    )
+    assert "you have already seen this" in prompt
+
+
+def test_build_prompt_says_nothing_about_staleness_on_a_normal_turn():
+    m = _msg(conversation_id="room_1")
+    history = {"room_1": [{"sender_label": "Peer", "text": "earlier chatter"}]}
+    prompt = build_prompt([m], operator_trusted=False, conversation_history=history)
+    assert "HELD BACK" not in prompt
+    assert "you have already seen this" in prompt
+
+
+# #11: `complete` is a progress signal but never a trigger type, so it spawns no
+# turn and passes no rate gate — yet it reset the conversation's peer latch, so a
+# peer could interleave unlimited `complete`s and hold the budget at zero.
+def test_note_progress_refresh_allows_then_caps_per_conversation():
+    from ekho_hermes.autoreply import (
+        AutoReplyState,
+        PROGRESS_REFRESH_MAX_PER_WINDOW,
+        note_progress_refresh,
+    )
+
+    state = AutoReplyState()
+    for _ in range(PROGRESS_REFRESH_MAX_PER_WINDOW):
+        assert note_progress_refresh(state, "c1", 1000.0) is True
+    assert note_progress_refresh(state, "c1", 1000.0) is False
+    # A different conversation keeps its own allowance.
+    assert note_progress_refresh(state, "c2", 1000.0) is True
+
+
+def test_note_progress_refresh_window_rolls_off():
+    from ekho_hermes.autoreply import (
+        AutoReplyState,
+        PROGRESS_REFRESH_MAX_PER_WINDOW,
+        PROGRESS_REFRESH_WINDOW_S,
+        note_progress_refresh,
+    )
+
+    state = AutoReplyState()
+    for _ in range(PROGRESS_REFRESH_MAX_PER_WINDOW):
+        note_progress_refresh(state, "c1", 1000.0)
+    assert note_progress_refresh(state, "c1", 1000.0) is False
+    later = 1000.0 + PROGRESS_REFRESH_WINDOW_S + 1
+    assert note_progress_refresh(state, "c1", later) is True

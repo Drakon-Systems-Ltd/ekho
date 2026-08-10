@@ -619,6 +619,19 @@ export class EkhoDb {
       // inferred from the conversation_id (an agent threading under a room id).
       const roomRecipients = this.roomMemberIds(input.fleetId, conversationId, input.senderAgentId, true);
       if (roomRecipients !== null) {
+        // #12: fail closed on an inconsistent recipient/conversation pair. The
+        // envelope signature binds the stated recipient, so fanning an
+        // agent-addressed message across a room delivers it to members who
+        // cannot verify it — every strict peer dead-letters it as
+        // `recipient-mismatch` and the room silently fragments by verification
+        // posture. Loosening the verifier would be the wrong end to fix: a
+        // message must not reach anyone its signature does not name.
+        if (input.recipientKind === "agent") {
+          throw new Error(
+            "recipient/conversation mismatch: recipient is a single agent but conversation_id is a room — " +
+              "send to the room with recipient kind 'group' (id = the room id), or use a non-room conversation_id"
+          );
+        }
         for (const rid of roomRecipients) {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
         }
