@@ -22,6 +22,11 @@ export interface EkhoIdentity {
    *  operator keys (#5). Latched forever so a later emptied pin set can never
    *  be re-seeded by whoever controls the relay at that moment. */
   tofuAt?: string;
+  /** key_id -> ISO timestamp we first saw the relay report it revoked (#14).
+   *  A tombstone ledger, not a cache: unpinning a revoked key is worthless on
+   *  its own because the config seed, TOFU and endorsement chaining all re-add
+   *  it on the next wake. Every add path consults this, so revocation sticks. */
+  revokedOperatorKeys?: Record<string, string>;
 }
 
 export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
@@ -33,7 +38,10 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
         return {
           seedHex: String(data.seedHex),
           pinnedOperatorKeys: (data.pinnedOperatorKeys as Record<string, string>) ?? {},
-          ...(data.tofuAt ? { tofuAt: String(data.tofuAt) } : {})
+          ...(data.tofuAt ? { tofuAt: String(data.tofuAt) } : {}),
+          ...(data.revokedOperatorKeys
+            ? { revokedOperatorKeys: data.revokedOperatorKeys as Record<string, string> }
+            : {})
         };
       }
     } catch {

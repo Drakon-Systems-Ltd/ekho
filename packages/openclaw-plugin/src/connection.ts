@@ -78,6 +78,22 @@ export async function registerAndBootstrapIdentity(
     } catch {
       continue; // skip a malformed key
     }
+    // #14: the seed is a bootstrap hint, never an override. Without this check
+    // the poll's revocation drop and the config re-pin fought on every wake and
+    // the config won, so a compromised key stayed trusted forever. Warn loudly:
+    // the operator's config is stale and only they can fix it.
+    const revokedAt = id.revokedOperatorKeys?.[kid];
+    if (revokedAt) {
+      opts.log?.warn?.(
+        `[ekho] ignoring configured operatorPubkey ${kid}: the relay reported it REVOKED at ${revokedAt}. ` +
+          `Remove it from the ekho plugin config (operatorPubkey) — a revoked key is never re-pinned.`
+      );
+      if (id.pinnedOperatorKeys[kid]) {
+        delete id.pinnedOperatorKeys[kid];
+        changed = true;
+      }
+      continue;
+    }
     if (id.pinnedOperatorKeys[kid] !== pub) {
       id.pinnedOperatorKeys[kid] = pub;
       changed = true;

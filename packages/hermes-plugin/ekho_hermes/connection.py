@@ -229,6 +229,21 @@ def register_and_bootstrap_identity(
             kid = _derive_key_id(pub)
         except Exception:  # noqa: BLE001 — skip a malformed key, don't crash
             continue
+        # #14: the seed is a bootstrap hint, never an override. Without this
+        # check the poll's revocation drop and the config re-pin fought on every
+        # wake and the config won, so a compromised key stayed trusted forever.
+        # Warn loudly: the operator's config is stale and only they can fix it.
+        revoked_at = (getattr(identity, "revoked_operator_keys", None) or {}).get(kid)
+        if revoked_at:
+            log.warning(
+                "[ekho] ignoring configured operator_pubkey %s: the relay reported it REVOKED at %s. "
+                "Remove it from EKHO_OPERATOR_PUBKEY — a revoked key is never re-pinned.",
+                kid,
+                revoked_at,
+            )
+            if identity.pinned_operator_keys.pop(kid, None) is not None:
+                changed = True
+            continue
         if identity.pinned_operator_keys.get(kid) != pub:
             identity.pinned_operator_keys[kid] = pub
             changed = True

@@ -10,9 +10,11 @@ import {
 } from "../src/identity";
 import {
   loadOrCreateIdentity,
+  saveIdentity,
   identityPublicKey,
   type EkhoIdentity,
 } from "../src/credentials";
+import { registerAndBootstrapIdentity } from "../src/connection";
 import {
   syncPinnedOperatorKeys,
   shouldAutowake,
@@ -61,8 +63,11 @@ describe("syncPinnedOperatorKeys", () => {
     const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: {} };
     expect(syncPinnedOperatorKeys(id, [], FLEET)).toBe(false);
     expect(id.tofuAt).toBeUndefined(); // nothing adopted — next contact may still TOFU
-    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(false);
+    // Returns true because the revocation tombstone (#14) is new and must be
+    // persisted — but nothing was adopted, so the TOFU latch stays unburned.
+    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(true);
     expect(id.tofuAt).toBeUndefined();
+    expect(id.pinnedOperatorKeys).toEqual({});
   });
   it("a pre-pinned identity never TOFUs — unendorsed keys are still refused", () => {
     const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
@@ -84,6 +89,95 @@ describe("syncPinnedOperatorKeys", () => {
     const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
     expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(true);
     expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+  });
+
+  // #14: dropping a revoked key from the pin map is not enough — the config seed
+  // re-adds it on the next wake. The sync has to leave a durable record so the
+  // seed can refuse it.
+  it("records every revoked key id, whether or not it was pinned", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    syncPinnedOperatorKeys(
+      id,
+      [
+        { key_id: OP1_KID, public_key: OP1_PUB, revoked: true },
+        { key_id: OP2_KID, public_key: OP2_PUB, revoked: true }
+      ],
+      FLEET
+    );
+    expect(Object.keys(id.revokedOperatorKeys ?? {}).sort()).toEqual([OP1_KID, OP2_KID].sort());
+  });
+  it("reports changed=true when a revocation is newly recorded but nothing was pinned", () => {
+    // Otherwise the ledger is never persisted and the seed re-pins after a restart.
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP2_KID]: OP2_PUB } };
+    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(true);
+    // Idempotent: a second identical poll is not a change.
+    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(false);
+  });
+  it("a revoked key is never re-adopted by TOFU", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: {},
+      revokedOperatorKeys: { [OP1_KID]: "2026-08-10T00:00:00.000Z" }
+    };
+    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB }], FLEET)).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+    expect(id.tofuAt).toBeUndefined();
+  });
+  it("a revoked key is never re-adopted by endorsement chaining", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB },
+      revokedOperatorKeys: { [OP2_KID]: "2026-08-10T00:00:00.000Z" }
+    };
+    const esig = signCanonical(endorsementPayload(FLEET, OP2_KID, OP2_PUB), OP1_SEED);
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, endorsed_by_key_id: OP1_KID, endorsement_sig: esig }],
+        FLEET
+      )
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBeUndefined();
+  });
+});
+
+// #14: the seed is a bootstrap hint, not an override. A key the relay has told
+// us is revoked must not come back from config on the next agent wake.
+describe("registerAndBootstrapIdentity (config seed)", () => {
+  const client = { registerIdentityKey: async () => {} } as any;
+
+  it("pins a seeded key that has never been revoked", async () => {
+    const dir = tmpdir();
+    const id = await registerAndBootstrapIdentity(client, { operatorPubkey: OP1_PUB, configDir: dir });
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+  });
+
+  it("refuses to re-pin a key recorded as revoked, and warns naming the key id", async () => {
+    const dir = tmpdir();
+    const seeded = loadOrCreateIdentity(dir);
+    seeded.revokedOperatorKeys = { [OP1_KID]: "2026-08-10T00:00:00.000Z" };
+    saveIdentity(dir, seeded);
+
+    const warnings: string[] = [];
+    const id = await registerAndBootstrapIdentity(client, {
+      operatorPubkey: `${OP1_PUB},${OP2_PUB}`,
+      configDir: dir,
+      log: { warn: (...a: unknown[]) => warnings.push(a.join(" ")) }
+    });
+
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB); // the live one still seeds
+    expect(warnings.join("\n")).toContain(OP1_KID);
+    // and it must survive the reload — otherwise the next wake re-pins it
+    expect(loadOrCreateIdentity(dir).pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+  });
+
+  it("persists the revocation ledger across a reload", () => {
+    const dir = tmpdir();
+    const id = loadOrCreateIdentity(dir);
+    id.revokedOperatorKeys = { [OP1_KID]: "2026-08-10T00:00:00.000Z" };
+    saveIdentity(dir, id);
+    expect(loadOrCreateIdentity(dir).revokedOperatorKeys?.[OP1_KID]).toBe("2026-08-10T00:00:00.000Z");
   });
 });
 

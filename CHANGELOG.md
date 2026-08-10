@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Security
+- **Revoking an operator key now actually sticks (#14).** Both plugins force-pinned every entry of the `operatorPubkey` config/env seed at load with no revocation check. The inbox poll correctly deleted revoked keys from the pin map — and the next agent wake put them straight back from config, so on any box with a configured seed, revocation did nothing. Observed live on 10 Aug 2026: minutes after the operator revoked six keys, two of them were back in the trust map on two separate boxes, and anything they signed would have verified as the operator's own instruction. Each plugin now keeps a tombstone ledger (`revokedOperatorKeys` / `revoked_operator_keys` in the identity file, `key_id` → first-seen-revoked timestamp) written whenever the relay reports a key revoked, whether or not it was pinned locally. The config seed, the trust-on-first-use bootstrap and endorsement chaining all consult it, so a tombstoned key is never re-adopted by any path; a seeded key that has been revoked is skipped with a WARNING naming the key id and telling the operator to remove it from config. Unchanged for everyone else: a seed whose keys are live behaves exactly as before.
+
 ## [0.4.0] - 2026-08-09
 
 ### Security

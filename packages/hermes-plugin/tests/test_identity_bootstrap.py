@@ -1,12 +1,18 @@
 """On connect the agent registers its identity key and bootstrap-pins the
 operator key(s) from config (the trusted channel for pre-signing agents)."""
 
+import logging
+
 from ekho import identity
 from ekho_hermes.connection import register_and_bootstrap_identity
+from ekho_hermes.credentials import load_or_create_identity, save_identity
 
 OP_SEED = bytes(range(5, 37))
 OP_PUB = identity.public_key_b64url_from_seed(OP_SEED)
 OP_KID = identity.key_id(OP_PUB)
+OP2_SEED = bytes(range(6, 38))
+OP2_PUB = identity.public_key_b64url_from_seed(OP2_SEED)
+OP2_KID = identity.key_id(OP2_PUB)
 
 
 class _FakeClient:
@@ -35,6 +41,47 @@ def test_accepts_key_id_prefixed_form(tmp_path):
         fc, operator_pubkey=f"{OP_KID}:{OP_PUB}", config_dir=str(tmp_path)
     )
     assert ident.pinned_operator_keys[OP_KID] == OP_PUB
+
+
+# #14: the seed is a bootstrap hint, never an override. A key the relay has told
+# us is revoked must not come back from config on the next agent wake.
+def test_seed_refuses_a_tombstoned_key_and_warns(tmp_path, caplog):
+    ident = load_or_create_identity(str(tmp_path))
+    ident.revoked_operator_keys = {OP_KID: "2026-08-10T00:00:00Z"}
+    save_identity(str(tmp_path), ident)
+
+    with caplog.at_level(logging.WARNING):
+        out = register_and_bootstrap_identity(
+            _FakeClient(), operator_pubkey=f"{OP_PUB},{OP2_PUB}", config_dir=str(tmp_path)
+        )
+
+    assert OP_KID not in out.pinned_operator_keys
+    assert out.pinned_operator_keys[OP2_KID] == OP2_PUB  # the live one still seeds
+    assert OP_KID in caplog.text
+    # and it must survive the reload — otherwise the next wake re-pins it
+    assert OP_KID not in load_or_create_identity(str(tmp_path)).pinned_operator_keys
+
+
+def test_seed_unpins_a_key_that_was_tombstoned_while_still_in_config(tmp_path):
+    ident = load_or_create_identity(str(tmp_path))
+    ident.pinned_operator_keys = {OP_KID: OP_PUB}
+    ident.revoked_operator_keys = {OP_KID: "2026-08-10T00:00:00Z"}
+    save_identity(str(tmp_path), ident)
+
+    out = register_and_bootstrap_identity(
+        _FakeClient(), operator_pubkey=OP_PUB, config_dir=str(tmp_path)
+    )
+    assert OP_KID not in out.pinned_operator_keys
+    assert OP_KID not in load_or_create_identity(str(tmp_path)).pinned_operator_keys
+
+
+def test_revocation_ledger_round_trips_through_the_identity_file(tmp_path):
+    ident = load_or_create_identity(str(tmp_path))
+    ident.revoked_operator_keys = {OP_KID: "2026-08-10T00:00:00Z"}
+    save_identity(str(tmp_path), ident)
+    assert load_or_create_identity(str(tmp_path)).revoked_operator_keys == {
+        OP_KID: "2026-08-10T00:00:00Z"
+    }
 
 
 def test_no_operator_pubkey_still_registers_own_key(tmp_path):

@@ -40,16 +40,33 @@ export function syncPinnedOperatorKeys(
 ): boolean {
   const pinned: Record<string, string> = { ...identity.pinnedOperatorKeys };
   let changed = false;
+
+  // #14: record revocations as tombstones BEFORE anything can adopt a key.
+  // Unpinning alone never made revocation stick — the config seed re-added the
+  // key on the very next wake, and TOFU/chaining would too if the relay later
+  // stopped reporting it. The ledger is the durable half of the drop below.
+  const revokedLedger: Record<string, string> = { ...(identity.revokedOperatorKeys ?? {}) };
+  for (const k of operatorKeys) {
+    if (!k.key_id || !k.revoked) continue;
+    if (!revokedLedger[k.key_id]) {
+      revokedLedger[k.key_id] = new Date().toISOString();
+      changed = true; // must persist, even when the key was never pinned here
+    }
+  }
+  if (changed) identity.revokedOperatorKeys = revokedLedger;
+
   if (Object.keys(pinned).length === 0 && !identity.tofuAt) {
+    let adopted = false;
     for (const k of operatorKeys) {
-      if (k.key_id && k.public_key && !k.revoked) {
+      if (k.key_id && k.public_key && !k.revoked && !revokedLedger[k.key_id]) {
         pinned[k.key_id] = k.public_key;
-        changed = true;
+        adopted = true;
       }
     }
-    if (changed) {
+    if (adopted) {
       // Latch only when something was adopted — an empty roster now must not
-      // burn the one TOFU opportunity of a fresh identity.
+      // burn the one TOFU opportunity of a fresh identity. (Tracked separately
+      // from `changed`, which a revocation tombstone alone can now set.)
       identity.tofuAt = new Date().toISOString();
       identity.pinnedOperatorKeys = pinned;
       return true;
@@ -66,6 +83,7 @@ export function syncPinnedOperatorKeys(
       continue;
     }
     if (pinned[kid]) continue;
+    if (revokedLedger[kid]) continue; // #14: a tombstoned key never comes back
     const endorser = k.endorsed_by_key_id;
     const esig = k.endorsement_sig;
     const pub = k.public_key;

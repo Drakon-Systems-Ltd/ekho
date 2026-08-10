@@ -85,16 +85,34 @@ def sync_pinned_operator_keys(identity_obj: Any, operator_keys: Sequence[Any], *
     """
     pinned: Dict[str, str] = dict(identity_obj.pinned_operator_keys)
     changed = False
+
+    # #14: record revocations as tombstones BEFORE anything can adopt a key.
+    # Unpinning alone never made revocation stick — the config seed re-added the
+    # key on the very next wake, and TOFU/chaining would too if the relay later
+    # stopped reporting it. The ledger is the durable half of the drop below.
+    revoked_ledger: Dict[str, str] = dict(getattr(identity_obj, "revoked_operator_keys", None) or {})
+    for k in operator_keys:
+        key_id = getattr(k, "key_id", None)
+        if not key_id or not getattr(k, "revoked", False):
+            continue
+        if key_id not in revoked_ledger:
+            revoked_ledger[key_id] = iso_now()
+            changed = True  # must persist, even when the key was never pinned here
+    if changed:
+        identity_obj.revoked_operator_keys = revoked_ledger
+
     if not pinned and not getattr(identity_obj, "tofu_at", None):
+        adopted = False
         for k in operator_keys:
             key_id = getattr(k, "key_id", None)
             public_key = getattr(k, "public_key", None)
-            if key_id and public_key and not getattr(k, "revoked", False):
+            if key_id and public_key and not getattr(k, "revoked", False) and key_id not in revoked_ledger:
                 pinned[key_id] = public_key
-                changed = True
-        if changed:
+                adopted = True
+        if adopted:
             # Latch only when something was adopted — an empty roster now must
-            # not burn the one TOFU opportunity of a fresh identity.
+            # not burn the one TOFU opportunity of a fresh identity. (Tracked
+            # separately from `changed`, which a tombstone alone can now set.)
             identity_obj.tofu_at = iso_now()
             identity_obj.pinned_operator_keys = pinned
             return True
@@ -109,6 +127,8 @@ def sync_pinned_operator_keys(identity_obj: Any, operator_keys: Sequence[Any], *
             continue
         if key_id in pinned:
             continue
+        if key_id in revoked_ledger:
+            continue  # #14: a tombstoned key never comes back
         endorser = getattr(k, "endorsed_by_key_id", None)
         esig = getattr(k, "endorsement_sig", None)
         public_key = getattr(k, "public_key", None)

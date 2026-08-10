@@ -48,7 +48,9 @@ def test_tofu_skips_revoked_keys_and_empty_roster_does_not_burn_the_latch():
     assert sync_pinned_operator_keys(ident, [], fleet_id=FLEET) is False
     assert ident.tofu_at is None  # nothing adopted — next contact may still TOFU
     served = [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True)]
-    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+    # True because the revocation tombstone (#14) is new and must be persisted —
+    # but nothing was adopted, so the TOFU latch stays unburned.
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is True
     assert ident.tofu_at is None
     assert ident.pinned_operator_keys == {}
 
@@ -84,6 +86,50 @@ def test_sync_drops_a_revoked_key():
     served = [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True)]
     assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is True
     assert OP1_KID not in ident.pinned_operator_keys
+
+
+# #14: dropping the pin is not enough — the config seed re-adds it on the next
+# wake. The sync must leave a durable tombstone that every add path consults.
+def test_sync_records_every_revoked_key_id_pinned_or_not():
+    ident = EkhoIdentity(seed_hex="00" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    served = [
+        OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True),
+        OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB, revoked=True),
+    ]
+    sync_pinned_operator_keys(ident, served, fleet_id=FLEET)
+    assert sorted(ident.revoked_operator_keys) == sorted([OP1_KID, OP2_KID])
+
+
+def test_sync_reports_change_for_a_new_tombstone_then_is_idempotent():
+    ident = EkhoIdentity(seed_hex="00" * 32, pinned_operator_keys={OP2_KID: OP2_PUB})
+    served = [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True)]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is True
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+
+
+def test_tombstoned_key_is_never_re_adopted_by_tofu():
+    ident = EkhoIdentity(
+        seed_hex="00" * 32,
+        revoked_operator_keys={OP1_KID: "2026-08-10T00:00:00Z"},
+    )
+    served = [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)]  # relay no longer flags it
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+    assert OP1_KID not in ident.pinned_operator_keys
+    assert ident.tofu_at is None
+
+
+def test_tombstoned_key_is_never_re_adopted_by_endorsement_chaining():
+    ident = EkhoIdentity(
+        seed_hex="00" * 32,
+        pinned_operator_keys={OP1_KID: OP1_PUB},
+        revoked_operator_keys={OP2_KID: "2026-08-10T00:00:00Z"},
+    )
+    esig = identity.sign_canonical(identity.endorsement_payload(FLEET, OP2_KID, OP2_PUB), OP1_SEED)
+    served = [
+        OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB, endorsed_by_key_id=OP1_KID, endorsement_sig=esig),
+    ]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET) is False
+    assert OP2_KID not in ident.pinned_operator_keys
 
 
 # --- execution-authority gate (graceful) ---

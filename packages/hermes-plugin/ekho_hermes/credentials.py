@@ -43,6 +43,11 @@ class EkhoIdentity:
     # operator keys (#5). Latched forever so a later emptied pin set can never
     # be re-seeded by whoever controls the relay at that moment.
     tofu_at: Optional[str] = None
+    # key_id -> ISO timestamp we first saw the relay report it revoked (#14).
+    # A tombstone ledger, not a cache: unpinning a revoked key is worthless on
+    # its own because the config seed, TOFU and endorsement chaining all re-add
+    # it on the next wake. Every add path consults this, so revocation sticks.
+    revoked_operator_keys: Dict[str, str] = field(default_factory=dict)
 
     def public_key_b64url(self) -> str:
         return public_key_b64url_from_seed(bytes.fromhex(self.seed_hex))
@@ -63,6 +68,7 @@ def load_or_create_identity(config_dir: str) -> EkhoIdentity:
                     seed_hex=str(data["seed_hex"]),
                     pinned_operator_keys=dict(data.get("pinned_operator_keys") or {}),
                     tofu_at=str(data["tofu_at"]) if data.get("tofu_at") else None,
+                    revoked_operator_keys=dict(data.get("revoked_operator_keys") or {}),
                 )
         except (OSError, ValueError):
             pass
@@ -86,6 +92,8 @@ def save_identity(config_dir: str, identity: EkhoIdentity) -> None:
     }
     if identity.tofu_at:
         payload["tofu_at"] = identity.tofu_at
+    if identity.revoked_operator_keys:
+        payload["revoked_operator_keys"] = identity.revoked_operator_keys
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
