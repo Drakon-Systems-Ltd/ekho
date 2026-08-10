@@ -540,6 +540,13 @@ export class EkhoDb {
     return rows.map((r) => r.id);
   }
 
+  /** Whether conversationId names an existing room in this fleet — used to
+   *  reject a non-"group" recipient threaded under a room id (see
+   *  createMessage) without granting it room membership info either way. */
+  private isRoomConversation(fleetId: string, conversationId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId);
+  }
+
   createMessage(input: {
     fleetId: string;
     senderAgentId: string;
@@ -617,21 +624,19 @@ export class EkhoDb {
       // sender must be a member (else a non-member could inject into the room).
       // A "group" recipient names the room explicitly; otherwise a room is
       // inferred from the conversation_id (an agent threading under a room id).
-      const roomRecipients = this.roomMemberIds(input.fleetId, conversationId, input.senderAgentId, true);
+      // #12: a room fan-out happens ONLY when the sender explicitly names the
+      // room with recipient {kind:"group"} — a room-shaped conversation_id is
+      // never routing authority on its own. The envelope signature binds the
+      // stated recipient, so fanning an agent-addressed message across a room
+      // delivers it to members who cannot verify it: every strict peer
+      // dead-letters it as `recipient-mismatch` and the room fragments by
+      // verification posture. Loosening the verifier would be the wrong end to
+      // fix — a message must not reach anyone its signature does not name.
+      const roomRecipients =
+        input.recipientKind === "group"
+          ? this.roomMemberIds(input.fleetId, conversationId, input.senderAgentId, true)
+          : null;
       if (roomRecipients !== null) {
-        // #12: fail closed on an inconsistent recipient/conversation pair. The
-        // envelope signature binds the stated recipient, so fanning an
-        // agent-addressed message across a room delivers it to members who
-        // cannot verify it — every strict peer dead-letters it as
-        // `recipient-mismatch` and the room silently fragments by verification
-        // posture. Loosening the verifier would be the wrong end to fix: a
-        // message must not reach anyone its signature does not name.
-        if (input.recipientKind === "agent") {
-          throw new Error(
-            "recipient/conversation mismatch: recipient is a single agent but conversation_id is a room — " +
-              "send to the room with recipient kind 'group' (id = the room id), or use a non-room conversation_id"
-          );
-        }
         for (const rid of roomRecipients) {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
         }
@@ -639,6 +644,17 @@ export class EkhoDb {
         // A group send that didn't resolve to a room the sender belongs to: the
         // room is unknown or the sender isn't a member. Reject (no silent drop).
         throw new Error("room not found");
+      } else if (this.isRoomConversation(input.fleetId, conversationId)) {
+        // Rejected rather than delivered 1:1, membership or not. Falling through
+        // would still write the row under the ROOM's conversation_id, and
+        // getConversationTail selects purely on conversation_id — so the text
+        // would surface in the history the relay serves to every member, which
+        // the plugins render straight into each woken agent's prompt. That is a
+        // prompt-injection path open to any enrolled agent, member or not.
+        throw new Error(
+          `recipient/conversation mismatch: conversation ${conversationId} is a room — ` +
+            `a "${input.recipientKind}" recipient must use recipient.kind "group" (id = the room id) to post into it`
+        );
       } else if (input.recipientKind === "agent" && input.recipientId) {
         if (!this.isDeliverableAgent(input.fleetId, input.recipientId)) throw new Error("recipient not found");
         deliveryStmt.run(id("dly"), messageId, input.recipientId, createdAt, "queued");
