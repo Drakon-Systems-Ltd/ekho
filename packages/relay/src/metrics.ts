@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { db } from "./db";
 import { getLoadedLicense } from "./license";
 
-const RELAY_VERSION = "0.4.0";
+const RELAY_VERSION = "0.4.1";
 
 interface CountRow {
   label: string;

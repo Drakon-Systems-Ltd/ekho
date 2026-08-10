@@ -52,3 +52,117 @@ export function trustHealth(operatorKeys, agentKeys, currentKeyId) {
   if (unendorsed) problems.push(`${unendorsed} agent${unendorsed > 1 ? "s" : ""} not endorsed yet`);
   return { ok: problems.length === 0, problems, revoked, unendorsed, total: (agentKeys || []).length };
 }
+
+/**
+ * Whether the console's unlocked device key can actually sign endorsements, and
+ * why not when it can't (#15).
+ *
+ * The console holds its Ed25519 key in the browser and will happily sign with it
+ * whatever the relay thinks of it — including after the operator has revoked
+ * that very key. On 10 Aug 2026 that produced a page still offering "Re-endorse
+ * all under this device" whose every press failed for all eight agents, with a
+ * failure toast that named the agents rather than the dead key. Endorsements
+ * signed by a revoked key are worthless: agents drop revoked keys on their next
+ * poll, so the chain they build is dead on arrival.
+ *
+ * @returns {{ canSign: boolean, revoked: boolean, reason: string|null, recovery: string|null }}
+ */
+export function deviceKeySigningState(operatorKeys, unlockedKeyId) {
+  if (!unlockedKeyId) {
+    return {
+      canSign: false,
+      revoked: false,
+      reason: "Unlock your operator identity to sign endorsements.",
+      recovery: null,
+    };
+  }
+  const key = (operatorKeys || []).find((k) => k.key_id === unlockedKeyId);
+  if (!key) {
+    return {
+      canSign: false,
+      revoked: false,
+      reason: `This device's key ${unlockedKeyId} is not known to the relay — it was never registered, or the fleet was reset.`,
+      recovery: "Forget this device, then enrol a new key.",
+    };
+  }
+  if (key.revoked_at) {
+    return {
+      canSign: false,
+      revoked: true,
+      reason: `This device's key ${unlockedKeyId} is REVOKED — endorsements cannot be signed with it, and any it produced are already ignored by every agent.`,
+      recovery: "Forget this device, then enrol a new key, then re-endorse every agent under it.",
+    };
+  }
+  return { canSign: true, revoked: false, reason: null, recovery: null };
+}
+
+/** The operator keys the relay still considers live. Zero is the alarm state:
+ *  agents that pin nothing verify nothing, and under the default
+ *  requireSigned:"warn" they then process messages unauthenticated (#15). */
+export function liveOperatorKeys(operatorKeys) {
+  return (operatorKeys || []).filter((k) => !k.revoked_at);
+}
+
+/**
+ * Guard for revoking an operator key (#15). Revoking the console's own device
+ * key is the move that broke the fleet, and the UI treated it like any other
+ * row. Revoking the LAST live key is worse still and is refused outright.
+ *
+ * @returns {{ blocked: boolean, selfRevoke: boolean, message: string }}
+ */
+export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
+  const live = liveOperatorKeys(operatorKeys);
+  const isLastLive = live.length <= 1 && live.some((k) => k.key_id === keyId);
+  if (isLastLive) {
+    return {
+      blocked: true,
+      selfRevoke: keyId === unlockedKeyId,
+      message:
+        `${keyId} is your only live operator key. Revoking it leaves the fleet with no trust root: ` +
+        `every agent would stop verifying, and on the default "warn" setting they would then process ` +
+        `messages unauthenticated. Enrol a replacement key first, then revoke this one.`,
+    };
+  }
+  if (keyId === unlockedKeyId) {
+    return {
+      blocked: false,
+      selfRevoke: true,
+      message:
+        `${keyId} is THIS device's key — the one the console signs with.\n\n` +
+        `Revoking it means you can no longer endorse anything from this browser: the Re-endorse ` +
+        `buttons will stop working until you Forget this device and enrol a new key.` +
+        (dependents > 0
+          ? `\n\n${dependents} agent${dependents > 1 ? "s" : ""} currently trust it and will need re-endorsing under the new key.`
+          : "") +
+        `\n\nRevoke this device's own key?`,
+    };
+  }
+  if (dependents > 0) {
+    return {
+      blocked: false,
+      selfRevoke: false,
+      message:
+        `⚠ ${dependents} agent${dependents > 1 ? "s are" : " is"} endorsed by ${keyId} — it is their trust root.\n\n` +
+        `Revoking it now BREAKS their verification until you re-endorse them under another active key. ` +
+        `Re-endorse them first (panel ③), then revoke.\n\nRevoke anyway?`,
+    };
+  }
+  return {
+    blocked: false,
+    selfRevoke: false,
+    message: `Revoke operator key ${keyId}? Agents will stop trusting it on their next poll.`,
+  };
+}
+
+/**
+ * The key that should endorse a newly generated operator key (#13), or null when
+ * there is none. Endorsement is what lets agents adopt a new operator key without
+ * trust-on-first-use or hand-edited trust files — the relay verifies and stores it,
+ * and agents chain-adopt on their next poll. A revoked endorser is useless (the
+ * relay rejects it, and agents drop revoked keys), so only a live one qualifies.
+ */
+export function pickEndorser(unlocked, operatorKeys) {
+  if (!unlocked?.keyId) return null;
+  const live = liveOperatorKeys(operatorKeys).some((k) => k.key_id === unlocked.keyId);
+  return live ? unlocked : null;
+}

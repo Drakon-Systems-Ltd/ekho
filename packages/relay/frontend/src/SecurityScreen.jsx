@@ -6,6 +6,7 @@ import {
   signCanonical,
   encryptSeed,
   agentKeyEndorsementPayload,
+  endorsementPayload,
 } from "./operatorKey.js";
 import {
   getUnlocked,
@@ -24,7 +25,15 @@ import {
   endorseAgentKey,
   revokeOperatorKey,
 } from "./api.js";
-import { endorserStatus, dependentsOf, trustHealth } from "./operatorTrust.js";
+import {
+  endorserStatus,
+  dependentsOf,
+  trustHealth,
+  deviceKeySigningState,
+  liveOperatorKeys,
+  revokeGuard,
+  pickEndorser,
+} from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
 
@@ -64,15 +73,37 @@ export default function SecurityScreen({ session, agents = [] }) {
     try {
       const seed = generateSeed();
       const pub = publicKeyB64url(seed);
+      const kid = keyId(pub);
+      // #13: chain the new key to the one we are replacing, while we still hold
+      // its seed. The relay has always accepted and verified this endorsement,
+      // and agents adopt an endorsed key automatically on their next poll — but
+      // the console never sent one, so `endorsed_by_key_id` was null on EVERY
+      // key of every fleet and the chaining branch in syncPinnedOperatorKeys had
+      // literally never fired. Without it a new operator key reaches agents only
+      // by trust-on-first-use (empty pin set) or by hand-editing trust files.
+      // Signed BEFORE the new seed replaces the old one in the store; a live
+      // endorser is required, since the relay rejects a revoked one.
+      const endorser = pickEndorser(unlocked, keys);
+      const endorsement = endorser
+        ? {
+            endorsedByKeyId: endorser.keyId,
+            signature: signCanonical(endorsementPayload(fleetId, kid, pub), endorser.seed),
+          }
+        : undefined;
+
+      // Register FIRST: if the relay rejects the key or its endorsement, the old
+      // identity is still intact in the browser rather than half-replaced.
+      await registerOperatorKey(token, { publicKey: pub, label: label.trim() || "this device", endorsement });
       const blob = await encryptSeed(seed, passphrase);
       await saveEncryptedSeed(blob);
       setUnlockedState(setUnlocked(seed));
       setStored(true);
-      await registerOperatorKey(token, { publicKey: pub, label: label.trim() || "this device" });
       setPassphrase("");
       note(
-        "warn",
-        "Identity created and signing. ⚠ Your agents don't trust this key yet — endorse them in ③ (or use the banner) so they can verify your commands. Back it up below."
+        endorsement ? "ok" : "warn",
+        endorsement
+          ? `Identity created, signing, and endorsed by your previous key ${endorser.keyId} — agents that trust that key will adopt this one automatically on their next poll.`
+          : "Identity created and signing. ⚠ Your agents don't trust this key yet, and no live key was available to endorse it — endorse them in ③ (or use the banner) so they can verify your commands. Back it up below."
       );
       await refresh();
     } catch (e) {
@@ -123,17 +154,16 @@ export default function SecurityScreen({ session, agents = [] }) {
   };
 
   const onRevoke = async (kid) => {
-    const deps = dependentsOf(kid, agentKeys);
-    if (deps > 0) {
-      const ok = window.confirm(
-        `⚠ ${deps} agent${deps > 1 ? "s are" : " is"} endorsed by ${kid} — it is their trust root.\n\n` +
-          `Revoking it now BREAKS their verification until you re-endorse them under another active key. ` +
-          `Re-endorse them first (panel ③), then revoke.\n\nRevoke anyway?`
-      );
-      if (!ok) return;
-    } else if (!window.confirm(`Revoke operator key ${kid}? Agents will stop trusting it on their next poll.`)) {
+    // #15: revoking the console's OWN device key, or the last live key, is what
+    // took the fleet's trust chain down — and the UI treated both like any other
+    // row. The guard blocks the unrecoverable case and words the self-revoke
+    // confirmation for what it actually costs.
+    const guard = revokeGuard(kid, keys, unlocked?.keyId, dependentsOf(kid, agentKeys));
+    if (guard.blocked) {
+      note("danger", guard.message);
       return;
     }
+    if (!window.confirm(guard.message)) return;
     try {
       await revokeOperatorKey(token, kid);
       note("muted", `Revoked ${kid}.${deps > 0 ? ` Re-endorse the ${deps} affected agent(s) now.` : ""}`);
@@ -147,6 +177,10 @@ export default function SecurityScreen({ session, agents = [] }) {
   // This is the one-click recovery after a key rotation: it re-roots peer trust at a live key.
   const onReendorseAll = async () => {
     if (!unlocked) return note("warn", "Unlock your operator identity first.");
+    // #15: never sign with a key the relay has revoked — every endorsement it
+    // produces is dropped by the agents on their next poll, and the old failure
+    // toast blamed the agents for it.
+    if (!signing.canSign) return note("danger", `${signing.reason} ${signing.recovery ?? ""}`.trim());
     const targets = agentKeys.filter((ak) => endorserStatus(ak, keys, unlocked.keyId).needsAction);
     if (!targets.length) return note("ok", "Every agent already trusts this device.");
     setBusy(true);
@@ -173,6 +207,7 @@ export default function SecurityScreen({ session, agents = [] }) {
 
   const onEndorse = async (ak) => {
     if (!unlocked) return note("warn", "Unlock your operator identity first.");
+    if (!signing.canSign) return note("danger", `${signing.reason} ${signing.recovery ?? ""}`.trim()); // #15
     try {
       const payload = agentKeyEndorsementPayload(fleetId, ak.agent_id, ak.key_id, ak.public_key);
       const signature = signCanonical(payload, unlocked.seed);
@@ -190,6 +225,8 @@ export default function SecurityScreen({ session, agents = [] }) {
 
   const nameFor = (id) => agents.find((a) => a.id === id)?.display_name || id;
   const health = trustHealth(keys, agentKeys, unlocked?.keyId);
+  const signing = deviceKeySigningState(keys, unlocked?.keyId);
+  const live = liveOperatorKeys(keys);
 
   return (
     <div className="sec">
@@ -203,6 +240,34 @@ export default function SecurityScreen({ session, agents = [] }) {
 
       {msg && <div className={`sec__msg sec__msg--${msg.tone}`}>{msg.text}</div>}
 
+      {/* #15: zero live operator keys is the loudest state on this page. With no
+          live key every agent's trust map empties, verification returns a null
+          verdict rather than a rejection, and on the default requireSigned:"warn"
+          the fleet keeps working — unauthenticated. Silent by construction. */}
+      {keys.length > 0 && live.length === 0 && (
+        <div className="sec__alert sec__alert--danger">
+          <div className="sec__alert-h">🔴 NO LIVE OPERATOR KEY — your agents are accepting unverified messages</div>
+          <div className="sec__alert-b">
+            Every registered key is revoked, so nothing can be endorsed and no agent can verify anything you send.
+            Recover: <b>Forget device</b> (panel ①) → <b>Generate identity</b> to enrol a fresh key → then re-endorse
+            every agent under it.
+          </div>
+        </div>
+      )}
+
+      {/* #15: the console signs in the browser and will happily sign with a key
+          the relay has revoked. Say so, and point at the recovery, instead of
+          offering a Re-endorse button whose every press fails. */}
+      {unlocked && !signing.canSign && (
+        <div className="sec__alert sec__alert--danger">
+          <div className="sec__alert-h">⚠ This device cannot sign endorsements</div>
+          <div className="sec__alert-b">
+            {signing.reason} {signing.recovery}
+          </div>
+          <button className="sec__btn sec__btn--danger" onClick={onForget}>Forget device</button>
+        </div>
+      )}
+
       {/* Trust-health banner — surfaces a broken chain (e.g. agents left on a revoked key
           after a rotation) and offers the one-click fix, instead of failing silently. */}
       {!health.ok && agentKeys.length > 0 && (
@@ -211,10 +276,12 @@ export default function SecurityScreen({ session, agents = [] }) {
           <div className="sec__alert-b">
             {health.problems.join(" · ")}. Endorsing re-roots each agent's trust at your current device key.
           </div>
-          {unlocked ? (
+          {unlocked && signing.canSign ? (
             <button className="sec__btn sec__btn--go" disabled={busy} onClick={onReendorseAll}>
               Re-endorse all under this device · {unlocked.keyId}
             </button>
+          ) : unlocked ? (
+            <div className="sec__hint">{signing.reason} {signing.recovery}</div>
           ) : (
             <div className="sec__hint">Unlock your operator identity above, then re-endorse the affected agents.</div>
           )}
@@ -312,7 +379,7 @@ export default function SecurityScreen({ session, agents = [] }) {
                     ✓ {st.endorserLabel || st.endorserId}
                   </span>
                   {unlocked && (
-                    <button className="sec__btn" onClick={() => onEndorse(ak)} title="Re-endorse under this device">↻</button>
+                    <button className="sec__btn" disabled={!signing.canSign} onClick={() => onEndorse(ak)} title="Re-endorse under this device">↻</button>
                   )}
                 </>
               )}
@@ -321,11 +388,11 @@ export default function SecurityScreen({ session, agents = [] }) {
                   <span className="sec__tag sec__tag--warn" title={`endorser ${st.endorserId} is revoked/unknown`}>
                     ⚠ trusts a revoked key
                   </span>
-                  <button className="sec__btn sec__btn--go" disabled={!unlocked} onClick={() => onEndorse(ak)}>Re-endorse</button>
+                  <button className="sec__btn sec__btn--go" disabled={!signing.canSign} onClick={() => onEndorse(ak)}>Re-endorse</button>
                 </>
               )}
               {st.state === "unendorsed" && (
-                <button className="sec__btn sec__btn--go" disabled={!unlocked} onClick={() => onEndorse(ak)}>Endorse</button>
+                <button className="sec__btn sec__btn--go" disabled={!signing.canSign} onClick={() => onEndorse(ak)}>Endorse</button>
               )}
             </div>
           );
@@ -371,6 +438,10 @@ function SecStyle() {
       .sec__alert-h { color:var(--warn); font-weight:600; font-size:12px; letter-spacing:.04em; margin-bottom:3px; }
       .sec__alert-b { color:var(--text); font-size:12px; line-height:1.45; margin-bottom:9px; }
       .sec__alert .sec__btn--go { background:var(--warn); border-color:var(--warn); color:#1a1206; }
+      /* #15: a dead device key / zero live keys is a red state, not an amber one —
+         the fleet is silently unauthenticated, which reads as "fine" everywhere else. */
+      .sec__alert--danger { border-color:rgba(239,68,68,.45); background:rgba(239,68,68,.09); border-left-color:var(--danger, #ef4444); }
+      .sec__alert--danger .sec__alert-h { color:var(--danger, #ef4444); }
       .sec__msg { padding:8px 11px; border-radius:8px; margin-bottom:10px; font-size:12px; }
       .sec__msg--ok { color:var(--ok); background:rgba(52,211,153,.1); }
       .sec__msg--danger { color:var(--danger); background:rgba(248,113,113,.1); }
