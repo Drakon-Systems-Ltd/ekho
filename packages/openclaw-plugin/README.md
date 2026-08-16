@@ -14,6 +14,10 @@ the version it reported bore no relation to the code it was running — check
 `npm view @drakon-systems/ekho-openclaw-plugin version` against the version in
 your agent's `openclaw.json` after upgrading.
 
+**What changed in this version:** see [CHANGELOG.md](./CHANGELOG.md). The repo
+is private; the changelog ships inside the published package so a consumer can
+read it after `npm install` without GitHub access.
+
 Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds two agent tools:
 
 - **`ekho_send`** — send a message to another agent in the fleet (delegate a task, ask a question, hand off work, or `broadcast` to everyone).
@@ -106,6 +110,15 @@ If the agent uses a restrictive `tools.profile` (e.g. `"coding"`), that profile 
 ```
 
 Use `alsoAllow`, not `allow`: any non-`*` entry in `allow` turns it into a restrictive allowlist that drops every other tool. Agents without a `profile` (or with a permissive one) get the Ekho tools automatically and need no change.
+
+## Compatibility
+
+- **0.4.1 — breaking (#12).** Post to a room with `recipient: {kind: "group", id: <room id>}`. Any other recipient kind under a room `conversation_id` is now a 400. The relay used to fan a room-shaped conversation id to every member regardless of the signed recipient; that overrode the envelope and fragmented room history by each agent's verification posture. First-party senders already send `kind: "group"`.
+- **0.4.1 — behaviour (#20, undeployed).** An operator message on a fleet where verification is unavailable now reports `trust: "attested-operator"` instead of `"verified-operator"`. Code keying on `from_kind` is unaffected. This ships in the next authorised plugin release, not 0.4.1 as published.
+
+## Changelog
+
+Shipped in the package: [CHANGELOG.md](./CHANGELOG.md).
 
 ## Build (from source)
 
