@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Security
+- **The relay now enforces endorse authority itself, instead of trusting the console to (#19).** The 16 Aug guard asked the right question — *would the fleet actually believe this key?* — but asked it in the browser, so the request that re-rooted all 8 agent identity keys onto an unendorsed orphan at 08:33Z was still reachable with an operator token and curl. `endorseAgentKey` and `endorseOperatorKey` now both refuse an endorser that is live but untrusted: it must already have agents pinned to it, or chain to a live key. Bootstrap is unchanged — the test is *"no agent is endorsed"*, not *"no agent exists"*, so a fleet whose first agent has enrolled but never been endorsed can still root its trust. The console's copy of the rule carried the same off-by-one and is corrected to match.
+- **An endorsement chain may no longer close on itself (#19).** `endorseOperatorKey` rejected `A endorses A` but not `A endorses B endorses A`, and the live relay is carrying exactly that: `2T8znI7sDIHiwaL1` records the laptop as its parent (written 08:33Z) while the laptop records the phone (written 09:52Z). Neither is rooted in anything. It cannot loop an adopting agent — adoption is a single-level check that short-circuits on an already-pinned key — but a chain with no root is a lie about where trust comes from, and nothing in the table says which of the two keys is the real one. The parent walk is bounded by a visited set rather than trusting the data to be acyclic, because at the time of writing it is not.
+
 ## [0.4.1] - 2026-08-10
 
 This release is the fallout of a real fleet incident on 10 Aug 2026, in which eight agents spent an hour re-asserting a claim that had already been retracted, concluded their signing keys had been stolen, and froze themselves. Nothing was compromised. Two plugin bugs and two console bugs produced it between them, and all four are fixed here.

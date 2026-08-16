@@ -138,6 +138,90 @@ export class EkhoDb {
   // ---- Operator signing keys (verifiable operator identity) ----------------
 
   /**
+   * Would the fleet actually follow this key?
+   *
+   * "Live" is not "trusted", and the difference is what broke the fleet at
+   * 08:33Z on 16 Aug 2026. X6NvGXWiMP32k0J6 was live on the relay, endorsed by
+   * nobody and pinned by no agent; from that device the operator re-endorsed all
+   * 8 agent identity keys onto it while every agent still pinned
+   * 2T8znI7sDIHiwaL1. Endorsing from an untrusted key does not confer trust — it
+   * destroys it, by moving keys the fleet DID trust onto a root it does not.
+   *
+   * The console learned this the same morning (endorseAuthority in
+   * frontend/src/operatorTrust.js) but a browser check is a usability feature,
+   * not a control: the same request was still reachable with an operator token
+   * and curl. This is that rule where it binds.
+   */
+  private endorserIsTrusted(fleetId: string, endorserKeyId: string): boolean {
+    const agentKeys = this.db
+      .prepare(
+        "SELECT endorsed_by_key_id FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL"
+      )
+      .all(fleetId) as { endorsed_by_key_id: string | null }[];
+    // Nothing is pinned to anything yet, so there is no trust to destroy and
+    // first enrolment still works. Note this is "no agent is endorsed", not "no
+    // agent exists" — an enrolled agent whose identity key has never been
+    // endorsed is exactly the fresh-fleet case, and testing for an empty table
+    // instead would make a fleet unbootstrappable the moment one agent enrolled.
+    if (agentKeys.every((k) => !k.endorsed_by_key_id)) return true;
+    // Already a trust root: agents verify against it today, so endorsing from it
+    // keeps them where they are.
+    if (agentKeys.some((k) => k.endorsed_by_key_id === endorserKeyId)) return true;
+    // Chains to a live key, so agents adopt it by themselves (#13).
+    const parent = this.db
+      .prepare("SELECT endorsed_by_key_id FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+      .get(fleetId, endorserKeyId) as { endorsed_by_key_id: string | null } | undefined;
+    if (!parent?.endorsed_by_key_id) return false;
+    const liveParent = this.db
+      .prepare(
+        "SELECT 1 FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+      )
+      .get(fleetId, parent.endorsed_by_key_id);
+    return Boolean(liveParent);
+  }
+
+  private assertEndorserIsTrusted(fleetId: string, endorserKeyId: string) {
+    if (this.endorserIsTrusted(fleetId, endorserKeyId)) return;
+    throw new Error(
+      `${endorserKeyId} is live but unendorsed, and no agent trusts it — endorsing from here would ` +
+        `move the fleet onto a key none of its agents pin. Endorse from a device holding a trusted key, ` +
+        `or have that device endorse this one first.`
+    );
+  }
+
+  /**
+   * An endorsement chain must terminate at a root, not eat its own tail.
+   *
+   * The live relay carries the proof: 2T8zn records X6Nv as its parent (the
+   * laptop's 08:33 write) and X6Nv records 2T8zn (the phone's 09:52 rescue).
+   * Neither is rooted in anything. It cannot loop an adopting agent — adoption
+   * is a single-level check that short-circuits on an already-pinned key — but a
+   * chain with no root is a lie about where trust comes from, and the next
+   * reader of that table cannot tell which of the two keys is the real one.
+   *
+   * The walked-set is not belt-and-braces: the live table ALREADY contains a
+   * cycle, so a naive walk would hang the relay on the first request.
+   */
+  private assertNoEndorsementCycle(fleetId: string, targetKeyId: string, endorserKeyId: string) {
+    const parentOf = this.db.prepare(
+      "SELECT endorsed_by_key_id FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
+    );
+    const walked = new Set<string>();
+    let cursor: string | null = endorserKeyId;
+    while (cursor) {
+      if (cursor === targetKeyId) {
+        throw new Error(
+          `endorsement chain would close on itself: ${endorserKeyId} already chains back to ${targetKeyId}`
+        );
+      }
+      if (walked.has(cursor)) return; // a loop that predates this edge; not ours to reject
+      walked.add(cursor);
+      const row = parentOf.get(fleetId, cursor) as { endorsed_by_key_id: string | null } | undefined;
+      cursor = row?.endorsed_by_key_id ?? null;
+    }
+  }
+
+  /**
    * Register an operator public key for a fleet. Returns its derived key_id.
    * If an endorsement is supplied it must be a valid signature by an existing,
    * non-revoked key over endorsementPayload(...) — an early reject so the
@@ -219,6 +303,8 @@ export class EkhoDb {
       )
       .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
     if (!endorser) throw new Error("endorsement references an unknown or revoked key");
+    this.assertEndorserIsTrusted(fleetId, endorsement.endorsedByKeyId);
+    this.assertNoEndorsementCycle(fleetId, targetKeyId, endorsement.endorsedByKeyId);
     const ok = verifyCanonical(
       endorsementPayload(fleetId, targetKeyId, target.public_key),
       endorsement.signature,
@@ -299,6 +385,7 @@ export class EkhoDb {
       )
       .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
     if (!endorser) throw new Error("endorsement references an unknown or revoked operator key");
+    this.assertEndorserIsTrusted(fleetId, endorsement.endorsedByKeyId);
     const ok = verifyCanonical(
       agentKeyEndorsementPayload(fleetId, agentId, targetKeyId, row.public_key),
       endorsement.signature,

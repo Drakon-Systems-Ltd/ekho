@@ -209,8 +209,11 @@ export function endorseAuthority(unlockedKeyId, operatorKeys, agentKeys) {
     ? keys.find((k) => k.key_id === mine.endorsed_by_key_id && !k.revoked_at)
     : undefined;
   if (endorser) return { allowed: true, reason: null };
-  // Fresh fleet — nothing to break yet.
-  if (!agentKeys || agentKeys.length === 0) return { allowed: true, reason: null };
+  // Nothing is pinned to anything yet, so there is no trust to destroy. This is
+  // "no agent is endorsed", not "no agent exists": an enrolled agent whose key
+  // has never been endorsed is still the fresh-fleet case, and testing for an
+  // empty list would strand a fleet the moment its first agent enrolled.
+  if (!agentKeys || agentKeys.every((k) => !k.endorsed_by_key_id)) return { allowed: true, reason: null };
   return {
     allowed: false,
     reason:
