@@ -1304,7 +1304,7 @@ export function startAutoReply(opts: {
       const fleetId = batch.fleet_id ?? null;
       try {
         const operatorKeys: OperatorKeyEntryLike[] = Array.isArray(batch.operator_keys) ? batch.operator_keys : [];
-        if (syncPinnedOperatorKeys(opts.identity, operatorKeys, fleetId) && opts.onIdentityChanged) {
+        if (syncPinnedOperatorKeys(opts.identity, operatorKeys, fleetId, log ?? console) && opts.onIdentityChanged) {
           opts.onIdentityChanged(opts.identity);
         }
       } catch (err) {

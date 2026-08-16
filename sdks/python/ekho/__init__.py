@@ -12,7 +12,9 @@ from .identity import (
     endorsement_payload,
     key_id,
     public_key_b64url_from_seed,
+    revocation_payload,
     sign_canonical,
+    unrevoke_payload,
     verify_canonical,
 )
 from .verify import VerificationResult, verify_inbound
@@ -69,6 +71,8 @@ __all__ = [
     "public_key_b64url_from_seed",
     "endorsement_payload",
     "agent_key_endorsement_payload",
+    "revocation_payload",
+    "unrevoke_payload",
     "verify_inbound",
     "VerificationResult",
     "AckInput",

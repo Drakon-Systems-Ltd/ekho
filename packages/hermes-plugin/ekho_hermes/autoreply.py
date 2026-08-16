@@ -1320,7 +1320,10 @@ def process_inbox_once(
     if identity_obj is not None:
         try:
             if sync_pinned_operator_keys(
-                identity_obj, list(getattr(inbox, "operator_keys", []) or []), fleet_id=fleet_id
+                identity_obj,
+                list(getattr(inbox, "operator_keys", []) or []),
+                fleet_id=fleet_id,
+                log=log,
             ) and on_identity_changed:
                 on_identity_changed(identity_obj)
         except Exception as exc:  # noqa: BLE001 — never let key sync break the tick

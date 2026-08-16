@@ -9,6 +9,8 @@ import {
   publicKeyB64urlFromSeed,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
+  unrevokePayload,
 } from "../src/identity";
 
 // One source of truth: the SAME frozen vector the relay produced. Passing it
@@ -55,6 +57,34 @@ describe("identity (frozen interop vector)", () => {
   it("reproduces the frozen signature when signing", () => {
     const seed = new Uint8Array(Buffer.from(VECTOR.seed_hex, "hex"));
     expect(signCanonical(VECTOR.payload, seed)).toBe(VECTOR.signature_b64url);
+  });
+
+  // #27: same bytes as the relay and the Hermes plugin, or a legitimate signed
+  // revocation issued by one is unverifiable by the others.
+  it("revocation / un-revoke payloads have the stable cross-language shape", () => {
+    expect(canonicalize(revocationPayload("f", "k", "2026-08-16T00:00:00Z"))).toBe(
+      canonicalize({
+        v: 1,
+        t: "op-key-revocation",
+        fleet_id: "f",
+        key_id: "k",
+        revoked_at: "2026-08-16T00:00:00Z",
+      })
+    );
+    expect(canonicalize(unrevokePayload("f", "k"))).toBe(
+      canonicalize({ v: 1, t: "op-key-unrevoke", fleet_id: "f", key_id: "k" })
+    );
+  });
+
+  it("reproduces the frozen revocation / un-revoke signatures", () => {
+    const seed = new Uint8Array(Buffer.from(VECTOR.seed_hex, "hex"));
+    for (const v of [VECTOR.revocation, VECTOR.unrevoke]) {
+      expect(canonicalize(v.payload)).toBe(v.canonical);
+      expect(signCanonical(v.payload, seed)).toBe(v.signature_b64url);
+      expect(
+        verifyCanonical(v.payload, v.signature_b64url, fromB64url(VECTOR.public_key_b64url))
+      ).toBe(true);
+    }
   });
 
   it("endorsement payloads have the stable cross-language shape", () => {

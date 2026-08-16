@@ -14,6 +14,21 @@ export interface EkhoCredentials {
 const CREDENTIALS_FILE = ".ekho-credentials.json";
 const IDENTITY_FILE = ".ekho-identity.json";
 
+/** Why a pinned operator key is trusted on THIS box (#26). Written at the moment
+ *  the gate admitted the key, so the question "why is this key trusted here?"
+ *  has an offline answer — no relay round trip, and nothing to re-ask the relay
+ *  for (which is exactly the party we don't trust). For a chain admission the
+ *  endorsement signature is kept verbatim, so the endorsement can be re-verified
+ *  from disk against the endorser's pinned public key. */
+export interface OperatorKeyAdmission {
+  admitted_by: "tofu" | "chain";
+  /** Chain only: the pinned key whose endorsement admitted this one. */
+  endorsed_by_key_id?: string;
+  /** Chain only: the endorsement signature this box actually verified. */
+  endorsement_sig?: string;
+  admitted_at: string;
+}
+
 /** The agent's own Ed25519 identity (private seed) + the operator keys it pins. */
 export interface EkhoIdentity {
   seedHex: string;
@@ -27,6 +42,8 @@ export interface EkhoIdentity {
    *  its own because the config seed, TOFU and endorsement chaining all re-add
    *  it on the next wake. Every add path consults this, so revocation sticks. */
   revokedOperatorKeys?: Record<string, string>;
+  /** key_id -> the evidence that admitted it (#26). */
+  operatorKeyAdmissions?: Record<string, OperatorKeyAdmission>;
 }
 
 export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
@@ -35,12 +52,19 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
     try {
       const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<EkhoIdentity>;
       if (data?.seedHex) {
+        // Spread the file FIRST: a field this build doesn't know about (written
+        // by a newer plugin, or by the other runtime sharing the config dir)
+        // survives the load/save round trip instead of being silently dropped.
         return {
+          ...data,
           seedHex: String(data.seedHex),
           pinnedOperatorKeys: (data.pinnedOperatorKeys as Record<string, string>) ?? {},
           ...(data.tofuAt ? { tofuAt: String(data.tofuAt) } : {}),
           ...(data.revokedOperatorKeys
             ? { revokedOperatorKeys: data.revokedOperatorKeys as Record<string, string> }
+            : {}),
+          ...(data.operatorKeyAdmissions
+            ? { operatorKeyAdmissions: data.operatorKeyAdmissions as Record<string, OperatorKeyAdmission> }
             : {})
         };
       }

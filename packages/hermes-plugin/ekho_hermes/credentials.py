@@ -18,7 +18,7 @@ import os
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from ekho import AgentCredentials, EkhoAgentClient, public_key_b64url_from_seed
 
@@ -48,9 +48,30 @@ class EkhoIdentity:
     # its own because the config seed, TOFU and endorsement chaining all re-add
     # it on the next wake. Every add path consults this, so revocation sticks.
     revoked_operator_keys: Dict[str, str] = field(default_factory=dict)
+    # key_id -> why this key is trusted on THIS box (#26): {"admitted_by":
+    # "tofu"|"chain", "endorsed_by_key_id"?, "endorsement_sig"?, "admitted_at"}.
+    # Written at the moment the gate admitted the key, so the question "why is
+    # this key trusted here?" has an offline answer — the relay is exactly the
+    # party we would otherwise have to ask.
+    operator_key_admissions: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Fields the identity file carried that this build doesn't know about (a
+    # newer plugin's, or the OpenClaw side sharing the config dir). Kept so a
+    # load/save round trip doesn't silently delete them.
+    extra: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def public_key_b64url(self) -> str:
         return public_key_b64url_from_seed(bytes.fromhex(self.seed_hex))
+
+
+_KNOWN_IDENTITY_FIELDS = frozenset(
+    {
+        "seed_hex",
+        "pinned_operator_keys",
+        "tofu_at",
+        "revoked_operator_keys",
+        "operator_key_admissions",
+    }
+)
 
 
 def _identity_path(config_dir: str) -> Path:
@@ -69,6 +90,8 @@ def load_or_create_identity(config_dir: str) -> EkhoIdentity:
                     pinned_operator_keys=dict(data.get("pinned_operator_keys") or {}),
                     tofu_at=str(data["tofu_at"]) if data.get("tofu_at") else None,
                     revoked_operator_keys=dict(data.get("revoked_operator_keys") or {}),
+                    operator_key_admissions=dict(data.get("operator_key_admissions") or {}),
+                    extra={k: v for k, v in data.items() if k not in _KNOWN_IDENTITY_FIELDS},
                 )
         except (OSError, ValueError):
             pass
@@ -86,7 +109,9 @@ def save_identity(config_dir: str, identity: EkhoIdentity) -> None:
     except OSError:
         pass
     path = _identity_path(config_dir)
+    # Unknown fields first, so a key this build does own always wins the merge.
     payload = {
+        **identity.extra,
         "seed_hex": identity.seed_hex,
         "pinned_operator_keys": identity.pinned_operator_keys,
     }
@@ -94,6 +119,8 @@ def save_identity(config_dir: str, identity: EkhoIdentity) -> None:
         payload["tofu_at"] = identity.tofu_at
     if identity.revoked_operator_keys:
         payload["revoked_operator_keys"] = identity.revoked_operator_keys
+    if identity.operator_key_admissions:
+        payload["operator_key_admissions"] = identity.operator_key_admissions
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:

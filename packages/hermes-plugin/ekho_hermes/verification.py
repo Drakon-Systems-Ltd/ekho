@@ -15,6 +15,7 @@ Bridges the SDK verifier (ekho.verify_inbound) to the autoreply loop:
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime
 from typing import Any, Dict, Optional, Sequence, Set
 
@@ -23,6 +24,11 @@ from ekho import verify_inbound
 from ekho.verify import VerificationResult
 
 from .messages import iso_now
+
+# Default sink for the sync's trust-root notes. A relay claiming a revocation it
+# cannot prove must never pass in silence, so callers that don't inject a logger
+# still get the warning (#27).
+logger = logging.getLogger(__name__)
 
 
 def build_signed_send_fields(
@@ -68,11 +74,225 @@ def build_signed_send_fields(
     return {"agent_sig": sig, "key_id": kid, "sig_canonical": canonical}
 
 
-def sync_pinned_operator_keys(identity_obj: Any, operator_keys: Sequence[Any], *, fleet_id: Optional[str]) -> bool:
+def _note_advisory_claim(log: Any, out: Dict[str, Any], key_id: str) -> None:
+    """The relay says a key is dead but cannot prove it. Skip the key for NEW
+    adoption, write nothing, say so out loud.
+
+    Deleting the pin here is the tempting one-liner and it is wrong twice over:
+    it lets whoever controls the relay drop trust unilaterally, AND a deleted pin
+    is re-admitted on the very next poll by the same still-valid endorsement.
+    Rejecting a key takes a revoked_operator_keys tombstone, not a deletion — and
+    a tombstone takes a signature.
+    """
+    out["advisory"].add(key_id)
+    log.warning(
+        "[ekho] relay reports operator key %s as REVOKED without a valid revocation "
+        "signature. Treating the claim as ADVISORY: the key is NOT unpinned and NOT "
+        "tombstoned, but it will not be newly adopted until a signed revocation arrives.",
+        key_id,
+    )
+
+
+def _note_last_root_refusal(log: Any, key_id: str) -> None:
+    """Last-root protection: honoring this leaves the box with no trust root at
+    all, which looks exactly like the failure mode the signature requirement is
+    here to prevent. Refuse the claim whole, so we never hold a key that is
+    tombstoned (permanent) and still pinned (still trusted).
+    """
+    log.warning(
+        "[ekho] refusing the signed revocation of operator key %s: it is the LAST "
+        "pinned operator key, and honoring it would leave this agent with no trust "
+        "root at all. Endorse a replacement key first.",
+        key_id,
+    )
+
+
+def _honor_revocation(
+    *,
+    log: Any,
+    pinned: Dict[str, str],
+    revoked_ledger: Dict[str, str],
+    admissions: Dict[str, Dict[str, Any]],
+    key_id: str,
+    revoked_at: str,
+    out: Dict[str, Any],
+) -> None:
+    """Tombstone the key, then unpin it.
+
+    #14: the tombstone is the durable half. Unpinning alone never made a
+    revocation stick — the config seed re-added the key on the very next wake,
+    and TOFU/chaining would too.
+    """
+    if key_id not in revoked_ledger:
+        revoked_ledger[key_id] = revoked_at
+        out["ledger_changed"] = True
+    if key_id in pinned:
+        pinned.pop(key_id)
+        out["pin_removed"] = True
+        log.warning(
+            "[ekho] operator key %s is revoked (signed, at %s); it is no longer pinned.",
+            key_id,
+            revoked_at,
+        )
+    if key_id in admissions:
+        # The admission record answers "why is this key trusted here?" — keep it
+        # only while the answer is "it is".
+        admissions.pop(key_id)
+        out["admissions_changed"] = True
+
+
+def _apply_signed_revocations(
+    operator_keys: Sequence[Any],
+    *,
+    fleet_id: Optional[str],
+    log: Any,
+    pinned: Dict[str, str],
+    revoked_ledger: Dict[str, str],
+    admissions: Dict[str, Dict[str, Any]],
+    signed_by_a_pinned_key: Any,
+    out: Dict[str, Any],
+) -> None:
+    """A SIGNED revocation is the only thing that can remove trust. Anything less
+    is recorded as advisory: the key is skipped for new adoption, nothing else.
+    """
+    for k in operator_keys:
+        key_id = getattr(k, "key_id", None)
+        if not key_id or not getattr(k, "revoked", False):
+            continue
+        at = getattr(k, "revoked_at", None)
+        sig = getattr(k, "revocation_sig", None)
+        proven = bool(
+            sig
+            and at
+            and fleet_id
+            and signed_by_a_pinned_key(_identity.revocation_payload(fleet_id, key_id, at), sig)
+        )
+        if not proven:
+            _note_advisory_claim(log, out, key_id)
+        elif key_id in pinned and len(pinned) == 1:
+            _note_last_root_refusal(log, key_id)
+        else:
+            _honor_revocation(
+                log=log,
+                pinned=pinned,
+                revoked_ledger=revoked_ledger,
+                admissions=admissions,
+                key_id=key_id,
+                revoked_at=at,
+                out=out,
+            )
+
+
+def _clear_tombstones_on_signed_unrevoke(
+    operator_keys: Sequence[Any],
+    *,
+    fleet_id: Optional[str],
+    log: Any,
+    revoked_ledger: Dict[str, str],
+    signed_by_a_pinned_key: Any,
+    out: Dict[str, Any],
+) -> None:
+    """A SIGNED un-revoke clears a tombstone so the key can be re-admitted through
+    the endorsement chain. It never re-pins by itself — re-admission still costs a
+    valid endorsement. Runs before the revocation pass so a valid revocation in
+    the same batch still wins (fail closed).
+
+    The unsigned ABSENCE of ``revoked`` must never clear a tombstone: that was the
+    #14 hole, where a relay could resurrect a dead key just by not mentioning it.
+
+    KNOWN GAP (#27): unrevoke_payload binds only (fleet, key_id) — no timestamp,
+    no nonce — so one legitimately issued un-revoke is replayable forever. A relay
+    that captured one for key X can clear a LATER tombstone for X, and the
+    endorsement that re-pins X is equally replayable. Nothing here can detect
+    that; the fix belongs in the payload (bind revoked_at, so an un-revoke names
+    the revocation it undoes). The relay does not emit unrevoke_sig yet, so the
+    bytes are still free to change — do it before it ships.
+    """
+    for k in operator_keys:
+        key_id = getattr(k, "key_id", None)
+        sig = getattr(k, "unrevoke_sig", None)
+        if not key_id or not sig or key_id not in revoked_ledger:
+            continue
+        if not fleet_id or not signed_by_a_pinned_key(_identity.unrevoke_payload(fleet_id, key_id), sig):
+            log.warning(
+                "[ekho] refusing un-revoke of operator key %s: no currently pinned "
+                "operator key signed it. The tombstone stands.",
+                key_id,
+            )
+            continue
+        del revoked_ledger[key_id]
+        out["ledger_changed"] = True
+        log.info(
+            "[ekho] operator key %s un-revoked by a signed operator instruction; tombstone "
+            "cleared. The key is NOT re-pinned — it has to be re-endorsed by a pinned key.",
+            key_id,
+        )
+
+
+def _apply_relay_key_claims(
+    operator_keys: Sequence[Any],
+    *,
+    fleet_id: Optional[str],
+    log: Any,
+    pinned: Dict[str, str],
+    revoked_ledger: Dict[str, str],
+    admissions: Dict[str, Dict[str, Any]],
+    signed_by_a_pinned_key: Any,
+) -> Dict[str, Any]:
+    """Apply the relay's revocation / un-revocation claims to the working trust
+    root (#27). Mutates ``pinned``, ``revoked_ledger`` and ``admissions`` in
+    place; a claim only lands if a currently pinned operator key signed it.
+
+    Returns what it touched, plus ``advisory``: the key ids the relay CLAIMS are
+    revoked without proving it. Those are blocked from new adoption this poll and
+    nothing about them is written to disk.
+    """
+    out: Dict[str, Any] = {
+        "advisory": set(),
+        "pin_removed": False,
+        "ledger_changed": False,
+        "admissions_changed": False,
+    }
+    _clear_tombstones_on_signed_unrevoke(
+        operator_keys,
+        fleet_id=fleet_id,
+        log=log,
+        revoked_ledger=revoked_ledger,
+        signed_by_a_pinned_key=signed_by_a_pinned_key,
+        out=out,
+    )
+    _apply_signed_revocations(
+        operator_keys,
+        fleet_id=fleet_id,
+        log=log,
+        pinned=pinned,
+        revoked_ledger=revoked_ledger,
+        admissions=admissions,
+        signed_by_a_pinned_key=signed_by_a_pinned_key,
+        out=out,
+    )
+    return out
+
+
+def sync_pinned_operator_keys(
+    identity_obj: Any,
+    operator_keys: Sequence[Any],
+    *,
+    fleet_id: Optional[str],
+    log: Any = None,
+) -> bool:
     """Update pinned operator keys from the inbox. Returns True if anything changed.
 
-    Drops revoked keys. Adds a new key ONLY if it is endorsed by an already-pinned
-    key (the endorsement chain).
+    Adds a new key ONLY if it is endorsed by an already-pinned key (the
+    endorsement chain). Removes one ONLY on a SIGNED revocation.
+
+    Trust mutates in one direction only, and never on the relay's say-so (#27).
+    An unsigned ``revoked: True`` is a HINT: the key is skipped for new adoption
+    and the claim is logged, but nothing is written and nothing is unpinned.
+    Treating it as authoritative (the #14 regression) meant one poll from a
+    compromised relay could tombstone and unpin an entire fleet's trust root,
+    permanently — the tombstone survives restarts by design, so the damage was
+    not even recoverable by restarting against an honest relay.
 
     One deliberate exception to "no relay TOFU" (#5): an identity that has never
     pinned ANY key can't grow a chain — endorsements need an already-pinned root,
@@ -83,52 +303,67 @@ def sync_pinned_operator_keys(identity_obj: Any, operator_keys: Sequence[Any], *
     the shared secret over the same channel. Pre-pinning via config/env skips
     TOFU entirely and stays the stronger option.
     """
+    log = log or logger
     pinned: Dict[str, str] = dict(identity_obj.pinned_operator_keys)
-    changed = False
-
-    # #14: record revocations as tombstones BEFORE anything can adopt a key.
-    # Unpinning alone never made revocation stick — the config seed re-added the
-    # key on the very next wake, and TOFU/chaining would too if the relay later
-    # stopped reporting it. The ledger is the durable half of the drop below.
     revoked_ledger: Dict[str, str] = dict(getattr(identity_obj, "revoked_operator_keys", None) or {})
-    for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
-        if not key_id or not getattr(k, "revoked", False):
-            continue
-        if key_id not in revoked_ledger:
-            revoked_ledger[key_id] = iso_now()
-            changed = True  # must persist, even when the key was never pinned here
-    if changed:
+    admissions: Dict[str, Dict[str, Any]] = dict(
+        getattr(identity_obj, "operator_key_admissions", None) or {}
+    )
+
+    # The keys allowed to authorize a trust-root mutation this poll, snapshotted
+    # BEFORE any of them are applied. Frozen on purpose: verifying against the
+    # live map would make the outcome depend on the order the relay happened to
+    # serve its entries in, which is the relay's choice, not ours.
+    authorities = dict(identity_obj.pinned_operator_keys)
+
+    def signed_by_a_pinned_key(payload: Any, sig: str) -> bool:
+        return any(_identity.verify_canonical(payload, sig, pub) for pub in authorities.values())
+
+    claims = _apply_relay_key_claims(
+        operator_keys,
+        fleet_id=fleet_id,
+        log=log,
+        pinned=pinned,
+        revoked_ledger=revoked_ledger,
+        admissions=admissions,
+        signed_by_a_pinned_key=signed_by_a_pinned_key,
+    )
+    advisory = claims["advisory"]
+    changed = claims["pin_removed"]
+    admissions_changed = claims["admissions_changed"]
+    if claims["ledger_changed"]:
         identity_obj.revoked_operator_keys = revoked_ledger
+        changed = True  # must persist, even when the key was never pinned here
 
     if not pinned and not getattr(identity_obj, "tofu_at", None):
         adopted = False
+        at = iso_now()
         for k in operator_keys:
             key_id = getattr(k, "key_id", None)
             public_key = getattr(k, "public_key", None)
-            if key_id and public_key and not getattr(k, "revoked", False) and key_id not in revoked_ledger:
+            if key_id and public_key and key_id not in advisory and key_id not in revoked_ledger:
                 pinned[key_id] = public_key
+                admissions[key_id] = {"admitted_by": "tofu", "admitted_at": at}  # #26
+                admissions_changed = True
                 adopted = True
         if adopted:
             # Latch only when something was adopted — an empty roster now must
             # not burn the one TOFU opportunity of a fresh identity. (Tracked
             # separately from `changed`, which a tombstone alone can now set.)
-            identity_obj.tofu_at = iso_now()
+            identity_obj.tofu_at = at
             identity_obj.pinned_operator_keys = pinned
+            identity_obj.operator_key_admissions = admissions
             return True
     for k in operator_keys:
         key_id = getattr(k, "key_id", None)
         if not key_id:
             continue
-        if getattr(k, "revoked", False):
-            if key_id in pinned:
-                del pinned[key_id]
-                changed = True
-            continue
         if key_id in pinned:
             continue
         if key_id in revoked_ledger:
             continue  # #14: a tombstoned key never comes back
+        if key_id in advisory:
+            continue  # #27: claimed-revoked → no NEW adoption
         endorser = getattr(k, "endorsed_by_key_id", None)
         esig = getattr(k, "endorsement_sig", None)
         public_key = getattr(k, "public_key", None)
@@ -137,8 +372,21 @@ def sync_pinned_operator_keys(identity_obj: Any, operator_keys: Sequence[Any], *
             if _identity.verify_canonical(payload, esig, pinned[endorser]):
                 pinned[key_id] = public_key
                 changed = True
+                # #26: keep the endorsement we just verified, so this box can
+                # answer "why is this key trusted here?" offline — the relay is
+                # exactly the party we would otherwise have to ask.
+                admissions[key_id] = {
+                    "admitted_by": "chain",
+                    "endorsed_by_key_id": endorser,
+                    "endorsement_sig": esig,
+                    "admitted_at": iso_now(),
+                }
+                admissions_changed = True
     if changed:
         identity_obj.pinned_operator_keys = pinned
+    if admissions_changed:
+        identity_obj.operator_key_admissions = admissions
+        changed = True
     return changed
 
 

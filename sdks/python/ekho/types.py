@@ -157,6 +157,15 @@ class OperatorKeyEntry:
     revoked: bool = False
     endorsed_by_key_id: Optional[str] = None
     endorsement_sig: Optional[str] = None
+    # #27: `revoked` on its own is a relay CLAIM. Agents only mutate their trust
+    # root on `revocation_sig` — a signature by a pinned operator key over
+    # revocation_payload(fleet_id, key_id, revoked_at). `revoked_at` is inside
+    # those bytes, so the relay cannot restate when a key died.
+    revocation_sig: Optional[str] = None
+    revoked_at: Optional[str] = None
+    # #27: signature over unrevoke_payload(fleet_id, key_id) — clears a tombstone
+    # so the key can be re-admitted by endorsement. Never re-pins on its own.
+    unrevoke_sig: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OperatorKeyEntry":
@@ -166,6 +175,9 @@ class OperatorKeyEntry:
             revoked=bool(data.get("revoked", False)),
             endorsed_by_key_id=data.get("endorsed_by_key_id"),
             endorsement_sig=data.get("endorsement_sig"),
+            revocation_sig=data.get("revocation_sig"),
+            revoked_at=data.get("revoked_at"),
+            unrevoke_sig=data.get("unrevoke_sig"),
         )
 
 

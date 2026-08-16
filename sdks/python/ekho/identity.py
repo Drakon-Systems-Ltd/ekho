@@ -85,6 +85,37 @@ def endorsement_payload(fleet_id: str, new_key_id: str, new_public_key_b64url: s
     }
 
 
+def revocation_payload(fleet_id: str, revoked_key_id: str, revoked_at: str) -> dict:
+    """Structure an operator key signs to REVOKE an operator key (#27).
+
+    Revocation mutates the trust root exactly as adoption does, so it needs the
+    same proof: an unsigned relay ``revoked: true`` flag is advisory only.
+    ``revoked_at`` is inside the signed bytes so the relay cannot restate WHEN a
+    key died under a still-valid signature.
+    """
+    return {
+        "v": 1,
+        "t": "op-key-revocation",
+        "fleet_id": fleet_id,
+        "key_id": revoked_key_id,
+        "revoked_at": revoked_at,
+    }
+
+
+def unrevoke_payload(fleet_id: str, revoked_key_id: str) -> dict:
+    """Structure an operator key signs to UN-REVOKE a key (#27).
+
+    Clears the tombstone so the key can be re-admitted through the endorsement
+    chain. Never re-pins on its own — re-admission still costs an endorsement.
+    """
+    return {
+        "v": 1,
+        "t": "op-key-unrevoke",
+        "fleet_id": fleet_id,
+        "key_id": revoked_key_id,
+    }
+
+
 def agent_key_endorsement_payload(
     fleet_id: str, agent_id: str, agent_key_id: str, agent_public_key_b64url: str
 ) -> dict:

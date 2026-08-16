@@ -9,6 +9,8 @@ import {
   keyId,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
+  unrevokePayload,
 } from "../src/operator-identity";
 
 const SEED = new Uint8Array(32).fill(7); // fixed seed -> deterministic vector
@@ -110,6 +112,52 @@ describe("endorsementPayload", () => {
         public_key: "pub_b64",
       })
     );
+  });
+});
+
+// #27: revoking a key mutates the trust root, so it needs the same proof adding
+// one does. These two payloads are the bytes that make an unsigned relay
+// `revoked:true` flag advisory instead of authoritative.
+describe("revocationPayload / unrevokePayload", () => {
+  it("revocation binds fleet, key and revoked_at in a stable structure", () => {
+    expect(canonicalize(revocationPayload("flt_x", "kid_gone", "2026-08-16T00:00:00Z"))).toBe(
+      canonicalize({
+        v: 1,
+        t: "op-key-revocation",
+        fleet_id: "flt_x",
+        key_id: "kid_gone",
+        revoked_at: "2026-08-16T00:00:00Z",
+      })
+    );
+  });
+
+  it("un-revoke binds fleet and key", () => {
+    expect(canonicalize(unrevokePayload("flt_x", "kid_back"))).toBe(
+      canonicalize({ v: 1, t: "op-key-unrevoke", fleet_id: "flt_x", key_id: "kid_back" })
+    );
+  });
+
+  it("a revocation signature does not verify as an un-revoke (types are bound)", () => {
+    const pub = ed25519.getPublicKey(SEED);
+    const sig = signCanonical(revocationPayload("flt_x", "kid", "2026-08-16T00:00:00Z"), SEED);
+    expect(verifyCanonical(unrevokePayload("flt_x", "kid"), sig, pub)).toBe(false);
+  });
+
+  it("a revocation signature is bound to its revoked_at", () => {
+    const pub = ed25519.getPublicKey(SEED);
+    const sig = signCanonical(revocationPayload("flt_x", "kid", "2026-08-16T00:00:00Z"), SEED);
+    expect(verifyCanonical(revocationPayload("flt_x", "kid", "2020-01-01T00:00:00Z"), sig, pub)).toBe(false);
+  });
+
+  // Added vectors (the pre-existing ones are frozen and untouched).
+  it("matches the frozen revocation / un-revoke vectors", () => {
+    const seed = new Uint8Array(Buffer.from(VECTOR.seed_hex, "hex"));
+    const pub = fromB64url(VECTOR.public_key_b64url);
+    for (const v of [VECTOR.revocation, VECTOR.unrevoke]) {
+      expect(canonicalize(v.payload)).toBe(v.canonical);
+      expect(signCanonical(v.payload, seed)).toBe(v.signature_b64url);
+      expect(verifyCanonical(v.payload, v.signature_b64url, pub)).toBe(true);
+    }
   });
 });
 

@@ -89,6 +89,30 @@ export function endorsementPayload(fleetId: string, newKeyId: string, newPublicK
   };
 }
 
+/** Structure an operator key signs to REVOKE an operator key (#27).
+ *  Revocation mutates the trust root exactly as adoption does, so it needs the
+ *  same proof: an unsigned relay `revoked:true` flag is advisory only. */
+export function revocationPayload(fleetId: string, revokedKeyId: string, revokedAt: string) {
+  return {
+    v: 1,
+    t: "op-key-revocation",
+    fleet_id: fleetId,
+    key_id: revokedKeyId,
+    revoked_at: revokedAt,
+  };
+}
+
+/** Structure an operator key signs to UN-REVOKE a key (#27) — clears the
+ *  tombstone so the key can be re-admitted by endorsement. Never re-pins. */
+export function unrevokePayload(fleetId: string, revokedKeyId: string) {
+  return {
+    v: 1,
+    t: "op-key-unrevoke",
+    fleet_id: fleetId,
+    key_id: revokedKeyId,
+  };
+}
+
 /** Structure the operator signs to endorse an AGENT's identity key (peer trust). */
 export function agentKeyEndorsementPayload(
   fleetId: string,
