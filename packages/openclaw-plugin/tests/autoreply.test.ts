@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isRealInbound,
+  whyNotRealInbound,
   peerLatchOpen,
   consumePeerLatch,
   resetPeerLatch,
@@ -55,6 +56,19 @@ describe("bounded peer delegation", () => {
   it("never reacts to its own outbound", () => {
     const own = msg({ sender_kind: "agent", sender_agent_id: "self" });
     expect(isRealInbound(own, "self", createAutoReplyState(), true, true)).toBe(false);
+  });
+
+  it("wakes on an operator 'reply exactly' diagnostic ping (#4)", () => {
+    // The 7 Aug incident: three trusted operator pings of this shape scored
+    // real=0. Against the current gate they must score real=1 — a trusted
+    // operator direct with non-empty text is a wake. We do NOT bypass the
+    // authority gate for the phrase; a failed signature still stays asleep.
+    const ping = msg({
+      message_id: "probe-1",
+      body: { text: "Reply exactly: PING-7AUG" }
+    });
+    expect(isRealInbound(ping, "self", createAutoReplyState(), true, true)).toBe(true);
+    expect(isRealInbound(ping, "self", createAutoReplyState(), false, true)).toBe(false);
   });
 
   it("latch opens until the budget is reached, then closes", () => {

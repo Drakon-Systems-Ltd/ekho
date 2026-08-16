@@ -30,4 +30,16 @@ describe("plugin version declarations stay in lockstep", () => {
       expect(files).toContain(required);
     }
   });
+
+  it("declares the same tools the source registers (#25)", () => {
+    // alsoAllow can only admit a tool that is already registered. If the
+    // manifest and the source drift, the host race in #25 becomes a permanent
+    // hole instead of a timing hole.
+    const declared = read("openclaw.plugin.json").contracts?.tools ?? [];
+    expect(declared).toEqual(["ekho_send", "ekho_open_room", "ekho_inbox"]);
+    const src = fs.readFileSync(path.join(__dirname, "..", "src", "index.ts"), "utf8");
+    for (const name of declared) {
+      expect(src).toContain(`name: "${name}"`);
+    }
+  });
 });
