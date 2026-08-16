@@ -11,10 +11,14 @@ describe("GET /v1/inbox limit clamp (#35)", () => {
   });
 
   async function seedInbox(count: number) {
-    const sender = await relay.enrollAgent(`inbox-limit-src-${count}-${Math.random().toString(16).slice(2)}`);
     const receiver = await relay.enrollAgent(`inbox-limit-dst-${count}-${Math.random().toString(16).slice(2)}`);
+    let sender: { agent_id: string; secret: string } | undefined;
     for (let i = 0; i < count; i++) {
-      const res = await relay.agentRequest(sender.agent_id, sender.secret, "POST", "/v1/messages", {
+      // Test relay rate-limit is 5 messages / 5s per agent. Rotate senders.
+      if (i % 5 === 0) {
+        sender = await relay.enrollAgent(`inbox-limit-src-${count}-${i}-${Math.random().toString(16).slice(2)}`);
+      }
+      const res = await relay.agentRequest(sender!.agent_id, sender!.secret, "POST", "/v1/messages", {
         recipient: { kind: "agent", id: receiver.agent_id },
         message_type: "direct",
         priority: "normal",
@@ -74,5 +78,19 @@ describe("GET /v1/inbox limit clamp (#35)", () => {
     expect(capped.status).toBe(200);
     expect(capped.body.messages).toHaveLength(3);
     expect(capped.body.messages.length).toBeLessThanOrEqual(100);
+  });
+
+  it("defaults an absent limit to 25, not everything", async () => {
+    const receiver = await seedInbox(26);
+    const res = await relay.agentRequest(receiver.agent_id, receiver.secret, "GET", "/v1/inbox");
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toHaveLength(25);
+  });
+
+  it("caps ?limit=99999 at 100 when the mailbox is larger", async () => {
+    const receiver = await seedInbox(101);
+    const res = await relay.agentRequest(receiver.agent_id, receiver.secret, "GET", "/v1/inbox?limit=99999");
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toHaveLength(100);
   });
 });
