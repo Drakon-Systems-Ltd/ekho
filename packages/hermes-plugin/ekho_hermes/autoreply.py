@@ -1743,13 +1743,21 @@ def start_autoreply(
 
     thread = threading.Thread(target=_loop, name="ekho-autoreply", daemon=True)
     thread.start()
+    try:
+        from .bundle_identity import describe as _describe_bundle
+
+        _bundle = _describe_bundle()
+        _bundle_note = f" bundle={_bundle.short_observed()} match={_bundle.match}"
+    except OSError:
+        _bundle_note = ""
     log.info(
         "[ekho-autoreply] listening for inbound (poll %.0fs) as %s "
-        "(peer_delegation=%s, budget=%d)",
+        "(peer_delegation=%s, budget=%d)%s",
         poll_interval_s,
         self_agent_id,
         "on" if peer_enabled else "off",
         peer_turn_budget,
+        _bundle_note,
     )
 
     def stop() -> None:
