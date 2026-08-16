@@ -933,3 +933,60 @@ describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
     expect(verdictFor("dup2")?.verified).toBe(true);
   });
 });
+
+// ekho#20, round 3. The Q2 carry-over fix introduced its own decay, in exactly
+// the scenario the carry-over exists for (found by Case against 82abec3), and
+// the carry-over itself needed binding to the signed material rather than the id.
+describe("a carried verdict cannot decay or transfer (ekho#20)", () => {
+  const signed = (id: string, over: Record<string, unknown> = {}) =>
+    ({ message_id: id, conversation_id: "c1", message_type: "direct", agent_sig: "sigA", key_id: "kA", body: { text: "one" }, ...over });
+  const batchOf = (msgs: Array<Record<string, unknown>>) => ({ messages: msgs }) as never;
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "kA" };
+
+  // verifyBatch early-returns a null for EVERY message when the pin set is empty
+  // or fleet_id is falsy — and pin sets churn on the same tick (revocation sync
+  // runs immediately before). Writing that null over a held verdict reset a
+  // `failed` message to `unchecked`, and no collector restores it.
+  it("an all-null verdict map never erases a verdict already held", () => {
+    recordBatch(batchOf([signed("x")]));
+    recordVerifications({ x: failed });
+    recordBatch(batchOf([signed("x")]));         // redelivered
+    recordVerifications({ x: null });             // verification became impossible
+    const v = verdictFor("x");
+    expect(v).not.toBeNull();
+    expect(v?.verified).toBe(false);
+    expect(v?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("a null verdict for a never-seen message is still simply absent", () => {
+    recordBatch(batchOf([signed("fresh")]));
+    recordVerifications({ fresh: null });
+    expect(verdictFor("fresh")).toBeNull();
+  });
+
+  // The verdict describes signed material, not an id the relay chooses. If a
+  // redelivery under the same message_id carries different material, the old
+  // verdict must not transfer to it.
+  it("a redelivery with a DIFFERENT signature does not inherit the old verdict", () => {
+    recordBatch(batchOf([signed("y")]));
+    recordVerifications({ y: { verified: true, kind: "peer", reason: null, keyId: "kA" } });
+    recordBatch(batchOf([signed("y", { agent_sig: "sigB" })]));
+    expect(verdictFor("y")).toBeNull(); // re-verify, never inherit
+  });
+
+  it("a redelivery with a DIFFERENT body does not inherit the old verdict", () => {
+    recordBatch(batchOf([signed("z")]));
+    recordVerifications({ z: { verified: true, kind: "peer", reason: null, keyId: "kA" } });
+    recordBatch(batchOf([signed("z", { body: { text: "two" } })]));
+    expect(verdictFor("z")).toBeNull();
+  });
+
+  it("an identical redelivery still keeps its verdict", () => {
+    recordBatch(batchOf([signed("w")]));
+    recordVerifications({ w: failed });
+    recordBatch(batchOf([signed("w")]));
+    expect(verdictFor("w")?.reason).toBe("endorser-not-pinned");
+  });
+});

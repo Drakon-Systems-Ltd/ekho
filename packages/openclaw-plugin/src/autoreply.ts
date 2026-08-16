@@ -223,6 +223,24 @@ let lastBatchMeta: {
   peer_turns_used: {}
 };
 
+/**
+ * Do two deliveries of the same message_id carry the same signed material?
+ * Governs whether a stored verdict may be reused for a redelivery (ekho#20):
+ * the verdict describes what was signed, and the cache is keyed by an id the
+ * relay chooses. Compares the signature, the key that made it and the body —
+ * body included because a verdict for an UNSIGNED message (reason "unsigned")
+ * would otherwise transfer to different unsigned content under the same id.
+ */
+function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
+  const sigOf = (m: InboxMessage) => `${m.agent_sig ?? ""}|${m.operator_sig ?? ""}|${m.key_id ?? ""}`;
+  if (sigOf(a) !== sigOf(b)) return false;
+  try {
+    return JSON.stringify(a.body ?? null) === JSON.stringify(b.body ?? null);
+  } catch {
+    return false; // uncomparable bodies -> re-verify rather than assume
+  }
+}
+
 export function recordBatch(batch: InboxBatch) {
   const relayPeer = batch.peer_autoreply;
   const relayBudget = batch.peer_turn_budget;
@@ -248,7 +266,15 @@ export function recordBatch(batch: InboxBatch) {
     // empty verdict map and a no-op below. Silent, and it decayed towards the
     // unsafe answer. A verdict describes a message_id, so it stays valid for a
     // redelivery of that same id until a fresh verdict replaces it.
-    const previous = lastBatch.get(msg.message_id)?.verification ?? null;
+    // ...but only when the redelivered message is the SAME message. A verdict
+    // describes signed material, not an id: the entry's message object is
+    // replaced here, so carrying the verdict across a redelivery whose
+    // signature material differs would let new content inherit an old
+    // `verified`. A relay that returns a different body under a reused
+    // message_id is exactly the compromised-relay case this whole issue is
+    // about, so the carry-over is bound to the signature, not the key.
+    const held = lastBatch.get(msg.message_id);
+    const previous = held && sameSignedMaterial(held.message, msg) ? held.verification : null;
     lastBatch.delete(msg.message_id);
     lastBatch.set(msg.message_id, { message: msg, verification: previous });
   }
@@ -281,6 +307,17 @@ export function recordVerifications(
   rejects: Array<{ message: { message_id?: unknown }; verdict: VerifyResult }> = []
 ): void {
   for (const [messageId, verdict] of Object.entries(verifications)) {
+    // NEVER write a null over a verdict we already hold. verifyBatch
+    // early-returns a null for EVERY message in the batch when the pin set is
+    // empty or fleet_id is falsy — and pin sets churn (revocation sync runs on
+    // the same tick, immediately before). Without this guard a message already
+    // labelled `failed` was reset to `unchecked` the moment verification became
+    // impossible, and neither collector restores it: collectVerificationRejects
+    // needs `v && !v.verified` and skips nulls, and the require-mode collector
+    // only runs in that mode. "Verification stopped being possible" is never a
+    // reason to forget that a message already failed. The pre-rewrite code
+    // filtered nulls (`if (v) nonNull[mid] = v`) and that filter has to survive.
+    if (!verdict) continue;
     const entry = lastBatch.get(messageId);
     if (entry) entry.verification = verdict;
   }

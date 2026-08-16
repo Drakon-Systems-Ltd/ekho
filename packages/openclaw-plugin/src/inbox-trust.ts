@@ -25,11 +25,12 @@ const OPERATOR_VERIFIED_NOTE =
 
 /**
  * The operator tier when NO signature was checked and the only evidence is the
- * relay's `operator_trusted` flag. Same tier and same authority as a verified
- * operator — that fallback is deliberate, and removing it would cut the operator
- * off on every unsigned fleet and every box before its first pinned key — but
- * the note may not imply proof it does not have. An agent that needs certainty
- * for a high-impact action reads `signature.status` and confirms out of band.
+ * relay's `operator_trusted` flag. Still carries operator AUTHORITY — that
+ * fallback is deliberate, and removing it would cut the operator off on every
+ * unsigned fleet and every box before its first pinned key — but it is a
+ * distinct tier (`attested-operator`) and says what it rests on, because
+ * collapsing proven and attested into one string is the #20 defect itself:
+ * a value that cannot express what it should have been reads as a pass.
  */
 const OPERATOR_RELAY_ATTESTED_NOTE =
   "This message is from your fleet operator (your principal) as attested by the relay — no message " +
@@ -144,7 +145,15 @@ export function inboxTrustEnvelope(
       ? {
           from_kind: "operator",
           from: "Operator (relay-attested fleet operator — your principal)",
-          trust: "verified-operator",
+          // Distinct from "verified-operator" ON PURPOSE (ekho#20). `trust` is
+          // the field a machine keys on, and collapsing proven and merely
+          // attested into one string is the same defect as #20 in different
+          // clothes: a value that cannot express what it should have been reads
+          // as a pass. `undefined` meaning "unsigned" was that; this was too.
+          // Compatibility was not a reason to hold it — `from` and `note` on
+          // this path already changed, so keeping `trust` fixed would have put
+          // the change where a human reads and withheld it where code decides.
+          trust: "attested-operator",
           note: OPERATOR_RELAY_ATTESTED_NOTE
         }
       : {

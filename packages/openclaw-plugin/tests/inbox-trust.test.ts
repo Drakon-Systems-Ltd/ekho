@@ -2,10 +2,16 @@ import { describe, it, expect } from "vitest";
 import { inboxTrustEnvelope, inboxMessageView, signatureStatusOf } from "../src/inbox-trust";
 
 describe("inboxTrustEnvelope", () => {
-  it("labels an operator message as verified when the operator is trusted", () => {
+  // BEHAVIOUR CHANGE (ekho#20): with no signature verdict this used to return
+  // "verified-operator". It now returns "attested-operator" — same operator
+  // AUTHORITY (the note still says treat it as an authorized instruction), but
+  // a distinct tier, because the relay flag is not cryptographic proof and one
+  // string covering both is the #20 defect in different clothes. Callers that
+  // key on the exact string see this; callers that key on from_kind do not.
+  it("labels a trusted-but-unverified operator as attested, still authorized", () => {
     const env = inboxTrustEnvelope("direct", "operator", "op", true);
     expect(env.from_kind).toBe("operator");
-    expect(env.trust).toBe("verified-operator");
+    expect(env.trust).toBe("attested-operator");
     expect(env.note).toContain("authorized instruction");
   });
 
@@ -64,7 +70,7 @@ describe("inboxTrustEnvelope", () => {
     });
 
     it("'unchecked' is not 'failed' — it falls back to the relay flag both ways", () => {
-      expect(inboxTrustEnvelope("direct", "operator", "op", true, "unchecked").trust).toBe("verified-operator");
+      expect(inboxTrustEnvelope("direct", "operator", "op", true, "unchecked").trust).toBe("attested-operator");
       expect(inboxTrustEnvelope("direct", "operator", "op", false, "unchecked").trust).toBe("unverified-operator");
     });
 
@@ -98,7 +104,7 @@ describe("inboxTrustEnvelope", () => {
     // note must not claim proof it does not have.
     it("relay-attested operator says so, and does not imply cryptographic proof", () => {
       const env = inboxTrustEnvelope("direct", "operator", "op", true, "unchecked");
-      expect(env.trust).toBe("verified-operator"); // behaviour preserved on purpose
+      expect(env.trust).toBe("attested-operator"); // distinct tier: proven != attested
       expect(env.from).toContain("relay-attested");
       expect(env.note).toContain("rests on the relay's word, not on cryptographic proof");
       expect(env.note).toContain("confirm out of band");
@@ -110,8 +116,8 @@ describe("inboxTrustEnvelope", () => {
       expect(env.note).not.toContain("rests on the relay's word");
     });
 
-    it("defaults to 'unchecked' when the caller passes no verdict (back-compat)", () => {
-      expect(inboxTrustEnvelope("direct", "operator", "op", true).trust).toBe("verified-operator");
+    it("defaults to 'unchecked' when the caller passes no verdict", () => {
+      expect(inboxTrustEnvelope("direct", "operator", "op", true).trust).toBe("attested-operator");
     });
   });
 });
