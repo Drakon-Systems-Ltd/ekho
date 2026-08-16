@@ -167,6 +167,60 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
  * relay rejects it, and agents drop revoked keys), so only a live one qualifies.
  */
 /**
+ * May the key unlocked in this browser endorse ANYTHING — an agent key in panel
+ * ③ or another operator key in panel ②?
+ *
+ * 16 Aug 2026: the answer used to be "yes, if it exists". The operator's laptop
+ * held a key that was live on the relay but endorsed by nobody and pinned by no
+ * agent, and from it he ran panel ③'s bulk "re-endorse all under this device".
+ * All 8 agent keys were re-rooted onto it while every agent still pinned the
+ * previous root, so the entire fleet's agent-to-agent traffic began dead-
+ * lettering with `endorser-not-pinned`. Endorsing from an untrusted key does not
+ * grant trust — it destroys it, by moving keys the fleet DID trust onto a root
+ * it does not.
+ *
+ * "Live" is not "trusted". A key may endorse only if the fleet would actually
+ * believe it: it is already a trust root, or it chains to a live one. The
+ * bootstrap case (a fresh fleet with no agent keys yet) stays open, or first
+ * enrolment could never happen.
+ *
+ * @returns {{ allowed: boolean, reason: string|null }}
+ */
+export function endorseAuthority(unlockedKeyId, operatorKeys, agentKeys) {
+  if (!unlockedKeyId) return { allowed: false, reason: "Unlock this device's operator identity first." };
+  const keys = operatorKeys || [];
+  const mine = keys.find((k) => k.key_id === unlockedKeyId);
+  if (!mine) {
+    return { allowed: false, reason: `This device's key ${unlockedKeyId} is not registered with the relay.` };
+  }
+  if (mine.revoked_at) {
+    // Points at the device that CAN do it. Never "Forget device" — that advice
+    // burnt a key id on 16 Aug and left the operator just as locked out.
+    return {
+      allowed: false,
+      reason: `This device's key ${unlockedKeyId} is revoked and cannot endorse anything. Do it from another device that holds a live key.`,
+    };
+  }
+  // Already a trust root: agents verify against it today, so endorsing from it
+  // keeps them where they are.
+  if (dependentsOf(unlockedKeyId, agentKeys) > 0) return { allowed: true, reason: null };
+  // Chains to a live key, so agents adopt it by themselves (#13).
+  const endorser = mine.endorsed_by_key_id
+    ? keys.find((k) => k.key_id === mine.endorsed_by_key_id && !k.revoked_at)
+    : undefined;
+  if (endorser) return { allowed: true, reason: null };
+  // Fresh fleet — nothing to break yet.
+  if (!agentKeys || agentKeys.length === 0) return { allowed: true, reason: null };
+  return {
+    allowed: false,
+    reason:
+      `This device's key ${unlockedKeyId} is live but unendorsed, and no agent trusts it. ` +
+      `Endorsing from here would move your agents onto a key none of them pin and stop the fleet talking to itself. ` +
+      `Do it from a device that holds a trusted key, or have that device endorse this one first.`,
+  };
+}
+
+/**
  * Live operator keys carrying no endorsement (#19) — excluding the trust root
  * itself, which is what everything else chains to.
  *
@@ -190,24 +244,16 @@ export function orphanedOperatorKeys(operatorKeys, rootKeyId) {
  *
  * @returns {{ allowed: boolean, reason: string|null }}
  */
-export function rescueGuard(targetKeyId, operatorKeys, unlockedKeyId) {
-  if (!unlockedKeyId) {
-    return { allowed: false, reason: "Unlock this device's operator identity first." };
-  }
-  if (targetKeyId === unlockedKeyId) {
+export function rescueGuard(targetKeyId, operatorKeys, unlockedKeyId, agentKeys = []) {
+  if (targetKeyId && targetKeyId === unlockedKeyId) {
     return { allowed: false, reason: "A key cannot endorse itself — use the device that holds a different live key." };
   }
+  // The signer must be one the fleet actually believes. On 16 Aug a live-but-
+  // untrusted key was allowed to endorse and took the whole fleet's peer traffic
+  // down with it; "revoked or unregistered" was never a strict enough test.
+  const authority = endorseAuthority(unlockedKeyId, operatorKeys, agentKeys);
+  if (!authority.allowed) return authority;
   const keys = operatorKeys || [];
-  const mine = keys.find((k) => k.key_id === unlockedKeyId);
-  if (!mine || mine.revoked_at) {
-    // Deliberately does NOT say "Forget device". That is the advice that burnt
-    // a key id on 16 Aug: the stranded device mints an orphan it can never
-    // endorse. The only way out is a device that still holds a live key.
-    return {
-      allowed: false,
-      reason: `This device's key is revoked or unregistered, so it cannot endorse anything. Do this from another device that holds a live key.`,
-    };
-  }
   const target = keys.find((k) => k.key_id === targetKeyId);
   if (!target) return { allowed: false, reason: `Unknown key ${targetKeyId}.` };
   if (target.revoked_at) return { allowed: false, reason: `${targetKeyId} is revoked — endorsing it would achieve nothing.` };

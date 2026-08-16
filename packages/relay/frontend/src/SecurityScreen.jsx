@@ -35,6 +35,7 @@ import {
   revokeGuard,
   pickEndorser,
   rescueGuard,
+  endorseAuthority,
 } from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
@@ -73,7 +74,7 @@ export default function SecurityScreen({ session, agents = [] }) {
   // The rescue for a device that cannot sign for itself — without this, a key
   // minted on a stranded device is permanently invisible to every agent.
   const onEndorseKey = async (targetKeyId) => {
-    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId);
+    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId, agentKeys);
     if (!guard.allowed) return note("danger", guard.reason);
     const target = keys.find((k) => k.key_id === targetKeyId);
     setBusy(true);
@@ -256,6 +257,9 @@ export default function SecurityScreen({ session, agents = [] }) {
   const onEndorse = async (ak) => {
     if (!unlocked) return note("warn", "Unlock your operator identity first.");
     if (!signing.canSign) return note("danger", `${signing.reason} ${signing.recovery ?? ""}`.trim()); // #15
+    // 16 Aug: live is not trusted. Endorsing from a key no agent pins moves
+    // that agent onto a root the fleet cannot verify.
+    if (!authority.allowed) return note("danger", authority.reason);
     try {
       const payload = agentKeyEndorsementPayload(fleetId, ak.agent_id, ak.key_id, ak.public_key);
       const signature = signCanonical(payload, unlocked.seed);
@@ -274,6 +278,11 @@ export default function SecurityScreen({ session, agents = [] }) {
   const nameFor = (id) => agents.find((a) => a.id === id)?.display_name || id;
   const health = trustHealth(keys, agentKeys, unlocked?.keyId);
   const signing = deviceKeySigningState(keys, unlocked?.keyId);
+  // 16 Aug: signing.canSign only asks whether the key is live. A live-but-
+  // untrusted key ran the bulk re-endorse below and moved all 8 agents onto a
+  // root none of them pinned, dead-lettering every peer message fleet-wide.
+  // Authority is the stricter question: would the fleet believe this signer?
+  const authority = endorseAuthority(unlocked?.keyId, keys, agentKeys);
   const live = liveOperatorKeys(keys);
 
   return (
@@ -324,12 +333,12 @@ export default function SecurityScreen({ session, agents = [] }) {
           <div className="sec__alert-b">
             {health.problems.join(" · ")}. Endorsing re-roots each agent's trust at your current device key.
           </div>
-          {unlocked && signing.canSign ? (
+          {unlocked && signing.canSign && authority.allowed ? (
             <button className="sec__btn sec__btn--go" disabled={busy} onClick={onReendorseAll}>
               Re-endorse all under this device · {unlocked.keyId}
             </button>
           ) : unlocked ? (
-            <div className="sec__hint">{signing.reason} {signing.recovery}</div>
+            <div className="sec__hint">{signing.canSign ? authority.reason : `${signing.reason} ${signing.recovery ?? ""}`}</div>
           ) : (
             <div className="sec__hint">Unlock your operator identity above, then re-endorse the affected agents.</div>
           )}
@@ -408,8 +417,8 @@ export default function SecurityScreen({ session, agents = [] }) {
                       </span>
                       <button
                         className="sec__btn sec__btn--go"
-                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId).allowed}
-                        title={rescueGuard(k.key_id, keys, unlocked?.keyId).reason || `Endorse ${k.key_id} with this device's key`}
+                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys).allowed}
+                        title={rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys).reason || `Endorse ${k.key_id} with this device's key`}
                         onClick={() => onEndorseKey(k.key_id)}
                       >
                         Endorse
