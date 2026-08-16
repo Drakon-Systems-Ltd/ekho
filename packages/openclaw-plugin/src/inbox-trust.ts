@@ -167,12 +167,38 @@ export function inboxTrustEnvelope(
 }
 
 /** The per-message verdict as the cache stores it (structural — see verify.ts). */
-export type InboxVerdict = { verified: boolean; reason?: string | null; keyId?: string | null } | null;
+export type InboxVerdict = {
+  verified: boolean;
+  kind?: "operator" | "peer";
+  reason?: string | null;
+  keyId?: string | null;
+} | null;
 
-/** Map a raw verdict to the tri-state the envelope consumes. `null` means
- *  verification never ran, which is NOT the same as having run and failed. */
-export function signatureStatusOf(verdict: InboxVerdict): SignatureStatus {
+/**
+ * Map a raw verdict to the tri-state the envelope consumes. `null` means
+ * verification never ran, which is NOT the same as having run and failed.
+ *
+ * `senderKind` is the defence-in-depth check (ekho#20). `VerifyResult.kind`
+ * records WHICH tier was proved — `verifyInbound` branches on `sender_kind` to
+ * pick an entirely different key-resolution path (pinned operator keys vs the
+ * endorsed roster) — and discarding it on the way to the tri-state let a verdict
+ * that proved a PEER authorise an operator envelope. A peer verdict is simply
+ * not evidence about an operator message, however it came to be attached, so a
+ * mismatch is refused rather than reconciled. This is the same rule that made
+ * `unchecked` distinct from `failed` and `attested` distinct from `verified`:
+ * never discard the field that discriminates.
+ *
+ * A mismatch fails LOUD rather than degrading to `unchecked`: with the
+ * whole-message carry-over guard in place it cannot arise from any legitimate
+ * flow, so it means the cache or the relay is misbehaving, and that is worth
+ * seeing rather than quietly treating as "not verified yet".
+ */
+export function signatureStatusOf(verdict: InboxVerdict, senderKind?: unknown): SignatureStatus {
   if (!verdict) return "unchecked";
+  if (verdict.kind && senderKind !== undefined) {
+    const messageKind = senderKind === "operator" ? "operator" : "peer";
+    if (verdict.kind !== messageKind) return "failed";
+  }
   return verdict.verified ? "verified" : "failed";
 }
 
@@ -196,7 +222,7 @@ export function inboxMessageView(
     peerTurnsUsed?: Record<string, number>;
   }
 ): Record<string, unknown> {
-  const signature = signatureStatusOf(verdict);
+  const signature = signatureStatusOf(verdict, message.sender_kind);
   const envelope = inboxTrustEnvelope(
     message.message_type,
     message.sender_kind,

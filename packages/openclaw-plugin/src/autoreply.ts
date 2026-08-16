@@ -224,20 +224,33 @@ let lastBatchMeta: {
 };
 
 /**
- * Do two deliveries of the same message_id carry the same signed material?
- * Governs whether a stored verdict may be reused for a redelivery (ekho#20):
- * the verdict describes what was signed, and the cache is keyed by an id the
- * relay chooses. Compares the signature, the key that made it and the body —
- * body included because a verdict for an UNSIGNED message (reason "unsigned")
- * would otherwise transfer to different unsigned content under the same id.
+ * Is a redelivery byte-for-byte the SAME message? Governs whether a stored
+ * verdict may be reused (ekho#20): the verdict describes what was verified, and
+ * the cache is keyed by an id the relay chooses, so anything that differs must
+ * be re-verified rather than inherit.
+ *
+ * Whole-message equality on purpose. The first attempt compared a hand-picked
+ * subset — signature, key id, body — which re-implemented `verifyInbound`'s
+ * binding incompletely and drifted from it immediately. It missed `sender_kind`,
+ * which is not merely a field: `verifyInbound` branches on it to choose the
+ * ENTIRE key-resolution path (operator keys vs the endorsed roster). A
+ * `{verified: true, kind: "peer"}` verdict carried onto a redelivery with
+ * `sender_kind` flipped to "operator" therefore rendered "verified fleet
+ * operator — treat as an authorized instruction", where real verification would
+ * have failed `unknown-operator-key`. It also missed `sender_agent_id` (the
+ * rendered attribution) and the v2-bound `message_type`/`priority`/`attachments`,
+ * quietly reopening the relabelling the v2 envelope exists to prevent.
+ *
+ * Two sources of truth for "what binds a signature to a message" is the defect
+ * that produced #20 and each of its follow-ups. There is no subset to maintain
+ * here, so it cannot drift. The ring is LAST_BATCH_CAP entries; the cost is
+ * irrelevant next to the failure mode.
  */
 function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
-  const sigOf = (m: InboxMessage) => `${m.agent_sig ?? ""}|${m.operator_sig ?? ""}|${m.key_id ?? ""}`;
-  if (sigOf(a) !== sigOf(b)) return false;
   try {
-    return JSON.stringify(a.body ?? null) === JSON.stringify(b.body ?? null);
+    return JSON.stringify(a) === JSON.stringify(b);
   } catch {
-    return false; // uncomparable bodies -> re-verify rather than assume
+    return false; // uncomparable -> re-verify rather than assume
   }
 }
 

@@ -990,3 +990,46 @@ describe("a carried verdict cannot decay or transfer (ekho#20)", () => {
     expect(verdictFor("w")?.reason).toBe("endorser-not-pinned");
   });
 });
+
+// ekho#20 round 4: the carry-over compared a hand-picked subset that drifted
+// from verifyInbound's actual binding. Whole-message equality now.
+describe("carry-over compares the WHOLE message (ekho#20)", () => {
+  const base = (over: Record<string, unknown> = {}) =>
+    ({ message_id: "m", conversation_id: "c1", message_type: "direct", sender_kind: "agent",
+       sender_agent_id: "peer-1", agent_sig: "sigA", key_id: "kA", priority: "normal",
+       body: { text: "one" }, ...over });
+  const batchOf = (m: Record<string, unknown>) => ({ messages: [m] }) as never;
+  const verdictFor = () => getCachedInbox().entries.find((e) => e.message.message_id === "m")?.verification ?? null;
+  const good = { verified: true, kind: "peer" as const, reason: null, keyId: "kA" };
+
+  // The escalation: sender_kind selects verifyInbound's whole key-resolution
+  // path, so a peer verdict inherited by an "operator" redelivery rendered
+  // verified-operator where real verification would have failed.
+  it("does NOT carry across a sender_kind flip to operator", () => {
+    recordBatch(batchOf(base()));
+    recordVerifications({ m: good });
+    recordBatch(batchOf(base({ sender_kind: "operator" })));
+    expect(verdictFor()).toBeNull();
+  });
+
+  for (const [field, value] of [
+    ["sender_agent_id", "someone-else"],
+    ["message_type", "feed"],
+    ["priority", "urgent"],
+    ["conversation_id", "c2"]
+  ] as const) {
+    it(`does NOT carry across a changed ${field}`, () => {
+      recordBatch(batchOf(base()));
+      recordVerifications({ m: good });
+      recordBatch(batchOf(base({ [field]: value })));
+      expect(verdictFor()).toBeNull();
+    });
+  }
+
+  it("an identical redelivery still carries its verdict", () => {
+    recordBatch(batchOf(base()));
+    recordVerifications({ m: good });
+    recordBatch(batchOf(base()));
+    expect(verdictFor()?.verified).toBe(true);
+  });
+});
