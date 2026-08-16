@@ -1578,6 +1578,185 @@ export class EkhoDb {
     });
   }
 
+  /**
+   * #22 — the relay's own view of ONE message this agent SENT, so a sender can
+   * check a `sent: true` (or a failed-looking send) against the relay instead of
+   * trusting its own transport's return value.
+   *
+   * Scoped hard to sender_agent_id in the same fleet. An unknown id and another
+   * agent's id are indistinguishable from here (both null), and the route turns
+   * that into a 404 — existence of another agent's traffic is never disclosed.
+   *
+   * The per-recipient `deliveries` rows are the real answer: messages.status is
+   * only 'queued' | 'acked' | 'dead_lettered' fleet-wide, whereas a delivery
+   * carries queued/delivered/acked/dead_lettered with its own timestamps.
+   */
+  getSentMessageStatus(fleetId: string, senderAgentId: string, messageId: string) {
+    const m = this.db.prepare(
+      `SELECT id, conversation_id, correlation_id, message_type, priority, recipient_kind, recipient_id,
+              created_at, expires_at, status
+       FROM messages WHERE id = ? AND fleet_id = ? AND sender_agent_id = ?`
+    ).get(messageId, fleetId, senderAgentId) as Record<string, unknown> | undefined;
+    if (!m) return null;
+
+    const deliveries = this.db.prepare(
+      `SELECT d.recipient_agent_id, d.status, d.queued_at, d.delivered_at, d.acked_at,
+              d.delivery_attempts, d.retry_count, d.last_failure_reason,
+              dl.failure_reason AS dead_letter_reason, dl.dead_lettered_at
+       FROM message_deliveries d
+       LEFT JOIN dead_letters dl ON dl.original_delivery_id = d.id
+       WHERE d.message_id = ?
+       ORDER BY d.queued_at ASC, d.id ASC`
+    ).all(messageId) as Array<Record<string, unknown>>;
+
+    return {
+      message_id: String(m.id),
+      conversation_id: String(m.conversation_id),
+      correlation_id: String(m.correlation_id),
+      message_type: String(m.message_type),
+      priority: String(m.priority),
+      recipient: { kind: String(m.recipient_kind), id: (m.recipient_id as string | null) ?? null },
+      status: String(m.status),
+      created_at: String(m.created_at),
+      expires_at: String(m.expires_at),
+      // A still-queued message past its TTL is never collected by /v1/inbox —
+      // the one "dropped" outcome that leaves no dead letter behind.
+      expired: String(m.expires_at) <= nowIso(),
+      deliveries: deliveries.map((d) => ({
+        recipient_agent_id: String(d.recipient_agent_id),
+        status: String(d.status),
+        queued_at: (d.queued_at as string | null) ?? null,
+        delivered_at: (d.delivered_at as string | null) ?? null,
+        acked_at: (d.acked_at as string | null) ?? null,
+        delivery_attempts: Number(d.delivery_attempts ?? 0),
+        retry_count: Number(d.retry_count ?? 0),
+        last_failure_reason: (d.last_failure_reason as string | null) ?? null,
+        dead_lettered_at: (d.dead_lettered_at as string | null) ?? null,
+        dead_letter_reason: (d.dead_letter_reason as string | null) ?? null
+      }))
+    };
+  }
+
+  /**
+   * #17 — the conversations this agent has taken part in, newest activity first.
+   * Participation uses the same definition as isConversationParticipant (room
+   * membership, or having sent/received a message in the thread), so a session
+   * can enumerate the threads its SIBLING sessions used under the same identity
+   * — and carry a correction to every one of them. Fleet-scoped throughout.
+   */
+  listAgentConversations(fleetId: string, agentId: string, limit: number) {
+    const rows = this.db.prepare(
+      `WITH participated(cid) AS (
+         SELECT DISTINCT conversation_id FROM messages
+           WHERE fleet_id = ? AND sender_agent_id = ?
+         UNION
+         SELECT DISTINCT m.conversation_id FROM message_deliveries d
+           JOIN messages m ON m.id = d.message_id
+           WHERE d.recipient_agent_id = ? AND m.fleet_id = ?
+         UNION
+         SELECT mem.room_id FROM room_members mem JOIN rooms r0 ON r0.id = mem.room_id
+           WHERE r0.fleet_id = ? AND mem.agent_id = ?
+       )
+       SELECT p.cid AS conversation_id,
+              r.name AS room_name,
+              r.created_at AS room_created_at,
+              (SELECT COUNT(*) FROM messages m2 WHERE m2.fleet_id = ? AND m2.conversation_id = p.cid) AS message_count,
+              (SELECT COUNT(*) FROM messages m3 WHERE m3.fleet_id = ? AND m3.conversation_id = p.cid AND m3.sender_agent_id = ?) AS sent_count,
+              (SELECT MAX(m4.created_at) FROM messages m4 WHERE m4.fleet_id = ? AND m4.conversation_id = p.cid) AS last_message_at
+       FROM participated p
+       LEFT JOIN rooms r ON r.id = p.cid AND r.fleet_id = ?`
+    ).all(
+      fleetId, agentId,
+      agentId, fleetId,
+      fleetId, agentId,
+      fleetId,
+      fleetId, agentId,
+      fleetId,
+      fleetId
+    ) as Array<Record<string, unknown>>;
+
+    return rows
+      .map((r) => {
+        const lastMessageAt = (r.last_message_at as string | null) ?? null;
+        return {
+          conversation_id: String(r.conversation_id),
+          kind: r.room_name === null || r.room_name === undefined ? "direct" : "room",
+          name: (r.room_name as string | null) ?? null,
+          message_count: Number(r.message_count ?? 0),
+          sent_count: Number(r.sent_count ?? 0),
+          last_message_at: lastMessageAt,
+          // A room the agent belongs to that nobody has posted in yet still
+          // appears, dated from the room's creation — silence is an answer too.
+          last_activity_at: lastMessageAt ?? ((r.room_created_at as string | null) ?? null)
+        };
+      })
+      .sort((a, b) => String(b.last_activity_at ?? "").localeCompare(String(a.last_activity_at ?? "")))
+      .slice(0, Math.max(1, limit));
+  }
+
+  /**
+   * #17 — this agent's own outbound messages, newest first, optionally only
+   * those strictly after `since`. Body and metadata come back verbatim: they are
+   * the caller's own words (and its own envelope signature), which is the point
+   * — "did I say this?" must be answerable by a session that did not say it.
+   */
+  listSentMessages(fleetId: string, agentId: string, options: { since?: string; limit: number }) {
+    const where = ["fleet_id = ?", "sender_agent_id = ?"];
+    const params: Array<string | number> = [fleetId, agentId];
+    if (options.since) {
+      where.push("created_at > ?");
+      params.push(options.since);
+    }
+    const rows = this.db.prepare(
+      `SELECT id, conversation_id, correlation_id, message_type, priority, recipient_kind, recipient_id,
+              body_json, metadata_json, created_at, expires_at, status
+       FROM messages WHERE ${where.join(" AND ")}
+       ORDER BY created_at DESC, id DESC LIMIT ?`
+    ).all(...params, Math.max(1, options.limit)) as Array<Record<string, unknown>>;
+    if (rows.length === 0) return [];
+
+    // One grouped pass over the deliveries rather than a query per message.
+    const ph = rows.map(() => "?").join(",");
+    const counts = new Map<string, Record<string, number>>();
+    for (const c of this.db.prepare(
+      `SELECT message_id,
+              COUNT(*) AS total,
+              SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+              SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS delivered,
+              SUM(CASE WHEN status = 'acked' THEN 1 ELSE 0 END) AS acked,
+              SUM(CASE WHEN status = 'dead_lettered' THEN 1 ELSE 0 END) AS dead_lettered
+       FROM message_deliveries WHERE message_id IN (${ph}) GROUP BY message_id`
+    ).all(...rows.map((r) => String(r.id))) as Array<Record<string, unknown>>) {
+      counts.set(String(c.message_id), {
+        total: Number(c.total ?? 0),
+        queued: Number(c.queued ?? 0),
+        delivered: Number(c.delivered ?? 0),
+        acked: Number(c.acked ?? 0),
+        dead_lettered: Number(c.dead_lettered ?? 0)
+      });
+    }
+
+    const now = nowIso();
+    const parse = (raw: unknown) => {
+      try { return JSON.parse(String(raw)) as Record<string, unknown>; } catch { return {}; }
+    };
+    return rows.map((r) => ({
+      message_id: String(r.id),
+      conversation_id: String(r.conversation_id),
+      correlation_id: String(r.correlation_id),
+      message_type: String(r.message_type),
+      priority: String(r.priority),
+      recipient: { kind: String(r.recipient_kind), id: (r.recipient_id as string | null) ?? null },
+      status: String(r.status),
+      created_at: String(r.created_at),
+      expires_at: String(r.expires_at),
+      expired: String(r.expires_at) <= now,
+      body: parse(r.body_json),
+      metadata: r.metadata_json ? parse(r.metadata_json) : null,
+      deliveries: counts.get(String(r.id)) ?? { total: 0, queued: 0, delivered: 0, acked: 0, dead_lettered: 0 }
+    }));
+  }
+
   ackMessages(agentId: string, ackRows: Array<{ message_id: string; received_at: string }>) {
     let updated = 0;
     const tx = this.db.transaction(() => {

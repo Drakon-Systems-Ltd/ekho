@@ -26,6 +26,19 @@ export function sendAttachment(reply: FastifyReply, att: { filename: string; mim
   return reply.send(fs.createReadStream(att.storage_path));
 }
 
+/**
+ * Clamp a `?limit=` query param to 1..max, defaulting when absent or unparseable.
+ * Truncated to an INTEGER: better-sqlite3 binds 1.5 as a REAL and SQLite rejects
+ * a fractional LIMIT with SQLITE_MISMATCH, which would turn `?limit=1.5` into a
+ * 500 on a read-only endpoint.
+ */
+function clampLimit(raw: string | undefined, fallback: number, max = 100): number {
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), 1), max);
+}
+
 export async function registerAgentRoutes(app: FastifyInstance) {
   app.post("/v1/enroll", async (request, reply) => {
     const parsed = enrollSchema.safeParse(request.body);
@@ -211,6 +224,55 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     }
 
     return reply.send({ message_id: result.messageId, status: "queued", queued_at: result.createdAt });
+  });
+
+  // #22 — sender-side read-back. The send call's own return value is a claim by
+  // the component whose failure mode is in question; this is the relay's own
+  // answer for a message this agent sent. Scoped to sender_agent_id: an unknown
+  // id and another agent's id both 404, so the endpoint never discloses that
+  // someone else's message exists.
+  app.get("/v1/messages/:message_id/status", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const messageId = String((request.params as { message_id: string }).message_id || "");
+    if (!messageId) return reply.code(400).send({ error: "message id required" });
+    const status = db.getSentMessageStatus(request.agent.fleetId, request.agent.id, messageId);
+    if (!status) return reply.code(404).send({ error: "message not found" });
+    return reply.send(status);
+  });
+
+  // #17 — the threads this agent has been in, so a session can find the ones its
+  // SIBLING sessions used. An Ekho identity is per-box and many sessions share
+  // it; "check your own session history" returns a confident false negative.
+  app.get("/v1/conversations", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const limit = clampLimit((request.query as { limit?: string }).limit, 25);
+    return reply.send({ conversations: db.listAgentConversations(request.agent.fleetId, request.agent.id, limit) });
+  });
+
+  // #17 — this agent's own outbound messages. Enough on its own to answer "did I
+  // say this?" truthfully across sessions, and to drive a cross-thread
+  // correction. `since` is an ISO-8601 instant, exclusive.
+  app.get("/v1/sent", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const query = request.query as { since?: string; limit?: string };
+    const limit = clampLimit(query.limit, 25);
+
+    let since: string | undefined;
+    if (query.since !== undefined) {
+      // Reject an unparseable `since` rather than silently ignoring it — a
+      // filter that quietly doesn't filter is exactly the false confidence #17
+      // is about. Normalised to the stored ISO form so string compare is sound.
+      const parsedSince = new Date(query.since);
+      if (Number.isNaN(parsedSince.getTime())) {
+        return reply.code(400).send({ error: "since must be an ISO-8601 timestamp" });
+      }
+      since = parsedSince.toISOString();
+    }
+
+    return reply.send({
+      messages: db.listSentMessages(request.agent.fleetId, request.agent.id, { since, limit }),
+      since: since ?? null
+    });
   });
 
   // Upload — raised body limit on THIS route only (Fastify 5 defaults to 1 MB).
