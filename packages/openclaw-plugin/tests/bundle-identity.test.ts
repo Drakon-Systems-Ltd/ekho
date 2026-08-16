@@ -154,6 +154,27 @@ describe("the built bundle carries its own identity", () => {
     expect(build.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
+  it("still answers the build question on a box that cannot reach its relay", async () => {
+    // Asking every box its version is how a security posture gets established,
+    // so the answer must not depend on the relay being up.
+    const { plugin, home } = await startPlugin(stageBundle(dist));
+    const inbox = plugin.tools.find((t: { name: string }) => t.name === "ekho_inbox");
+    const prev = process.env.HOME;
+    process.env.HOME = home; // empty home: no saved credentials to fall back on
+    try {
+      // No relayBaseUrl and no credentials — connection cannot succeed.
+      const result = (await inbox.execute({}, {}, {})) as {
+        build: Record<string, unknown>;
+        error?: string;
+      };
+      expect(result.error).toMatch(/not connected/);
+      expect(result.build).toMatchObject({ artifact: "intact", source: "bundle" });
+    } finally {
+      if (prev === undefined) delete process.env.HOME;
+      else process.env.HOME = prev;
+    }
+  });
+
   // THE case. On this fleet dist is hand-patched in place and package.json is
   // left alone, so the reported version keeps describing code that is no longer
   // there. A stamp alone would inherit that defect verbatim — it would sit in

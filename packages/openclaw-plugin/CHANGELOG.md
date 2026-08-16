@@ -22,6 +22,8 @@ All notable changes to Ekho are documented here.
 
   **It degrades honestly, because a build stamp that lies is worse than none.** Outside a git work tree (npm tarball, `docker COPY`) the commit is `unknown`; with any uncommitted change it is `<sha>-dirty`; and when cleanliness cannot be established it is *also* `-dirty`, since the cost of a false "dirty" is a second look and the cost of a false "clean" is this bug again. A bundle built before this change carries no stamp at all and says so (`carries no build stamp … its version cannot be established`) rather than falling back to `package.json`. Note that mtime is not used anywhere here: it was proposed and disproved — two known-good matched installs differ by 3ms and 1.478s, so any threshold would be invented.
 
+  **Behaviour change for consumers:** `ekho_inbox` no longer throws when the relay cannot be reached. It returns `{ build, count: 0, messages: [], error: "not connected: …" }` instead, because an inventory that only works while the relay is up cannot establish a security posture — the build question is answerable locally and should not be taken down with the connection. Callers that relied on the throw must now check `error`.
+
 ## [0.4.1] - 2026-08-10
 
 This release is the fallout of a real fleet incident on 10 Aug 2026, in which eight agents spent an hour re-asserting a claim that had already been retracted, concluded their signing keys had been stolen, and froze themselves. Nothing was compromised. Two plugin bugs and two console bugs produced it between them, and all four are fixed here.
