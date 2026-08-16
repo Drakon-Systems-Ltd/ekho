@@ -127,6 +127,13 @@ describe("mentions, reply-to, and room history", () => {
     const bEntry = history.find((h: { text: string }) => h.text === "b reply");
     expect(bEntry.sender_kind).toBe("agent");
     expect(bEntry.sender_agent_id).toBe(b.agent_id);
+    // #20 leftover: snapshots now carry the same signature fields as inbox
+    // deliveries, so a plugin can verify history instead of only labelling it
+    // [unverified]. Unsigned rows still have the keys, with null values.
+    expect(bEntry).toHaveProperty("operator_sig");
+    expect(bEntry).toHaveProperty("agent_sig");
+    expect(bEntry).toHaveProperty("key_id");
+    expect(bEntry).toHaveProperty("sig_canonical");
   });
 
   it("never serves room history to a non-member (history IDOR guard)", async () => {
