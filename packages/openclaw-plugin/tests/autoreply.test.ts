@@ -13,6 +13,8 @@ import {
   effectiveConversationBudget,
   recordPeerUsage,
   getCachedInbox,
+  recordBatch,
+  recordVerifications,
   stashDeferred,
   listRetryableDeferred,
   clearDeferred,
@@ -516,6 +518,61 @@ describe("ekho_inbox budget surfacing", () => {
     recordPeerUsage(live);
     live.set("c1", 99);
     expect(getCachedInbox().peer_turns_used["c1"]).toBe(2);
+  });
+});
+
+// ekho#20. The verdict has to live and die with the message it describes.
+// It previously sat in a per-batch side map (`lastBatchMeta.verifications`,
+// replaced wholesale every batch) while the message ring is LAST_BATCH_CAP deep
+// and spans many batches. So a rejected message stayed inbox-readable, verdict
+// free, for up to 24 further messages after the only verdict describing it had
+// been discarded — and looking it up returned `undefined`, indistinguishable
+// from "unsigned / never checked". Emitting the side map would have shipped a
+// false green; these tests are what that fix would have failed.
+describe("cached verdicts share the message's lifetime (ekho#20)", () => {
+  const batchOf = (ids: string[]) =>
+    ({ messages: ids.map((id) => ({ message_id: id, conversation_id: "c1", message_type: "direct" })) }) as never;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "k1" };
+
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+
+  it("a reject's verdict survives 24 later messages across many batches", () => {
+    recordBatch(batchOf(["bad"]));
+    recordVerifications({ bad: failed });
+    expect(verdictFor("bad")?.verified).toBe(false);
+
+    // 24 more messages, one per batch — each replacing what the old side map
+    // held, while "bad" stays inside the 25-deep ring.
+    for (let i = 0; i < 24; i++) {
+      recordBatch(batchOf([`later-${i}`]));
+      recordVerifications({ [`later-${i}`]: { verified: true, kind: "peer", reason: null, keyId: "k2" } });
+    }
+
+    const still = verdictFor("bad");
+    expect(still).not.toBeNull(); // the whole defect: this used to be undefined
+    expect(still?.verified).toBe(false);
+    expect(still?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("the verdict is evicted with its message, never orphaned or outlived", () => {
+    recordBatch(batchOf(["bad"]));
+    recordVerifications({ bad: failed });
+    // One past the cap — "bad" is now the oldest and must be gone entirely.
+    for (let i = 0; i < 25; i++) recordBatch(batchOf([`fill-${i}`]));
+    expect(getCachedInbox().entries.some((e) => e.message.message_id === "bad")).toBe(false);
+  });
+
+  it("a message with no verdict reads as null, distinct from a failed one", () => {
+    recordBatch(batchOf(["never-checked"]));
+    expect(verdictFor("never-checked")).toBeNull();
+  });
+
+  it("messages and entries stay positionally aligned for attachment resolution", () => {
+    recordBatch(batchOf(["a", "b", "c"]));
+    const { entries, messages } = getCachedInbox();
+    expect(messages.length).toBe(entries.length);
+    messages.forEach((m, i) => expect(m.message_id).toBe(entries[i].message.message_id));
   });
 });
 

@@ -6,7 +6,7 @@ import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
 import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
 import { buildSignedSendFields } from "./verification.js";
-import { inboxTrustEnvelope } from "./inbox-trust.js";
+import { inboxMessageView } from "./inbox-trust.js";
 import {
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_MAX_PER_MESSAGE,
@@ -257,6 +257,9 @@ const plugin = defineToolPlugin({
         // reason — the loop already acked.
         const { client } = await ensureConnected(config);
         const cached = getCachedInbox();
+        // Entries pair each message with ITS OWN verdict. `messages` is a
+        // positional mirror (index i matches) used only for attachment resolution.
+        const entries = cached.entries;
         const messages = cached.messages as unknown as Array<Record<string, unknown>>;
         const operatorTrusted = Boolean(cached.operator_trusted);
         const roster = (cached.roster ?? []) as unknown as Array<Record<string, unknown>>;
@@ -283,47 +286,18 @@ const plugin = defineToolPlugin({
           // its peer budget even before reading individual messages.
           peer_autoreply: peerAutoreply,
           peer_turn_budget: peerTurnBudget > 0 ? peerTurnBudget : null,
-          messages: messages.map((m, i) => {
-            // Trust envelope (feed / operator / agent). Feeds are delivered under
-            // the operator's sender id but carry EXTERNAL content, so the helper
-            // hard-downgrades them to untrusted-external BEFORE the operator tier —
-            // a headline can never be read as an operator instruction. See
-            // inbox-trust.ts.
-            const envelope = inboxTrustEnvelope(m.message_type, m.sender_kind, m.sender_agent_id, operatorTrusted);
-            const fromKind = envelope.from_kind;
-            const attachments = localAttachments[i];
-            const base = {
-              type: m.message_type,
-              body: m.body,
-              conversation_id: m.conversation_id,
-              sent_at: m.created_at,
-              from_kind: fromKind,
-              // @mentions (who's addressed) + the quoted message this replies to.
-              ...(Array.isArray(m.mentions) && (m.mentions as unknown[]).length ? { mentions: m.mentions } : {}),
-              ...(m.reply_to ? { reply_to: m.reply_to } : {}),
-              ...(attachments.length ? { attachments } : {})
-            };
-            if (fromKind === "feed" || fromKind === "operator") {
-              return { ...base, from: envelope.from, trust: envelope.trust, note: envelope.note };
-            }
-            // Bounded-delegation budget left for this peer conversation, so a
-            // manual inbox read shows how many more times a teammate can wake
-            // this agent before the latch auto-pauses. Additive + peer-only.
-            const peerBudget =
-              peerTurnBudget > 0
-                ? (() => {
-                    const used = Number(
-                      (peerTurnsUsed as Record<string, number>)[String(m.conversation_id)] ?? 0
-                    );
-                    return {
-                      peer_turns_used: used,
-                      peer_turn_budget: peerTurnBudget,
-                      peer_remaining: Math.max(0, peerTurnBudget - used)
-                    };
-                  })()
-                : {};
-            return { ...base, ...peerBudget, from: m.sender_agent_id };
-          }),
+          // One pure, unit-tested projection per message (ekho#20). The verdict
+          // travels with the message from the cache, so a dead-lettered item can
+          // never be served as an ordinary one — and the mapping lives in
+          // inbox-trust.ts where a test can execute it without a live relay.
+          messages: entries.map((e, i) =>
+            inboxMessageView(e.message as unknown as Record<string, unknown>, e.verification, {
+              operatorTrusted,
+              attachments: localAttachments[i],
+              peerTurnBudget,
+              peerTurnsUsed: peerTurnsUsed as Record<string, number>
+            })
+          ),
           // Teammates the agent can delegate to / coordinate with.
           roster: roster.map((r) => ({
             agent_id: r.agent_id,

@@ -190,13 +190,22 @@ export const EKHO_ORIGIN_STAMP = "openclaw-agent";
  * The background loop is the single consumer of the inbox; `ekho_inbox` reads
  * this cache instead of calling getInbox() again, so a manual tool call during
  * a turn can never double-consume rows the loop is mid-processing (Part B1).
+ *
+ * Each entry carries ITS OWN verdict (ekho#20). It used to be message-only, with
+ * verdicts held in a `lastBatchMeta.verifications` side map — but that map is
+ * replaced wholesale per batch while this ring is 25 deep and spans many, so a
+ * rejected message stayed inbox-readable for up to LAST_BATCH_CAP-1 subsequent
+ * messages after the only verdict describing it had been discarded. Looking a
+ * message up in the side map then returned `undefined`, which is indistinguishable
+ * from "unsigned / never checked". Same lifetime as the message it describes is
+ * the whole point: do not reintroduce a side map.
  */
-const lastBatch = new Map<string, InboxMessage>();
+type CachedInboxEntry = { message: InboxMessage; verification: VerifyResult | null };
+const lastBatch = new Map<string, CachedInboxEntry>();
 let lastBatchMeta: {
   operator_trusted: boolean;
   roster: RosterEntry[];
   controls: ControlEntry[];
-  verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
   // Bounded-delegation state, so a manual ekho_inbox read shows how much peer
   // budget is left: the effective cap, the on/off flag, and per-conversation
@@ -208,21 +217,19 @@ let lastBatchMeta: {
   operator_trusted: false,
   roster: [],
   controls: [],
-  verifications: {},
   conversation_history: {},
   peer_autoreply: false,
   peer_turn_budget: DEFAULT_PEER_TURN_BUDGET,
   peer_turns_used: {}
 };
 
-function recordBatch(batch: InboxBatch) {
+export function recordBatch(batch: InboxBatch) {
   const relayPeer = batch.peer_autoreply;
   const relayBudget = batch.peer_turn_budget;
   lastBatchMeta = {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
-    verifications: lastBatchMeta.verifications,
     conversation_history: batch.conversation_history ?? {},
     // Relay is the source of truth; older relays omit these -> off / default cap.
     peer_autoreply: typeof relayPeer === "boolean" ? relayPeer : false,
@@ -233,13 +240,28 @@ function recordBatch(batch: InboxBatch) {
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
     // Re-insert so most-recent wins ordering; trim oldest beyond the cap.
+    // Verdict starts null — verification has not run yet at this point in the
+    // tick — and recordVerifications() fills it in a few lines later. Null is
+    // the honest state, and stays null forever when identity bootstrap failed.
     lastBatch.delete(msg.message_id);
-    lastBatch.set(msg.message_id, msg);
+    lastBatch.set(msg.message_id, { message: msg, verification: null });
   }
   while (lastBatch.size > LAST_BATCH_CAP) {
     const oldest = lastBatch.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     lastBatch.delete(oldest);
+  }
+}
+
+/**
+ * Attach this tick's verdicts to the cached messages they describe (ekho#20).
+ * Called immediately after verifyBatch, so a verdict lives and dies with its
+ * message rather than in a per-batch map with a shorter lifetime.
+ */
+export function recordVerifications(verifications: Record<string, VerifyResult | null>): void {
+  for (const [messageId, verdict] of Object.entries(verifications)) {
+    const entry = lastBatch.get(messageId);
+    if (entry) entry.verification = verdict;
   }
 }
 
@@ -288,22 +310,26 @@ export function recordPeerUsage(usedByConversation: Map<string, number>): void {
 }
 
 export function getCachedInbox(): {
+  /** Message + its own verdict, same lifetime. Prefer this over `messages`. */
+  entries: CachedInboxEntry[];
   messages: InboxMessage[];
   operator_trusted: boolean;
   roster: RosterEntry[];
   controls: ControlEntry[];
-  verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
   peer_autoreply: boolean;
   peer_turn_budget: number;
   peer_turns_used: Record<string, number>;
 } {
+  const entries = Array.from(lastBatch.values());
   return {
-    messages: Array.from(lastBatch.values()),
+    entries,
+    // Kept as a positional mirror of `entries` for callers that only need the
+    // message (attachment resolution). Index i of one IS index i of the other.
+    messages: entries.map((e) => e.message),
     operator_trusted: lastBatchMeta.operator_trusted,
     roster: lastBatchMeta.roster,
     controls: lastBatchMeta.controls,
-    verifications: lastBatchMeta.verifications,
     conversation_history: lastBatchMeta.conversation_history,
     peer_autoreply: lastBatchMeta.peer_autoreply,
     peer_turn_budget: lastBatchMeta.peer_turn_budget,
@@ -1153,9 +1179,9 @@ export function startAutoReply(opts: {
         seenNonces: state.seenNonces,
         now: new Date()
       });
-      const nonNull: Record<string, VerifyResult | null> = {};
-      for (const [mid, v] of Object.entries(verifications)) if (v) nonNull[mid] = v;
-      lastBatchMeta.verifications = nonNull;
+      // Attach each verdict to the cached message it describes, so `ekho_inbox`
+      // can label it for as long as the message is readable (ekho#20).
+      recordVerifications(verifications);
     }
 
     // Dead-letter EVERYTHING about to be acked-and-binned without acting on it.
@@ -1169,11 +1195,19 @@ export function startAutoReply(opts: {
     if (requireSigned === "require") {
       rejects.push(...collectRequireSignedWithheld(batch.messages, verifications, selfAgentId));
     }
+    // The wording is deliberate. This used to end "dead-lettered, not acted on",
+    // which was FALSE and is exactly the string an incident responder greps for
+    // under time pressure: the message wakes no turn, but it stays in the
+    // `ekho_inbox` ring, and an agent polling that tool on a schedule reads and
+    // acts on it (ekho#20 — measured on the Case box 2026-08-16, acted on 11
+    // minutes after this line was written about it). Say only what is true: no
+    // turn was triggered. The label on the tool read is what carries the rest.
     for (const { message: m, verdict: v } of rejects) {
       log?.warn?.(
         `[ekho-autoreply] verification FAILED for message ${m.message_id} from ` +
           `${m.sender_kind ?? "?"}/${m.sender_agent_id ?? "?"} key=${v.keyId ?? "?"} ` +
-          `reason=${v.reason ?? "?"} — dead-lettered, not acted on`
+          `reason=${v.reason ?? "?"} — dead-lettered; no turn triggered ` +
+          `(still readable via ekho_inbox, labelled signature=failed)`
       );
     }
     if (rejects.length > 0 && opts.onVerificationReject) {
