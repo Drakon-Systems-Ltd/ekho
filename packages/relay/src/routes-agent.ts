@@ -332,9 +332,8 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "unauthorized" });
     }
 
-    const query = request.query as { limit?: string };
-    const limit = query.limit ? Math.min(Number(query.limit), 100) : 25;
-    return reply.send(db.getInbox(request.agent.id, Number.isFinite(limit) ? limit : 25));
+    const limit = clampLimit((request.query as { limit?: string }).limit, 25);
+    return reply.send(db.getInbox(request.agent.id, limit));
   });
 
   app.post("/v1/acks", { preHandler: requireAgentAuth }, async (request, reply) => {
