@@ -5,6 +5,7 @@ import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import { noteModelCallEnded } from "./connection.js";
 
 import type { EkhoIdentity } from "./credentials.js";
+import { canonicalize } from "./identity.js";
 import {
   shouldAutowake,
   syncPinnedOperatorKeys,
@@ -245,39 +246,25 @@ let lastBatchMeta: {
  * that produced #20 and each of its follow-ups. There is no subset to maintain
  * here, so it cannot drift. The ring is LAST_BATCH_CAP entries; the cost is
  * irrelevant next to the failure mode.
+ *
+ * Compared with `canonicalize` — THE serializer the signature is computed over
+ * (identity.ts, via signCanonical/verifyCanonical) — and not a local one. The
+ * first attempt at key-order independence wrote a fresh canonicaliser here,
+ * which was the same mistake one level up: this function's whole job is to
+ * decide whether two objects are the same signed material, and the only
+ * non-arbitrary definition of that is the one the signature is taken over.
+ * That local version also did not do what it claimed — it sorted keys into
+ * `Object.fromEntries`, and V8 orders integer-like keys numerically ahead of
+ * string keys regardless of insertion order, so the sort was silently
+ * overridden on any numeric-ish key. Derive from the same value; never
+ * recompute it alongside.
  */
 function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
   try {
-    return canonicalJson(a) === canonicalJson(b);
+    return canonicalize(a) === canonicalize(b);
   } catch {
     return false; // uncomparable -> re-verify rather than assume
   }
-}
-
-/**
- * Key-order-independent serialisation for the equality above.
- *
- * A plain `JSON.stringify` compare is key-order sensitive, so two structurally
- * identical redeliveries that serialised differently would compare false. That
- * is safe in the escalation direction — it only ever re-verifies — but it fails
- * in the OTHER direction that matters: the verdict is dropped and a message that
- * had been labelled `failed` reads `unchecked`. That is the round-two decay
- * again, merely made conditional on serialisation stability instead of
- * eliminated. Both objects come off the same wire through the same parser, so
- * stability is likely — but "likely" is the assumption this issue has now
- * falsified four times, and sorting keys costs nothing on a 25-entry ring.
- * Removing the assumption beats documenting it.
- */
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
-    v && typeof v === "object" && !Array.isArray(v)
-      ? Object.fromEntries(
-          Object.keys(v as Record<string, unknown>)
-            .sort()
-            .map((k) => [k, (v as Record<string, unknown>)[k]])
-        )
-      : v
-  );
 }
 
 export function recordBatch(batch: InboxBatch) {

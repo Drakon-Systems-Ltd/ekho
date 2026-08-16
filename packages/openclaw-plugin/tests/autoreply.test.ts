@@ -1060,3 +1060,27 @@ describe("carry-over survives key-order differences (ekho#20)", () => {
     expect(verdictFor()).toBeNull();
   });
 });
+
+// ekho#20 round 6: the equality must use THE signing canonicaliser, not a local
+// one. A local version sorted keys into Object.fromEntries, and V8 orders
+// integer-like keys numerically ahead of string keys regardless of insertion
+// order — so the sort was silently overridden. Same-value-not-recomputed.
+describe("carry-over equality uses the signing canonicaliser (ekho#20)", () => {
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "kA" };
+
+  it("numeric-ish keys compare correctly in both orders", () => {
+    recordBatch({ messages: [{ message_id: "nk", body: { "10": "x", "2": "y" } }] } as never);
+    recordVerifications({ nk: failed });
+    recordBatch({ messages: [{ message_id: "nk", body: { "2": "y", "10": "x" } }] } as never);
+    expect(verdictFor("nk")?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("a real change under numeric-ish keys still drops the verdict", () => {
+    recordBatch({ messages: [{ message_id: "nk2", body: { "10": "x", "2": "y" } }] } as never);
+    recordVerifications({ nk2: failed });
+    recordBatch({ messages: [{ message_id: "nk2", body: { "10": "CHANGED", "2": "y" } }] } as never);
+    expect(verdictFor("nk2")).toBeNull();
+  });
+});
