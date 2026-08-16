@@ -157,16 +157,32 @@ def test_format_inbox_no_peer_budget_on_operator_messages():
 
 
 def test_format_inbox_operator_trusted_label():
+    # BEHAVIOUR CHANGE (ekho#20, ported by #23): with no signature verdict this
+    # used to be "verified-operator". It is now "attested-operator" — the same
+    # operator AUTHORITY (the note still says treat it as an authorized
+    # instruction), but a distinct tier, because the relay flag is not
+    # cryptographic proof and one string covering both is the #20 defect in
+    # different clothes: a value that cannot express what it should have been
+    # reads as a pass.
     out = format_inbox(
         [_msg(sender_kind="operator", sender_agent_id="op")],
         operator_trusted=True,
     )
     msg = out["messages"][0]
     assert msg["from_kind"] == "operator"
-    assert msg["from"] == "Operator (verified fleet operator — your principal)"
-    assert msg["trust"] == "verified-operator"
+    assert msg["from"] == "Operator (relay-attested fleet operator — your principal)"
+    assert msg["trust"] == "attested-operator"
     assert "authorized instruction" in msg["note"]
+    assert "rests on the relay's word, not on cryptographic proof" in msg["note"]
+    assert msg["signature"] == {"status": "unchecked"}
     assert out["operator_trusted"] is True
+
+
+def test_format_inbox_always_emits_a_signature_field_including_peers():
+    # An absent field reading as "fine" is the defect itself, so every message
+    # carries the tri-state — peers with no verdict included.
+    out = format_inbox([_msg()], operator_trusted=False)
+    assert out["messages"][0]["signature"] == {"status": "unchecked"}
 
 
 def test_format_inbox_feed_is_untrusted_external():
@@ -280,28 +296,39 @@ def test_format_inbox_verified_operator_label():
     from types import SimpleNamespace
     out = format_inbox(
         [_opmsg()], operator_trusted=False,
-        verifications={"m1": SimpleNamespace(verified=True, reason=None)},
+        verifications={"m1": SimpleNamespace(verified=True, kind="operator", reason=None, key_id="k")},
     )
     msg = out["messages"][0]
+    # A valid operator signature stands on its own — no relay flag needed.
     assert msg["trust"] == "verified-operator"
-    assert "cryptographically verified" in msg["from"]
+    assert msg["from"] == "Operator (verified fleet operator — your principal)"
+    assert msg["signature"] == {"status": "verified", "key_id": "k"}
+    assert "rests on the relay's word" not in msg["note"]
 
 
-def test_format_inbox_impersonation_label_overrides_relay_flag():
+def test_format_inbox_rejected_signature_label_overrides_relay_flag():
+    # Was `impersonation`; now the shared `rejected-signature` tier, so both
+    # plugins label the same message with the same string (ekho#23).
     from types import SimpleNamespace
     out = format_inbox(
         [_opmsg()], operator_trusted=True,
-        verifications={"m1": SimpleNamespace(verified=False, reason="bad-signature")},
+        verifications={"m1": SimpleNamespace(verified=False, kind="operator", reason="bad-signature", key_id="k")},
     )
-    assert out["messages"][0]["trust"] == "impersonation"
+    msg = out["messages"][0]
+    assert msg["trust"] == "rejected-signature"
+    assert msg["signature"] == {"status": "failed", "reason": "bad-signature", "key_id": "k"}
+    assert "authorized instruction" not in msg["note"]
 
 
 def test_format_inbox_unsigned_falls_back_to_relay_label():
     from types import SimpleNamespace
     out = format_inbox(
         [_opmsg()], operator_trusted=True,
-        verifications={"m1": SimpleNamespace(verified=False, reason="unsigned")},
+        verifications={"m1": SimpleNamespace(verified=False, kind="operator", reason="unsigned")},
     )
-    # reason == "unsigned" → no signature → relay-attested label, not impersonation.
-    assert out["messages"][0]["trust"] == "verified-operator"
-    assert "cryptographically" not in out["messages"][0]["from"]
+    # reason == "unsigned" → no signature was present, so nothing was checked →
+    # the relay-attested tier, not a forgery label. (Feeds arrive unsigned by
+    # construction; see signature_status_of.)
+    msg = out["messages"][0]
+    assert msg["trust"] == "attested-operator"
+    assert msg["signature"]["status"] == "unchecked"

@@ -40,6 +40,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from datetime import datetime, timezone
 
+from ekho.identity import canonicalize
 from ekho.verify import VerificationResult
 
 from .attachments import download_inbox_attachments
@@ -128,13 +129,13 @@ EKHO_AUTOREPLY_DISABLE_ENV = "EKHO_AUTOREPLY_DISABLE"
 # loop thread writes while a tool call (another thread) may read.
 
 _cache_lock = threading.Lock()
-_last_batch: "OrderedDict[str, Any]" = OrderedDict()
+# Each ring entry carries ITS OWN verdict (ekho#20 / #23). A side map replaced
+# wholesale per batch while this ring is 25 deep is the headline defect.
+_last_batch: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _last_batch_meta: Dict[str, Any] = {
     "operator_trusted": False,
     "roster": [],
     "controls": [],
-    # message_id -> VerificationResult, so ekho_inbox can show truthful labels.
-    "verifications": {},
     # Bounded-delegation state, so a manual ekho_inbox read shows how much peer
     # budget is left: the effective cap, the on/off flag, and per-conversation
     # consumed counts (conversation_id -> turns used).
@@ -151,18 +152,70 @@ def reset_cache() -> None:
         _last_batch_meta["operator_trusted"] = False
         _last_batch_meta["roster"] = []
         _last_batch_meta["controls"] = []
-        _last_batch_meta["verifications"] = {}
         _last_batch_meta["peer_autoreply"] = False
         _last_batch_meta["peer_turn_budget"] = DEFAULT_PEER_TURN_BUDGET
         _last_batch_meta["peer_turns_used"] = {}
 
 
-def record_verifications(verifications: Dict[str, Any]) -> None:
-    """Cache per-message verdicts (skipping None) for ekho_inbox to surface."""
+def _plain_for_canonicalize(message: Any) -> Any:
+    """JSON-serializable view of an inbox message for ``canonicalize``.
+
+    Dataclass → asdict. Dict → itself. Anything else is uncomparable.
+    """
+    if isinstance(message, dict):
+        return message
+    if dataclasses.is_dataclass(message) and not isinstance(message, type):
+        return dataclasses.asdict(message)
+    raise TypeError("uncomparable inbox message")
+
+
+def same_signed_material(a: Any, b: Any) -> bool:
+    """Is a redelivery the SAME message? Governs verdict reuse (ekho#20/#23).
+
+    Whole-message equality via ``ekho.identity.canonicalize`` — the serializer
+    signatures are computed over. Uncomparable → False (re-verify, never assume).
+    """
+    try:
+        return canonicalize(_plain_for_canonicalize(a)) == canonicalize(
+            _plain_for_canonicalize(b)
+        )
+    except Exception:  # noqa: BLE001 — uncomparable must not inherit a verdict
+        return False
+
+
+def record_verifications(
+    verifications: Dict[str, Any],
+    rejects: Optional[Sequence[Any]] = None,
+) -> None:
+    """Attach this tick's verdicts to the cached messages they describe.
+
+    ``rejects`` is the authority and is applied LAST. What gets dead-lettered
+    and what gets labelled must be the same set; collectors synthesise verdicts
+    into the reject list and never write them into ``verifications``.
+    Never write None over a verdict already held.
+    """
     with _cache_lock:
-        _last_batch_meta["verifications"] = {
-            mid: v for mid, v in (verifications or {}).items() if mid and v is not None
-        }
+        for message_id, verdict in (verifications or {}).items():
+            if not verdict or not message_id:
+                continue
+            entry = _last_batch.get(message_id)
+            if entry is not None:
+                entry["verification"] = verdict
+        for item in rejects or []:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                message, verdict = item[0], item[1]
+            elif isinstance(item, dict):
+                message, verdict = item.get("message"), item.get("verdict")
+            else:
+                continue
+            if not verdict:
+                continue
+            message_id = getattr(message, "message_id", None)
+            if not isinstance(message_id, str):
+                continue
+            entry = _last_batch.get(message_id)
+            if entry is not None:
+                entry["verification"] = verdict
 
 
 def record_batch(inbox: Any) -> None:
@@ -170,6 +223,8 @@ def record_batch(inbox: Any) -> None:
 
     ``inbox`` is an SDK ``InboxResponse`` (``.messages``, ``.operator_trusted``,
     ``.roster``, ``.controls``). Messages are kept newest-wins, capped FIFO.
+    A redelivery keeps its previous verdict only when the signed material is
+    unchanged.
     """
     with _cache_lock:
         _last_batch_meta["operator_trusted"] = bool(
@@ -191,9 +246,14 @@ def record_batch(inbox: Any) -> None:
             message_id = getattr(msg, "message_id", None)
             if not message_id:
                 continue
-            # Re-insert so most-recent wins ordering; trim oldest beyond the cap.
+            held = _last_batch.get(message_id)
+            previous = (
+                held["verification"]
+                if held and same_signed_material(held["message"], msg)
+                else None
+            )
             _last_batch.pop(message_id, None)
-            _last_batch[message_id] = msg
+            _last_batch[message_id] = {"message": msg, "verification": previous}
         while len(_last_batch) > LAST_BATCH_CAP:
             _last_batch.popitem(last=False)  # evict oldest
 
@@ -209,14 +269,25 @@ def get_cached_inbox() -> Dict[str, Any]:
     """The view ``ekho_inbox`` returns: the loop's most recent cached batch.
 
     No relay call, no ack — the loop already consumed and acked these.
+    ``verifications`` is derived from the ring entries, never a side map.
     """
     with _cache_lock:
+        entries = [
+            {"message": e["message"], "verification": e["verification"]}
+            for e in _last_batch.values()
+        ]
+        verifications: Dict[str, Any] = {}
+        for entry in entries:
+            mid = getattr(entry["message"], "message_id", None)
+            if mid and entry["verification"] is not None:
+                verifications[mid] = entry["verification"]
         return {
-            "messages": list(_last_batch.values()),
+            "messages": [e["message"] for e in entries],
+            "entries": entries,
             "operator_trusted": _last_batch_meta["operator_trusted"],
             "roster": list(_last_batch_meta["roster"]),
             "controls": list(_last_batch_meta["controls"]),
-            "verifications": dict(_last_batch_meta["verifications"]),
+            "verifications": verifications,
             "peer_autoreply": _last_batch_meta["peer_autoreply"],
             "peer_turn_budget": _last_batch_meta["peer_turn_budget"],
             "peer_turns_used": dict(_last_batch_meta["peer_turns_used"]),
@@ -299,18 +370,31 @@ def stash_deferred(
     can retry the floor. Dedupes by message id, keeps the newest slice, and
     preserves the FIRST deferral time (the TTL clock)."""
     existing = state.deferred_by_conversation.pop(conversation_id, None) or {}
-    by_id: Dict[Any, Any] = {}
+    previous_by_id: Dict[Any, Any] = {}
     for m in existing.get("messages", []):
-        by_id[getattr(m, "message_id", None)] = m
+        previous_by_id[getattr(m, "message_id", None)] = m
+    by_id: Dict[Any, Any] = dict(previous_by_id)
     for m in messages:
         by_id[getattr(m, "message_id", None)] = m
     merged = list(by_id.values())[-DEFERRED_MESSAGES_PER_CONV:]
     kept_verifications: Dict[str, Any] = {}
+    previous_verdicts = existing.get("verifications", {}) or {}
     for m in merged:
         mid = getattr(m, "message_id", None)
         v = (verifications or {}).get(mid)
         if v is None:
-            v = existing.get("verifications", {}).get(mid)
+            # H7: the stash replaces the message object. An old verdict may
+            # travel only when the WHOLE signed material is unchanged — the
+            # same rule as record_batch. message_id is relay-chosen.
+            old = previous_by_id.get(mid)
+            old_v = previous_verdicts.get(mid)
+            v = (
+                old_v
+                if old_v is not None
+                and old is not None
+                and same_signed_material(old, m)
+                else None
+            )
         kept_verifications[mid] = v
     state.deferred_by_conversation[conversation_id] = {
         "messages": merged,
@@ -1250,7 +1334,6 @@ def process_inbox_once(
             seen_nonces=state.seen_nonces,
             now=wall_now or datetime.now(timezone.utc),
         )
-        record_verifications(verifications)
 
     # Dead-letter EVERYTHING about to be acked-and-binned without acting on it.
     # OUTSIDE the identity gate on purpose: if identity bootstrap failed
@@ -1264,10 +1347,20 @@ def process_inbox_once(
         rejects.extend(
             collect_require_signed_withheld(messages, verifications, self_agent_id)
         )
+    # Label from the SAME set that drove the dead-letter, and only once the
+    # set is complete — including require-mode verdicts synthesised above,
+    # which never enter ``verifications``. Outside the identity gate on
+    # purpose: bootstrap-failed ticks have no verdicts but DO have withheld
+    # peers, and those must not read as ordinary (ekho#20 / #23 H6).
+    record_verifications(verifications, rejects)
+    # The wording is deliberate. This used to end "dead-lettered, not acted
+    # on", which was FALSE: the message wakes no turn, but it stays in the
+    # ekho_inbox ring. Say only what is true.
     for m, v in rejects:
         log.warning(
             "[ekho-autoreply] verification FAILED for message %s from %s/%s "
-            "key=%s reason=%s — dead-lettered, not acted on",
+            "key=%s reason=%s — dead-lettered; no turn triggered "
+            "(still readable via ekho_inbox, labelled signature=failed)",
             getattr(m, "message_id", "?"),
             getattr(m, "sender_kind", "?"),
             getattr(m, "sender_agent_id", "?"),
