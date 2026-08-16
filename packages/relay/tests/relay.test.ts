@@ -62,6 +62,41 @@ describe("Relay integration", () => {
       expect(inboxRes.body.messages[0].body.text).toBe("hello");
     });
 
+    it("clamps hostile inbox limits instead of 500ing or returning everything (#35)", async () => {
+      const sender = await relay.enrollAgent("inbox-limit-sender");
+      const receiver = await relay.enrollAgent("inbox-limit-receiver");
+      await relay.agentRequest(sender.agent_id, sender.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: receiver.agent_id },
+        message_type: "direct",
+        body: { text: "limit probe" },
+        conversation_id: "conv-limit",
+        correlation_id: "corr-limit"
+      });
+      // `?limit=1.5` used to reach SQLite as a REAL and blow up with SQLITE_MISMATCH.
+      // `?limit=-5` used to be treated as no limit at all.
+      for (const limit of ["1.5", "-5", "0", "abc", ""]) {
+        const res = await relay.agentRequest(
+          receiver.agent_id,
+          receiver.secret,
+          "GET",
+          `/v1/inbox?limit=${limit}`
+        );
+        // Inbox is destructive: later iterations may see an empty batch.
+        // The defect is a 500 or an unbounded dump, not an empty one.
+        expect(res.status, `limit=${limit}`).toBe(200);
+        expect(Array.isArray(res.body.messages)).toBe(true);
+        expect(res.body.messages.length).toBeLessThanOrEqual(100);
+      }
+      const huge = await relay.agentRequest(
+        receiver.agent_id,
+        receiver.secret,
+        "GET",
+        "/v1/inbox?limit=99999"
+      );
+      expect(huge.status).toBe(200);
+      expect(huge.body.messages.length).toBeLessThanOrEqual(100);
+    });
+
     it("acks a message", async () => {
       const sender = await relay.enrollAgent("sender");
       const receiver = await relay.enrollAgent("receiver");
