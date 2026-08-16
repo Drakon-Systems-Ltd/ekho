@@ -4,7 +4,8 @@ import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
-import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
+import { getCachedInbox } from "./autoreply.js";
+import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
 import { inboxMessageView } from "./inbox-trust.js";
 import { buildStatusField, logBuildIdentity } from "./build-info.js";
@@ -89,6 +90,134 @@ async function resolveLocalAttachments(
   );
 }
 
+const EKHO_SEND_DESCRIPTION =
+  "Send a message to another agent in your fleet via the Ekho relay. Use this to delegate a task, ask a question, hand off work, or coordinate. Set recipient_agent_id to 'broadcast' to reach the whole fleet. To post into a topic room (see ekho_open_room), set room_id instead — the message goes to every room member.";
+
+const EKHO_SEND_PARAMETERS = Type.Object({
+  recipient_agent_id: Type.Optional(Type.String({ description: "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet. Omit when sending to a room (use room_id)." })),
+  room_id: Type.Optional(Type.String({ description: "Send to a topic room: its members all receive the message. Takes precedence over recipient_agent_id." })),
+  message: Type.String({ description: "The message text to send." }),
+  conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional; ignored when room_id is set — the room is the conversation)." })),
+  attachment_paths: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Local file path(s) to attach. Each is read, base64-encoded, and uploaded; must be an allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) under the 25 MiB size cap. Max 10 per message."
+    })
+  )
+});
+
+interface EkhoSendParams {
+  recipient_agent_id?: string;
+  room_id?: string;
+  message: string;
+  conversation_id?: string;
+  attachment_paths?: string[];
+}
+
+/**
+ * A tool built by `factory` is registered with the host as-is, so — unlike the
+ * `execute` form — it wraps its own return value. Mirrors the host's
+ * wrapToolPluginResult/jsonResult (openclaw dist/tool-plugin-*.js) so the model
+ * sees exactly the same JSON text it saw before ekho#17 moved this tool to a
+ * factory. Inlined rather than imported from openclaw/plugin-sdk/tool-results so
+ * the plugin gains no new runtime dependency on a host module path.
+ */
+function jsonToolResult(payload: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }], details: payload };
+}
+
+/**
+ * The ekho_send body. Lives outside the tool definition because ekho#17 needs the
+ * factory form (below) to see the host's session identity; `originSessionId` is
+ * whatever the host actually supplied, or undefined.
+ */
+async function executeEkhoSend(
+  { recipient_agent_id, room_id, message, conversation_id, attachment_paths }: EkhoSendParams,
+  config: EkhoPluginConfig,
+  originSessionId?: string
+) {
+  const roomId = typeof room_id === "string" ? room_id.trim() : "";
+  if (!roomId && !recipient_agent_id) {
+    throw new Error("provide recipient_agent_id (an agent id or 'broadcast') or room_id");
+  }
+  const { client, credentials } = await ensureConnected(config);
+  // A room send threads under the room id (the room IS the conversation);
+  // otherwise use the supplied conversation id or mint a fresh one.
+  const conversationId = roomId || conversation_id || `oc-${Date.now()}`;
+  const stamp = `oc-${Date.now()}`;
+
+  // Upload any attachments first; collect their server-issued ids to bind
+  // into the (HMAC-signed) message body as body.attachments. Validate the
+  // count + each file locally for a fast, clear error — the relay is still
+  // authoritative and re-checks everything.
+  const paths = Array.isArray(attachment_paths) ? attachment_paths : [];
+  if (paths.length > ATTACHMENT_MAX_PER_MESSAGE) {
+    throw new Error(`too many attachments (${paths.length}); max ${ATTACHMENT_MAX_PER_MESSAGE} per message`);
+  }
+  const attachmentIds: string[] = [];
+  for (const p of paths) {
+    const { bytes, mime, filename } = readUploadFile(p);
+    const up = await client.uploadAttachment({ filename, mime, dataBase64: bytes.toString("base64") });
+    attachmentIds.push(up.id);
+  }
+
+  const recipient =
+    roomId
+      ? { kind: "group", id: roomId }
+      : recipient_agent_id === "broadcast"
+      ? { kind: "broadcast" }
+      : { kind: "agent", id: recipient_agent_id };
+  const sendPayload: Record<string, unknown> = {
+    recipient,
+    message_type: "direct",
+    // body.attachments rides inside the signed body — the relay binds it to
+    // the message and validates ownership against this agent.
+    body: { text: message, ...(attachmentIds.length ? { attachments: attachmentIds } : {}) },
+    // Stamp every agent send so peers' auto-reply loops (and ours) can tell
+    // a machine reply from a human/operator one and avoid echo ping-pong.
+    // #17: carry the originating session too, when the host exposes one, so a
+    // sibling session on this box can tell its own sends from another's.
+    metadata: buildSendMetadata(originSessionId),
+    conversation_id: conversationId,
+    correlation_id: stamp
+  };
+
+  // Best-effort: sign the outbound message so recipients can verify it's us.
+  try {
+    const ident = getEkhoIdentity();
+    if (ident && credentials.fleetId) {
+      Object.assign(
+        sendPayload,
+        buildSignedSendFields({
+          identity: ident,
+          fleetId: credentials.fleetId,
+          selfAgentId: credentials.agentId,
+          recipient,
+          conversationId,
+          bodyText: message,
+          nonce: crypto.randomBytes(16).toString("base64url"),
+          sentAt: new Date().toISOString(),
+          // v2 (#9): bind what the relay could otherwise relabel/swap.
+          messageType: "direct",
+          priority: "normal",
+          attachments: attachmentIds
+        })
+      );
+    }
+  } catch {
+    /* unsigned send is still valid (graceful) */
+  }
+
+  const result = await client.sendMessage(sendPayload as Parameters<typeof client.sendMessage>[0]);
+  return {
+    sent: true,
+    message_id: result.message_id,
+    conversation_id: conversationId,
+    ...(roomId ? { room_id: roomId } : {}),
+    attachments: attachmentIds
+  };
+}
+
 /**
  * Ekho relay adapter for OpenClaw.
  *
@@ -121,100 +250,26 @@ const plugin = defineToolPlugin({
   tools: (tool) => [
     tool({
       name: "ekho_send",
-      description:
-        "Send a message to another agent in your fleet via the Ekho relay. Use this to delegate a task, ask a question, hand off work, or coordinate. Set recipient_agent_id to 'broadcast' to reach the whole fleet. To post into a topic room (see ekho_open_room), set room_id instead — the message goes to every room member.",
-      parameters: Type.Object({
-        recipient_agent_id: Type.Optional(Type.String({ description: "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet. Omit when sending to a room (use room_id)." })),
-        room_id: Type.Optional(Type.String({ description: "Send to a topic room: its members all receive the message. Takes precedence over recipient_agent_id." })),
-        message: Type.String({ description: "The message text to send." }),
-        conversation_id: Type.Optional(Type.String({ description: "Existing conversation id to thread under (optional; ignored when room_id is set — the room is the conversation)." })),
-        attachment_paths: Type.Optional(
-          Type.Array(Type.String(), {
-            description:
-              "Local file path(s) to attach. Each is read, base64-encoded, and uploaded; must be an allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) under the 25 MiB size cap. Max 10 per message."
-          })
-        )
-      }),
-      execute: async ({ recipient_agent_id, room_id, message, conversation_id, attachment_paths }, config: EkhoPluginConfig) => {
-        const roomId = typeof room_id === "string" ? room_id.trim() : "";
-        if (!roomId && !recipient_agent_id) {
-          throw new Error("provide recipient_agent_id (an agent id or 'broadcast') or room_id");
-        }
-        const { client, credentials } = await ensureConnected(config);
-        // A room send threads under the room id (the room IS the conversation);
-        // otherwise use the supplied conversation id or mint a fresh one.
-        const conversationId = roomId || conversation_id || `oc-${Date.now()}`;
-        const stamp = `oc-${Date.now()}`;
-
-        // Upload any attachments first; collect their server-issued ids to bind
-        // into the (HMAC-signed) message body as body.attachments. Validate the
-        // count + each file locally for a fast, clear error — the relay is still
-        // authoritative and re-checks everything.
-        const paths = Array.isArray(attachment_paths) ? attachment_paths : [];
-        if (paths.length > ATTACHMENT_MAX_PER_MESSAGE) {
-          throw new Error(`too many attachments (${paths.length}); max ${ATTACHMENT_MAX_PER_MESSAGE} per message`);
-        }
-        const attachmentIds: string[] = [];
-        for (const p of paths) {
-          const { bytes, mime, filename } = readUploadFile(p);
-          const up = await client.uploadAttachment({ filename, mime, dataBase64: bytes.toString("base64") });
-          attachmentIds.push(up.id);
-        }
-
-        const recipient =
-          roomId
-            ? { kind: "group", id: roomId }
-            : recipient_agent_id === "broadcast"
-            ? { kind: "broadcast" }
-            : { kind: "agent", id: recipient_agent_id };
-        const sendPayload: Record<string, unknown> = {
-          recipient,
-          message_type: "direct",
-          // body.attachments rides inside the signed body — the relay binds it to
-          // the message and validates ownership against this agent.
-          body: { text: message, ...(attachmentIds.length ? { attachments: attachmentIds } : {}) },
-          // Stamp every agent send so peers' auto-reply loops (and ours) can tell
-          // a machine reply from a human/operator one and avoid echo ping-pong.
-          metadata: { ekho_origin: EKHO_ORIGIN_STAMP },
-          conversation_id: conversationId,
-          correlation_id: stamp
-        };
-
-        // Best-effort: sign the outbound message so recipients can verify it's us.
-        try {
-          const ident = getEkhoIdentity();
-          if (ident && credentials.fleetId) {
-            Object.assign(
-              sendPayload,
-              buildSignedSendFields({
-                identity: ident,
-                fleetId: credentials.fleetId,
-                selfAgentId: credentials.agentId,
-                recipient,
-                conversationId,
-                bodyText: message,
-                nonce: crypto.randomBytes(16).toString("base64url"),
-                sentAt: new Date().toISOString(),
-                // v2 (#9): bind what the relay could otherwise relabel/swap.
-                messageType: "direct",
-                priority: "normal",
-                attachments: attachmentIds
-              })
-            );
-          }
-        } catch {
-          /* unsigned send is still valid (graceful) */
-        }
-
-        const result = await client.sendMessage(sendPayload as Parameters<typeof client.sendMessage>[0]);
-        return {
-          sent: true,
-          message_id: result.message_id,
-          conversation_id: conversationId,
-          ...(roomId ? { room_id: roomId } : {}),
-          attachments: attachmentIds
-        };
-      }
+      description: EKHO_SEND_DESCRIPTION,
+      parameters: EKHO_SEND_PARAMETERS,
+      // #17: built via `factory`, not `execute`, purely to see the session that
+      // is sending. The host's execute wrapper is called with
+      // (params, config, { api, signal, toolCallId, onUpdate }) — no session
+      // identity anywhere in it. sessionKey/sessionId live on
+      // OpenClawPluginToolContext, which the host only passes to
+      // `tool.factory({ api, config, toolContext })`
+      // (openclaw 2026.7.1-2, dist/tool-plugin-SyJ7vXLf.js). The other tools keep
+      // the simpler `execute` form — they have nothing to stamp.
+      factory: ({ config, toolContext }) => ({
+        name: "ekho_send",
+        label: "ekho_send",
+        description: EKHO_SEND_DESCRIPTION,
+        parameters: EKHO_SEND_PARAMETERS,
+        execute: async (_toolCallId: string, params: EkhoSendParams) =>
+          jsonToolResult(
+            await executeEkhoSend(params, config as EkhoPluginConfig, resolveOriginSessionId(toolContext))
+          )
+      })
     }),
     tool({
       name: "ekho_open_room",

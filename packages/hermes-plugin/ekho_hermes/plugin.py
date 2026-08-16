@@ -151,7 +151,54 @@ def _check_relay_configured() -> bool:
     return EkhoConfig.from_env().has_relay
 
 
-def _handle_ekho_send(args: dict, **_kw) -> str:
+# Kwarg names that would name the *session* a tool call belongs to, most stable
+# first. ekho#17: an agent identity is per-box, so an outbound send has to say
+# which session produced it for a sibling session to tell "I said that" from
+# "someone else has my key".
+#
+# HONESTY NOTE: unlike the OpenClaw side — where the host's
+# OpenClawPluginToolContext.sessionKey is documented in the installed runtime and
+# verified against it — no Hermes runtime was available to read the tool-handler
+# call shape from. So these names are a *feature detection*, never a source of
+# truth: if the host passes one, we stamp it; if it does not, the field is
+# omitted. Nothing is minted here — a fresh uuid per send would make every
+# message look like a different session, and a per-process constant would make
+# the box look like one session. `task_id` (which Hermes is known to pass to the
+# pre_tool_call hook) is deliberately NOT accepted: a task is not a session.
+_SESSION_ID_KWARGS = ("session_key", "session_id", "sessionKey", "sessionId")
+# Kwargs whose value may be a mapping carrying the names above.
+_SESSION_CONTEXT_KWARGS = ("session", "context", "ctx", "tool_context")
+
+
+def _first_session_id(source) -> str:
+    """First non-empty session-shaped value in a mapping, else ``""``."""
+    if not isinstance(source, dict):
+        return ""
+    for key in _SESSION_ID_KWARGS:
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def resolve_origin_session_id(kwargs: dict) -> str:
+    """The session identity Hermes handed this tool call, or ``""``.
+
+    Checks the handler kwargs directly, then one level inside a context-ish
+    mapping. Never raises and never invents: an unknown host shape yields ``""``,
+    which means the send carries no ``origin_session_id`` at all.
+    """
+    direct = _first_session_id(kwargs)
+    if direct:
+        return direct
+    for key in _SESSION_CONTEXT_KWARGS:
+        nested = _first_session_id(kwargs.get(key))
+        if nested:
+            return nested
+    return ""
+
+
+def _handle_ekho_send(args: dict, **kw) -> str:
     """ekho_send handler. Signature matches Hermes: ``(args, **kw) -> str``."""
     recipient = str(args.get("recipient_agent_id") or "").strip()
     room_id = str(args.get("room_id") or "").strip()
@@ -188,6 +235,9 @@ def _handle_ekho_send(args: dict, **_kw) -> str:
         conversation_id=conversation_id,
         attachment_ids=attachment_ids,
         room_id=room_id or None,
+        # #17: only stamped if Hermes actually named the session (see
+        # resolve_origin_session_id) — otherwise the field is absent, not faked.
+        origin_session_id=resolve_origin_session_id(kw) or None,
     )
 
     # Best-effort: sign the outbound message so recipients can verify it's us.

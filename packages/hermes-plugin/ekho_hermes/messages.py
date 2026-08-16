@@ -113,6 +113,7 @@ def build_send_input(
     attachment_ids: Optional[Sequence[str]] = None,
     correlation_id: Optional[str] = None,
     room_id: Optional[str] = None,
+    origin_session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a ``SendMessageInput`` dict for ``client.send_message``.
 
@@ -127,6 +128,13 @@ def build_send_input(
     ``correlation_id`` as non-empty strings, so we always set them — threading a
     caller-supplied ``conversation_id`` (an auto-reply continues the operator's
     thread) and otherwise minting fresh ids.
+
+    ``origin_session_id`` (ekho#17) names the session that produced the send. An
+    agent identity is per-box — every session on this host signs with the same
+    key — so a sibling can only tell "I said that" from "someone else has my key"
+    if the send says which session sent it. It is stamped ONLY when the host
+    actually supplies one: a missing field is honest, an invented one (a fresh
+    uuid per send, a pid) would claim a different session sent every message.
     """
     room = (room_id or "").strip()
     if room:
@@ -144,11 +152,16 @@ def build_send_input(
     # A room send threads under the room id (the room is the conversation).
     conv = room or conversation_id or new_id("hermes-conv")
 
+    metadata: Dict[str, Any] = {"ekho_origin": EKHO_ORIGIN_STAMP}
+    origin_session = (origin_session_id or "").strip()
+    if origin_session:
+        metadata["origin_session_id"] = origin_session
+
     return {
         "recipient": recipient,
         "message_type": "direct",
         "body": body,
-        "metadata": {"ekho_origin": EKHO_ORIGIN_STAMP},
+        "metadata": metadata,
         "conversation_id": conv,
         "correlation_id": correlation_id or new_id("hermes"),
     }

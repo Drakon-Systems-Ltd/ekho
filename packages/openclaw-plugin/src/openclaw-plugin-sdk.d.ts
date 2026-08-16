@@ -17,18 +17,44 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
     [key: string]: unknown;
   }
 
-  interface ToolDefinition<TConfig, TParamsSchema extends TSchema> {
+  // The session slice of the host's OpenClawPluginToolContext. Only `factory`
+  // tools ever see this — the `execute` wrapper's context carries no session
+  // identity (ekho#17). Everything is optional and read defensively: a host that
+  // predates these fields just yields undefined.
+  interface ToolContext {
+    sessionKey?: string;
+    sessionId?: string;
+    agentId?: string;
+    [key: string]: unknown;
+  }
+
+  interface ToolDefinitionBase<TParamsSchema extends TSchema> {
     name: string;
     label?: string;
     description: string;
     parameters: TParamsSchema;
     optional?: boolean;
-    execute: (
-      params: Static<TParamsSchema>,
-      config: TConfig,
-      context: ToolExecutionContext
-    ) => unknown;
   }
+
+  // A tool declares EITHER execute (host wraps params/config/result for you) OR
+  // factory (host hands over the tool context; the returned tool is registered
+  // as-is, so it wraps its own result). Mirrors openclaw's own
+  // ToolPluginToolDefinition union.
+  type ToolDefinition<TConfig, TParamsSchema extends TSchema> = ToolDefinitionBase<TParamsSchema> &
+    (
+      | {
+          execute: (
+            params: Static<TParamsSchema>,
+            config: TConfig,
+            context: ToolExecutionContext
+          ) => unknown;
+          factory?: never;
+        }
+      | {
+          factory: (context: { api: PluginApi; config: TConfig; toolContext: ToolContext }) => unknown;
+          execute?: never;
+        }
+    );
 
   type ToolFactory<TConfig> = <TParamsSchema extends TSchema>(
     definition: ToolDefinition<TConfig, TParamsSchema>

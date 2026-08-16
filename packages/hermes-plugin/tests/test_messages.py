@@ -16,7 +16,31 @@ def test_build_send_input_agent_recipient():
     assert payload["recipient"] == {"kind": "agent", "id": "agent-123"}
     assert payload["message_type"] == "direct"
     assert payload["body"] == {"text": "hello there"}
+    # No session supplied -> the origin stamp alone. #17: a missing
+    # origin_session_id is honest; an invented one would be a lie.
     assert payload["metadata"] == {"ekho_origin": EKHO_ORIGIN_STAMP}
+
+
+def test_build_send_input_stamps_origin_session_when_supplied():
+    # #17: an agent identity is per-box, so a send has to name the session that
+    # produced it for a sibling to tell its own sends from another's.
+    payload = build_send_input("agent-123", "hi", origin_session_id="sess_abc")
+    assert payload["metadata"] == {
+        "ekho_origin": EKHO_ORIGIN_STAMP,
+        "origin_session_id": "sess_abc",
+    }
+
+
+def test_build_send_input_omits_origin_session_when_absent():
+    for supplied in (None, "", "   "):
+        payload = build_send_input("agent-123", "hi", origin_session_id=supplied)
+        assert payload["metadata"] == {"ekho_origin": EKHO_ORIGIN_STAMP}
+        assert "origin_session_id" not in payload["metadata"]
+
+
+def test_build_send_input_trims_origin_session():
+    payload = build_send_input("agent-123", "hi", origin_session_id="  sess_abc  ")
+    assert payload["metadata"]["origin_session_id"] == "sess_abc"
 
 
 def test_build_send_input_always_includes_required_ids():
