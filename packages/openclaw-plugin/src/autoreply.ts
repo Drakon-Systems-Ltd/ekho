@@ -258,6 +258,29 @@ let lastBatchMeta: {
  * string keys regardless of insertion order, so the sort was silently
  * overridden on any numeric-ish key. Derive from the same value; never
  * recompute it alongside.
+ *
+ * The property this needs is that `canonicalize` is INJECTIVE over JSON-parsed
+ * data — distinct wire messages must not canonicalise to the same string, or
+ * two different messages compare equal and a verdict carries across. Measured,
+ * not assumed (Case, 2026-08-16): 9,604 fuzzed `JSON.parse` value pairs — atoms,
+ * nesting, arrays, numeric-ish keys, escaped/unicode keys, `{}` vs `[]` — zero
+ * structural collisions.
+ *
+ * Swapping in `canonicalize` changed the two known divergences from the old
+ * local serializer, and it is worth recording which way round, because the
+ * dangerous one is NOT the one it fixed:
+ *   - undefined-valued keys: the old one merged `{a:1,k:undefined}` with `{a:1}`;
+ *     `canonicalize` distinguishes them. STRICTER — resolved, not carried.
+ *   - objects with no own enumerable keys (e.g. `Date`): `canonicalize` renders
+ *     any of them `{}`, merging values the old one distinguished. LOOSER, and
+ *     therefore the escalation direction — two messages differing only there
+ *     would compare equal and carry the verdict across.
+ * The looser case is unreachable rather than merely unlikely: both sides reach
+ * this function off `JSON.parse`, which cannot produce a non-JSON value, and the
+ * fuzz above covers exactly that domain. Same for the verify path — `sig_canonical`
+ * is attacker-supplied but also `JSON.parse`'d. If a caller is ever added that
+ * passes a non-`JSON.parse` object, that guarantee is gone and this is the line
+ * to revisit.
  */
 function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
   try {
