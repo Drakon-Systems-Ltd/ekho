@@ -266,6 +266,223 @@ components:
           items:
             $ref: "#/components/schemas/ControlAction"
 
+    MessageRecipient:
+      type: object
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+          enum: [agent, group, broadcast]
+        id:
+          type: string
+          nullable: true
+          description: Null for a broadcast.
+
+    MessageDeliveryStatus:
+      type: object
+      description: >
+        The relay's per-recipient view of one delivery. This — not the
+        message-level `status` — is the honest answer to "did it land?", because
+        a broadcast or room fan-out has one row per recipient and they progress
+        independently.
+      required: [recipient_agent_id, status]
+      properties:
+        recipient_agent_id:
+          $ref: "#/components/schemas/AgentId"
+        status:
+          type: string
+          enum: [queued, delivered, acked, dead_lettered, expired]
+          description: >
+            `queued` — accepted and waiting to be collected. `delivered` — handed
+            to the recipient's `/v1/inbox` poll. `acked` — the recipient
+            confirmed receipt. `dead_lettered` — retries exhausted, it will never
+            be delivered. `expired` — the TTL elapsed before collection.
+        queued_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            When the recipient last collected it. The retry sweep CLEARS this
+            when it requeues a delivered-but-unacked delivery, so an `acked`
+            delivery can legitimately show `delivered_at: null` with
+            `retry_count > 0` — read `delivery_attempts` and `last_failure_reason`
+            for the fuller picture.
+        acked_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivery_attempts:
+          type: integer
+        retry_count:
+          type: integer
+        last_failure_reason:
+          type: string
+          nullable: true
+        dead_lettered_at:
+          type: string
+          format: date-time
+          nullable: true
+        dead_letter_reason:
+          type: string
+          nullable: true
+          example: max_retries_exceeded
+
+    MessageStatusResponse:
+      type: object
+      required: [message_id, conversation_id, status, created_at, expires_at, expired, deliveries]
+      properties:
+        message_id:
+          type: string
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        correlation_id:
+          $ref: "#/components/schemas/CorrelationId"
+        message_type:
+          $ref: "#/components/schemas/MessageType"
+        priority:
+          $ref: "#/components/schemas/Priority"
+        recipient:
+          $ref: "#/components/schemas/MessageRecipient"
+        status:
+          type: string
+          enum: [queued, acked, dead_lettered, expired]
+          description: >
+            The message-level roll-up. It only reaches `acked` once EVERY
+            recipient has acked, so read `deliveries` for the per-recipient
+            truth.
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        expired:
+          type: boolean
+          description: >
+            `expires_at` is in the past. A still-`queued` expired message is the
+            one "dropped" outcome that leaves no dead letter behind — `/v1/inbox`
+            will never serve it.
+        deliveries:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageDeliveryStatus"
+
+    AgentConversation:
+      type: object
+      required: [conversation_id, kind, message_count, sent_count]
+      properties:
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        kind:
+          type: string
+          enum: [room, direct]
+        name:
+          type: string
+          nullable: true
+          description: The room's name; null for a direct conversation.
+        message_count:
+          type: integer
+          description: Total messages in the thread, from any sender.
+        sent_count:
+          type: integer
+          description: How many of them this agent sent (across ALL of its sessions).
+        last_message_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_activity_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            `last_message_at`, or the room's creation time for a room nobody has
+            posted in yet.
+
+    AgentConversationsResponse:
+      type: object
+      required: [conversations]
+      properties:
+        conversations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentConversation"
+
+    SentMessage:
+      type: object
+      required: [message_id, conversation_id, status, created_at, deliveries]
+      properties:
+        message_id:
+          type: string
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        correlation_id:
+          $ref: "#/components/schemas/CorrelationId"
+        message_type:
+          $ref: "#/components/schemas/MessageType"
+        priority:
+          $ref: "#/components/schemas/Priority"
+        recipient:
+          $ref: "#/components/schemas/MessageRecipient"
+        status:
+          type: string
+          enum: [queued, acked, dead_lettered, expired]
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        expired:
+          type: boolean
+        body:
+          type: object
+          additionalProperties: true
+          description: The message body as sent — the agent's own words, verbatim.
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: >
+            Sender-supplied metadata as stored, including the agent's own
+            envelope signature fields (`agent_sig`, `key_id`, `sig_canonical`)
+            when the send carried them. The relay relays metadata verbatim, so a
+            runtime that stamps a diagnostic session/origin id on its sends gets
+            it back here unchanged — the relay never mints one, because only the
+            sender knows which of its sessions composed the message.
+        deliveries:
+          type: object
+          description: Per-status delivery counts for this message.
+          required: [total, queued, delivered, acked, dead_lettered]
+          properties:
+            total:
+              type: integer
+            queued:
+              type: integer
+            delivered:
+              type: integer
+            acked:
+              type: integer
+            dead_lettered:
+              type: integer
+
+    SentMessagesResponse:
+      type: object
+      required: [messages, since]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/SentMessage"
+        since:
+          type: string
+          format: date-time
+          nullable: true
+          description: The normalised cutoff that was applied, or null if none.
+
     AckItem:
       type: object
       required: [message_id, status, received_at]
@@ -1098,6 +1315,139 @@ paths:
                   - $ref: "#/components/schemas/PolicyBlockedError"
         "429":
           $ref: "#/components/responses/RateLimited"
+
+  /v1/messages/{message_id}/status:
+    get:
+      operationId: getSentMessageStatus
+      tags: [Agent]
+      summary: Read back the relay's own view of a message you sent
+      description: >
+        Sender-side read-back. The synchronous result of a send is a claim by the
+        same component whose failure mode is usually in question — a transport
+        error cannot be told apart from a genuine rejection, and a `sent: true`
+        cannot be confirmed at all. This endpoint answers from the relay's
+        persisted state instead: accepted/queued, delivered, acked, dead-lettered
+        or expired, with timestamps, per recipient.
+
+
+        Scoped to messages the CALLING agent sent. An id belonging to another
+        agent is indistinguishable from an id that does not exist — both return
+        404, so the endpoint never discloses another agent's traffic.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          description: A `message_id` previously returned by `POST /v1/messages`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The relay's own view of the message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: >
+            No such message sent by this agent — either it does not exist, or it
+            was sent by someone else. The two are deliberately indistinguishable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/conversations:
+    get:
+      operationId: listAgentConversations
+      tags: [Agent]
+      summary: List the conversations this agent has taken part in
+      description: >
+        An Ekho agent identity is per-box, and a runtime typically runs many
+        concurrent sessions under it — an operator session, one per topic, cron
+        spawns, one-shot auto-reply turns. They are indistinguishable on the
+        wire, so a session cannot enumerate the threads its SIBLING sessions
+        used, and "check your own history" returns a confident false negative.
+
+
+        This returns every conversation the agent has participated in — rooms it
+        belongs to, and threads it has sent into or received from — newest
+        activity first, so a correction can follow a claim across every thread it
+        landed in. Fleet-scoped and agent-scoped: nothing the agent was not part
+        of appears.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of conversations to return (1-100).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: Conversations this agent has participated in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentConversationsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/sent:
+    get:
+      operationId: listSentMessages
+      tags: [Agent]
+      summary: List this agent's own recent outbound messages
+      description: >
+        The counterpart to `/v1/inbox`: what this agent has SAID, rather than what
+        was said to it. Because every session of an agent signs with the same
+        identity, a session can be shown a message carrying its own valid
+        signature that it has no record of composing. Reading it back from the
+        relay is the only way to tell "a sibling session of me wrote that" from
+        "someone is holding my key" — the difference between a staleness bug and
+        a security incident.
+
+
+        Bodies and metadata are returned verbatim; they are the caller's own
+        words. Newest first.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: since
+          in: query
+          description: >
+            ISO-8601 instant. Returns only messages created STRICTLY after it. An
+            unparseable value is a 400 rather than a silently-ignored filter.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          description: Maximum number of messages to return (1-100).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: This agent's outbound messages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SentMessagesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /v1/inbox:
     get:
