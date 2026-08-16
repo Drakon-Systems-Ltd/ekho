@@ -248,10 +248,36 @@ let lastBatchMeta: {
  */
 function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
   try {
-    return JSON.stringify(a) === JSON.stringify(b);
+    return canonicalJson(a) === canonicalJson(b);
   } catch {
     return false; // uncomparable -> re-verify rather than assume
   }
+}
+
+/**
+ * Key-order-independent serialisation for the equality above.
+ *
+ * A plain `JSON.stringify` compare is key-order sensitive, so two structurally
+ * identical redeliveries that serialised differently would compare false. That
+ * is safe in the escalation direction — it only ever re-verifies — but it fails
+ * in the OTHER direction that matters: the verdict is dropped and a message that
+ * had been labelled `failed` reads `unchecked`. That is the round-two decay
+ * again, merely made conditional on serialisation stability instead of
+ * eliminated. Both objects come off the same wire through the same parser, so
+ * stability is likely — but "likely" is the assumption this issue has now
+ * falsified four times, and sorting keys costs nothing on a 25-entry ring.
+ * Removing the assumption beats documenting it.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(
+          Object.keys(v as Record<string, unknown>)
+            .sort()
+            .map((k) => [k, (v as Record<string, unknown>)[k]])
+        )
+      : v
+  );
 }
 
 export function recordBatch(batch: InboxBatch) {

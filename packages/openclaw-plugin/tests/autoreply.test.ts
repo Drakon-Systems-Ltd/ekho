@@ -1033,3 +1033,30 @@ describe("carry-over compares the WHOLE message (ekho#20)", () => {
     expect(verdictFor()?.verified).toBe(true);
   });
 });
+
+// ekho#20 round 5 (Case's caveat against 36e7134, closed rather than documented).
+// A key-order-sensitive compare would drop the verdict on a structurally
+// identical redelivery — safe against escalation, but it reads `unchecked`
+// where it should read `failed`, which is the round-two decay made conditional
+// on serialisation stability instead of eliminated.
+describe("carry-over survives key-order differences (ekho#20)", () => {
+  const verdictFor = () => getCachedInbox().entries.find((e) => e.message.message_id === "ko")?.verification ?? null;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "kA" };
+
+  it("keeps a failed verdict when the redelivery serialises its keys in another order", () => {
+    recordBatch({ messages: [{ message_id: "ko", sender_kind: "agent", agent_sig: "sigA", body: { text: "one", n: 1 } }] } as never);
+    recordVerifications({ ko: failed });
+    // Same content, keys built in a different order (both plausible off the wire).
+    recordBatch({ messages: [{ body: { n: 1, text: "one" }, agent_sig: "sigA", sender_kind: "agent", message_id: "ko" }] } as never);
+    const v = verdictFor();
+    expect(v).not.toBeNull();
+    expect(v?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("still refuses a genuine content change regardless of key order", () => {
+    recordBatch({ messages: [{ message_id: "ko", sender_kind: "agent", agent_sig: "sigA", body: { text: "one" } }] } as never);
+    recordVerifications({ ko: { verified: true, kind: "peer", reason: null, keyId: "kA" } });
+    recordBatch({ messages: [{ body: { text: "two" }, agent_sig: "sigA", sender_kind: "agent", message_id: "ko" }] } as never);
+    expect(verdictFor()).toBeNull();
+  });
+});

@@ -188,10 +188,19 @@ export type InboxVerdict = {
  * `unchecked` distinct from `failed` and `attested` distinct from `verified`:
  * never discard the field that discriminates.
  *
- * A mismatch fails LOUD rather than degrading to `unchecked`: with the
- * whole-message carry-over guard in place it cannot arise from any legitimate
- * flow, so it means the cache or the relay is misbehaving, and that is worth
- * seeing rather than quietly treating as "not verified yet".
+ * A mismatch resolves to `failed`, not `unchecked`, for two reasons that hold
+ * regardless of how reachable this branch is — deliberately NOT "the carry-over
+ * guard means it can never happen", which would be self-defeating: a defensive
+ * branch justified by its own unreachability is exactly the branch that bites
+ * when the reachability argument turns out to be wrong.
+ *   1. `unchecked` would be a false statement about our own state. It means
+ *      verification never ran. Here it DID run and produced evidence about a
+ *      different resolution path — that is wrong evidence, not absent evidence,
+ *      and conflating the two is the root of #20.
+ *   2. The costs are asymmetric. A false `failed` costs a message a human can
+ *      resend; a false `unchecked` grants authority to something unproven. A
+ *      tri-state whose job is never to be wrong expensively takes the cheap
+ *      error every time.
  */
 export function signatureStatusOf(verdict: InboxVerdict, senderKind?: unknown): SignatureStatus {
   if (!verdict) return "unchecked";
