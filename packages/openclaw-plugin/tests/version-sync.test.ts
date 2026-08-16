@@ -26,7 +26,7 @@ describe("plugin version declarations stay in lockstep", () => {
 
   it("ships the files an installing agent actually needs", () => {
     const files = read("package.json").files ?? [];
-    for (const required of ["dist", "openclaw.plugin.json"]) {
+    for (const required of ["dist", "openclaw.plugin.json", "README.md", "CHANGELOG.md"]) {
       expect(files).toContain(required);
     }
   });
