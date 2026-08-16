@@ -36,6 +36,52 @@ export function dependentsOf(keyId, agentKeys) {
 }
 
 /**
+ * THE fleet trust root (#19): the live operator key the most agents are
+ * endorsed by, or null when no live key has dependents. A revoked key never
+ * qualifies however many agents still pin it — that is a dead chain awaiting
+ * re-endorsement, not a root. Null is the fresh-fleet / broken-fleet state:
+ * there is no device that can meaningfully act yet.
+ *
+ * On 16 Aug the operator could not answer "which of my devices is the root?"
+ * from anything on screen — every device rendered the same page. This is the
+ * single source for that answer.
+ */
+export function trustRootKey(operatorKeys, agentKeys) {
+  let best = null;
+  let bestDeps = 0;
+  for (const k of operatorKeys || []) {
+    if (k.revoked_at) continue;
+    const deps = dependentsOf(k.key_id, agentKeys);
+    if (deps > bestDeps) {
+      best = k;
+      bestDeps = deps;
+    }
+  }
+  return best;
+}
+
+/** Does THIS browser's unlocked key anchor the fleet's trust? (#19) */
+export function thisBrowserHoldsTrustRoot(unlockedKeyId, operatorKeys, agentKeys) {
+  if (!unlockedKeyId) return false;
+  const root = trustRootKey(operatorKeys, agentKeys);
+  return !!root && root.key_id === unlockedKeyId;
+}
+
+/**
+ * The label of the device that CAN act — endorse, re-endorse, rescue — i.e.
+ * the one holding the trust root (#19). Refusal copy uses this to point at a
+ * specific device ("Mike iPhone 15 Pro Max") instead of "another device",
+ * which told the operator nothing about which browser to walk to. Falls back
+ * to the key id when the root was registered without a label; null when no
+ * device can act.
+ */
+export function actingDeviceLabel(operatorKeys, agentKeys) {
+  const root = trustRootKey(operatorKeys, agentKeys);
+  if (!root) return null;
+  return root.label || root.key_id;
+}
+
+/**
  * Fleet-wide trust summary: ok only when every agent is endorsed by an active key.
  * @returns {{ ok: boolean, problems: string[], revoked: number, unendorsed: number, total: number }}
  */
@@ -65,9 +111,12 @@ export function trustHealth(operatorKeys, agentKeys, currentKeyId) {
  * signed by a revoked key are worthless: agents drop revoked keys on their next
  * poll, so the chain they build is dead on arrival.
  *
+ * `agentKeys` is optional; when given, the recovery names the device that holds
+ * the trust root instead of "another device" (#19).
+ *
  * @returns {{ canSign: boolean, revoked: boolean, reason: string|null, recovery: string|null }}
  */
-export function deviceKeySigningState(operatorKeys, unlockedKeyId) {
+export function deviceKeySigningState(operatorKeys, unlockedKeyId, agentKeys) {
   if (!unlockedKeyId) {
     return {
       canSign: false,
@@ -93,9 +142,14 @@ export function deviceKeySigningState(operatorKeys, unlockedKeyId) {
       // #19: NOT "forget device and enrol". Enrolling here mints a key this
       // browser can never endorse (no live seed to sign with), and the relay
       // refuses that key id ever after — which is how 16 Aug burnt one and left
-      // the operator still locked out. Rescue has to come from a healthy device.
-      recovery:
-        "Open the console on another device that holds a live key and endorse this device's key from its Security screen.",
+      // the operator still locked out. Rescue has to come from a healthy device
+      // — named, when we know which one it is.
+      recovery: (() => {
+        const label = agentKeys ? actingDeviceLabel(operatorKeys, agentKeys) : null;
+        return label
+          ? `Open the console on “${label}” — the device that holds the fleet trust root — and endorse this device's key from its Security screen.`
+          : "Open the console on another device that holds a live key and endorse this device's key from its Security screen.";
+      })(),
     };
   }
   return { canSign: true, revoked: false, reason: null, recovery: null };
@@ -194,11 +248,17 @@ export function endorseAuthority(unlockedKeyId, operatorKeys, agentKeys) {
     return { allowed: false, reason: `This device's key ${unlockedKeyId} is not registered with the relay.` };
   }
   if (mine.revoked_at) {
-    // Points at the device that CAN do it. Never "Forget device" — that advice
-    // burnt a key id on 16 Aug and left the operator just as locked out.
+    // Points at the device that CAN do it — by name when a root exists. Never
+    // "Forget device" — that advice burnt a key id on 16 Aug and left the
+    // operator just as locked out.
+    const label = actingDeviceLabel(keys, agentKeys);
     return {
       allowed: false,
-      reason: `This device's key ${unlockedKeyId} is revoked and cannot endorse anything. Do it from another device that holds a live key.`,
+      reason:
+        `This device's key ${unlockedKeyId} is revoked and cannot endorse anything. ` +
+        (label
+          ? `Do it from “${label}” — the device that holds the fleet trust root.`
+          : `Do it from another device that holds a live key.`),
     };
   }
   // Already a trust root: agents verify against it today, so endorsing from it
@@ -214,12 +274,15 @@ export function endorseAuthority(unlockedKeyId, operatorKeys, agentKeys) {
   // has never been endorsed is still the fresh-fleet case, and testing for an
   // empty list would strand a fleet the moment its first agent enrolled.
   if (!agentKeys || agentKeys.every((k) => !k.endorsed_by_key_id)) return { allowed: true, reason: null };
+  const label = actingDeviceLabel(keys, agentKeys);
   return {
     allowed: false,
     reason:
       `This device's key ${unlockedKeyId} is live but unendorsed, and no agent trusts it. ` +
       `Endorsing from here would move your agents onto a key none of them pin and stop the fleet talking to itself. ` +
-      `Do it from a device that holds a trusted key, or have that device endorse this one first.`,
+      (label
+        ? `Do it from “${label}” — the device that holds the fleet trust root — or have that device endorse this one first.`
+        : `Do it from a device that holds a trusted key, or have that device endorse this one first.`),
   };
 }
 
