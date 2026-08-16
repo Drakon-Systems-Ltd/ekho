@@ -144,6 +144,17 @@ export const operatorTrustSchema = z.object({
   trusted: z.boolean()
 });
 
+/**
+ * #19: endorse a key that is ALREADY registered, from a device holding a live
+ * one. The creation-time endorsement in operatorKeySchema cannot rescue a device
+ * whose own key was revoked, because it can only sign with the key in its own
+ * browser — so the orphan it mints is unrepairable without this.
+ */
+export const endorseOperatorKeySchema = z.object({
+  endorsed_by_key_id: z.string().min(1).max(32),
+  signature: z.string().min(1).max(128)
+});
+
 export const operatorKeySchema = z.object({
   public_key: z.string().min(1).max(128),
   label: z.string().min(1).max(80),

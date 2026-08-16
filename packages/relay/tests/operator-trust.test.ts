@@ -113,7 +113,13 @@ describe("device-key signing state (#15)", () => {
     expect(s.revoked).toBe(true);
     expect(s.reason).toMatch(/revoked/i);
     // The recovery action must be named — nothing on the page pointed to it.
-    expect(s.recovery).toMatch(/forget/i);
+    // #19 (16 Aug): it used to say "Forget device, enrol a new key, re-endorse".
+    // Following that on a stranded device mints a key it can NEVER endorse
+    // (pickEndorser needs a live seed in the same browser) and registerOperatorKey
+    // refuses the id ever after — the operator stayed locked out and burnt a key.
+    // The recovery must point at a device that still holds a live key.
+    expect(s.recovery).toMatch(/another device|device that holds|live key/i);
+    expect(s.recovery).not.toMatch(/forget/i);
   });
 
   it("reports a device key the relay has never seen as unable to sign", () => {

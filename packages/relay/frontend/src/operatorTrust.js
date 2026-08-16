@@ -90,7 +90,12 @@ export function deviceKeySigningState(operatorKeys, unlockedKeyId) {
       canSign: false,
       revoked: true,
       reason: `This device's key ${unlockedKeyId} is REVOKED — endorsements cannot be signed with it, and any it produced are already ignored by every agent.`,
-      recovery: "Forget this device, then enrol a new key, then re-endorse every agent under it.",
+      // #19: NOT "forget device and enrol". Enrolling here mints a key this
+      // browser can never endorse (no live seed to sign with), and the relay
+      // refuses that key id ever after — which is how 16 Aug burnt one and left
+      // the operator still locked out. Rescue has to come from a healthy device.
+      recovery:
+        "Open the console on another device that holds a live key and endorse this device's key from its Security screen.",
     };
   }
   return { canSign: true, revoked: false, reason: null, recovery: null };
@@ -161,6 +166,54 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
  * and agents chain-adopt on their next poll. A revoked endorser is useless (the
  * relay rejects it, and agents drop revoked keys), so only a live one qualifies.
  */
+/**
+ * Live operator keys carrying no endorsement (#19) — excluding the trust root
+ * itself, which is what everything else chains to.
+ *
+ * An unendorsed key is invisible to the fleet: agents adopt an operator key by
+ * chaining from one they already trust, so a key with `endorsed_by_key_id: null`
+ * gets `unknown-operator-key` from every recipient no matter how live the relay
+ * considers it. The device that minted it cannot repair it — the console signs
+ * an endorsement only with the key in its own browser, and on a stranded device
+ * that key is the revoked one. So the list has to surface HERE, on whichever
+ * device is healthy, or the orphan is unrescuable.
+ */
+export function orphanedOperatorKeys(operatorKeys, rootKeyId) {
+  if (!operatorKeys || !rootKeyId) return [];
+  return operatorKeys.filter(
+    (k) => !k.revoked_at && !k.endorsed_by_key_id && k.key_id !== rootKeyId
+  );
+}
+
+/**
+ * Can the key unlocked in THIS browser endorse `targetKeyId` (#19)?
+ *
+ * @returns {{ allowed: boolean, reason: string|null }}
+ */
+export function rescueGuard(targetKeyId, operatorKeys, unlockedKeyId) {
+  if (!unlockedKeyId) {
+    return { allowed: false, reason: "Unlock this device's operator identity first." };
+  }
+  if (targetKeyId === unlockedKeyId) {
+    return { allowed: false, reason: "A key cannot endorse itself — use the device that holds a different live key." };
+  }
+  const keys = operatorKeys || [];
+  const mine = keys.find((k) => k.key_id === unlockedKeyId);
+  if (!mine || mine.revoked_at) {
+    // Deliberately does NOT say "Forget device". That is the advice that burnt
+    // a key id on 16 Aug: the stranded device mints an orphan it can never
+    // endorse. The only way out is a device that still holds a live key.
+    return {
+      allowed: false,
+      reason: `This device's key is revoked or unregistered, so it cannot endorse anything. Do this from another device that holds a live key.`,
+    };
+  }
+  const target = keys.find((k) => k.key_id === targetKeyId);
+  if (!target) return { allowed: false, reason: `Unknown key ${targetKeyId}.` };
+  if (target.revoked_at) return { allowed: false, reason: `${targetKeyId} is revoked — endorsing it would achieve nothing.` };
+  return { allowed: true, reason: null };
+}
+
 export function pickEndorser(unlocked, operatorKeys) {
   if (!unlocked?.keyId) return null;
   const live = liveOperatorKeys(operatorKeys).some((k) => k.key_id === unlocked.keyId);

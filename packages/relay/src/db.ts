@@ -186,6 +186,52 @@ export class EkhoDb {
     return { keyId: kid };
   }
 
+  /**
+   * Endorse an ALREADY-REGISTERED operator key from a device holding a live one.
+   *
+   * #19: registerOperatorKey only accepts an endorsement at creation, and the
+   * console can only sign one with a key in the same browser. A device whose key
+   * was revoked therefore mints an unendorsed orphan it can never repair — the
+   * key id is burnt and the operator stays locked out of his own fleet. This is
+   * the recovery path: the healthy device signs for the stranded one, and agents
+   * chain-adopt the endorsed key on their next poll.
+   */
+  endorseOperatorKey(
+    fleetId: string,
+    targetKeyId: string,
+    endorsement: { endorsedByKeyId: string; signature: string }
+  ): void {
+    // A key rooting its own trust is the exact self-assertion the chain exists
+    // to prevent; check before anything else so it can never be talked around.
+    if (endorsement.endorsedByKeyId === targetKeyId) {
+      throw new Error("a key cannot endorse itself");
+    }
+    const target = this.db
+      .prepare(
+        "SELECT public_key, revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
+      )
+      .get(fleetId, targetKeyId) as { public_key: string; revoked_at: string | null } | undefined;
+    if (!target) throw new Error("operator key not found");
+    if (target.revoked_at) throw new Error("cannot endorse a revoked key");
+    const endorser = this.db
+      .prepare(
+        "SELECT public_key FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+      )
+      .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
+    if (!endorser) throw new Error("endorsement references an unknown or revoked key");
+    const ok = verifyCanonical(
+      endorsementPayload(fleetId, targetKeyId, target.public_key),
+      endorsement.signature,
+      fromB64url(endorser.public_key)
+    );
+    if (!ok) throw new Error("invalid key endorsement signature");
+    this.db
+      .prepare(
+        "UPDATE fleet_operator_keys SET endorsed_by_key_id = ?, endorsement_sig = ? WHERE fleet_id = ? AND key_id = ?"
+      )
+      .run(endorsement.endorsedByKeyId, endorsement.signature, fleetId, targetKeyId);
+  }
+
   listOperatorKeys(fleetId: string): OperatorKeyRow[] {
     return this.db
       .prepare(
@@ -769,6 +815,27 @@ export class EkhoDb {
     // Verifiable operator identity: stored and relayed verbatim (never recomputed).
     signature?: { sig: string; keyId: string; canonical: Record<string, unknown> };
   }) {
+    // #19: fail the send CLOSED. A message signed by a revoked or unregistered
+    // key was previously accepted, delivered and acked at transport level, then
+    // dead-lettered unread by every recipient as `unknown-operator-key`. The
+    // console reported success and the operator saw only silence — he concluded
+    // his agents had stopped answering. Reject here so the failure is impossible
+    // to miss, and so it holds for any client, not just our own console.
+    if (input.signature) {
+      const signer = this.db
+        .prepare("SELECT revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+        .get(input.fleetId, input.signature.keyId) as { revoked_at: string | null } | undefined;
+      if (!signer) {
+        throw new Error(
+          `operator signing key ${input.signature.keyId} is unknown to this fleet — every agent would discard this message`
+        );
+      }
+      if (signer.revoked_at) {
+        throw new Error(
+          `operator signing key ${input.signature.keyId} was revoked at ${signer.revoked_at} — every agent would discard this message`
+        );
+      }
+    }
     const messageId = id("msg");
     const createdAt = nowIso();
     const ttlSeconds = 86400; // survive recipient downtime (sleeping laptop, gateway restart)

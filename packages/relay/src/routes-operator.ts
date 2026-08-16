@@ -4,7 +4,7 @@ import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
 import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorProfileSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, endorseOperatorKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorProfileSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -229,6 +229,34 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       // endorsement / unknown-key / bad-signature are all client errors.
       return reply.code(400).send({ error: msg });
     }
+  });
+
+  // #19: endorse an already-registered key from a device that holds a live one.
+  // Recovery path for a device whose key was revoked: it can mint a new key but
+  // never endorse it (no live seed in that browser), so the healthy device signs
+  // for it and agents chain-adopt on their next poll.
+  app.post("/v1/operator/keys/:keyId/endorse", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const { keyId } = request.params as { keyId: string };
+    const parsed = endorseOperatorKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    try {
+      db.endorseOperatorKey(request.operator.fleetId, keyId, {
+        endorsedByKeyId: parsed.data.endorsed_by_key_id,
+        signature: parsed.data.signature
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      // revoked target/endorser, self-endorsement and bad signatures are all
+      // client errors — the caller sent something it should not have.
+      return reply.code(400).send({ error: msg });
+    }
+    return reply.send({ endorsed: true, key_id: keyId, endorsed_by_key_id: parsed.data.endorsed_by_key_id });
   });
 
   app.delete("/v1/operator/keys/:keyId", { preHandler: requireOperatorAuth }, async (request, reply) => {

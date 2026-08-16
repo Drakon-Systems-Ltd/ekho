@@ -24,6 +24,7 @@ import {
   getAgentKeys,
   endorseAgentKey,
   revokeOperatorKey,
+  endorseOperatorKey,
 } from "./api.js";
 import {
   endorserStatus,
@@ -33,6 +34,7 @@ import {
   liveOperatorKeys,
   revokeGuard,
   pickEndorser,
+  rescueGuard,
 } from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
@@ -67,8 +69,48 @@ export default function SecurityScreen({ session, agents = [] }) {
     refresh();
   }, [refresh]);
 
+  // #19: endorse an already-registered key with the live key in THIS browser.
+  // The rescue for a device that cannot sign for itself — without this, a key
+  // minted on a stranded device is permanently invisible to every agent.
+  const onEndorseKey = async (targetKeyId) => {
+    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId);
+    if (!guard.allowed) return note("danger", guard.reason);
+    const target = keys.find((k) => k.key_id === targetKeyId);
+    setBusy(true);
+    try {
+      await endorseOperatorKey(token, targetKeyId, {
+        endorsedByKeyId: unlocked.keyId,
+        signature: signCanonical(
+          endorsementPayload(fleetId, targetKeyId, target.public_key),
+          unlocked.seed
+        ),
+      });
+      note(
+        "ok",
+        `${targetKeyId} endorsed by ${unlocked.keyId}. Agents that trust ${unlocked.keyId} adopt it on their next poll — that device can send again without re-enrolling.`
+      );
+      await refresh();
+    } catch (e) {
+      note("danger", `Endorse failed: ${e.message || e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onGenerate = async () => {
     if (passphrase.length < 8) return note("warn", "Choose a passphrase of at least 8 characters.");
+    // #19: refuse rather than mint an orphan. Without a live key in this browser
+    // the new key cannot be endorsed — not now, and not later, because the relay
+    // rejects a re-registration of the same key id. On 16 Aug this path burnt a
+    // key and left the operator exactly as locked out as before, with the console
+    // still reporting success. A warning in small print was not enough.
+    if (keys.length > 0 && !pickEndorser(getUnlocked(), keys)) {
+      return note(
+        "danger",
+        "This device holds no live key, so a new identity here could never be endorsed — agents would discard everything it signs, permanently. " +
+          "Open the console on a device that still holds a live key and use ‘Endorse’ on this device's key in panel ②."
+      );
+    }
     setBusy(true);
     try {
       const seed = generateSeed();
@@ -116,9 +158,15 @@ export default function SecurityScreen({ session, agents = [] }) {
   const onUnlock = async () => {
     setBusy(true);
     try {
-      setUnlockedState(await unlockFromStore(passphrase));
+      const u = await unlockFromStore(passphrase);
+      setUnlockedState(u);
       setPassphrase("");
-      note("ok", "Identity unlocked — signing active.");
+      // #19: do not report "signing active" for a key the relay has revoked or
+      // never saw. The console said exactly that for six days while every agent
+      // discarded the operator's messages unread.
+      const state = deviceKeySigningState(keys, u?.keyId);
+      if (state.canSign) note("ok", "Identity unlocked — signing active.");
+      else note("danger", `${state.reason}${state.recovery ? ` ${state.recovery}` : ""}`);
     } catch (e) {
       note("danger", "Wrong passphrase, or no stored key.");
     } finally {
@@ -349,6 +397,25 @@ export default function SecurityScreen({ session, agents = [] }) {
               ) : (
                 <>
                   <span className="sec__tag sec__tag--live">active</span>
+                  {/* #19: "active" is not the same as usable. A key with no
+                      endorsement is discarded by every agent, and the row gave
+                      no hint of it — the operator read "active" and reasonably
+                      assumed his agents were ignoring him. */}
+                  {!k.endorsed_by_key_id && deps === 0 && k.key_id !== unlocked?.keyId && (
+                    <>
+                      <span className="sec__tag sec__tag--off" title="No endorsement — agents reject anything this key signs">
+                        unendorsed
+                      </span>
+                      <button
+                        className="sec__btn sec__btn--go"
+                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId).allowed}
+                        title={rescueGuard(k.key_id, keys, unlocked?.keyId).reason || `Endorse ${k.key_id} with this device's key`}
+                        onClick={() => onEndorseKey(k.key_id)}
+                      >
+                        Endorse
+                      </button>
+                    </>
+                  )}
                   <button className="sec__btn sec__btn--danger" onClick={() => onRevoke(k.key_id)}>Revoke</button>
                 </>
               )}
