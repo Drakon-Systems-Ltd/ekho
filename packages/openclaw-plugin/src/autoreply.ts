@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import { noteModelCallEnded } from "./connection.js";
+import { buildIdentity, formatBuildIdentityShort } from "./build-info.js";
 
 import type { EkhoIdentity } from "./credentials.js";
 import { canonicalize } from "./identity.js";
@@ -1601,7 +1602,8 @@ export function startAutoReply(opts: {
 
   log?.info?.(
     `[ekho-autoreply] listening for inbound (poll ${pollIntervalMs}ms) as ${selfAgentId} ` +
-    `(peer_delegation=${peerEnabled ? "on" : "off"}, budget=${peerTurnBudget})`
+    `(peer_delegation=${peerEnabled ? "on" : "off"}, budget=${peerTurnBudget}, ` +
+    `build=${formatBuildIdentityShort(buildIdentity())})`
   );
 
   return () => {

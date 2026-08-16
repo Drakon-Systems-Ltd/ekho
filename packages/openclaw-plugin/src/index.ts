@@ -7,6 +7,7 @@ import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded
 import { getCachedInbox, EKHO_ORIGIN_STAMP } from "./autoreply.js";
 import { buildSignedSendFields } from "./verification.js";
 import { inboxMessageView } from "./inbox-trust.js";
+import { buildStatusField, logBuildIdentity } from "./build-info.js";
 import {
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_MAX_PER_MESSAGE,
@@ -249,13 +250,33 @@ const plugin = defineToolPlugin({
         "Re-list the Ekho messages you are currently handling. You receive messages automatically — new fleet messages are delivered to you as turns, so you do not need to poll. Use this only to re-read the messages from your most recent inbound batch (e.g. to recall sender ids or conversation ids while replying via ekho_send).",
       parameters: Type.Object({}),
       execute: async (_params, config: EkhoPluginConfig) => {
+        // ekho#33: the identity of THIS process, computed before any relay call.
+        // running_sha256 is derived from the bytes serving this call, so
+        // artifact="intact" is what makes version/commit believable here, and
+        // artifact="modified" says dist was edited after it was built. Read
+        // first because a box that cannot reach its relay still has to be able
+        // to answer which bundle it is running — an inventory that only works
+        // while the relay is up cannot establish security posture.
+        const build = buildStatusField();
         // The background auto-reply loop is the single consumer of the inbox: it
         // calls getInbox() (which consumes + delivers) and acks. This tool reads
         // the loop's cached view of the most recent batch instead of calling
         // getInbox() again, so a manual call during a turn can never double-
         // consume rows the loop is mid-processing. No ack here for the same
         // reason — the loop already acked.
-        const { client } = await ensureConnected(config);
+        let client: EkhoAgentClient;
+        try {
+          ({ client } = await ensureConnected(config));
+        } catch (err) {
+          // Degraded, not empty: the inbox is genuinely unknown here, and the
+          // error says so — but `build` is local and stays answerable.
+          return {
+            build,
+            count: 0,
+            messages: [],
+            error: `not connected: ${String(err)}`
+          };
+        }
         const cached = getCachedInbox();
         // Entries pair each message with ITS OWN verdict. `messages` is a
         // positional mirror (index i matches) used only for attachment resolution.
@@ -278,6 +299,8 @@ const plugin = defineToolPlugin({
 
         return {
           count: messages.length,
+          // Which bundle is answering (ekho#33), without needing the journal.
+          build,
           // When ON, the relay vouches that the console operator is this agent's
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.
@@ -324,6 +347,16 @@ const plugin = defineToolPlugin({
 const registerTools = plugin.register;
 plugin.register = (api) => {
   registerTools(api);
+
+  // ekho#33: say which bundle this box is running, once, at startup. This runs
+  // before (and independently of) the relay connect, so it is emitted even on a
+  // box that never connects — the autoreply listener line carries the same
+  // build tag for the connected case.
+  try {
+    logBuildIdentity(api.logger);
+  } catch (err) {
+    api.logger?.debug?.(`[ekho-build] build identity unavailable: ${String(err)}`);
+  }
 
   // Auto-detect the active model for the operator health board (so OpenClaw agents
   // show their model without per-host EKHO_REPORT_MODEL config). Seed from the
