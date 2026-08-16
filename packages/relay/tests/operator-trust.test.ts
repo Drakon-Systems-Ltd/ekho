@@ -8,6 +8,10 @@ import {
   liveOperatorKeys,
   revokeGuard,
   pickEndorser,
+  trustRootKey,
+  thisBrowserHoldsTrustRoot,
+  actingDeviceLabel,
+  endorseAuthority,
 } from "../frontend/src/operatorTrust.js";
 
 const opKeys = [
@@ -189,5 +193,141 @@ describe("pickEndorser (#13)", () => {
 
   it("returns null for a locked console (first enrolment / post-revocation recovery)", () => {
     expect(pickEndorser(null, opKeys)).toBeNull();
+  });
+});
+
+// #19 (16 Aug, 08:33Z): the console's device model was invisible. Every device
+// rendered the same Security screen, so nothing said which key was THE fleet
+// trust root, whether this browser held it, or — when it did not — which device
+// did. These helpers make that model explicit so the UI can say "held on
+// 'Mike iPhone 15 Pro Max' — this browser cannot endorse" instead of a generic
+// refusal that names no way out.
+describe("fleet trust root (#19)", () => {
+  const rootedKeys = [
+    { key_id: "spareK", label: "MacBook", revoked_at: null, endorsed_by_key_id: null },
+    { key_id: "rootK", label: "Mike iPhone 15 Pro Max", revoked_at: null, endorsed_by_key_id: null },
+    { key_id: "deadK", label: "old-laptop", revoked_at: "2026-08-10T09:47:24Z", endorsed_by_key_id: null },
+  ];
+  const rootedAgents = [
+    { agent_id: "a", key_id: "k-a", endorsed_by_key_id: "rootK" },
+    { agent_id: "b", key_id: "k-b", endorsed_by_key_id: "rootK" },
+  ];
+
+  describe("trustRootKey", () => {
+    it("identifies the live key with dependents as the root", () => {
+      expect(trustRootKey(rootedKeys, rootedAgents)?.key_id).toBe("rootK");
+    });
+
+    it("does not pick another live key with zero dependents, whatever the list order", () => {
+      // spareK is listed first and is live — but no agent pins it.
+      expect(trustRootKey(rootedKeys, rootedAgents)?.key_id).not.toBe("spareK");
+    });
+
+    it("picks the live key with the MOST dependents when trust is split", () => {
+      const split = [
+        ...rootedAgents,
+        { agent_id: "c", key_id: "k-c", endorsed_by_key_id: "spareK" },
+      ];
+      expect(trustRootKey(rootedKeys, split)?.key_id).toBe("rootK");
+    });
+
+    it("never returns a revoked key, even one agents still pin — a dead chain is not a root", () => {
+      const agents = [{ agent_id: "a", key_id: "k-a", endorsed_by_key_id: "deadK" }];
+      expect(trustRootKey(rootedKeys, agents)).toBeNull();
+    });
+
+    it("returns null on a fresh fleet — no agent endorsed means no root exists yet", () => {
+      expect(trustRootKey(rootedKeys, [])).toBeNull();
+      expect(trustRootKey(rootedKeys, [{ agent_id: "a", key_id: "k-a", endorsed_by_key_id: null }])).toBeNull();
+    });
+
+    it("is null and safe on missing input", () => {
+      expect(trustRootKey(undefined as never, undefined as never)).toBeNull();
+    });
+  });
+
+  describe("thisBrowserHoldsTrustRoot", () => {
+    it("is true when the unlocked key IS the fleet trust root", () => {
+      expect(thisBrowserHoldsTrustRoot("rootK", rootedKeys, rootedAgents)).toBe(true);
+    });
+
+    it("is false when this browser holds a different live key", () => {
+      expect(thisBrowserHoldsTrustRoot("spareK", rootedKeys, rootedAgents)).toBe(false);
+    });
+
+    it("is false when the console is locked", () => {
+      expect(thisBrowserHoldsTrustRoot(null, rootedKeys, rootedAgents)).toBe(false);
+    });
+
+    it("is false when no root exists at all", () => {
+      expect(thisBrowserHoldsTrustRoot("rootK", rootedKeys, [])).toBe(false);
+    });
+  });
+
+  describe("actingDeviceLabel", () => {
+    it("returns the root key's device label — the device that can act", () => {
+      expect(actingDeviceLabel(rootedKeys, rootedAgents)).toBe("Mike iPhone 15 Pro Max");
+    });
+
+    it("falls back to the key id when the root carries no label", () => {
+      const keys = [{ key_id: "rootK", label: null, revoked_at: null, endorsed_by_key_id: null }];
+      expect(actingDeviceLabel(keys, rootedAgents)).toBe("rootK");
+    });
+
+    it("is null when no device can act", () => {
+      expect(actingDeviceLabel(rootedKeys, [])).toBeNull();
+    });
+  });
+
+  // The refusal copy must name the device that CAN act, not just say "another
+  // device" — on 16 Aug the operator had no way to know which browser to walk to.
+  describe("blocked actions name the acting device (#19)", () => {
+    it("endorseAuthority names the root device when this key is revoked", () => {
+      const keys = [
+        { key_id: "devK", label: "this device", revoked_at: "2026-08-16T08:33:00Z", endorsed_by_key_id: null },
+        ...rootedKeys,
+      ];
+      const g = endorseAuthority("devK", keys, rootedAgents);
+      expect(g.allowed).toBe(false);
+      expect(g.reason).toMatch(/Mike iPhone 15 Pro Max/);
+    });
+
+    it("endorseAuthority names the root device when this key is live but untrusted", () => {
+      const g = endorseAuthority("spareK", rootedKeys, rootedAgents);
+      expect(g.allowed).toBe(false);
+      expect(g.reason).toMatch(/Mike iPhone 15 Pro Max/);
+    });
+
+    it("endorseAuthority keeps a generic pointer when no root is known", () => {
+      // Every agent chains to a revoked key: no live root exists to name.
+      const keys = [
+        { key_id: "devK", label: "this device", revoked_at: "2026-08-16T08:33:00Z", endorsed_by_key_id: null },
+        { key_id: "deadK", label: "old-laptop", revoked_at: "2026-08-10T09:47:24Z", endorsed_by_key_id: null },
+      ];
+      const agents = [{ agent_id: "a", key_id: "k-a", endorsed_by_key_id: "deadK" }];
+      const g = endorseAuthority("devK", keys, agents);
+      expect(g.allowed).toBe(false);
+      expect(g.reason).toMatch(/another device|device that holds|live key/i);
+    });
+
+    it("deviceKeySigningState recovery names the root device when agent keys are provided", () => {
+      const keys = [
+        { key_id: "devK", label: "this device", revoked_at: "2026-08-16T08:33:00Z", endorsed_by_key_id: null },
+        ...rootedKeys,
+      ];
+      const s = deviceKeySigningState(keys, "devK", rootedAgents);
+      expect(s.canSign).toBe(false);
+      expect(s.recovery).toMatch(/Mike iPhone 15 Pro Max/);
+      expect(s.recovery).not.toMatch(/forget/i);
+    });
+
+    it("deviceKeySigningState keeps the generic recovery when agent keys are unknown", () => {
+      const keys = [
+        { key_id: "devK", label: "this device", revoked_at: "2026-08-16T08:33:00Z", endorsed_by_key_id: null },
+        ...rootedKeys,
+      ];
+      const s = deviceKeySigningState(keys, "devK");
+      expect(s.recovery).toMatch(/another device|device that holds|live key/i);
+    });
   });
 });

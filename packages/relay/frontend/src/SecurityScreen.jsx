@@ -36,6 +36,9 @@ import {
   pickEndorser,
   rescueGuard,
   endorseAuthority,
+  trustRootKey,
+  thisBrowserHoldsTrustRoot,
+  actingDeviceLabel,
 } from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
@@ -106,10 +109,14 @@ export default function SecurityScreen({ session, agents = [] }) {
     // key and left the operator exactly as locked out as before, with the console
     // still reporting success. A warning in small print was not enough.
     if (keys.length > 0 && !pickEndorser(getUnlocked(), keys)) {
+      // #19: name the device that can act, when we know it, instead of "a device".
+      const actLabel = actingDeviceLabel(keys, agentKeys);
       return note(
         "danger",
         "This device holds no live key, so a new identity here could never be endorsed — agents would discard everything it signs, permanently. " +
-          "Open the console on a device that still holds a live key and use ‘Endorse’ on this device's key in panel ②."
+          (actLabel
+            ? `Open the console on “${actLabel}” — the device that holds the fleet trust root — and use ‘Endorse’ on this device's key in panel ②.`
+            : "Open the console on a device that still holds a live key and use ‘Endorse’ on this device's key in panel ②.")
       );
     }
     setBusy(true);
@@ -165,7 +172,7 @@ export default function SecurityScreen({ session, agents = [] }) {
       // #19: do not report "signing active" for a key the relay has revoked or
       // never saw. The console said exactly that for six days while every agent
       // discarded the operator's messages unread.
-      const state = deviceKeySigningState(keys, u?.keyId);
+      const state = deviceKeySigningState(keys, u?.keyId, agentKeys);
       if (state.canSign) note("ok", "Identity unlocked — signing active.");
       else note("danger", `${state.reason}${state.recovery ? ` ${state.recovery}` : ""}`);
     } catch (e) {
@@ -207,7 +214,8 @@ export default function SecurityScreen({ session, agents = [] }) {
     // took the fleet's trust chain down — and the UI treated both like any other
     // row. The guard blocks the unrecoverable case and words the self-revoke
     // confirmation for what it actually costs.
-    const guard = revokeGuard(kid, keys, unlocked?.keyId, dependentsOf(kid, agentKeys));
+    const deps = dependentsOf(kid, agentKeys);
+    const guard = revokeGuard(kid, keys, unlocked?.keyId, deps);
     if (guard.blocked) {
       note("danger", guard.message);
       return;
@@ -277,21 +285,35 @@ export default function SecurityScreen({ session, agents = [] }) {
 
   const nameFor = (id) => agents.find((a) => a.id === id)?.display_name || id;
   const health = trustHealth(keys, agentKeys, unlocked?.keyId);
-  const signing = deviceKeySigningState(keys, unlocked?.keyId);
+  const signing = deviceKeySigningState(keys, unlocked?.keyId, agentKeys);
   // 16 Aug: signing.canSign only asks whether the key is live. A live-but-
   // untrusted key ran the bulk re-endorse below and moved all 8 agents onto a
   // root none of them pinned, dead-lettering every peer message fleet-wide.
   // Authority is the stricter question: would the fleet believe this signer?
   const authority = endorseAuthority(unlocked?.keyId, keys, agentKeys);
   const live = liveOperatorKeys(keys);
+  // #19: which device IS the fleet, trust-wise. The 08:33 outage started on a
+  // browser that looked exactly like every other — nothing on this screen said
+  // the root lived elsewhere.
+  const root = trustRootKey(keys, agentKeys);
+  const holdsRoot = thisBrowserHoldsTrustRoot(unlocked?.keyId, keys, agentKeys);
+  const rootLabel = actingDeviceLabel(keys, agentKeys);
 
   return (
     <div className="sec">
       <SecStyle />
       <div className="sec__head">
         <span className="sec__title">⛨ OPERATOR SECURITY</span>
+        {/* #19: "SIGNING" alone read as "this is the fleet-signing device". When
+            the root is elsewhere, say so in the same breath. */}
         <span className={`sec__status sec__status--${unlocked ? "live" : "off"}`}>
-          {unlocked ? `● SIGNING · ${unlocked.keyId}` : "○ NOT SIGNING"}
+          {!unlocked
+            ? "○ NOT SIGNING"
+            : holdsRoot
+              ? `● SIGNING · FLEET TRUST ROOT · ${unlocked.keyId}`
+              : root
+                ? `● SIGNING · ${unlocked.keyId} · trust root on “${rootLabel}”`
+                : `● SIGNING · ${unlocked.keyId}`}
         </span>
       </div>
 
@@ -352,6 +374,14 @@ export default function SecurityScreen({ session, agents = [] }) {
           Your Ed25519 key is generated and held in <b>this browser</b> and never sent to the relay —
           that's what lets agents trust you even if the relay is compromised.
         </p>
+        {/* #19: "there are two different passwords to unlock on each device which
+            was confusing." Signing in to the console and unlocking the signing
+            key looked like the same act. Say once, plainly, that they are not. */}
+        <p className="sec__hint">
+          Two different credentials meet here: <b>signing in to the console</b> (your email + password) is not{" "}
+          <b>unlocking this device's signing key</b> (a signing passphrase). The signing passphrase is
+          per-device — it cannot be shared, and cannot be recovered from your other device.
+        </p>
         {unlocked ? (
           <div className="sec__row">
             <code className="sec__kid">key {unlocked.keyId}</code>
@@ -360,24 +390,28 @@ export default function SecurityScreen({ session, agents = [] }) {
             <button className="sec__btn sec__btn--danger" onClick={onForget}>Forget device</button>
           </div>
         ) : stored ? (
-          <div className="sec__row">
-            <input
-              className="sec__in"
-              type="password"
-              placeholder="passphrase"
-              value={passphrase}
-              onChange={(e) => setPassphrase(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && onUnlock()}
-            />
-            <button className="sec__btn sec__btn--go" disabled={busy} onClick={onUnlock}>Unlock</button>
+          <div className="sec__col">
+            <span className="sec__sub">Unlock this device's signing key</span>
+            <div className="sec__row">
+              <input
+                className="sec__in"
+                type="password"
+                placeholder="this device's signing passphrase (not your console login)"
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && onUnlock()}
+              />
+              <button className="sec__btn sec__btn--go" disabled={busy} onClick={onUnlock}>Unlock</button>
+            </div>
           </div>
         ) : (
           <div className="sec__col">
+            <span className="sec__sub">Create this device's signing key</span>
             <input className="sec__in" placeholder="device label (e.g. macbook)" value={label} onChange={(e) => setLabel(e.target.value)} />
             <input
               className="sec__in"
               type="password"
-              placeholder="passphrase (≥ 8 chars, encrypts the key at rest)"
+              placeholder="choose this device's signing passphrase (≥ 8 chars — not your console login)"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
             />
@@ -396,10 +430,29 @@ export default function SecurityScreen({ session, agents = [] }) {
             <div key={k.key_id} className="sec__item">
               <code className="sec__kid">{k.key_id}</code>
               <span className="sec__lbl">{k.label}</span>
-              {deps > 0 && !k.revoked_at && (
-                <span className="sec__dep" title={`${deps} agent(s) verify against this key`}>
-                  trust root · {deps}
+              {/* #19: don't just count dependents — say this is THE root, where
+                  it lives, and what that means for this browser. The 08:33
+                  outage began on a device whose page looked identical to the
+                  root's. */}
+              {root && k.key_id === root.key_id ? (
+                <span
+                  className="sec__dep sec__dep--root"
+                  title={`${deps} agent(s) verify against this key — the fleet's trust chains end here`}
+                >
+                  ★ FLEET TRUST ROOT · {deps} ·{" "}
+                  {holdsRoot
+                    ? "held on this browser"
+                    : `held on “${k.label || k.key_id}”${
+                        unlocked && !authority.allowed ? " — this browser cannot endorse" : ""
+                      }`}
                 </span>
+              ) : (
+                deps > 0 &&
+                !k.revoked_at && (
+                  <span className="sec__dep" title={`${deps} agent(s) verify against this key`}>
+                    trust root · {deps}
+                  </span>
+                )
               )}
               {k.revoked_at ? (
                 <span className="sec__tag sec__tag--off">revoked</span>
@@ -510,6 +563,10 @@ function SecStyle() {
       .sec__tag--off { color:var(--faint); border:1px solid var(--hair-strong); }
       .sec__tag--warn { color:var(--warn); border:1px solid rgba(251,191,36,.4); background:rgba(251,191,36,.08); }
       .sec__dep { flex:0 0 auto; font-size:10px; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); border:1px solid var(--hair-strong); border-radius:6px; padding:2px 7px; }
+      /* #19: THE root gets a loud badge — it is the one fact the 08:33 outage
+         needed on screen. Normal-case (not uppercase) so device labels read verbatim. */
+      .sec__dep--root { color:var(--cr); border-color:var(--cr); background:var(--cr-soft); font-weight:600; text-transform:none; letter-spacing:.02em; }
+      .sec__sub { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
       .sec__alert { border:1px solid rgba(251,191,36,.4); background:rgba(251,191,36,.08); border-left:3px solid var(--warn); border-radius:var(--radius-sm); padding:11px 13px; margin-bottom:10px; }
       .sec__alert-h { color:var(--warn); font-weight:600; font-size:12px; letter-spacing:.04em; margin-bottom:3px; }
       .sec__alert-b { color:var(--text); font-size:12px; line-height:1.45; margin-bottom:9px; }
