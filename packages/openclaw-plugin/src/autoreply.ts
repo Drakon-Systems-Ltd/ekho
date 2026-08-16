@@ -240,11 +240,17 @@ export function recordBatch(batch: InboxBatch) {
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
     // Re-insert so most-recent wins ordering; trim oldest beyond the cap.
-    // Verdict starts null — verification has not run yet at this point in the
-    // tick — and recordVerifications() fills it in a few lines later. Null is
-    // the honest state, and stays null forever when identity bootstrap failed.
+    // CARRY THE EXISTING VERDICT ACROSS. Re-insertion of an id we already hold
+    // is expected (that is what "most-recent wins" means), and resetting to
+    // null on every redelivery let a message labelled `failed` in one tick read
+    // back `unchecked` in the next whenever verification did not re-run —
+    // identity falsy, or pinned keys transiently empty, both of which yield an
+    // empty verdict map and a no-op below. Silent, and it decayed towards the
+    // unsafe answer. A verdict describes a message_id, so it stays valid for a
+    // redelivery of that same id until a fresh verdict replaces it.
+    const previous = lastBatch.get(msg.message_id)?.verification ?? null;
     lastBatch.delete(msg.message_id);
-    lastBatch.set(msg.message_id, { message: msg, verification: null });
+    lastBatch.set(msg.message_id, { message: msg, verification: previous });
   }
   while (lastBatch.size > LAST_BATCH_CAP) {
     const oldest = lastBatch.keys().next().value as string | undefined;
@@ -254,13 +260,33 @@ export function recordBatch(batch: InboxBatch) {
 }
 
 /**
- * Attach this tick's verdicts to the cached messages they describe (ekho#20).
- * Called immediately after verifyBatch, so a verdict lives and dies with its
- * message rather than in a per-batch map with a shorter lifetime.
+ * Attach this tick's verdicts to the cached messages they describe (ekho#20),
+ * so a verdict lives and dies with its message rather than in a per-batch map
+ * with a shorter lifetime.
+ *
+ * `rejects` is the authority and is applied LAST, on purpose. What gets
+ * dead-lettered and what gets labelled must be computed from the same set or
+ * they drift: `collectRequireSignedWithheld` SYNTHESISES its verdicts
+ * (`unsigned-require-signed` / `unverifiable-require-signed`) straight into the
+ * reject list and never writes them back into `verifications`, so labelling off
+ * `verifications` alone left every withheld message reading `unchecked` — i.e.
+ * served as an ordinary teammate, with a peer budget, after the loop had
+ * dead-lettered it. That is ekho#20 verbatim, and it appeared ONLY under
+ * `requireSigned: "require"` — the mode an operator turns on to be safer.
+ * Passing the reject list makes the two sets identical by construction rather
+ * than by the call sites staying in the right order.
  */
-export function recordVerifications(verifications: Record<string, VerifyResult | null>): void {
+export function recordVerifications(
+  verifications: Record<string, VerifyResult | null>,
+  rejects: Array<{ message: { message_id?: unknown }; verdict: VerifyResult }> = []
+): void {
   for (const [messageId, verdict] of Object.entries(verifications)) {
     const entry = lastBatch.get(messageId);
+    if (entry) entry.verification = verdict;
+  }
+  for (const { message, verdict } of rejects) {
+    if (typeof message?.message_id !== "string") continue;
+    const entry = lastBatch.get(message.message_id);
     if (entry) entry.verification = verdict;
   }
 }
@@ -1179,9 +1205,6 @@ export function startAutoReply(opts: {
         seenNonces: state.seenNonces,
         now: new Date()
       });
-      // Attach each verdict to the cached message it describes, so `ekho_inbox`
-      // can label it for as long as the message is readable (ekho#20).
-      recordVerifications(verifications);
     }
 
     // Dead-letter EVERYTHING about to be acked-and-binned without acting on it.
@@ -1195,6 +1218,12 @@ export function startAutoReply(opts: {
     if (requireSigned === "require") {
       rejects.push(...collectRequireSignedWithheld(batch.messages, verifications, selfAgentId));
     }
+    // Label from the SAME set that drove the dead-letter, and only once the set
+    // is complete — including the require-mode verdicts synthesised above, which
+    // never enter `verifications`. Deliberately outside the identity gate: when
+    // bootstrap failed there are no verdicts but there ARE withheld messages,
+    // and those are exactly the ones that must not read as ordinary (ekho#20).
+    recordVerifications(verifications, rejects);
     // The wording is deliberate. This used to end "dead-lettered, not acted on",
     // which was FALSE and is exactly the string an incident responder greps for
     // under time pressure: the message wakes no turn, but it stays in the

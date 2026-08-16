@@ -862,3 +862,74 @@ describe("progress-signal budget refresh is bounded (#11)", () => {
     expect(refreshBudgetForProgressSignals(state, [complete()], "self", {}).has("c1")).toBe(true);
   });
 });
+
+// ekho#20, round 2 (found by Case against fdd5d95). Two ways the per-message
+// verdict could still go missing on a message the loop DID dead-letter.
+describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
+  const batchOf = (ids: string[]) =>
+    ({ messages: ids.map((id) => ({ message_id: id, conversation_id: "c1", message_type: "direct" })) }) as never;
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+
+  // collectRequireSignedWithheld SYNTHESISES its verdicts into the reject list
+  // and never writes them back into `verifications`. Labelling off
+  // `verifications` alone left every require-mode withheld message reading
+  // "unchecked" — served as an ordinary teammate after being dead-lettered.
+  // That is the original defect, in the mode operators enable to be safer.
+  it("a require-mode withheld message is labelled from the reject list", () => {
+    recordBatch(batchOf(["withheld"]));
+    // Exactly what the tick passes: no verdict in `verifications` at all, the
+    // synthesised verdict present only in `rejects`.
+    recordVerifications(
+      {},
+      [{ message: { message_id: "withheld" }, verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
+    );
+    const v = verdictFor("withheld");
+    expect(v).not.toBeNull();
+    expect(v?.verified).toBe(false);
+    expect(v?.reason).toBe("unsigned-require-signed");
+  });
+
+  it("labels withheld peers even when identity bootstrap failed entirely", () => {
+    recordBatch(batchOf(["no-identity"]));
+    // opts.identity falsy -> verifications is {} and verifyBatch never ran.
+    recordVerifications(
+      {},
+      [{ message: { message_id: "no-identity" }, verdict: { verified: false, kind: "peer", reason: "unverifiable-require-signed", keyId: "k" } }]
+    );
+    expect(verdictFor("no-identity")?.verified).toBe(false);
+  });
+
+  it("the reject list wins over a stale passing verdict for the same id", () => {
+    recordBatch(batchOf(["m"]));
+    recordVerifications(
+      { m: { verified: true, kind: "peer", reason: null, keyId: "k" } },
+      [{ message: { message_id: "m" }, verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
+    );
+    expect(verdictFor("m")?.verified).toBe(false);
+  });
+
+  // recordBatch re-inserts on redelivery ("most-recent wins"). Resetting the
+  // verdict to null there let a message labelled `failed` in tick N read back
+  // `unchecked` in tick N+1 whenever verification did not re-run — silent, and
+  // decaying towards the unsafe answer.
+  it("a redelivered message keeps its failed verdict when verification cannot re-run", () => {
+    recordBatch(batchOf(["dup"]));
+    recordVerifications({ dup: { verified: false, kind: "peer", reason: "endorser-not-pinned", keyId: "k" } });
+    // Redelivered on a later tick with no identity -> empty map, no-op below.
+    recordBatch(batchOf(["dup"]));
+    recordVerifications({});
+    const v = verdictFor("dup");
+    expect(v).not.toBeNull();
+    expect(v?.verified).toBe(false);
+    expect(v?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("a fresh verdict still replaces the carried-over one", () => {
+    recordBatch(batchOf(["dup2"]));
+    recordVerifications({ dup2: { verified: false, kind: "peer", reason: "endorser-not-pinned", keyId: "k" } });
+    recordBatch(batchOf(["dup2"]));
+    recordVerifications({ dup2: { verified: true, kind: "peer", reason: null, keyId: "k" } });
+    expect(verdictFor("dup2")?.verified).toBe(true);
+  });
+});
