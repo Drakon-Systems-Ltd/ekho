@@ -358,6 +358,17 @@ plugin.register = (api) => {
     api.logger?.debug?.(`[ekho-build] build identity unavailable: ${String(err)}`);
   }
 
+  // #25: the host can drop ekho_send from the turn surface without logging.
+  // Say which tools this plugin registered, once, so a missing tool is
+  // greppable instead of a silent hole. Absence on a later turn is still a
+  // host race (alsoAllow vs registration timing) — this at least proves the
+  // plugin handed the tools over.
+  try {
+    api.logger?.info?.("[ekho-adapter] registered tools: ekho_send, ekho_open_room, ekho_inbox");
+  } catch {
+    /* never fail startup over a log line */
+  }
+
   // Auto-detect the active model for the operator health board (so OpenClaw agents
   // show their model without per-host EKHO_REPORT_MODEL config). Seed from the
   // resolved config now — the first heartbeat fires before any model call — then

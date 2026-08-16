@@ -691,6 +691,32 @@ function noteProgressRefresh(state: AutoReplyState, conversationId: string, nowM
  * conversation re-energises its latch. Opt out per agent from the console or
  * with `"peerAutoreply": false`.
  */
+/** Why `isRealInbound` said no. Used so a `real=0` poll is diagnosable (#4)
+ *  instead of a silent false-negative during an incident. Never a reason to
+ *  bypass the authority gate — a failed signature stays a failed signature. */
+export function whyNotRealInbound(
+  msg: InboxMessage,
+  selfAgentId: string,
+  state: AutoReplyState,
+  operatorTrusted: boolean,
+  peerEnabled = false,
+  verification?: VerifyResult | null,
+  requireSigned: RequireSignedMode = "warn"
+): string | null {
+  if (!msg || typeof msg.message_id !== "string") return "no-id";
+  if (msg.sender_agent_id === selfAgentId) return "self";
+  if (!TRIGGER_TYPES.has(msg.message_type)) return `type=${String(msg.message_type)}`;
+  const text = typeof msg.body?.text === "string" ? msg.body.text.trim() : "";
+  if (!text) return "empty";
+  if (state.seen.has(msg.message_id)) return "seen";
+  if (!shouldAutowake(msg, verification, operatorTrusted, peerEnabled, requireSigned)) {
+    return verification && verification.verified === false
+      ? `authority=${verification.reason ?? "failed"}`
+      : "authority";
+  }
+  return null;
+}
+
 export function isRealInbound(
   msg: InboxMessage,
   selfAgentId: string,
@@ -700,19 +726,7 @@ export function isRealInbound(
   verification?: VerifyResult | null,
   requireSigned: RequireSignedMode = "warn"
 ): boolean {
-  if (!msg || typeof msg.message_id !== "string") return false;
-  // 1. Never react to our own outbound.
-  if (msg.sender_agent_id === selfAgentId) return false;
-  // 2. Type allowlist (excludes heartbeat/control/complete/acks).
-  if (!TRIGGER_TYPES.has(msg.message_type)) return false;
-  // 3. Non-empty text body.
-  const text = typeof msg.body?.text === "string" ? msg.body.text.trim() : "";
-  if (!text) return false;
-  // 4. Dedupe.
-  if (state.seen.has(msg.message_id)) return false;
-  // 5. Principal gate + execution authority (graceful crypto verification).
-  // Peers are additionally latched per conversation in the tick.
-  return shouldAutowake(msg, verification, operatorTrusted, peerEnabled, requireSigned);
+  return whyNotRealInbound(msg, selfAgentId, state, operatorTrusted, peerEnabled, verification, requireSigned) === null;
 }
 
 /**
@@ -1373,6 +1387,24 @@ export function startAutoReply(opts: {
     const real = batch.messages.filter((m) =>
       isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
+    // #4: a real=0 poll used to be silent about WHY. During the 7 Aug incident
+    // that made three diagnostic pings look like a down agent. Log the reason
+    // for each skipped trigger-shaped message — never for heartbeats/self.
+    if (batch.messages.length > 0 && real.length === 0) {
+      const reasons = batch.messages
+        .map((m) => {
+          const why = whyNotRealInbound(
+            m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned
+          );
+          return why && why !== "self" && !why.startsWith("type=")
+            ? `${m.message_id ?? "?"}:${why}`
+            : null;
+        })
+        .filter((x): x is string => Boolean(x));
+      if (reasons.length > 0) {
+        log?.info?.(`[ekho-autoreply] real=0 reasons: ${reasons.join(", ")}`);
+      }
+    }
     // Burn the nonce of every signature we accepted (replay guard).
     for (const m of real) {
       const v = verifications[m.message_id];
