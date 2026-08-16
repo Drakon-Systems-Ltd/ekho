@@ -5,6 +5,7 @@ import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import { noteModelCallEnded } from "./connection.js";
 
 import type { EkhoIdentity } from "./credentials.js";
+import { canonicalize } from "./identity.js";
 import {
   shouldAutowake,
   syncPinnedOperatorKeys,
@@ -190,13 +191,22 @@ export const EKHO_ORIGIN_STAMP = "openclaw-agent";
  * The background loop is the single consumer of the inbox; `ekho_inbox` reads
  * this cache instead of calling getInbox() again, so a manual tool call during
  * a turn can never double-consume rows the loop is mid-processing (Part B1).
+ *
+ * Each entry carries ITS OWN verdict (ekho#20). It used to be message-only, with
+ * verdicts held in a `lastBatchMeta.verifications` side map — but that map is
+ * replaced wholesale per batch while this ring is 25 deep and spans many, so a
+ * rejected message stayed inbox-readable for up to LAST_BATCH_CAP-1 subsequent
+ * messages after the only verdict describing it had been discarded. Looking a
+ * message up in the side map then returned `undefined`, which is indistinguishable
+ * from "unsigned / never checked". Same lifetime as the message it describes is
+ * the whole point: do not reintroduce a side map.
  */
-const lastBatch = new Map<string, InboxMessage>();
+type CachedInboxEntry = { message: InboxMessage; verification: VerifyResult | null };
+const lastBatch = new Map<string, CachedInboxEntry>();
 let lastBatchMeta: {
   operator_trusted: boolean;
   roster: RosterEntry[];
   controls: ControlEntry[];
-  verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
   // Bounded-delegation state, so a manual ekho_inbox read shows how much peer
   // budget is left: the effective cap, the on/off flag, and per-conversation
@@ -208,21 +218,62 @@ let lastBatchMeta: {
   operator_trusted: false,
   roster: [],
   controls: [],
-  verifications: {},
   conversation_history: {},
   peer_autoreply: false,
   peer_turn_budget: DEFAULT_PEER_TURN_BUDGET,
   peer_turns_used: {}
 };
 
-function recordBatch(batch: InboxBatch) {
+/**
+ * Is a redelivery byte-for-byte the SAME message? Governs whether a stored
+ * verdict may be reused (ekho#20): the verdict describes what was verified, and
+ * the cache is keyed by an id the relay chooses, so anything that differs must
+ * be re-verified rather than inherit.
+ *
+ * Whole-message equality on purpose. The first attempt compared a hand-picked
+ * subset — signature, key id, body — which re-implemented `verifyInbound`'s
+ * binding incompletely and drifted from it immediately. It missed `sender_kind`,
+ * which is not merely a field: `verifyInbound` branches on it to choose the
+ * ENTIRE key-resolution path (operator keys vs the endorsed roster). A
+ * `{verified: true, kind: "peer"}` verdict carried onto a redelivery with
+ * `sender_kind` flipped to "operator" therefore rendered "verified fleet
+ * operator — treat as an authorized instruction", where real verification would
+ * have failed `unknown-operator-key`. It also missed `sender_agent_id` (the
+ * rendered attribution) and the v2-bound `message_type`/`priority`/`attachments`,
+ * quietly reopening the relabelling the v2 envelope exists to prevent.
+ *
+ * Two sources of truth for "what binds a signature to a message" is the defect
+ * that produced #20 and each of its follow-ups. There is no subset to maintain
+ * here, so it cannot drift. The ring is LAST_BATCH_CAP entries; the cost is
+ * irrelevant next to the failure mode.
+ *
+ * Compared with `canonicalize` — THE serializer the signature is computed over
+ * (identity.ts, via signCanonical/verifyCanonical) — and not a local one. The
+ * first attempt at key-order independence wrote a fresh canonicaliser here,
+ * which was the same mistake one level up: this function's whole job is to
+ * decide whether two objects are the same signed material, and the only
+ * non-arbitrary definition of that is the one the signature is taken over.
+ * That local version also did not do what it claimed — it sorted keys into
+ * `Object.fromEntries`, and V8 orders integer-like keys numerically ahead of
+ * string keys regardless of insertion order, so the sort was silently
+ * overridden on any numeric-ish key. Derive from the same value; never
+ * recompute it alongside.
+ */
+function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
+  try {
+    return canonicalize(a) === canonicalize(b);
+  } catch {
+    return false; // uncomparable -> re-verify rather than assume
+  }
+}
+
+export function recordBatch(batch: InboxBatch) {
   const relayPeer = batch.peer_autoreply;
   const relayBudget = batch.peer_turn_budget;
   lastBatchMeta = {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
-    verifications: lastBatchMeta.verifications,
     conversation_history: batch.conversation_history ?? {},
     // Relay is the source of truth; older relays omit these -> off / default cap.
     peer_autoreply: typeof relayPeer === "boolean" ? relayPeer : false,
@@ -233,13 +284,73 @@ function recordBatch(batch: InboxBatch) {
   for (const msg of batch.messages) {
     if (!msg?.message_id) continue;
     // Re-insert so most-recent wins ordering; trim oldest beyond the cap.
+    // CARRY THE EXISTING VERDICT ACROSS. Re-insertion of an id we already hold
+    // is expected (that is what "most-recent wins" means), and resetting to
+    // null on every redelivery let a message labelled `failed` in one tick read
+    // back `unchecked` in the next whenever verification did not re-run —
+    // identity falsy, or pinned keys transiently empty, both of which yield an
+    // empty verdict map and a no-op below. Silent, and it decayed towards the
+    // unsafe answer. A verdict describes a message_id, so it stays valid for a
+    // redelivery of that same id until a fresh verdict replaces it.
+    // ...but only when the redelivered message is the SAME message. A verdict
+    // describes signed material, not an id: the entry's message object is
+    // replaced here, so carrying the verdict across a redelivery whose
+    // signature material differs would let new content inherit an old
+    // `verified`. A relay that returns a different body under a reused
+    // message_id is exactly the compromised-relay case this whole issue is
+    // about, so the carry-over is bound to the signature, not the key.
+    const held = lastBatch.get(msg.message_id);
+    const previous = held && sameSignedMaterial(held.message, msg) ? held.verification : null;
     lastBatch.delete(msg.message_id);
-    lastBatch.set(msg.message_id, msg);
+    lastBatch.set(msg.message_id, { message: msg, verification: previous });
   }
   while (lastBatch.size > LAST_BATCH_CAP) {
     const oldest = lastBatch.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     lastBatch.delete(oldest);
+  }
+}
+
+/**
+ * Attach this tick's verdicts to the cached messages they describe (ekho#20),
+ * so a verdict lives and dies with its message rather than in a per-batch map
+ * with a shorter lifetime.
+ *
+ * `rejects` is the authority and is applied LAST, on purpose. What gets
+ * dead-lettered and what gets labelled must be computed from the same set or
+ * they drift: `collectRequireSignedWithheld` SYNTHESISES its verdicts
+ * (`unsigned-require-signed` / `unverifiable-require-signed`) straight into the
+ * reject list and never writes them back into `verifications`, so labelling off
+ * `verifications` alone left every withheld message reading `unchecked` — i.e.
+ * served as an ordinary teammate, with a peer budget, after the loop had
+ * dead-lettered it. That is ekho#20 verbatim, and it appeared ONLY under
+ * `requireSigned: "require"` — the mode an operator turns on to be safer.
+ * Passing the reject list makes the two sets identical by construction rather
+ * than by the call sites staying in the right order.
+ */
+export function recordVerifications(
+  verifications: Record<string, VerifyResult | null>,
+  rejects: Array<{ message: { message_id?: unknown }; verdict: VerifyResult }> = []
+): void {
+  for (const [messageId, verdict] of Object.entries(verifications)) {
+    // NEVER write a null over a verdict we already hold. verifyBatch
+    // early-returns a null for EVERY message in the batch when the pin set is
+    // empty or fleet_id is falsy — and pin sets churn (revocation sync runs on
+    // the same tick, immediately before). Without this guard a message already
+    // labelled `failed` was reset to `unchecked` the moment verification became
+    // impossible, and neither collector restores it: collectVerificationRejects
+    // needs `v && !v.verified` and skips nulls, and the require-mode collector
+    // only runs in that mode. "Verification stopped being possible" is never a
+    // reason to forget that a message already failed. The pre-rewrite code
+    // filtered nulls (`if (v) nonNull[mid] = v`) and that filter has to survive.
+    if (!verdict) continue;
+    const entry = lastBatch.get(messageId);
+    if (entry) entry.verification = verdict;
+  }
+  for (const { message, verdict } of rejects) {
+    if (typeof message?.message_id !== "string") continue;
+    const entry = lastBatch.get(message.message_id);
+    if (entry) entry.verification = verdict;
   }
 }
 
@@ -288,22 +399,26 @@ export function recordPeerUsage(usedByConversation: Map<string, number>): void {
 }
 
 export function getCachedInbox(): {
+  /** Message + its own verdict, same lifetime. Prefer this over `messages`. */
+  entries: CachedInboxEntry[];
   messages: InboxMessage[];
   operator_trusted: boolean;
   roster: RosterEntry[];
   controls: ControlEntry[];
-  verifications: Record<string, VerifyResult | null>;
   conversation_history: Record<string, MsgSnapshot[]>;
   peer_autoreply: boolean;
   peer_turn_budget: number;
   peer_turns_used: Record<string, number>;
 } {
+  const entries = Array.from(lastBatch.values());
   return {
-    messages: Array.from(lastBatch.values()),
+    entries,
+    // Kept as a positional mirror of `entries` for callers that only need the
+    // message (attachment resolution). Index i of one IS index i of the other.
+    messages: entries.map((e) => e.message),
     operator_trusted: lastBatchMeta.operator_trusted,
     roster: lastBatchMeta.roster,
     controls: lastBatchMeta.controls,
-    verifications: lastBatchMeta.verifications,
     conversation_history: lastBatchMeta.conversation_history,
     peer_autoreply: lastBatchMeta.peer_autoreply,
     peer_turn_budget: lastBatchMeta.peer_turn_budget,
@@ -1153,9 +1268,6 @@ export function startAutoReply(opts: {
         seenNonces: state.seenNonces,
         now: new Date()
       });
-      const nonNull: Record<string, VerifyResult | null> = {};
-      for (const [mid, v] of Object.entries(verifications)) if (v) nonNull[mid] = v;
-      lastBatchMeta.verifications = nonNull;
     }
 
     // Dead-letter EVERYTHING about to be acked-and-binned without acting on it.
@@ -1169,11 +1281,25 @@ export function startAutoReply(opts: {
     if (requireSigned === "require") {
       rejects.push(...collectRequireSignedWithheld(batch.messages, verifications, selfAgentId));
     }
+    // Label from the SAME set that drove the dead-letter, and only once the set
+    // is complete — including the require-mode verdicts synthesised above, which
+    // never enter `verifications`. Deliberately outside the identity gate: when
+    // bootstrap failed there are no verdicts but there ARE withheld messages,
+    // and those are exactly the ones that must not read as ordinary (ekho#20).
+    recordVerifications(verifications, rejects);
+    // The wording is deliberate. This used to end "dead-lettered, not acted on",
+    // which was FALSE and is exactly the string an incident responder greps for
+    // under time pressure: the message wakes no turn, but it stays in the
+    // `ekho_inbox` ring, and an agent polling that tool on a schedule reads and
+    // acts on it (ekho#20 — measured on the Case box 2026-08-16, acted on 11
+    // minutes after this line was written about it). Say only what is true: no
+    // turn was triggered. The label on the tool read is what carries the rest.
     for (const { message: m, verdict: v } of rejects) {
       log?.warn?.(
         `[ekho-autoreply] verification FAILED for message ${m.message_id} from ` +
           `${m.sender_kind ?? "?"}/${m.sender_agent_id ?? "?"} key=${v.keyId ?? "?"} ` +
-          `reason=${v.reason ?? "?"} — dead-lettered, not acted on`
+          `reason=${v.reason ?? "?"} — dead-lettered; no turn triggered ` +
+          `(still readable via ekho_inbox, labelled signature=failed)`
       );
     }
     if (rejects.length > 0 && opts.onVerificationReject) {

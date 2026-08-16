@@ -13,6 +13,8 @@ import {
   effectiveConversationBudget,
   recordPeerUsage,
   getCachedInbox,
+  recordBatch,
+  recordVerifications,
   stashDeferred,
   listRetryableDeferred,
   clearDeferred,
@@ -519,6 +521,61 @@ describe("ekho_inbox budget surfacing", () => {
   });
 });
 
+// ekho#20. The verdict has to live and die with the message it describes.
+// It previously sat in a per-batch side map (`lastBatchMeta.verifications`,
+// replaced wholesale every batch) while the message ring is LAST_BATCH_CAP deep
+// and spans many batches. So a rejected message stayed inbox-readable, verdict
+// free, for up to 24 further messages after the only verdict describing it had
+// been discarded — and looking it up returned `undefined`, indistinguishable
+// from "unsigned / never checked". Emitting the side map would have shipped a
+// false green; these tests are what that fix would have failed.
+describe("cached verdicts share the message's lifetime (ekho#20)", () => {
+  const batchOf = (ids: string[]) =>
+    ({ messages: ids.map((id) => ({ message_id: id, conversation_id: "c1", message_type: "direct" })) }) as never;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "k1" };
+
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+
+  it("a reject's verdict survives 24 later messages across many batches", () => {
+    recordBatch(batchOf(["bad"]));
+    recordVerifications({ bad: failed });
+    expect(verdictFor("bad")?.verified).toBe(false);
+
+    // 24 more messages, one per batch — each replacing what the old side map
+    // held, while "bad" stays inside the 25-deep ring.
+    for (let i = 0; i < 24; i++) {
+      recordBatch(batchOf([`later-${i}`]));
+      recordVerifications({ [`later-${i}`]: { verified: true, kind: "peer", reason: null, keyId: "k2" } });
+    }
+
+    const still = verdictFor("bad");
+    expect(still).not.toBeNull(); // the whole defect: this used to be undefined
+    expect(still?.verified).toBe(false);
+    expect(still?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("the verdict is evicted with its message, never orphaned or outlived", () => {
+    recordBatch(batchOf(["bad"]));
+    recordVerifications({ bad: failed });
+    // One past the cap — "bad" is now the oldest and must be gone entirely.
+    for (let i = 0; i < 25; i++) recordBatch(batchOf([`fill-${i}`]));
+    expect(getCachedInbox().entries.some((e) => e.message.message_id === "bad")).toBe(false);
+  });
+
+  it("a message with no verdict reads as null, distinct from a failed one", () => {
+    recordBatch(batchOf(["never-checked"]));
+    expect(verdictFor("never-checked")).toBeNull();
+  });
+
+  it("messages and entries stay positionally aligned for attachment resolution", () => {
+    recordBatch(batchOf(["a", "b", "c"]));
+    const { entries, messages } = getCachedInbox();
+    expect(messages.length).toBe(entries.length);
+    messages.forEach((m, i) => expect(m.message_id).toBe(entries[i].message.message_id));
+  });
+});
+
 describe("prompt-injection containment (buildPrompt body fence)", () => {
   // A malicious peer whose body reproduces the plugin's own verified-operator
   // framing must NOT be able to make that forged line read as plugin-generated.
@@ -803,5 +860,227 @@ describe("progress-signal budget refresh is bounded (#11)", () => {
     const state = createAutoReplyState();
     state.peerTurnsByConversation.set("c1", 25);
     expect(refreshBudgetForProgressSignals(state, [complete()], "self", {}).has("c1")).toBe(true);
+  });
+});
+
+// ekho#20, round 2 (found by Case against fdd5d95). Two ways the per-message
+// verdict could still go missing on a message the loop DID dead-letter.
+describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
+  const batchOf = (ids: string[]) =>
+    ({ messages: ids.map((id) => ({ message_id: id, conversation_id: "c1", message_type: "direct" })) }) as never;
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+
+  // collectRequireSignedWithheld SYNTHESISES its verdicts into the reject list
+  // and never writes them back into `verifications`. Labelling off
+  // `verifications` alone left every require-mode withheld message reading
+  // "unchecked" — served as an ordinary teammate after being dead-lettered.
+  // That is the original defect, in the mode operators enable to be safer.
+  it("a require-mode withheld message is labelled from the reject list", () => {
+    recordBatch(batchOf(["withheld"]));
+    // Exactly what the tick passes: no verdict in `verifications` at all, the
+    // synthesised verdict present only in `rejects`.
+    recordVerifications(
+      {},
+      [{ message: { message_id: "withheld" }, verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
+    );
+    const v = verdictFor("withheld");
+    expect(v).not.toBeNull();
+    expect(v?.verified).toBe(false);
+    expect(v?.reason).toBe("unsigned-require-signed");
+  });
+
+  it("labels withheld peers even when identity bootstrap failed entirely", () => {
+    recordBatch(batchOf(["no-identity"]));
+    // opts.identity falsy -> verifications is {} and verifyBatch never ran.
+    recordVerifications(
+      {},
+      [{ message: { message_id: "no-identity" }, verdict: { verified: false, kind: "peer", reason: "unverifiable-require-signed", keyId: "k" } }]
+    );
+    expect(verdictFor("no-identity")?.verified).toBe(false);
+  });
+
+  it("the reject list wins over a stale passing verdict for the same id", () => {
+    recordBatch(batchOf(["m"]));
+    recordVerifications(
+      { m: { verified: true, kind: "peer", reason: null, keyId: "k" } },
+      [{ message: { message_id: "m" }, verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
+    );
+    expect(verdictFor("m")?.verified).toBe(false);
+  });
+
+  // recordBatch re-inserts on redelivery ("most-recent wins"). Resetting the
+  // verdict to null there let a message labelled `failed` in tick N read back
+  // `unchecked` in tick N+1 whenever verification did not re-run — silent, and
+  // decaying towards the unsafe answer.
+  it("a redelivered message keeps its failed verdict when verification cannot re-run", () => {
+    recordBatch(batchOf(["dup"]));
+    recordVerifications({ dup: { verified: false, kind: "peer", reason: "endorser-not-pinned", keyId: "k" } });
+    // Redelivered on a later tick with no identity -> empty map, no-op below.
+    recordBatch(batchOf(["dup"]));
+    recordVerifications({});
+    const v = verdictFor("dup");
+    expect(v).not.toBeNull();
+    expect(v?.verified).toBe(false);
+    expect(v?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("a fresh verdict still replaces the carried-over one", () => {
+    recordBatch(batchOf(["dup2"]));
+    recordVerifications({ dup2: { verified: false, kind: "peer", reason: "endorser-not-pinned", keyId: "k" } });
+    recordBatch(batchOf(["dup2"]));
+    recordVerifications({ dup2: { verified: true, kind: "peer", reason: null, keyId: "k" } });
+    expect(verdictFor("dup2")?.verified).toBe(true);
+  });
+});
+
+// ekho#20, round 3. The Q2 carry-over fix introduced its own decay, in exactly
+// the scenario the carry-over exists for (found by Case against 82abec3), and
+// the carry-over itself needed binding to the signed material rather than the id.
+describe("a carried verdict cannot decay or transfer (ekho#20)", () => {
+  const signed = (id: string, over: Record<string, unknown> = {}) =>
+    ({ message_id: id, conversation_id: "c1", message_type: "direct", agent_sig: "sigA", key_id: "kA", body: { text: "one" }, ...over });
+  const batchOf = (msgs: Array<Record<string, unknown>>) => ({ messages: msgs }) as never;
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "kA" };
+
+  // verifyBatch early-returns a null for EVERY message when the pin set is empty
+  // or fleet_id is falsy — and pin sets churn on the same tick (revocation sync
+  // runs immediately before). Writing that null over a held verdict reset a
+  // `failed` message to `unchecked`, and no collector restores it.
+  it("an all-null verdict map never erases a verdict already held", () => {
+    recordBatch(batchOf([signed("x")]));
+    recordVerifications({ x: failed });
+    recordBatch(batchOf([signed("x")]));         // redelivered
+    recordVerifications({ x: null });             // verification became impossible
+    const v = verdictFor("x");
+    expect(v).not.toBeNull();
+    expect(v?.verified).toBe(false);
+    expect(v?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("a null verdict for a never-seen message is still simply absent", () => {
+    recordBatch(batchOf([signed("fresh")]));
+    recordVerifications({ fresh: null });
+    expect(verdictFor("fresh")).toBeNull();
+  });
+
+  // The verdict describes signed material, not an id the relay chooses. If a
+  // redelivery under the same message_id carries different material, the old
+  // verdict must not transfer to it.
+  it("a redelivery with a DIFFERENT signature does not inherit the old verdict", () => {
+    recordBatch(batchOf([signed("y")]));
+    recordVerifications({ y: { verified: true, kind: "peer", reason: null, keyId: "kA" } });
+    recordBatch(batchOf([signed("y", { agent_sig: "sigB" })]));
+    expect(verdictFor("y")).toBeNull(); // re-verify, never inherit
+  });
+
+  it("a redelivery with a DIFFERENT body does not inherit the old verdict", () => {
+    recordBatch(batchOf([signed("z")]));
+    recordVerifications({ z: { verified: true, kind: "peer", reason: null, keyId: "kA" } });
+    recordBatch(batchOf([signed("z", { body: { text: "two" } })]));
+    expect(verdictFor("z")).toBeNull();
+  });
+
+  it("an identical redelivery still keeps its verdict", () => {
+    recordBatch(batchOf([signed("w")]));
+    recordVerifications({ w: failed });
+    recordBatch(batchOf([signed("w")]));
+    expect(verdictFor("w")?.reason).toBe("endorser-not-pinned");
+  });
+});
+
+// ekho#20 round 4: the carry-over compared a hand-picked subset that drifted
+// from verifyInbound's actual binding. Whole-message equality now.
+describe("carry-over compares the WHOLE message (ekho#20)", () => {
+  const base = (over: Record<string, unknown> = {}) =>
+    ({ message_id: "m", conversation_id: "c1", message_type: "direct", sender_kind: "agent",
+       sender_agent_id: "peer-1", agent_sig: "sigA", key_id: "kA", priority: "normal",
+       body: { text: "one" }, ...over });
+  const batchOf = (m: Record<string, unknown>) => ({ messages: [m] }) as never;
+  const verdictFor = () => getCachedInbox().entries.find((e) => e.message.message_id === "m")?.verification ?? null;
+  const good = { verified: true, kind: "peer" as const, reason: null, keyId: "kA" };
+
+  // The escalation: sender_kind selects verifyInbound's whole key-resolution
+  // path, so a peer verdict inherited by an "operator" redelivery rendered
+  // verified-operator where real verification would have failed.
+  it("does NOT carry across a sender_kind flip to operator", () => {
+    recordBatch(batchOf(base()));
+    recordVerifications({ m: good });
+    recordBatch(batchOf(base({ sender_kind: "operator" })));
+    expect(verdictFor()).toBeNull();
+  });
+
+  for (const [field, value] of [
+    ["sender_agent_id", "someone-else"],
+    ["message_type", "feed"],
+    ["priority", "urgent"],
+    ["conversation_id", "c2"]
+  ] as const) {
+    it(`does NOT carry across a changed ${field}`, () => {
+      recordBatch(batchOf(base()));
+      recordVerifications({ m: good });
+      recordBatch(batchOf(base({ [field]: value })));
+      expect(verdictFor()).toBeNull();
+    });
+  }
+
+  it("an identical redelivery still carries its verdict", () => {
+    recordBatch(batchOf(base()));
+    recordVerifications({ m: good });
+    recordBatch(batchOf(base()));
+    expect(verdictFor()?.verified).toBe(true);
+  });
+});
+
+// ekho#20 round 5 (Case's caveat against 36e7134, closed rather than documented).
+// A key-order-sensitive compare would drop the verdict on a structurally
+// identical redelivery — safe against escalation, but it reads `unchecked`
+// where it should read `failed`, which is the round-two decay made conditional
+// on serialisation stability instead of eliminated.
+describe("carry-over survives key-order differences (ekho#20)", () => {
+  const verdictFor = () => getCachedInbox().entries.find((e) => e.message.message_id === "ko")?.verification ?? null;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "kA" };
+
+  it("keeps a failed verdict when the redelivery serialises its keys in another order", () => {
+    recordBatch({ messages: [{ message_id: "ko", sender_kind: "agent", agent_sig: "sigA", body: { text: "one", n: 1 } }] } as never);
+    recordVerifications({ ko: failed });
+    // Same content, keys built in a different order (both plausible off the wire).
+    recordBatch({ messages: [{ body: { n: 1, text: "one" }, agent_sig: "sigA", sender_kind: "agent", message_id: "ko" }] } as never);
+    const v = verdictFor();
+    expect(v).not.toBeNull();
+    expect(v?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("still refuses a genuine content change regardless of key order", () => {
+    recordBatch({ messages: [{ message_id: "ko", sender_kind: "agent", agent_sig: "sigA", body: { text: "one" } }] } as never);
+    recordVerifications({ ko: { verified: true, kind: "peer", reason: null, keyId: "kA" } });
+    recordBatch({ messages: [{ body: { text: "two" }, agent_sig: "sigA", sender_kind: "agent", message_id: "ko" }] } as never);
+    expect(verdictFor()).toBeNull();
+  });
+});
+
+// ekho#20 round 6: the equality must use THE signing canonicaliser, not a local
+// one. A local version sorted keys into Object.fromEntries, and V8 orders
+// integer-like keys numerically ahead of string keys regardless of insertion
+// order — so the sort was silently overridden. Same-value-not-recomputed.
+describe("carry-over equality uses the signing canonicaliser (ekho#20)", () => {
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+  const failed = { verified: false, kind: "peer" as const, reason: "endorser-not-pinned", keyId: "kA" };
+
+  it("numeric-ish keys compare correctly in both orders", () => {
+    recordBatch({ messages: [{ message_id: "nk", body: { "10": "x", "2": "y" } }] } as never);
+    recordVerifications({ nk: failed });
+    recordBatch({ messages: [{ message_id: "nk", body: { "2": "y", "10": "x" } }] } as never);
+    expect(verdictFor("nk")?.reason).toBe("endorser-not-pinned");
+  });
+
+  it("a real change under numeric-ish keys still drops the verdict", () => {
+    recordBatch({ messages: [{ message_id: "nk2", body: { "10": "x", "2": "y" } }] } as never);
+    recordVerifications({ nk2: failed });
+    recordBatch({ messages: [{ message_id: "nk2", body: { "10": "CHANGED", "2": "y" } }] } as never);
+    expect(verdictFor("nk2")).toBeNull();
   });
 });
