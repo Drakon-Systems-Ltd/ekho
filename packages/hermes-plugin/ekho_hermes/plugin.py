@@ -333,6 +333,15 @@ def register(ctx) -> None:
     config + connecting happen here, not at import time, so importing the
     package never requires the Hermes runtime.
     """
+    # #39: log the loaded-tree identity before anything else so a box with
+    # no relay still answers "which code is this".
+    try:
+        from .bundle_identity import describe as _describe_bundle
+
+        logger.info("%s", _describe_bundle().log_line())
+    except OSError as exc:
+        logger.warning("[ekho] bundle identity unavailable: %s", exc)
+
     config = EkhoConfig.from_env()
     if not config.has_relay:
         logger.info("[ekho] EKHO_RELAY_URL not set; Ekho tools not registered")

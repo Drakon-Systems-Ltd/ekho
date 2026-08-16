@@ -19,6 +19,9 @@ All notable changes to Ekho are documented here.
 
 - **Hermes `ekho_inbox` now carries the same verdict invariant as the OpenClaw plugin (#23).** The OpenClaw side of #20 is on `main`; Hermes still labelled from a side map a later batch could empty, and still collapsed attested vs proven operator into one string. Ported: verdict lives on the ring entry; redelivery carries it only via `ekho.identity.canonicalize` (no second serializer); `record_verifications(..., rejects)` applies the dead-letter set last so a `require_signed` withheld peer is not `unchecked`; every inbox row emits `signature.status`; attested-operator ≠ verified-operator; a failed feed is `untrusted-external-forged`; a kind-mismatched verdict is `failed`; `stash_deferred` is not a third store — old verdicts travel only when the whole signed material is unchanged. The `v is not None` filter is preserved. Plugin freeze: this is a PR, not a deploy.
 
+### Added
+- **Hermes plugin logs the loaded-tree identity at startup (#39).** `plugin.yaml` version is not bound to the executing files. `ekho_hermes.bundle_identity` hashes the packaged `.py` + `plugin.yaml` (excluding `_claimed_bundle.py`) and logs `version` / `observed` / `claimed` / `match` from `register()` and on the `[ekho-autoreply] listening for inbound` line. A claimed stamp is optional and lives outside the hash so a hand-patch cannot keep claim and bytes in lockstep. Plugin freeze: PR only.
+
 ## [0.4.1] - 2026-08-10
 
 This release is the fallout of a real fleet incident on 10 Aug 2026, in which eight agents spent an hour re-asserting a claim that had already been retracted, concluded their signing keys had been stolen, and froze themselves. Nothing was compromised. Two plugin bugs and two console bugs produced it between them, and all four are fixed here.
