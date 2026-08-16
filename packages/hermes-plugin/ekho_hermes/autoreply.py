@@ -1748,7 +1748,7 @@ def start_autoreply(
 
         _bundle = _describe_bundle()
         _bundle_note = f" bundle={_bundle.short_observed()} match={_bundle.match}"
-    except OSError:
+    except (OSError, UnicodeError):
         _bundle_note = ""
     log.info(
         "[ekho-autoreply] listening for inbound (poll %.0fs) as %s "

@@ -120,3 +120,35 @@ def test_register_logs_bundle_identity(caplog, monkeypatch):
     joined = "\n".join(r.getMessage() for r in caplog.records)
     assert live.observed in joined
     assert "bundle version=" in joined
+
+
+def test_autoreply_listening_line_includes_bundle(caplog):
+    from ekho import InboxResponse
+
+    from ekho_hermes import autoreply
+    from ekho_hermes.bundle_identity import describe as live_describe
+
+    class _Client:
+        def get_inbox(self, limit=25):
+            return InboxResponse(
+                messages=[], controls=[], operator_trusted=False, roster=[]
+            )
+
+        def ack_messages(self, acks):
+            return {"ok": True}
+
+    live = live_describe()
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.autoreply"):
+        stop = autoreply.start_autoreply(
+            client=_Client(),
+            self_agent_id="self",
+            poll_interval_s=60,
+            spawn=lambda *_a, **_k: None,
+        )
+        try:
+            joined = "\n".join(r.getMessage() for r in caplog.records)
+        finally:
+            stop()
+    assert "listening for inbound" in joined
+    assert f"bundle={live.short_observed()}" in joined
+    assert f"match={live.match}" in joined

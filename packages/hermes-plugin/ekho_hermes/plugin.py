@@ -339,7 +339,7 @@ def register(ctx) -> None:
         from .bundle_identity import describe as _describe_bundle
 
         logger.info("%s", _describe_bundle().log_line())
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         logger.warning("[ekho] bundle identity unavailable: %s", exc)
 
     config = EkhoConfig.from_env()
