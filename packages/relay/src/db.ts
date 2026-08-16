@@ -1387,7 +1387,16 @@ export class EkhoDb {
         sender_kind: sk,
         sender_label: sk === "operator" ? String(m.sender_label ?? "Operator") : (info?.display_name ?? String(row.sender_agent_id)),
         text: typeof body.text === "string" ? body.text : "",
-        created_at: row.created_at
+        created_at: row.created_at,
+        // #20 leftover: history used to carry text with no signature. The plugin
+        // then labelled it [unverified] and refused retract authority — honest,
+        // but it could not check even when the signature existed on the row.
+        // Same sender-kind gate as the inbox delivery path: an agent cannot
+        // inject a fake operator_sig onto a snapshot.
+        operator_sig: sk === "operator" ? (m.operator_sig ?? null) : null,
+        agent_sig: sk === "agent" ? (m.agent_sig ?? null) : null,
+        key_id: m.key_id ?? null,
+        sig_canonical: m.sig_canonical ?? null
       };
     };
     const replyRowById = new Map<string, Record<string, unknown>>();
@@ -1573,7 +1582,11 @@ export class EkhoDb {
         sender_kind: sk,
         sender_label: sk === "operator" ? String(meta.sender_label ?? "Operator") : (inf?.display_name ?? String(r.sender_agent_id)),
         text,
-        created_at: r.created_at
+        created_at: r.created_at,
+        operator_sig: sk === "operator" ? (meta.operator_sig ?? null) : null,
+        agent_sig: sk === "agent" ? (meta.agent_sig ?? null) : null,
+        key_id: meta.key_id ?? null,
+        sig_canonical: meta.sig_canonical ?? null
       };
     });
   }

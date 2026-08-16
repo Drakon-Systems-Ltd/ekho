@@ -1095,6 +1095,48 @@ describe("operator message signatures", () => {
     expect(verifyCanonical(msg.sig_canonical, msg.operator_sig, k.pub)).toBe(true);
   });
 
+  it("puts the same operator signature on conversation_history snapshots (#20 leftover)", async () => {
+    const k = makeOperatorKey(32);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "mb" });
+    const a = await relay.enrollAgent("hist-sig-a");
+    const b = await relay.enrollAgent("hist-sig-b");
+    const room = (await relay.operatorRequest("POST", "/v1/operator/rooms", {
+      name: "HistSig",
+      member_agent_ids: [a.agent_id, b.agent_id]
+    })).body;
+    const canonical = {
+      v: 1,
+      fleet_id: relay.fleetId,
+      operator_id: relay.operatorId,
+      key_id: k.id,
+      recipient: { kind: "group", id: room.id },
+      conversation_id: room.id,
+      body_sha256: "deadbeefcafe",
+      sent_at: "2026-06-07T00:00:00Z",
+      nonce: "aGlzdHNpZw"
+    };
+    const sig = signCanonical(canonical, k.seed);
+    const send = await relay.operatorRequest("POST", "/v1/operator/messages", {
+      room_id: room.id,
+      text: "signed history",
+      operator_sig: sig,
+      key_id: k.id,
+      sig_canonical: canonical
+    });
+    expect(send.status).toBe(201);
+    const inbox = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+    const snap = (inbox.body.conversation_history?.[room.id] ?? []).find(
+      (h: { text: string }) => h.text === "signed history"
+    );
+    expect(snap).toBeTruthy();
+    expect(snap.sender_kind).toBe("operator");
+    expect(snap.operator_sig).toBe(sig);
+    expect(snap.agent_sig).toBeNull();
+    expect(snap.key_id).toBe(k.id);
+    expect(snap.sig_canonical).toEqual(canonical);
+    expect(verifyCanonical(snap.sig_canonical, snap.operator_sig, k.pub)).toBe(true);
+  });
+
   it("omits signature fields for an unsigned operator message", async () => {
     const agent = await relay.enrollAgent("Receiver2");
     const send = await relay.operatorRequest("POST", "/v1/operator/messages", {
