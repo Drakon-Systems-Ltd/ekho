@@ -7,6 +7,8 @@ import {
   publicKeyB64urlFromSeed,
   keyId,
   endorsementPayload,
+  revocationPayload,
+  unrevokePayload,
 } from "../src/identity";
 import {
   loadOrCreateIdentity,
@@ -29,10 +31,26 @@ const OP2_SEED = new Uint8Array(32).fill(2);
 const OP2_PUB = publicKeyB64urlFromSeed(OP2_SEED);
 const OP2_KID = keyId(fromB64url(OP2_PUB));
 const FLEET = "flt_v";
+const REVOKED_AT = "2026-08-16T00:00:00.000Z";
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ekho-oc-"));
 }
+
+/** A signed revocation of `kid`, issued by `seed`. */
+function revSig(seed: Uint8Array, kid: string, at = REVOKED_AT, fleet = FLEET) {
+  return signCanonical(revocationPayload(fleet, kid, at), seed);
+}
+/** A signed un-revoke of `kid`, issued by `seed`. */
+function unrevSig(seed: Uint8Array, kid: string, fleet = FLEET) {
+  return signCanonical(unrevokePayload(fleet, kid), seed);
+}
+/** Capture the structured notes the sync emits (it must never be silent). */
+function capture() {
+  const notes: string[] = [];
+  return { notes, log: { warn: (...a: unknown[]) => notes.push(a.join(" ")), info: () => {} } };
+}
+const QUIET = { warn: () => {}, info: () => {} };
 
 describe("identity store", () => {
   it("creates and persists a stable identity", () => {
@@ -61,13 +79,16 @@ describe("syncPinnedOperatorKeys", () => {
   });
   it("TOFU skips revoked keys and doesn't burn the latch on an empty roster", () => {
     const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: {} };
-    expect(syncPinnedOperatorKeys(id, [], FLEET)).toBe(false);
+    expect(syncPinnedOperatorKeys(id, [], FLEET, QUIET)).toBe(false);
     expect(id.tofuAt).toBeUndefined(); // nothing adopted — next contact may still TOFU
-    // Returns true because the revocation tombstone (#14) is new and must be
-    // persisted — but nothing was adopted, so the TOFU latch stays unburned.
-    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(true);
+    // #27: an unsigned revoked flag is advisory — nothing is written, so this is
+    // a no-op poll. It still blocks adoption, so the latch stays unburned.
+    expect(
+      syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET, QUIET)
+    ).toBe(false);
     expect(id.tofuAt).toBeUndefined();
     expect(id.pinnedOperatorKeys).toEqual({});
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
   });
   it("a pre-pinned identity never TOFUs — unendorsed keys are still refused", () => {
     const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
@@ -85,35 +106,7 @@ describe("syncPinnedOperatorKeys", () => {
     expect(changed).toBe(true);
     expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
   });
-  it("drops a revoked key", () => {
-    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
-    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(true);
-    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
-  });
-
-  // #14: dropping a revoked key from the pin map is not enough — the config seed
-  // re-adds it on the next wake. The sync has to leave a durable record so the
-  // seed can refuse it.
-  it("records every revoked key id, whether or not it was pinned", () => {
-    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
-    syncPinnedOperatorKeys(
-      id,
-      [
-        { key_id: OP1_KID, public_key: OP1_PUB, revoked: true },
-        { key_id: OP2_KID, public_key: OP2_PUB, revoked: true }
-      ],
-      FLEET
-    );
-    expect(Object.keys(id.revokedOperatorKeys ?? {}).sort()).toEqual([OP1_KID, OP2_KID].sort());
-  });
-  it("reports changed=true when a revocation is newly recorded but nothing was pinned", () => {
-    // Otherwise the ledger is never persisted and the seed re-pins after a restart.
-    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP2_KID]: OP2_PUB } };
-    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(true);
-    // Idempotent: a second identical poll is not a change.
-    expect(syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true }], FLEET)).toBe(false);
-  });
-  it("a revoked key is never re-adopted by TOFU", () => {
+  it("a tombstoned key is never re-adopted by TOFU", () => {
     const id: EkhoIdentity = {
       seedHex: "00".repeat(32),
       pinnedOperatorKeys: {},
@@ -123,7 +116,7 @@ describe("syncPinnedOperatorKeys", () => {
     expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
     expect(id.tofuAt).toBeUndefined();
   });
-  it("a revoked key is never re-adopted by endorsement chaining", () => {
+  it("a tombstoned key is never re-adopted by endorsement chaining", () => {
     const id: EkhoIdentity = {
       seedHex: "00".repeat(32),
       pinnedOperatorKeys: { [OP1_KID]: OP1_PUB },
@@ -138,6 +131,363 @@ describe("syncPinnedOperatorKeys", () => {
       )
     ).toBe(false);
     expect(id.pinnedOperatorKeys[OP2_KID]).toBeUndefined();
+  });
+});
+
+// #27: the relay is the transport, not the trust root. Before this, a relay that
+// said revoked:true got a permanent tombstone AND the pin deleted, with no proof
+// asked for — one poll from a compromised relay wiped a fleet's trust root.
+describe("syncPinnedOperatorKeys — unsigned revoked is ADVISORY (#27)", () => {
+  const unsigned = { key_id: OP1_KID, public_key: OP1_PUB, revoked: true };
+
+  it("does NOT unpin a pinned key", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    expect(syncPinnedOperatorKeys(id, [unsigned], FLEET, QUIET)).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+  });
+
+  it("does NOT write a tombstone", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP2_KID]: OP2_PUB } };
+    expect(syncPinnedOperatorKeys(id, [unsigned], FLEET, QUIET)).toBe(false);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+    // and it is still a no-op on the next poll — nothing accumulates
+    expect(syncPinnedOperatorKeys(id, [unsigned], FLEET, QUIET)).toBe(false);
+  });
+
+  it("still blocks NEW adoption by TOFU", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: {} };
+    expect(
+      syncPinnedOperatorKeys(id, [unsigned, { key_id: OP2_KID, public_key: OP2_PUB }], FLEET, QUIET)
+    ).toBe(true);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined(); // flagged → not freshly pinned
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
+  });
+
+  it("still blocks NEW adoption by endorsement chaining", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const esig = signCanonical(endorsementPayload(FLEET, OP2_KID, OP2_PUB), OP1_SEED);
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, revoked: true, endorsed_by_key_id: OP1_KID, endorsement_sig: esig }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBeUndefined();
+  });
+
+  it("blocks adoption even when the relay ALSO serves the same key id unflagged", () => {
+    // Split the claim across two entries and a naive per-entry check adopts it.
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: {} };
+    expect(
+      syncPinnedOperatorKeys(id, [unsigned, { key_id: OP1_KID, public_key: OP1_PUB }], FLEET, QUIET)
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+  });
+
+  it("is never silent — it names the key and says the claim was unsigned", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const { notes, log } = capture();
+    syncPinnedOperatorKeys(id, [unsigned], FLEET, log);
+    expect(notes.join("\n")).toContain(OP1_KID);
+    expect(notes.join("\n").toLowerCase()).toContain("without a valid revocation signature");
+  });
+
+  it("treats a revocation signature that does not verify as unsigned", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const { notes, log } = capture();
+    // Signed by a key nobody pinned — the classic rogue-relay forgery.
+    const rogue = new Uint8Array(32).fill(9);
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ ...unsigned, revoked_at: REVOKED_AT, revocation_sig: revSig(rogue, OP1_KID) }],
+        FLEET,
+        log
+      )
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+    expect(notes.join("\n")).toContain(OP1_KID);
+  });
+
+  it("treats a revocation signature for a DIFFERENT fleet or time as unsigned", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+    };
+    // Right key, wrong fleet.
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ ...unsigned, revoked_at: REVOKED_AT, revocation_sig: revSig(OP2_SEED, OP1_KID, REVOKED_AT, "flt_other") }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+    // Right key and fleet, but the relay restated WHEN it happened.
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ ...unsigned, revoked_at: "2020-01-01T00:00:00Z", revocation_sig: revSig(OP2_SEED, OP1_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+  });
+});
+
+// #27: signed revocation is the ONLY thing that mutates the trust root.
+describe("syncPinnedOperatorKeys — signed revocation (#27)", () => {
+  it("tombstones and unpins a key revoked by a pinned key", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+    };
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP2_SEED, OP1_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(true);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
+    expect(id.revokedOperatorKeys?.[OP1_KID]).toBe(REVOKED_AT); // the SIGNED time
+  });
+
+  it("accepts a key that revokes itself", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+    };
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP1_SEED, OP1_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(true);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+  });
+
+  it("tombstones a key that was never pinned here, so it can never be adopted", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP1_SEED, OP2_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(true);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(REVOKED_AT);
+    // Idempotent: the same signed claim again is not a change.
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP1_SEED, OP2_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+  });
+
+  it("REFUSES a revocation that would leave zero pinned keys, and says so", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const { notes, log } = capture();
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP1_SEED, OP1_KID) }],
+        FLEET,
+        log
+      )
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB); // still the trust root
+    expect(id.revokedOperatorKeys ?? {}).toEqual({}); // and NOT tombstoned, or it would be pinned-but-dead
+    expect(notes.join("\n")).toContain(OP1_KID);
+  });
+
+  it("revoking both pinned keys in one poll still leaves one — the last root holds", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+    };
+    syncPinnedOperatorKeys(
+      id,
+      [
+        { key_id: OP1_KID, public_key: OP1_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP2_SEED, OP1_KID) },
+        { key_id: OP2_KID, public_key: OP2_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP1_SEED, OP2_KID) }
+      ],
+      FLEET,
+      QUIET
+    );
+    expect(Object.keys(id.pinnedOperatorKeys).length).toBe(1);
+  });
+
+  it("a signed revocation cannot be replayed against another fleet's key id", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+    };
+    // A genuine revocation of OP2, re-labelled by the relay as revoking OP1.
+    const sigForOp2 = revSig(OP1_SEED, OP2_KID);
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: sigForOp2 }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+  });
+});
+
+// #27: the escape hatch for a revocation issued in error.
+describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
+  const tombstoned = (): EkhoIdentity => ({
+    seedHex: "00".repeat(32),
+    pinnedOperatorKeys: { [OP1_KID]: OP1_PUB },
+    revokedOperatorKeys: { [OP2_KID]: REVOKED_AT }
+  });
+
+  it("clears the tombstone but does NOT re-pin", () => {
+    const id = tombstoned();
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(OP1_SEED, OP2_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(true);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBeUndefined();
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBeUndefined(); // re-admission still costs an endorsement
+  });
+
+  it("lets the endorsement chain re-admit the key afterwards", () => {
+    const id = tombstoned();
+    const esig = signCanonical(endorsementPayload(FLEET, OP2_KID, OP2_PUB), OP1_SEED);
+    syncPinnedOperatorKeys(
+      id,
+      [
+        {
+          key_id: OP2_KID,
+          public_key: OP2_PUB,
+          unrevoke_sig: unrevSig(OP1_SEED, OP2_KID),
+          endorsed_by_key_id: OP1_KID,
+          endorsement_sig: esig
+        }
+      ],
+      FLEET,
+      QUIET
+    );
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
+  });
+
+  it("UNSIGNED absence of `revoked` never clears a tombstone (the #14 hole)", () => {
+    const id = tombstoned();
+    expect(syncPinnedOperatorKeys(id, [{ key_id: OP2_KID, public_key: OP2_PUB }], FLEET, QUIET)).toBe(false);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(REVOKED_AT);
+  });
+
+  it("an un-revoke signed by a key we do NOT pin is refused", () => {
+    const id = tombstoned();
+    const rogue = new Uint8Array(32).fill(9);
+    const { notes, log } = capture();
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(rogue, OP2_KID) }],
+        FLEET,
+        log
+      )
+    ).toBe(false);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(REVOKED_AT);
+    expect(notes.join("\n")).toContain(OP2_KID);
+  });
+
+  it("a revocation in the same poll beats an un-revoke — fail closed", () => {
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB },
+      revokedOperatorKeys: {}
+    };
+    syncPinnedOperatorKeys(
+      id,
+      [
+        {
+          key_id: OP2_KID,
+          public_key: OP2_PUB,
+          revoked: true,
+          revoked_at: REVOKED_AT,
+          revocation_sig: revSig(OP1_SEED, OP2_KID),
+          unrevoke_sig: unrevSig(OP1_SEED, OP2_KID)
+        }
+      ],
+      FLEET,
+      QUIET
+    );
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(REVOKED_AT);
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBeUndefined();
+  });
+});
+
+// #26: persist the endorsement the gate already verified, so a box can answer
+// "why is this key trusted here?" offline, with no relay round trip.
+describe("operatorKeyAdmissions (#26)", () => {
+  it("records the endorser and the signature on chain admission", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const esig = signCanonical(endorsementPayload(FLEET, OP2_KID, OP2_PUB), OP1_SEED);
+    syncPinnedOperatorKeys(
+      id,
+      [{ key_id: OP2_KID, public_key: OP2_PUB, endorsed_by_key_id: OP1_KID, endorsement_sig: esig }],
+      FLEET,
+      QUIET
+    );
+    const rec = id.operatorKeyAdmissions?.[OP2_KID];
+    expect(rec?.admitted_by).toBe("chain");
+    expect(rec?.endorsed_by_key_id).toBe(OP1_KID);
+    expect(rec?.endorsement_sig).toBe(esig);
+    expect(Date.parse(String(rec?.admitted_at))).not.toBeNaN();
+    // The stored evidence is enough to re-verify offline, relay or no relay.
+    expect(
+      verifyCanonical(endorsementPayload(FLEET, OP2_KID, OP2_PUB), rec!.endorsement_sig!, fromB64url(OP1_PUB))
+    ).toBe(true);
+  });
+
+  it("records tofu with no endorser on TOFU admission", () => {
+    const id: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: {} };
+    syncPinnedOperatorKeys(id, [{ key_id: OP1_KID, public_key: OP1_PUB }], FLEET, QUIET);
+    const rec = id.operatorKeyAdmissions?.[OP1_KID];
+    expect(rec?.admitted_by).toBe("tofu");
+    expect(rec?.endorsed_by_key_id).toBeUndefined();
+    expect(rec?.endorsement_sig).toBeUndefined();
+  });
+
+  it("survives a save/load round trip, and unknown fields are not dropped", () => {
+    const dir = tmpdir();
+    const id = loadOrCreateIdentity(dir);
+    id.operatorKeyAdmissions = {
+      [OP1_KID]: { admitted_by: "tofu", admitted_at: "2026-08-16T00:00:00.000Z" }
+    };
+    (id as Record<string, unknown>).somethingNewerWrote = { keep: "me" };
+    saveIdentity(dir, id);
+    const back = loadOrCreateIdentity(dir);
+    expect(back.operatorKeyAdmissions?.[OP1_KID].admitted_by).toBe("tofu");
+    expect((back as Record<string, unknown>).somethingNewerWrote).toEqual({ keep: "me" });
+    // and a rewrite must not silently drop it either
+    saveIdentity(dir, back);
+    expect(
+      (JSON.parse(fs.readFileSync(path.join(dir, ".ekho-identity.json"), "utf-8")) as Record<string, unknown>)
+        .somethingNewerWrote
+    ).toEqual({ keep: "me" });
   });
 });
 

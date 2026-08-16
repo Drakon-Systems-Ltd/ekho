@@ -348,7 +348,11 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
       // for a never-pinned identity (see syncPinnedOperatorKeys); explicit
       // config pins above always win.
       const enrollKeys = takeEnrollOperatorKeys();
-      if (enrollKeys && identity && syncPinnedOperatorKeys(identity, enrollKeys, credentials.fleetId || config.fleetId)) {
+      if (
+        enrollKeys &&
+        identity &&
+        syncPinnedOperatorKeys(identity, enrollKeys, credentials.fleetId || config.fleetId, log ?? console)
+      ) {
         saveIdentity(configDir, identity);
         log?.info?.(`[ekho] pinned ${Object.keys(identity.pinnedOperatorKeys).length} operator key(s) from enrollment (TOFU)`);
       }

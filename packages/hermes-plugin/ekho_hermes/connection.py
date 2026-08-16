@@ -296,7 +296,7 @@ def ensure_connected(
                 enroll_keys
                 and identity is not None
                 and sync_pinned_operator_keys(
-                    identity, enroll_keys, fleet_id=config.fleet_id
+                    identity, enroll_keys, fleet_id=config.fleet_id, log=logger
                 )
             ):
                 save_identity(config_dir, identity)

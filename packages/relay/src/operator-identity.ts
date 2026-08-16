@@ -61,6 +61,40 @@ export function endorsementPayload(fleetId: string, newKeyId: string, newPublicK
 }
 
 /**
+ * Canonical structure an operator key signs to REVOKE an operator key (#27).
+ * Revocation mutates the trust root exactly as adoption does, so it needs the
+ * same proof: agents treat an unsigned relay `revoked:true` flag as advisory
+ * (skip the key for new adoption) and mutate nothing. Without this, whoever
+ * controls the relay could tombstone and unpin a fleet's whole trust root in a
+ * single poll. `revoked_at` is inside the signed bytes so the relay cannot
+ * restate WHEN a key died under a still-valid signature.
+ */
+export function revocationPayload(fleetId: string, revokedKeyId: string, revokedAt: string) {
+  return {
+    v: 1,
+    t: "op-key-revocation",
+    fleet_id: fleetId,
+    key_id: revokedKeyId,
+    revoked_at: revokedAt,
+  };
+}
+
+/**
+ * Canonical structure an operator key signs to UN-REVOKE a key (#27) — the
+ * escape hatch for a revocation issued in error. It clears the tombstone so the
+ * key can be re-admitted through the endorsement chain; it never re-pins on its
+ * own, so re-admission still costs a valid endorsement.
+ */
+export function unrevokePayload(fleetId: string, revokedKeyId: string) {
+  return {
+    v: 1,
+    t: "op-key-unrevoke",
+    fleet_id: fleetId,
+    key_id: revokedKeyId,
+  };
+}
+
+/**
  * Canonical structure the OPERATOR signs to endorse an AGENT's identity key —
  * the root of agent-to-agent trust. A peer that has pinned the operator's public
  * key can verify this endorsement and so trust the sender's key without trusting

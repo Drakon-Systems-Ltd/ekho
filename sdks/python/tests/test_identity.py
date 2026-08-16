@@ -15,6 +15,8 @@ from ekho.identity import (
     key_id,
     endorsement_payload,
     agent_key_endorsement_payload,
+    revocation_payload,
+    unrevoke_payload,
 )
 
 # One source of truth for the vector: the relay's fixture (monorepo path).
@@ -70,6 +72,36 @@ def test_sign_round_trip():
 def test_key_id_matches_vector():
     assert key_id(VECTOR["public_key_b64url"]) == VECTOR["key_id"]
     assert len(key_id(VECTOR["public_key_b64url"])) == 16
+
+
+# #27: a revocation is a trust-root mutation and must be signed. These bytes have
+# to match the TS relay and the OpenClaw plugin exactly.
+def test_revocation_payloads_match_ts_shape():
+    assert canonicalize(
+        revocation_payload("flt_x", "kid", "2026-08-16T00:00:00Z")
+    ) == canonicalize(
+        {
+            "v": 1,
+            "t": "op-key-revocation",
+            "fleet_id": "flt_x",
+            "key_id": "kid",
+            "revoked_at": "2026-08-16T00:00:00Z",
+        }
+    )
+    assert canonicalize(unrevoke_payload("flt_x", "kid")) == canonicalize(
+        {"v": 1, "t": "op-key-unrevoke", "fleet_id": "flt_x", "key_id": "kid"}
+    )
+
+
+def test_reproduces_frozen_revocation_and_unrevoke_signatures():
+    seed = bytes.fromhex(VECTOR["seed_hex"])
+    for v in (VECTOR["revocation"], VECTOR["unrevoke"]):
+        assert canonicalize(v["payload"]) == v["canonical"]
+        assert sign_canonical(v["payload"], seed) == v["signature_b64url"]
+        assert (
+            verify_canonical(v["payload"], v["signature_b64url"], VECTOR["public_key_b64url"])
+            is True
+        )
 
 
 def test_endorsement_payloads_match_ts_shape():

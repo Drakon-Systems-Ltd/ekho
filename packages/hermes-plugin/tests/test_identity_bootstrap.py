@@ -84,6 +84,35 @@ def test_revocation_ledger_round_trips_through_the_identity_file(tmp_path):
     }
 
 
+# #26: the admission evidence has to survive a restart, or "why is this key
+# trusted here?" is only answerable until the process dies.
+def test_operator_key_admissions_round_trip_through_the_identity_file(tmp_path):
+    ident = load_or_create_identity(str(tmp_path))
+    ident.operator_key_admissions = {
+        OP_KID: {"admitted_by": "tofu", "admitted_at": "2026-08-16T00:00:00Z"}
+    }
+    save_identity(str(tmp_path), ident)
+    back = load_or_create_identity(str(tmp_path))
+    assert back.operator_key_admissions[OP_KID]["admitted_by"] == "tofu"
+
+
+def test_unknown_identity_fields_are_not_dropped(tmp_path):
+    # A field a newer plugin (or the OpenClaw side sharing this dir) wrote must
+    # survive our load/save round trip instead of being silently deleted.
+    import json
+
+    ident = load_or_create_identity(str(tmp_path))
+    save_identity(str(tmp_path), ident)
+    path = tmp_path / "identity.json"
+    data = json.loads(path.read_text())
+    data["something_newer_wrote"] = {"keep": "me"}
+    path.write_text(json.dumps(data))
+
+    back = load_or_create_identity(str(tmp_path))
+    save_identity(str(tmp_path), back)
+    assert json.loads(path.read_text())["something_newer_wrote"] == {"keep": "me"}
+
+
 def test_no_operator_pubkey_still_registers_own_key(tmp_path):
     fc = _FakeClient()
     ident = register_and_bootstrap_identity(

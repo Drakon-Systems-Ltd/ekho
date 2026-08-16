@@ -19,5 +19,27 @@
     "nonce": "Zml4ZWQtbm9uY2UtMTIz"
   },
   "canonical": "{\"body_sha256\":\"d1ff6ff48a62ad0e4022eae369863c9a8cea70ce94c4cc005a1006916e75e87a\",\"conversation_id\":\"conv_demo\",\"fleet_id\":\"flt_demo\",\"key_id\":\"_oEsEvOrTOasXbaa\",\"nonce\":\"Zml4ZWQtbm9uY2UtMTIz\",\"operator_id\":\"op-demo\",\"recipient\":{\"id\":\"agent_demo\",\"kind\":\"agent\"},\"sent_at\":\"2026-06-07T00:00:00Z\",\"v\":1}",
-  "signature_b64url": "G57M88E3h3sDopZe8yuIIR0UqNZnqU_i41i_tuU1sYrgRgzUaDqnRz6AgNyz5NqGWB18PvDaJ8W6wjy4DygsAw"
+  "signature_b64url": "G57M88E3h3sDopZe8yuIIR0UqNZnqU_i41i_tuU1sYrgRgzUaDqnRz6AgNyz5NqGWB18PvDaJ8W6wjy4DygsAw",
+  "note_revocation": "#27 — ADDED, not a change to the frozen message vector above. Same seed. Revoking an operator key mutates the trust root, so it is signed like everything else; every verifier MUST agree on these bytes or a legitimate revocation is unverifiable across runtimes.",
+  "revocation": {
+    "payload": {
+      "v": 1,
+      "t": "op-key-revocation",
+      "fleet_id": "flt_demo",
+      "key_id": "_oEsEvOrTOasXbaa",
+      "revoked_at": "2026-08-16T00:00:00Z"
+    },
+    "canonical": "{\"fleet_id\":\"flt_demo\",\"key_id\":\"_oEsEvOrTOasXbaa\",\"revoked_at\":\"2026-08-16T00:00:00Z\",\"t\":\"op-key-revocation\",\"v\":1}",
+    "signature_b64url": "wK6qHDFrJJoLFy82UbdfLKCY18I0Fw2ataK58NbeSall5IZ06Rzn-hvPmCfT_vo9BXUvRG1fFsvaEqk1HmTFCg"
+  },
+  "unrevoke": {
+    "payload": {
+      "v": 1,
+      "t": "op-key-unrevoke",
+      "fleet_id": "flt_demo",
+      "key_id": "_oEsEvOrTOasXbaa"
+    },
+    "canonical": "{\"fleet_id\":\"flt_demo\",\"key_id\":\"_oEsEvOrTOasXbaa\",\"t\":\"op-key-unrevoke\",\"v\":1}",
+    "signature_b64url": "CcU5UZ9dDJJP-q-ti0-eMtECmPv3XD6TQyhJBjX8o_lYowRlvUQPbw5taZWnqmRbcWWX0ed834Uy67ZT7c8pBw"
+  }
 }
