@@ -8,6 +8,7 @@ import {
   liveOperatorKeys,
   revokeGuard,
   pickEndorser,
+  mayGenerateNewOperatorIdentity,
   trustRootKey,
   thisBrowserHoldsTrustRoot,
   actingDeviceLabel,
@@ -193,6 +194,39 @@ describe("pickEndorser (#13)", () => {
 
   it("returns null for a locked console (first enrolment / post-revocation recovery)", () => {
     expect(pickEndorser(null, opKeys)).toBeNull();
+  });
+});
+
+// #19 follow-up: second-device Generate must not be blocked when the live root
+// sits on another browser. Empty phone + live X6Nv on laptop is the happy path.
+describe("mayGenerateNewOperatorIdentity (#19 second device)", () => {
+  const agents = [
+    { agent_id: "a", key_id: "ka", endorsed_by_key_id: "live1" },
+    { agent_id: "b", key_id: "kb", endorsed_by_key_id: "live1" },
+  ];
+
+  it("allows mint on an empty browser when a live trust root exists elsewhere", () => {
+    const r = mayGenerateNewOperatorIdentity(null, opKeys, agents);
+    expect(r.allowed).toBe(true);
+    expect(r.nextStep).toMatch(/Endorse/i);
+    expect(r.nextStep).toMatch(/live1|trust root/i);
+  });
+
+  it("allows mint when this browser already holds a live endorser", () => {
+    const r = mayGenerateNewOperatorIdentity({ keyId: "live1", seed: new Uint8Array(32) }, opKeys, agents);
+    expect(r.allowed).toBe(true);
+    expect(r.reason).toBeNull();
+  });
+
+  it("allows mint when the fleet has zero live keys (recovery)", () => {
+    const allDead = opKeys.map((k) => ({ ...k, revoked_at: "2026-08-10T09:50:00.000Z" }));
+    expect(mayGenerateNewOperatorIdentity(null, allDead, []).allowed).toBe(true);
+  });
+
+  it("refuses mint while this browser still holds a revoked/unlocked dead seed", () => {
+    const r = mayGenerateNewOperatorIdentity({ keyId: "dead1", seed: new Uint8Array(32) }, opKeys, agents);
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/Forget device|cannot endorse/i);
   });
 });
 

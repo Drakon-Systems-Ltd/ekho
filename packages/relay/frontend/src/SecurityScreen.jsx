@@ -34,6 +34,7 @@ import {
   liveOperatorKeys,
   revokeGuard,
   pickEndorser,
+  mayGenerateNewOperatorIdentity,
   rescueGuard,
   endorseAuthority,
   trustRootKey,
@@ -103,20 +104,16 @@ export default function SecurityScreen({ session, agents = [] }) {
 
   const onGenerate = async () => {
     if (passphrase.length < 8) return note("warn", "Choose a passphrase of at least 8 characters.");
-    // #19: refuse rather than mint an orphan. Without a live key in this browser
-    // the new key cannot be endorsed — not now, and not later, because the relay
-    // rejects a re-registration of the same key id. On 16 Aug this path burnt a
-    // key and left the operator exactly as locked out as before, with the console
-    // still reporting success. A warning in small print was not enough.
-    if (keys.length > 0 && !pickEndorser(getUnlocked(), keys)) {
-      // #19: name the device that can act, when we know it, instead of "a device".
-      const actLabel = actingDeviceLabel(keys, agentKeys);
+    // #19 follow-up: refuse ONLY when this browser still holds a dead seed that
+    // cannot act as endorser. An empty phone (no unlocked key) with a live root
+    // on the laptop is the normal second-device path — mint here, Endorse there.
+    // The old check treated "no live key in THIS browser" as "can never be
+    // endorsed", which is false and blocked the phone with a permanent red wall.
+    const mint = mayGenerateNewOperatorIdentity(getUnlocked(), keys, agentKeys);
+    if (!mint.allowed) {
       return note(
         "danger",
-        "This device holds no live key, so a new identity here could never be endorsed — agents would discard everything it signs, permanently. " +
-          (actLabel
-            ? `Open the console on “${actLabel}” — the device that holds the fleet trust root — and use ‘Endorse’ on this device's key in panel ②.`
-            : "Open the console on a device that still holds a live key and use ‘Endorse’ on this device's key in panel ②.")
+        `${mint.reason}${mint.nextStep ? ` ${mint.nextStep}` : ""}`
       );
     }
     setBusy(true);
@@ -133,6 +130,8 @@ export default function SecurityScreen({ session, agents = [] }) {
       // by trust-on-first-use (empty pin set) or by hand-editing trust files.
       // Signed BEFORE the new seed replaces the old one in the store; a live
       // endorser is required, since the relay rejects a revoked one.
+      // When this browser is empty, endorsement is omitted on purpose — the live
+      // root on another device signs it via panel ② Endorse after registration.
       const endorser = pickEndorser(unlocked, keys);
       const endorsement = endorser
         ? {
@@ -153,7 +152,10 @@ export default function SecurityScreen({ session, agents = [] }) {
         endorsement ? "ok" : "warn",
         endorsement
           ? `Identity created, signing, and endorsed by your previous key ${endorser.keyId} — agents that trust that key will adopt this one automatically on their next poll.`
-          : "Identity created and signing. ⚠ Your agents don't trust this key yet, and no live key was available to endorse it — endorse them in ③ (or use the banner) so they can verify your commands. Back it up below."
+          : `Identity created on this device (${kid}). ⚠ Not fleet-trusted yet. ${
+              mint.nextStep ||
+              "On the device that holds the live trust root, open Security → panel ② → Endorse this new key."
+            } Then back it up below.`
       );
       await refresh();
     } catch (e) {

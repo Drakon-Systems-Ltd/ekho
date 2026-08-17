@@ -331,3 +331,62 @@ export function pickEndorser(unlocked, operatorKeys) {
   const live = liveOperatorKeys(operatorKeys).some((k) => k.key_id === unlocked.keyId);
   return live ? unlocked : null;
 }
+
+/**
+ * May THIS browser mint a brand-new operator identity (#19 follow-up)?
+ *
+ * 16 Aug burnt a key when Generate identity ran on a stranded browser that held
+ * only a revoked seed: the new id registered, could never be endorsed from that
+ * same browser, and the relay refused the id forever after. The console then
+ * refused Generate whenever `pickEndorser(getUnlocked())` was null.
+ *
+ * That over-corrected. A phone with **no local key at all** (empty browser,
+ * fresh device, post-Forget) is not stranded — it is the normal second-device
+ * enrolment path. The live trust root sits on another browser; after Generate
+ * registers the new public key, that root endorses it in panel ②. Blocking
+ * mint here leaves the operator staring at a red "could never be endorsed"
+ * wall while the laptop is already SIGNING as the root.
+ *
+ * Refuse only when this browser still holds a seed that cannot act as endorser
+ * (revoked / unknown). Empty + a live root elsewhere = allow, with copy that
+ * says the next step is Endorse from the root device.
+ *
+ * @returns {{ allowed: boolean, reason: string|null, nextStep: string|null }}
+ */
+export function mayGenerateNewOperatorIdentity(unlocked, operatorKeys, agentKeys = []) {
+  const keys = operatorKeys || [];
+  const live = liveOperatorKeys(keys);
+  // First enrolment / fully dead fleet: mint is the only way back.
+  if (live.length === 0) {
+    return { allowed: true, reason: null, nextStep: null };
+  }
+  // This browser already holds a live key — Generate would replace it and should
+  // chain-endorse from that seed (existing pickEndorser path).
+  if (pickEndorser(unlocked, keys)) {
+    return { allowed: true, reason: null, nextStep: null };
+  }
+  // Empty browser (not unlocked, nothing stored to unlock): second-device enrol.
+  // A live root exists elsewhere and can Endorse the new key after registration.
+  if (!unlocked?.keyId) {
+    const label = actingDeviceLabel(keys, agentKeys);
+    return {
+      allowed: true,
+      reason: null,
+      nextStep: label
+        ? `After Generate, open the console on “${label}” (fleet trust root) and press Endorse on this new key in panel ②.`
+        : "After Generate, open the console on a device that holds a live key and press Endorse on this new key in panel ②.",
+    };
+  }
+  // Unlocked but not a live endorser (revoked / unknown seed still in the store).
+  const label = actingDeviceLabel(keys, agentKeys);
+  return {
+    allowed: false,
+    reason:
+      "This browser still holds a key that cannot endorse anything. " +
+      "Forget device first to clear it, then Generate a fresh identity — " +
+      "or unlock a live key on another device and Endorse from there.",
+    nextStep: label
+      ? `Live trust root is on “${label}”.`
+      : "Use a device that still holds a live operator key.",
+  };
+}
