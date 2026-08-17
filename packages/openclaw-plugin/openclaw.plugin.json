@@ -1,6 +1,6 @@
 {
   "id": "ekho-adapter",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "name": "Ekho Relay Adapter",
   "description": "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
   "configSchema": {
@@ -39,7 +39,7 @@
       },
       "peerAutoreply": {
         "type": "boolean",
-        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true)"
+        "description": "Enable bounded agent-to-agent delegation \u2014 let teammates wake this agent (default true)"
       },
       "peerTurnBudget": {
         "type": "number",
