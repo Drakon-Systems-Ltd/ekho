@@ -4,6 +4,18 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-18
+
+### Security
+- **Operator-key lifecycle writes audit events (#50).** Register, endorse, and revoke of operator keys, plus agent-key endorse, now insert `events` rows (`operator_key.registered` / `operator_key.endorsed` / `operator_key.revoked` / `agent_key.endorsed`) with actor and target. A no-op revoke writes nothing.
+- **Un-revoke payload is compare-and-swap (#48).** `unrevokePayload` now binds `revoked_at_being_cleared`, `issued_at`, and a non-empty `nonce` in TS and Python. A captured un-revoke for key X cannot clear a later tombstone for X. The relay still does not emit `unrevoke_sig`.
+
+### Fixed
+- **Revoke confirmation names the terminal consequence (#49).** The console states that revoke cannot be undone and that recovery is to mint a new device key. Revoked rows already render as revoked, not active, and do not offer Endorse as restoration. Agent pin-state view is still deferred (no existing API).
+
+### Notes
+- README / helm / OpenAPI current-version pins caught up (they had lagged at 0.4.0).
+
 ## [0.4.2] - 2026-08-17
 
 ### Fixed

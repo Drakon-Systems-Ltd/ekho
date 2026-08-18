@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-18
+
+### Security
+- Un-revoke payload now binds `revoked_at_being_cleared`, `issued_at`, and a non-empty nonce (#48). Missing bind fields refuse the un-revoke. The relay still does not emit `unrevoke_sig`.
+
 ## [0.4.2] - 2026-08-17
 
 ### Fixed

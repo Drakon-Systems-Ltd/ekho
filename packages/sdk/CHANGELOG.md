@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-18
+
+### Security
+- `unrevokePayload` now binds `revoked_at_being_cleared`, `issued_at`, and a non-empty nonce (#48). Empty nonce is rejected.
+
 ## [0.4.2] - 2026-08-17
 
 ### Fixed

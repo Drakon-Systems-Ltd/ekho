@@ -1,7 +1,7 @@
 import type { A2AAgentCard } from "./types";
 
 const PROTOCOL_VERSION = "0.3.0";
-const RELAY_VERSION = "0.4.2";
+const RELAY_VERSION = "0.4.3";
 
 interface AgentInfo {
   id: string;
