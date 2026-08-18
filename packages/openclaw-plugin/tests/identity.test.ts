@@ -71,8 +71,18 @@ describe("identity (frozen interop vector)", () => {
         revoked_at: "2026-08-16T00:00:00Z",
       })
     );
-    expect(canonicalize(unrevokePayload("f", "k"))).toBe(
-      canonicalize({ v: 1, t: "op-key-unrevoke", fleet_id: "f", key_id: "k" })
+    expect(
+      canonicalize(unrevokePayload("f", "k", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n1"))
+    ).toBe(
+      canonicalize({
+        v: 1,
+        t: "op-key-unrevoke",
+        fleet_id: "f",
+        key_id: "k",
+        revoked_at_being_cleared: "2026-08-16T00:00:00Z",
+        issued_at: "2026-08-16T00:00:01Z",
+        nonce: "n1",
+      })
     );
   });
 

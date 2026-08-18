@@ -169,6 +169,9 @@ export function liveOperatorKeys(operatorKeys) {
  *
  * @returns {{ blocked: boolean, selfRevoke: boolean, message: string }}
  */
+const REVOKE_IS_TERMINAL =
+  "This cannot be undone. Recovery is to mint a new device key — Endorse will not restore a revoked key.";
+
 export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
   const live = liveOperatorKeys(operatorKeys);
   const isLastLive = live.length <= 1 && live.some((k) => k.key_id === keyId);
@@ -179,7 +182,8 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
       message:
         `${keyId} is your only live operator key. Revoking it leaves the fleet with no trust root: ` +
         `every agent would stop verifying, and on the default "warn" setting they would then process ` +
-        `messages unauthenticated. Enrol a replacement key first, then revoke this one.`,
+        `messages unauthenticated. Enrol a replacement key first, then revoke this one. ` +
+        REVOKE_IS_TERMINAL,
     };
   }
   if (keyId === unlockedKeyId) {
@@ -193,7 +197,7 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
         (dependents > 0
           ? `\n\n${dependents} agent${dependents > 1 ? "s" : ""} currently trust it and will need re-endorsing under the new key.`
           : "") +
-        `\n\nRevoke this device's own key?`,
+        `\n\n${REVOKE_IS_TERMINAL}\n\nRevoke this device's own key?`,
     };
   }
   if (dependents > 0) {
@@ -203,13 +207,13 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
       message:
         `⚠ ${dependents} agent${dependents > 1 ? "s are" : " is"} endorsed by ${keyId} — it is their trust root.\n\n` +
         `Revoking it now BREAKS their verification until you re-endorse them under another active key. ` +
-        `Re-endorse them first (panel ③), then revoke.\n\nRevoke anyway?`,
+        `Re-endorse them first (panel ③), then revoke.\n\n${REVOKE_IS_TERMINAL}\n\nRevoke anyway?`,
     };
   }
   return {
     blocked: false,
     selfRevoke: false,
-    message: `Revoke operator key ${keyId}? Agents will stop trusting it on their next poll.`,
+    message: `Revoke operator key ${keyId}? Agents will stop trusting it on their next poll.\n\n${REVOKE_IS_TERMINAL}`,
   };
 }
 

@@ -231,7 +231,8 @@ export class EkhoDb {
     fleetId: string,
     publicKeyB64url: string,
     label: string,
-    endorsement?: { endorsedByKeyId: string; signature: string }
+    endorsement?: { endorsedByKeyId: string; signature: string },
+    actorKeyId?: string | null
   ): { keyId: string } {
     const kid = deriveKeyId(fromB64url(publicKeyB64url));
     if (endorsement) {
@@ -267,6 +268,16 @@ export class EkhoDb {
         endorsement?.endorsedByKeyId ?? null,
         endorsement?.signature ?? null
       );
+    this.recordEvent(
+      fleetId,
+      "operator_key.registered",
+      "operator",
+      actorKeyId ?? null,
+      "operator_key",
+      kid,
+      null,
+      { endorsed_by_key_id: endorsement?.endorsedByKeyId ?? null }
+    );
     return { keyId: kid };
   }
 
@@ -283,7 +294,8 @@ export class EkhoDb {
   endorseOperatorKey(
     fleetId: string,
     targetKeyId: string,
-    endorsement: { endorsedByKeyId: string; signature: string }
+    endorsement: { endorsedByKeyId: string; signature: string },
+    actorKeyId?: string | null
   ): void {
     // A key rooting its own trust is the exact self-assertion the chain exists
     // to prevent; check before anything else so it can never be talked around.
@@ -316,6 +328,16 @@ export class EkhoDb {
         "UPDATE fleet_operator_keys SET endorsed_by_key_id = ?, endorsement_sig = ? WHERE fleet_id = ? AND key_id = ?"
       )
       .run(endorsement.endorsedByKeyId, endorsement.signature, fleetId, targetKeyId);
+    this.recordEvent(
+      fleetId,
+      "operator_key.endorsed",
+      "operator",
+      actorKeyId ?? endorsement.endorsedByKeyId,
+      "operator_key",
+      targetKeyId,
+      null,
+      { endorsed_by_key_id: endorsement.endorsedByKeyId }
+    );
   }
 
   listOperatorKeys(fleetId: string): OperatorKeyRow[] {
@@ -338,13 +360,27 @@ export class EkhoDb {
       .all(fleetId) as OperatorKeyRow[];
   }
 
-  revokeOperatorKey(fleetId: string, targetKeyId: string): boolean {
+  revokeOperatorKey(fleetId: string, targetKeyId: string, actorKeyId?: string | null): boolean {
+    const revokedAt = nowIso();
     const res = this.db
       .prepare(
         "UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
       )
-      .run(nowIso(), fleetId, targetKeyId);
-    return res.changes > 0;
+      .run(revokedAt, fleetId, targetKeyId);
+    if (res.changes > 0) {
+      this.recordEvent(
+        fleetId,
+        "operator_key.revoked",
+        "operator",
+        actorKeyId ?? null,
+        "operator_key",
+        targetKeyId,
+        null,
+        { revoked_at: revokedAt }
+      );
+      return true;
+    }
+    return false;
   }
 
   // ---- Agent identity keys (agent-to-agent trust) --------------------------
@@ -371,7 +407,8 @@ export class EkhoDb {
     fleetId: string,
     agentId: string,
     targetKeyId: string,
-    endorsement: { endorsedByKeyId: string; signature: string }
+    endorsement: { endorsedByKeyId: string; signature: string },
+    actorKeyId?: string | null
   ): boolean {
     const row = this.db
       .prepare(
@@ -399,6 +436,18 @@ export class EkhoDb {
          WHERE fleet_id = ? AND agent_id = ? AND key_id = ?`
       )
       .run(endorsement.endorsedByKeyId, endorsement.signature, nowIso(), fleetId, agentId, targetKeyId);
+    if (res.changes > 0) {
+      this.recordEvent(
+        fleetId,
+        "agent_key.endorsed",
+        "operator",
+        actorKeyId ?? endorsement.endorsedByKeyId,
+        "agent_key",
+        targetKeyId,
+        null,
+        { agent_id: agentId, endorsed_by_key_id: endorsement.endorsedByKeyId }
+      );
+    }
     return res.changes > 0;
   }
 

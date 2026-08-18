@@ -28,8 +28,11 @@ export interface OperatorKeyEntryLike {
   /** #27: the revocation time, inside the signed bytes (so the relay cannot
    *  restate when a key died under a still-valid signature). */
   revoked_at?: string | null;
-  /** #27: signature over unrevokePayload(fleet, key_id) — clears a tombstone. */
+  /** #27 / #48: signature over unrevokePayload(fleet, key, revoked_at, issued_at, nonce). */
   unrevoke_sig?: string | null;
+  unrevoke_revoked_at?: string | null;
+  unrevoke_issued_at?: string | null;
+  unrevoke_nonce?: string | null;
 }
 
 /** Where the sync reports trust-root decisions. Defaults to the console, because
@@ -82,19 +85,25 @@ function applyRelayKeyClaims(ctx: ClaimCtx): RelayKeyClaims {
  *  The unsigned ABSENCE of `revoked` must never clear a tombstone: that was the
  *  #14 hole, where a relay could resurrect a dead key just by not mentioning it.
  *
- *  KNOWN GAP (#27): unrevokePayload binds only (fleet, key_id) — no timestamp,
- *  no nonce — so one legitimately issued un-revoke is replayable forever. A
- *  relay that captured one for key X can clear a LATER tombstone for X, and the
- *  endorsement that re-pins X is equally replayable. Nothing here can detect
- *  that; the fix belongs in the payload (bind revoked_at, so an un-revoke names
- *  the revocation it undoes). The relay does not emit unrevoke_sig yet, so the
- *  bytes are still free to change — do it before it ships. */
+ *  #48: the payload now binds revoked_at_being_cleared + issued_at + nonce.
+ *  Missing bind fields refuse the un-revoke (fail closed). The relay still
+ *  does not emit unrevoke_sig. */
 function clearTombstonesOnSignedUnrevoke(ctx: ClaimCtx, out: RelayKeyClaims): void {
   for (const k of ctx.operatorKeys) {
     const kid = k.key_id;
     const sig = k.unrevoke_sig;
+    const revokedAt = k.unrevoke_revoked_at;
+    const issuedAt = k.unrevoke_issued_at;
+    const nonce = k.unrevoke_nonce;
     if (!kid || !sig || !ctx.revokedLedger[kid]) continue;
-    if (!ctx.fleetId || !ctx.signedByAPinnedKey(unrevokePayload(ctx.fleetId, kid), sig)) {
+    if (!revokedAt || !issuedAt || !nonce) {
+      ctx.log?.warn?.(
+        `[ekho] refusing un-revoke of operator key ${kid}: payload bind fields missing. ` +
+          `The tombstone stands.`
+      );
+      continue;
+    }
+    if (!ctx.fleetId || !ctx.signedByAPinnedKey(unrevokePayload(ctx.fleetId, kid, revokedAt, issuedAt, nonce), sig)) {
       ctx.log?.warn?.(
         `[ekho] refusing un-revoke of operator key ${kid}: no currently pinned operator key signed it. ` +
           `The tombstone stands.`

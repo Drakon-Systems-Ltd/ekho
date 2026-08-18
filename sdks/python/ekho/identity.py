@@ -102,17 +102,29 @@ def revocation_payload(fleet_id: str, revoked_key_id: str, revoked_at: str) -> d
     }
 
 
-def unrevoke_payload(fleet_id: str, revoked_key_id: str) -> dict:
-    """Structure an operator key signs to UN-REVOKE a key (#27).
+def unrevoke_payload(
+    fleet_id: str,
+    revoked_key_id: str,
+    revoked_at_being_cleared: str,
+    issued_at: str,
+    nonce: str,
+) -> dict:
+    """Structure an operator key signs to UN-REVOKE a key (#27 / #48).
 
-    Clears the tombstone so the key can be re-admitted through the endorsement
-    chain. Never re-pins on its own — re-admission still costs an endorsement.
+    Compare-and-swap: binds the exact revocation being undone, issue time, and
+    a nonce. A captured un-revoke for key X cannot clear a later tombstone for X.
+    Never re-pins on its own — re-admission still costs an endorsement.
     """
+    if not nonce:
+        raise ValueError("unrevoke nonce must be a non-empty string")
     return {
         "v": 1,
         "t": "op-key-unrevoke",
         "fleet_id": fleet_id,
         "key_id": revoked_key_id,
+        "revoked_at_being_cleared": revoked_at_being_cleared,
+        "issued_at": issued_at,
+        "nonce": nonce,
     }
 
 

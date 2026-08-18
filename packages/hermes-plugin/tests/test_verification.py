@@ -33,9 +33,25 @@ def rev_sig(seed, kid, at=REVOKED_AT, fleet=FLEET):
     return identity.sign_canonical(identity.revocation_payload(fleet, kid, at), seed)
 
 
+UNREV = dict(
+    unrevoke_revoked_at=REVOKED_AT,
+    unrevoke_issued_at="2026-08-16T00:00:01Z",
+    unrevoke_nonce="n1",
+)
+
+
 def unrev_sig(seed, kid, fleet=FLEET):
     """A signed un-revoke of ``kid``, issued by ``seed``."""
-    return identity.sign_canonical(identity.unrevoke_payload(fleet, kid), seed)
+    return identity.sign_canonical(
+        identity.unrevoke_payload(
+            fleet,
+            kid,
+            UNREV["unrevoke_revoked_at"],
+            UNREV["unrevoke_issued_at"],
+            UNREV["unrevoke_nonce"],
+        ),
+        seed,
+    )
 
 
 class CaptureLog:
@@ -332,7 +348,7 @@ def _tombstoned():
 def test_signed_unrevoke_clears_the_tombstone_without_re_pinning():
     ident = _tombstoned()
     served = [
-        OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB, unrevoke_sig=unrev_sig(OP1_SEED, OP2_KID))
+        OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB, unrevoke_sig=unrev_sig(OP1_SEED, OP2_KID), **UNREV)
     ]
     assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=QUIET) is True
     assert OP2_KID not in ident.revoked_operator_keys
@@ -349,6 +365,7 @@ def test_signed_unrevoke_lets_the_chain_re_admit_the_key():
             unrevoke_sig=unrev_sig(OP1_SEED, OP2_KID),
             endorsed_by_key_id=OP1_KID,
             endorsement_sig=esig,
+            **UNREV,
         )
     ]
     sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=QUIET)
@@ -368,7 +385,7 @@ def test_unrevoke_signed_by_an_unpinned_key_is_refused():
     log = CaptureLog()
     served = [
         OperatorKeyEntry(
-            key_id=OP2_KID, public_key=OP2_PUB, unrevoke_sig=unrev_sig(ROGUE_SEED, OP2_KID)
+            key_id=OP2_KID, public_key=OP2_PUB, unrevoke_sig=unrev_sig(ROGUE_SEED, OP2_KID), **UNREV
         )
     ]
     assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log) is False
@@ -388,6 +405,7 @@ def test_revocation_beats_unrevoke_in_the_same_poll():
             revoked_at=REVOKED_AT,
             revocation_sig=rev_sig(OP1_SEED, OP2_KID),
             unrevoke_sig=unrev_sig(OP1_SEED, OP2_KID),
+            **UNREV,
         )
     ]
     sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=QUIET)

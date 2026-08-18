@@ -218,10 +218,16 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
     const { public_key, label, endorsement } = parsed.data;
     try {
-      const { keyId } = db.registerOperatorKey(request.operator.fleetId, public_key, label, endorsement && {
-        endorsedByKeyId: endorsement.endorsed_by_key_id,
-        signature: endorsement.signature
-      });
+      const { keyId } = db.registerOperatorKey(
+        request.operator.fleetId,
+        public_key,
+        label,
+        endorsement && {
+          endorsedByKeyId: endorsement.endorsed_by_key_id,
+          signature: endorsement.signature
+        },
+        request.operator.id
+      );
       return reply.code(201).send({ key_id: keyId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -245,10 +251,15 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
     try {
-      db.endorseOperatorKey(request.operator.fleetId, keyId, {
-        endorsedByKeyId: parsed.data.endorsed_by_key_id,
-        signature: parsed.data.signature
-      });
+      db.endorseOperatorKey(
+        request.operator.fleetId,
+        keyId,
+        {
+          endorsedByKeyId: parsed.data.endorsed_by_key_id,
+          signature: parsed.data.signature
+        },
+        parsed.data.endorsed_by_key_id
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("not found")) return reply.code(404).send({ error: msg });
@@ -264,7 +275,12 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "unauthorized" });
     }
     const { keyId } = request.params as { keyId: string };
-    const revoked = db.revokeOperatorKey(request.operator.fleetId, keyId);
+    const query = request.query as { actor_key_id?: string } | undefined;
+    const actorKeyId =
+      typeof query?.actor_key_id === "string" && query.actor_key_id
+        ? query.actor_key_id
+        : request.operator.id;
+    const revoked = db.revokeOperatorKey(request.operator.fleetId, keyId, actorKeyId);
     if (!revoked) return reply.code(404).send({ error: "key not found" });
     return reply.send({ revoked: true });
   });
@@ -280,10 +296,16 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     }
     const { agentId } = request.params as { agentId: string };
     try {
-      const ok = db.endorseAgentKey(request.operator.fleetId, agentId, parsed.data.key_id, {
-        endorsedByKeyId: parsed.data.endorsed_by_key_id,
-        signature: parsed.data.signature
-      });
+      const ok = db.endorseAgentKey(
+        request.operator.fleetId,
+        agentId,
+        parsed.data.key_id,
+        {
+          endorsedByKeyId: parsed.data.endorsed_by_key_id,
+          signature: parsed.data.signature
+        },
+        parsed.data.endorsed_by_key_id
+      );
       if (!ok) return reply.code(404).send({ error: "agent identity key not found" });
       return reply.send({ endorsed: true });
     } catch (err) {

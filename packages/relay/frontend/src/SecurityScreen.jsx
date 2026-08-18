@@ -224,7 +224,7 @@ export default function SecurityScreen({ session, agents = [] }) {
     }
     if (!window.confirm(guard.message)) return;
     try {
-      await revokeOperatorKey(token, kid);
+      await revokeOperatorKey(token, kid, unlocked?.keyId);
       note("muted", `Revoked ${kid}.${deps > 0 ? ` Re-endorse the ${deps} affected agent(s) now.` : ""}`);
       await refresh();
     } catch (e) {

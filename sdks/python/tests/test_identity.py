@@ -88,9 +88,24 @@ def test_revocation_payloads_match_ts_shape():
             "revoked_at": "2026-08-16T00:00:00Z",
         }
     )
-    assert canonicalize(unrevoke_payload("flt_x", "kid")) == canonicalize(
-        {"v": 1, "t": "op-key-unrevoke", "fleet_id": "flt_x", "key_id": "kid"}
+    assert canonicalize(
+        unrevoke_payload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n1")
+    ) == canonicalize(
+        {
+            "v": 1,
+            "t": "op-key-unrevoke",
+            "fleet_id": "flt_x",
+            "key_id": "kid",
+            "revoked_at_being_cleared": "2026-08-16T00:00:00Z",
+            "issued_at": "2026-08-16T00:00:01Z",
+            "nonce": "n1",
+        }
     )
+    try:
+        unrevoke_payload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "")
+        raise AssertionError("empty nonce must be rejected")
+    except ValueError as exc:
+        assert "nonce" in str(exc)
 
 
 def test_reproduces_frozen_revocation_and_unrevoke_signatures():

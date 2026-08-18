@@ -80,17 +80,29 @@ export function revocationPayload(fleetId: string, revokedKeyId: string, revoked
 }
 
 /**
- * Canonical structure an operator key signs to UN-REVOKE a key (#27) — the
- * escape hatch for a revocation issued in error. It clears the tombstone so the
- * key can be re-admitted through the endorsement chain; it never re-pins on its
- * own, so re-admission still costs a valid endorsement.
+ * Canonical structure an operator key signs to UN-REVOKE a key (#27 / #48).
+ * Compare-and-swap: the signature names the exact revocation it undoes, when
+ * it was issued, and a nonce. A captured un-revoke for key X therefore cannot
+ * clear a later tombstone for X. The relay does not emit this yet.
  */
-export function unrevokePayload(fleetId: string, revokedKeyId: string) {
+export function unrevokePayload(
+  fleetId: string,
+  revokedKeyId: string,
+  revokedAtBeingCleared: string,
+  issuedAt: string,
+  nonce: string
+) {
+  if (!nonce) {
+    throw new Error("unrevoke nonce must be a non-empty string");
+  }
   return {
     v: 1,
     t: "op-key-unrevoke",
     fleet_id: fleetId,
     key_id: revokedKeyId,
+    revoked_at_being_cleared: revokedAtBeingCleared,
+    issued_at: issuedAt,
+    nonce,
   };
 }
 

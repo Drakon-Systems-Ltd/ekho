@@ -131,16 +131,55 @@ describe("revocationPayload / unrevokePayload", () => {
     );
   });
 
-  it("un-revoke binds fleet and key", () => {
-    expect(canonicalize(unrevokePayload("flt_x", "kid_back"))).toBe(
-      canonicalize({ v: 1, t: "op-key-unrevoke", fleet_id: "flt_x", key_id: "kid_back" })
+  it("un-revoke binds fleet, key, revoked_at, issued_at and nonce", () => {
+    expect(
+      canonicalize(unrevokePayload("flt_x", "kid_back", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n1"))
+    ).toBe(
+      canonicalize({
+        v: 1,
+        t: "op-key-unrevoke",
+        fleet_id: "flt_x",
+        key_id: "kid_back",
+        revoked_at_being_cleared: "2026-08-16T00:00:00Z",
+        issued_at: "2026-08-16T00:00:01Z",
+        nonce: "n1",
+      })
     );
+  });
+
+  it("rejects an empty nonce", () => {
+    expect(() => unrevokePayload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "")).toThrow(
+      /nonce/
+    );
+  });
+
+  it("two payloads for the same key with a different revoked_at do not verify interchangeably", () => {
+    const pub = ed25519.getPublicKey(SEED);
+    const a = unrevokePayload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n1");
+    const b = unrevokePayload("flt_x", "kid", "2026-08-17T00:00:00Z", "2026-08-16T00:00:01Z", "n1");
+    const sig = signCanonical(a, SEED);
+    expect(verifyCanonical(a, sig, pub)).toBe(true);
+    expect(verifyCanonical(b, sig, pub)).toBe(false);
+  });
+
+  it("two payloads for the same key with a different nonce do not verify interchangeably", () => {
+    const pub = ed25519.getPublicKey(SEED);
+    const a = unrevokePayload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n1");
+    const b = unrevokePayload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n2");
+    const sig = signCanonical(a, SEED);
+    expect(verifyCanonical(b, sig, pub)).toBe(false);
   });
 
   it("a revocation signature does not verify as an un-revoke (types are bound)", () => {
     const pub = ed25519.getPublicKey(SEED);
     const sig = signCanonical(revocationPayload("flt_x", "kid", "2026-08-16T00:00:00Z"), SEED);
-    expect(verifyCanonical(unrevokePayload("flt_x", "kid"), sig, pub)).toBe(false);
+    expect(
+      verifyCanonical(
+        unrevokePayload("flt_x", "kid", "2026-08-16T00:00:00Z", "2026-08-16T00:00:01Z", "n1"),
+        sig,
+        pub
+      )
+    ).toBe(false);
   });
 
   it("a revocation signature is bound to its revoked_at", () => {

@@ -37,9 +37,12 @@
       "v": 1,
       "t": "op-key-unrevoke",
       "fleet_id": "flt_demo",
-      "key_id": "_oEsEvOrTOasXbaa"
+      "key_id": "_oEsEvOrTOasXbaa",
+      "revoked_at_being_cleared": "2026-08-16T00:00:00Z",
+      "issued_at": "2026-08-16T00:00:01Z",
+      "nonce": "n1"
     },
-    "canonical": "{\"fleet_id\":\"flt_demo\",\"key_id\":\"_oEsEvOrTOasXbaa\",\"t\":\"op-key-unrevoke\",\"v\":1}",
-    "signature_b64url": "CcU5UZ9dDJJP-q-ti0-eMtECmPv3XD6TQyhJBjX8o_lYowRlvUQPbw5taZWnqmRbcWWX0ed834Uy67ZT7c8pBw"
+    "canonical": "{\"fleet_id\":\"flt_demo\",\"issued_at\":\"2026-08-16T00:00:01Z\",\"key_id\":\"_oEsEvOrTOasXbaa\",\"nonce\":\"n1\",\"revoked_at_being_cleared\":\"2026-08-16T00:00:00Z\",\"t\":\"op-key-unrevoke\",\"v\":1}",
+    "signature_b64url": "OGvc9UFfStwgFcREYBehZOAe0XchPvsbAMaaJRrD2BvgdfsXDEiXgp6lbXL48FZBzbbzwAG1fco0P02ce5jrBg"
   }
 }

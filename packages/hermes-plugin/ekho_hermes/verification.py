@@ -200,20 +200,34 @@ def _clear_tombstones_on_signed_unrevoke(
     The unsigned ABSENCE of ``revoked`` must never clear a tombstone: that was the
     #14 hole, where a relay could resurrect a dead key just by not mentioning it.
 
-    KNOWN GAP (#27): unrevoke_payload binds only (fleet, key_id) — no timestamp,
-    no nonce — so one legitimately issued un-revoke is replayable forever. A relay
-    that captured one for key X can clear a LATER tombstone for X, and the
-    endorsement that re-pins X is equally replayable. Nothing here can detect
-    that; the fix belongs in the payload (bind revoked_at, so an un-revoke names
-    the revocation it undoes). The relay does not emit unrevoke_sig yet, so the
-    bytes are still free to change — do it before it ships.
+    #48: the payload now binds revoked_at_being_cleared + issued_at + nonce.
+    Missing bind fields refuse the un-revoke (fail closed). The relay still
+    does not emit unrevoke_sig.
     """
     for k in operator_keys:
         key_id = getattr(k, "key_id", None)
         sig = getattr(k, "unrevoke_sig", None)
+        revoked_at = getattr(k, "unrevoke_revoked_at", None) or (
+            k.get("unrevoke_revoked_at") if isinstance(k, dict) else None
+        )
+        issued_at = getattr(k, "unrevoke_issued_at", None) or (
+            k.get("unrevoke_issued_at") if isinstance(k, dict) else None
+        )
+        nonce = getattr(k, "unrevoke_nonce", None) or (
+            k.get("unrevoke_nonce") if isinstance(k, dict) else None
+        )
         if not key_id or not sig or key_id not in revoked_ledger:
             continue
-        if not fleet_id or not signed_by_a_pinned_key(_identity.unrevoke_payload(fleet_id, key_id), sig):
+        if not revoked_at or not issued_at or not nonce:
+            log.warning(
+                "[ekho] refusing un-revoke of operator key %s: payload bind "
+                "fields missing. The tombstone stands.",
+                key_id,
+            )
+            continue
+        if not fleet_id or not signed_by_a_pinned_key(
+            _identity.unrevoke_payload(fleet_id, key_id, revoked_at, issued_at, nonce), sig
+        ):
             log.warning(
                 "[ekho] refusing un-revoke of operator key %s: no currently pinned "
                 "operator key signed it. The tombstone stands.",

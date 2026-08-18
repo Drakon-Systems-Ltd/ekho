@@ -110,8 +110,13 @@ export const registerOperatorKey = (token, { publicKey, label, endorsement }) =>
     method: "POST",
     body: { public_key: publicKey, label, ...(endorsement ? { endorsement } : {}) },
   });
-export const revokeOperatorKey = (token, keyId) =>
-  request(`/v1/operator/keys/${encodeURIComponent(keyId)}`, { token, method: "DELETE" });
+export const revokeOperatorKey = (token, keyId, actorKeyId) =>
+  request(
+    `/v1/operator/keys/${encodeURIComponent(keyId)}${
+      actorKeyId ? `?actor_key_id=${encodeURIComponent(actorKeyId)}` : ""
+    }`,
+    { token, method: "DELETE" }
+  );
 // #19: endorse a key that is already registered, signed by the live key held in
 // THIS browser. The rescue path for a device that can no longer sign for itself.
 export const endorseOperatorKey = (token, keyId, { endorsedByKeyId, signature }) =>

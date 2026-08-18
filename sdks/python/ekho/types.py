@@ -163,9 +163,12 @@ class OperatorKeyEntry:
     # those bytes, so the relay cannot restate when a key died.
     revocation_sig: Optional[str] = None
     revoked_at: Optional[str] = None
-    # #27: signature over unrevoke_payload(fleet_id, key_id) — clears a tombstone
-    # so the key can be re-admitted by endorsement. Never re-pins on its own.
+    # #27 / #48: signature over unrevoke_payload(fleet, key, revoked_at,
+    # issued_at, nonce). Never re-pins on its own.
     unrevoke_sig: Optional[str] = None
+    unrevoke_revoked_at: Optional[str] = None
+    unrevoke_issued_at: Optional[str] = None
+    unrevoke_nonce: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OperatorKeyEntry":
@@ -178,6 +181,9 @@ class OperatorKeyEntry:
             revocation_sig=data.get("revocation_sig"),
             revoked_at=data.get("revoked_at"),
             unrevoke_sig=data.get("unrevoke_sig"),
+            unrevoke_revoked_at=data.get("unrevoke_revoked_at"),
+            unrevoke_issued_at=data.get("unrevoke_issued_at"),
+            unrevoke_nonce=data.get("unrevoke_nonce"),
         )
 
 

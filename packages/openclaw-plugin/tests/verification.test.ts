@@ -41,9 +41,17 @@ function tmpdir() {
 function revSig(seed: Uint8Array, kid: string, at = REVOKED_AT, fleet = FLEET) {
   return signCanonical(revocationPayload(fleet, kid, at), seed);
 }
+const UNREV = {
+  unrevoke_revoked_at: REVOKED_AT,
+  unrevoke_issued_at: "2026-08-16T00:00:01Z",
+  unrevoke_nonce: "n1",
+};
 /** A signed un-revoke of `kid`, issued by `seed`. */
 function unrevSig(seed: Uint8Array, kid: string, fleet = FLEET) {
-  return signCanonical(unrevokePayload(fleet, kid), seed);
+  return signCanonical(
+    unrevokePayload(fleet, kid, UNREV.unrevoke_revoked_at, UNREV.unrevoke_issued_at, UNREV.unrevoke_nonce),
+    seed
+  );
 }
 /** Capture the structured notes the sync emits (it must never be silent). */
 function capture() {
@@ -362,7 +370,7 @@ describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
     expect(
       syncPinnedOperatorKeys(
         id,
-        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(OP1_SEED, OP2_KID) }],
+        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(OP1_SEED, OP2_KID), ...UNREV }],
         FLEET,
         QUIET
       )
@@ -381,6 +389,7 @@ describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
           key_id: OP2_KID,
           public_key: OP2_PUB,
           unrevoke_sig: unrevSig(OP1_SEED, OP2_KID),
+          ...UNREV,
           endorsed_by_key_id: OP1_KID,
           endorsement_sig: esig
         }
@@ -389,6 +398,19 @@ describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
       QUIET
     );
     expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
+  });
+
+  it("an un-revoke with a signature but no bind fields is refused", () => {
+    const id = tombstoned();
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(OP1_SEED, OP2_KID) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(REVOKED_AT);
   });
 
   it("UNSIGNED absence of `revoked` never clears a tombstone (the #14 hole)", () => {
@@ -404,7 +426,7 @@ describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
     expect(
       syncPinnedOperatorKeys(
         id,
-        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(rogue, OP2_KID) }],
+        [{ key_id: OP2_KID, public_key: OP2_PUB, unrevoke_sig: unrevSig(rogue, OP2_KID), ...UNREV }],
         FLEET,
         log
       )
@@ -428,7 +450,8 @@ describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
           revoked: true,
           revoked_at: REVOKED_AT,
           revocation_sig: revSig(OP1_SEED, OP2_KID),
-          unrevoke_sig: unrevSig(OP1_SEED, OP2_KID)
+          unrevoke_sig: unrevSig(OP1_SEED, OP2_KID),
+          ...UNREV
         }
       ],
       FLEET,

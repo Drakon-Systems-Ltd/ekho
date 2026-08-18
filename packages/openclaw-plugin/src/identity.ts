@@ -102,14 +102,27 @@ export function revocationPayload(fleetId: string, revokedKeyId: string, revoked
   };
 }
 
-/** Structure an operator key signs to UN-REVOKE a key (#27) — clears the
- *  tombstone so the key can be re-admitted by endorsement. Never re-pins. */
-export function unrevokePayload(fleetId: string, revokedKeyId: string) {
+/** Structure an operator key signs to UN-REVOKE a key (#27 / #48).
+ *  Binds the revocation being undone, issue time, and a nonce so a captured
+ *  un-revoke cannot clear a later tombstone. Never re-pins. */
+export function unrevokePayload(
+  fleetId: string,
+  revokedKeyId: string,
+  revokedAtBeingCleared: string,
+  issuedAt: string,
+  nonce: string
+) {
+  if (!nonce) {
+    throw new Error("unrevoke nonce must be a non-empty string");
+  }
   return {
     v: 1,
     t: "op-key-unrevoke",
     fleet_id: fleetId,
     key_id: revokedKeyId,
+    revoked_at_being_cleared: revokedAtBeingCleared,
+    issued_at: issuedAt,
+    nonce,
   };
 }
 

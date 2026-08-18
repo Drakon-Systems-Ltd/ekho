@@ -165,6 +165,8 @@ describe("revocation guard (#15)", () => {
     expect(g.selfRevoke).toBe(true);
     expect(g.message).toMatch(/this device/i);
     expect(g.message).toMatch(/endorse/i); // says what you lose
+    expect(g.message).toMatch(/cannot be undone/i);
+    expect(g.message).toMatch(/mint a new device key/i);
   });
 
   it("keeps the plain dependents warning for someone else's key", () => {
