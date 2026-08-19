@@ -360,7 +360,18 @@ export class EkhoDb {
       .all(fleetId) as OperatorKeyRow[];
   }
 
-  revokeOperatorKey(fleetId: string, targetKeyId: string, actorKeyId?: string | null): boolean {
+  /**
+   * Tombstone an operator key. `actorKeyId` is the AUTHENTICATED actor and is
+   * the only thing written to the audit trail's actor_id. `claimedActorKeyId`
+   * (#53) is a caller-asserted device key id, recorded in the payload as
+   * unverified so a debugging hint can never pass for an identity.
+   */
+  revokeOperatorKey(
+    fleetId: string,
+    targetKeyId: string,
+    actorKeyId?: string | null,
+    claimedActorKeyId?: string | null
+  ): boolean {
     const revokedAt = nowIso();
     const res = this.db
       .prepare(
@@ -376,7 +387,7 @@ export class EkhoDb {
         "operator_key",
         targetKeyId,
         null,
-        { revoked_at: revokedAt }
+        { revoked_at: revokedAt, claimed_actor_key_id_unverified: claimedActorKeyId ?? null }
       );
       return true;
     }

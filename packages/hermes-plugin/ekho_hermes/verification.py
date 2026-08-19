@@ -234,6 +234,21 @@ def _clear_tombstones_on_signed_unrevoke(
                 key_id,
             )
             continue
+        # #52: the compare half of the compare-and-swap. Signing over
+        # revoked_at_being_cleared is only worth anything if apply-time checks it
+        # against the tombstone actually standing right now — otherwise a valid
+        # un-revoke captured for an OLD revocation clears whatever NEWER one has
+        # replaced it.
+        if revoked_at != revoked_ledger[key_id]:
+            log.warning(
+                "[ekho] refusing un-revoke of operator key %s: it is bound to a revocation "
+                "at %s, but the live tombstone is at %s — a newer revocation this un-revoke "
+                "never authorized. The tombstone stands.",
+                key_id,
+                revoked_at,
+                revoked_ledger[key_id],
+            )
+            continue
         del revoked_ledger[key_id]
         out["ledger_changed"] = True
         log.info(

@@ -110,6 +110,19 @@ function clearTombstonesOnSignedUnrevoke(ctx: ClaimCtx, out: RelayKeyClaims): vo
       );
       continue;
     }
+    // #52: the compare half of the compare-and-swap. Signing over
+    // revoked_at_being_cleared is only worth anything if apply-time checks it
+    // against the tombstone actually standing right now — otherwise a valid
+    // un-revoke captured for an OLD revocation clears whatever NEWER one has
+    // replaced it.
+    if (revokedAt !== ctx.revokedLedger[kid]) {
+      ctx.log?.warn?.(
+        `[ekho] refusing un-revoke of operator key ${kid}: it is bound to a revocation at ${revokedAt}, ` +
+          `but the live tombstone is at ${ctx.revokedLedger[kid]} — a newer revocation this un-revoke ` +
+          `never authorized. The tombstone stands.`
+      );
+      continue;
+    }
     delete ctx.revokedLedger[kid];
     out.ledgerChanged = true;
     ctx.log?.info?.(
