@@ -4,6 +4,15 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-19
+
+### Security
+- **Revoke audit actor is authenticated, not client-supplied (#53).** `DELETE /v1/operator/keys/:keyId` previously wrote the caller's `?actor_key_id=` query param as the audit event's `actor_id`; it is now always the authenticated session's operator id.
+- **Unrevoke apply-time is compare-and-swap against the live tombstone (#52).** Both agent-side appliers now refuse to clear a tombstone when the signed `revoked_at_being_cleared` does not match the current live value.
+
+### Notes
+- Relay hot path. OpenClaw/Hermes agent plugins are version-bumped in lockstep; no agent protocol break.
+
 ## [0.4.3] - 2026-08-18
 
 ### Security

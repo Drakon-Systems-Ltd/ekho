@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-19
+
+### Security
+- Unrevoke apply-time now compares the signed `revoked_at_being_cleared` against the live tombstone before clearing it, refusing on mismatch (#52). Previously a valid un-revoke captured for an old revocation could clear a newer tombstone for the same key.
+
 ## [0.4.3] - 2026-08-18
 
 ### Security

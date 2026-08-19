@@ -18,7 +18,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.4.3` — operator-key lifecycle audit events, compare-and-swap unrevoke payload, terminal revoke confirmation. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.4.4` — revoke audit actor is now the authenticated session (not client-supplied), and unrevoke apply-time is compare-and-swap against the live tombstone. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 

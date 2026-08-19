@@ -1,6 +1,6 @@
 {
   "id": "ekho-adapter",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "name": "Ekho Relay Adapter",
   "description": "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
   "configSchema": {

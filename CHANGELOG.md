@@ -4,6 +4,12 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-19
+
+### Security
+- **Revoke audit actor is authenticated, not client-supplied (#53).** `DELETE /v1/operator/keys/:keyId` previously wrote the caller's `?actor_key_id=` query param as the audit event's `actor_id`, so any authenticated operator session could mint a revoke event attributed to another device's key. The actor is now always `request.operator.id`, matching register/endorse; the caller-claimed key id is kept in the event payload as `claimed_actor_key_id_unverified` for debugging, never as identity.
+- **Unrevoke apply-time is compare-and-swap against the live tombstone (#52).** `unrevokePayload` binds `revoked_at_being_cleared` at signing time, but both agent-side appliers (openclaw-plugin, hermes-plugin) cleared the tombstone unconditionally once the signature verified — so a valid un-revoke captured for an old revocation could clear a newer tombstone for the same key. Apply-time now compares the bound timestamp to the live ledger value and refuses the clear on mismatch.
+
 ## [0.4.3] - 2026-08-18
 
 ### Security
