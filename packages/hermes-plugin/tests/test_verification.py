@@ -54,6 +54,28 @@ def unrev_sig(seed, kid, fleet=FLEET):
     )
 
 
+def unrev_bound_to(seed, kid, bound_revoked_at, fleet=FLEET):
+    """A signed un-revoke of ``kid`` BOUND to a specific tombstone timestamp (#52)."""
+    bind = dict(
+        unrevoke_revoked_at=bound_revoked_at,
+        unrevoke_issued_at="2026-08-16T00:00:01Z",
+        unrevoke_nonce="n1",
+    )
+    return dict(
+        bind,
+        unrevoke_sig=identity.sign_canonical(
+            identity.unrevoke_payload(
+                fleet,
+                kid,
+                bind["unrevoke_revoked_at"],
+                bind["unrevoke_issued_at"],
+                bind["unrevoke_nonce"],
+            ),
+            seed,
+        ),
+    )
+
+
 class CaptureLog:
     """Stand-in for a logging.Logger that keeps what the sync said."""
 
@@ -370,6 +392,53 @@ def test_signed_unrevoke_lets_the_chain_re_admit_the_key():
     ]
     sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=QUIET)
     assert ident.pinned_operator_keys[OP2_KID] == OP2_PUB
+
+
+def test_unrevoke_with_a_signature_but_no_bind_fields_is_refused():
+    # #48: the bind fields are what make an un-revoke a compare-and-swap. An
+    # entry that carries only the signature is a downgrade to the unbound form.
+    ident = _tombstoned()
+    served = [OperatorKeyEntry(key_id=OP2_KID, public_key=OP2_PUB, unrevoke_sig=unrev_sig(OP1_SEED, OP2_KID))]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=QUIET) is False
+    assert ident.revoked_operator_keys[OP2_KID] == REVOKED_AT
+
+
+# #52: the payload binds the tombstone it undoes, but apply-time never compared
+# that bound value to the LIVE one — so a captured un-revoke for an old
+# revocation cleared whatever newer tombstone happened to be standing.
+NEWER_AT = "2026-08-17T00:00:00Z"
+
+
+def test_unrevoke_bound_to_an_older_tombstone_never_clears_a_newer_one():
+    ident = EkhoIdentity(
+        seed_hex="00" * 32,
+        pinned_operator_keys={OP1_KID: OP1_PUB},
+        revoked_operator_keys={OP2_KID: NEWER_AT},
+    )
+    log = CaptureLog()
+    served = [
+        OperatorKeyEntry(
+            key_id=OP2_KID, public_key=OP2_PUB, **unrev_bound_to(OP1_SEED, OP2_KID, REVOKED_AT)
+        )
+    ]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log) is False
+    assert ident.revoked_operator_keys[OP2_KID] == NEWER_AT
+    assert OP2_KID in log.text()
+
+
+def test_unrevoke_bound_to_the_current_live_tombstone_clears_it():
+    ident = EkhoIdentity(
+        seed_hex="00" * 32,
+        pinned_operator_keys={OP1_KID: OP1_PUB},
+        revoked_operator_keys={OP2_KID: NEWER_AT},
+    )
+    served = [
+        OperatorKeyEntry(
+            key_id=OP2_KID, public_key=OP2_PUB, **unrev_bound_to(OP1_SEED, OP2_KID, NEWER_AT)
+        )
+    ]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=QUIET) is True
+    assert OP2_KID not in ident.revoked_operator_keys
 
 
 def test_unsigned_absence_of_revoked_never_clears_a_tombstone():

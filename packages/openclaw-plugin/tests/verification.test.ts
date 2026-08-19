@@ -53,6 +53,21 @@ function unrevSig(seed: Uint8Array, kid: string, fleet = FLEET) {
     seed
   );
 }
+/** A signed un-revoke of `kid` BOUND to a specific tombstone timestamp (#52). */
+function unrevBoundTo(seed: Uint8Array, kid: string, boundRevokedAt: string, fleet = FLEET) {
+  const bind = {
+    unrevoke_revoked_at: boundRevokedAt,
+    unrevoke_issued_at: "2026-08-16T00:00:01Z",
+    unrevoke_nonce: "n1"
+  };
+  return {
+    ...bind,
+    unrevoke_sig: signCanonical(
+      unrevokePayload(fleet, kid, bind.unrevoke_revoked_at, bind.unrevoke_issued_at, bind.unrevoke_nonce),
+      seed
+    )
+  };
+}
 /** Capture the structured notes the sync emits (it must never be silent). */
 function capture() {
   const notes: string[] = [];
@@ -411,6 +426,47 @@ describe("syncPinnedOperatorKeys — signed un-revoke (#27)", () => {
       )
     ).toBe(false);
     expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(REVOKED_AT);
+  });
+
+  // #52: the payload binds the tombstone it undoes, but apply-time never
+  // compared that bound value to the LIVE one — so a captured un-revoke for an
+  // old revocation cleared whatever newer tombstone happened to be standing.
+  it("an un-revoke bound to an OLDER tombstone never clears a NEWER one", () => {
+    const NEWER_AT = "2026-08-17T00:00:00.000Z";
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB },
+      revokedOperatorKeys: { [OP2_KID]: NEWER_AT }
+    };
+    const { notes, log } = capture();
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, ...unrevBoundTo(OP1_SEED, OP2_KID, REVOKED_AT) }],
+        FLEET,
+        log
+      )
+    ).toBe(false);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBe(NEWER_AT);
+    expect(notes.join("\n")).toContain(OP2_KID);
+  });
+
+  it("an un-revoke bound to the CURRENT live tombstone clears it", () => {
+    const NEWER_AT = "2026-08-17T00:00:00.000Z";
+    const id: EkhoIdentity = {
+      seedHex: "00".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB },
+      revokedOperatorKeys: { [OP2_KID]: NEWER_AT }
+    };
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, ...unrevBoundTo(OP1_SEED, OP2_KID, NEWER_AT) }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(true);
+    expect(id.revokedOperatorKeys?.[OP2_KID]).toBeUndefined();
   });
 
   it("UNSIGNED absence of `revoked` never clears a tombstone (the #14 hole)", () => {

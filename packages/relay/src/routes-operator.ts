@@ -275,12 +275,20 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
       return reply.code(401).send({ error: "unauthorized" });
     }
     const { keyId } = request.params as { keyId: string };
+    // #53: the audit actor is the AUTHENTICATED session, never the query string.
+    // Sourcing actor_id from ?actor_key_id= let any operator session mint a
+    // revoke attributed to another device's key. The claimed id is still useful
+    // for debugging ("which browser fired this?"), so it is kept in the payload
+    // — clearly labelled as unverified, where nothing reads it as identity.
     const query = request.query as { actor_key_id?: string } | undefined;
-    const actorKeyId =
-      typeof query?.actor_key_id === "string" && query.actor_key_id
-        ? query.actor_key_id
-        : request.operator.id;
-    const revoked = db.revokeOperatorKey(request.operator.fleetId, keyId, actorKeyId);
+    const claimedActorKeyId =
+      typeof query?.actor_key_id === "string" && query.actor_key_id ? query.actor_key_id : null;
+    const revoked = db.revokeOperatorKey(
+      request.operator.fleetId,
+      keyId,
+      request.operator.id,
+      claimedActorKeyId
+    );
     if (!revoked) return reply.code(404).send({ error: "key not found" });
     return reply.send({ revoked: true });
   });
