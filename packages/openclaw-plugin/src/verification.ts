@@ -433,3 +433,89 @@ export function buildSignedSendFields(opts: {
   };
   return { agent_sig: signCanonical(canonical, seed), key_id: kid, sig_canonical: canonical };
 }
+
+/** A quoted snapshot of another message — a reply target (`reply_to`) or a
+ *  conversation-history / floor-tail entry. Since #43 the relay copies the
+ *  signature fields of the message it quotes onto the snapshot, so a snapshot
+ *  can be checked rather than merely inspected. Note the shape difference from
+ *  an inbox message: a snapshot carries `text` at the top level, not `body.text`. */
+export interface MsgSnapshotLike {
+  message_id?: string;
+  sender_agent_id?: string;
+  sender_kind?: "operator" | "agent";
+  text?: string;
+  message_type?: string;
+  priority?: string;
+  attachments?: string[];
+  operator_sig?: string | null;
+  agent_sig?: string | null;
+  key_id?: string | null;
+  sig_canonical?: Record<string, unknown> | null;
+}
+
+/** Verdict for one quoted snapshot: did its signature actually check out? */
+export type SnapshotVerifier = (snapshot: MsgSnapshotLike | null | undefined) => boolean;
+
+/** The fail-closed default (#20): when verification cannot run — no pinned
+ *  operator keys, no fleet id, no identity — every snapshot is UNVERIFIED.
+ *  Never "it has a signature field, so call it signed". */
+export const NO_SNAPSHOT_VERIFICATION: SnapshotVerifier = () => false;
+
+/**
+ * Build the snapshot verifier for one turn, from the same trust root the
+ * autowake path uses: this agent's pinned operator keys plus the batch roster.
+ *
+ * Runs the ordinary inbound verifier (`verifyInbound`) over a snapshot mapped
+ * into its `SignedMessage` shape — there is deliberately no second, laxer
+ * verifier for quoted text. Two consequences worth naming:
+ *
+ *  - An older relay that omits `sig_canonical` (or the v2-bound `message_type` /
+ *    `priority` / `attachments`) simply fails the checks, so its snapshots read
+ *    UNVERIFIED. That is the intended direction to fail in.
+ *  - The nonce set is fresh per turn rather than the live seen-nonce set. A
+ *    quote is by definition a re-presentation of a message that may already
+ *    have been delivered and had its nonce burned; the burn exists to stop a
+ *    replayed message WAKING a turn, and a snapshot can never wake one. The
+ *    staleness window is left at the verifier's default, so a snapshot replayed
+ *    from beyond it still reads UNVERIFIED.
+ */
+export function makeSnapshotVerifier(opts: {
+  identity?: EkhoIdentity | null;
+  selfAgentId: string;
+  fleetId: string | null | undefined;
+  roster: RosterEntryLike[];
+  now: Date;
+}): SnapshotVerifier {
+  const operatorKeys = { ...(opts.identity?.pinnedOperatorKeys ?? {}) };
+  const fleetId = opts.fleetId;
+  if (Object.keys(operatorKeys).length === 0 || !fleetId) return NO_SNAPSHOT_VERIFICATION;
+  const rosterByAgent: Record<string, RosterEntryLike> = {};
+  for (const r of opts.roster ?? []) if (r.agent_id) rosterByAgent[String(r.agent_id)] = r;
+  return (snapshot) => {
+    if (!snapshot || typeof snapshot !== "object") return false;
+    const asMessage: SignedMessage = {
+      message_id: snapshot.message_id,
+      sender_kind: snapshot.sender_kind,
+      sender_agent_id: snapshot.sender_agent_id,
+      message_type: snapshot.message_type,
+      priority: snapshot.priority,
+      // `text` -> `body.text`: body_sha256 must bind the snapshot's own text.
+      body: {
+        text: typeof snapshot.text === "string" ? snapshot.text : "",
+        attachments: Array.isArray(snapshot.attachments) ? snapshot.attachments : []
+      },
+      operator_sig: snapshot.operator_sig ?? null,
+      agent_sig: snapshot.agent_sig ?? null,
+      key_id: snapshot.key_id ?? null,
+      sig_canonical: snapshot.sig_canonical ?? null
+    };
+    return verifyInbound(asMessage, {
+      selfAgentId: opts.selfAgentId,
+      fleetId,
+      operatorKeys,
+      rosterByAgent,
+      seenNonces: new Set<string>(),
+      now: opts.now
+    }).verified;
+  };
+}

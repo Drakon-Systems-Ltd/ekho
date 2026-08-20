@@ -1412,13 +1412,14 @@ export class EkhoDb {
     if (replyToIds.length && fleetId) {
       const ph = replyToIds.map(() => "?").join(",");
       contextRows.push(...(this.db.prepare(
-        `SELECT id, conversation_id, sender_agent_id, body_json, metadata_json, created_at FROM messages WHERE fleet_id = ? AND id IN (${ph})`
+        `SELECT id, conversation_id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at
+         FROM messages WHERE fleet_id = ? AND id IN (${ph})`
       ).all(fleetId, ...replyToIds) as Array<Record<string, unknown>>));
     }
     const historyByConv = new Map<string, Array<Record<string, unknown>>>();
     for (const cid of roomConvIds) {
       const rows = (this.db.prepare(
-        `SELECT id, sender_agent_id, body_json, metadata_json, created_at FROM messages
+        `SELECT id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at FROM messages
          WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
       ).all(fleetId, cid, HISTORY_LIMIT) as Array<Record<string, unknown>>).reverse(); // chronological
       historyByConv.set(cid, rows);
@@ -1448,15 +1449,23 @@ export class EkhoDb {
         sender_label: sk === "operator" ? String(m.sender_label ?? "Operator") : (info?.display_name ?? String(row.sender_agent_id)),
         text: typeof body.text === "string" ? body.text : "",
         created_at: row.created_at,
-        // #20 leftover: history used to carry text with no signature. The plugin
-        // then labelled it [unverified] and refused retract authority — honest,
-        // but it could not check even when the signature existed on the row.
-        // Same sender-kind gate as the inbox delivery path: an agent cannot
-        // inject a fake operator_sig onto a snapshot.
+        // #43: history used to carry text with no signature, so the plugin could
+        // not check a snapshot even when the row had one. Carrying it does NOT
+        // make the snapshot trusted — the plugin verifies it before granting it
+        // anything (#20); this is only what it verifies against. Same
+        // sender-kind gate as the inbox delivery path: an agent cannot inject a
+        // fake operator_sig onto a snapshot.
         operator_sig: sk === "operator" ? (m.operator_sig ?? null) : null,
         agent_sig: sk === "agent" ? (m.agent_sig ?? null) : null,
         key_id: m.key_id ?? null,
-        sig_canonical: m.sig_canonical ?? null
+        sig_canonical: m.sig_canonical ?? null,
+        // A v2 envelope (#9) signs over these too, so a snapshot that omits
+        // them can never be verified — the recipient would be comparing the
+        // signed message_type against nothing. Same values the delivery path
+        // exposes; the signature is what decides whether to believe them.
+        message_type: row.message_type ?? "",
+        priority: row.priority ?? "",
+        attachments: Array.isArray(body.attachments) ? (body.attachments as unknown[]).map(String) : []
       };
     };
     const replyRowById = new Map<string, Record<string, unknown>>();
@@ -1618,7 +1627,7 @@ export class EkhoDb {
    */
   getConversationTail(fleetId: string, conversationId: string, limit: number) {
     const rows = (this.db.prepare(
-      `SELECT id, sender_agent_id, body_json, metadata_json, created_at FROM messages
+      `SELECT id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at FROM messages
        WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(fleetId, conversationId, Math.max(1, limit)) as Array<Record<string, unknown>>).reverse();
     if (rows.length === 0) return [];
@@ -1632,7 +1641,12 @@ export class EkhoDb {
     }
     return rows.map((r) => {
       let text = "";
-      try { const b = JSON.parse(String(r.body_json) || "{}") as Record<string, unknown>; if (typeof b.text === "string") text = b.text; } catch { /* empty */ }
+      let attachments: string[] = [];
+      try {
+        const b = JSON.parse(String(r.body_json) || "{}") as Record<string, unknown>;
+        if (typeof b.text === "string") text = b.text;
+        if (Array.isArray(b.attachments)) attachments = (b.attachments as unknown[]).map(String);
+      } catch { /* empty */ }
       const meta = r.metadata_json ? (() => { try { return JSON.parse(String(r.metadata_json)) as Record<string, unknown>; } catch { return {}; } })() : {};
       const inf = info.get(String(r.sender_agent_id));
       const sk = inf?.runtime === "operator" ? "operator" : "agent";
@@ -1646,7 +1660,12 @@ export class EkhoDb {
         operator_sig: sk === "operator" ? (meta.operator_sig ?? null) : null,
         agent_sig: sk === "agent" ? (meta.agent_sig ?? null) : null,
         key_id: meta.key_id ?? null,
-        sig_canonical: meta.sig_canonical ?? null
+        sig_canonical: meta.sig_canonical ?? null,
+        // v2 (#9) signs over these; without them the tail cannot be verified,
+        // and an unverifiable tail never gets supersede authority (#20).
+        message_type: r.message_type ?? "",
+        priority: r.priority ?? "",
+        attachments
       };
     });
   }
