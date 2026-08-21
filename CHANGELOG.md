@@ -4,9 +4,14 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-21
+
 ### Security
 - **History and quote snapshots are cryptographically verified, not signature-shaped (#20).** Both agent plugins treated a quoted snapshot (`reply_to`, room `conversation_history`, floor `conversation_tail`) as signed whenever `operator_sig` or `agent_sig` was merely PRESENT. Junk in either field was enough to strip the `[unverified]` tag and, for a held-back turn's tail, to win the #16 "retract or supersede what you were about to say" header — the most-trusted position in the prompt. Snapshots now run through the existing inbound verifier (`verifyInbound` / `ekho.verify_inbound`) against the same pinned operator keys and roster the autowake path uses, with the snapshot's own `text` mapped to `body.text` so `body_sha256` binds what is rendered. Failed, unsigned, canonical-less, or unverifiable-because-dormant all render `[unverified]` and stay context-only. The Hermes plugin previously did not label snapshots at all and granted supersede framing unconditionally; it now matches OpenClaw.
 - **Relay snapshots carry the v2-bound fields (#9, #20).** `message_type`, `priority` and the body's attachment ids are now included alongside `sig_canonical` on inbox history, `reply_to` and floor-tail snapshots. Without them a v2 envelope's own bindings have nothing to check against, so every genuinely signed snapshot would have failed verification.
+
+### Notes
+- Delivered by PR #55, closing #20. Relay plus both agent plugins; the SDK is version-bumped in lockstep. No agent protocol break.
 
 ## [0.4.4] - 2026-08-19
 

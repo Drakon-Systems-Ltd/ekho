@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-21
+
 ### Security
 - **A quoted snapshot is trusted only once its signature CHECKS (#20).** `snapshotHasSignature` returned `Boolean(e.operator_sig || e.agent_sig)`, so any bytes at all in either field stripped the `[unverified]` tag from a `reply_to` quote or a history line, and — for a held-back turn — handed the conversation tail the #16 *"retract or supersede what you were about to say"* header, the most-trusted position in the prompt. Presence is not verification: a forged `agent_sig`, a signature over different text, a peer key the operator never endorsed, and an unsigned snapshot are now all `[unverified]` and context-only. `makeSnapshotVerifier` runs the existing `verifyInbound` over the snapshot (its own `text` mapped to `body.text`, so `body_sha256` binds what is rendered) against the same pinned operator keys and roster the autowake path uses. When verification cannot run at all — no pinned keys, no fleet id, no identity — every snapshot is unverified; the dormant state never falls back to "looks signed".
 

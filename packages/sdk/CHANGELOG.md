@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-21
+
+### Notes
+- No SDK surface change. Version bumped in lockstep with the relay and agent plugins (#55); no agent protocol break.
+
 ## [0.4.4] - 2026-08-19
 
 ### Security

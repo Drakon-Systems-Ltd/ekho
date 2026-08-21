@@ -1,6 +1,6 @@
 {
   "name": "@drakon-systems/ekho-sdk",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Agent SDK for Ekho \u2014 the private communication layer for distributed AI agents.",
   "license": "MIT",
   "author": "Drakon Systems <hello@drakonsystems.com> (https://drakonsystems.com)",
