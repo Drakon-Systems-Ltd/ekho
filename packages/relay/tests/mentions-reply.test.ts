@@ -134,6 +134,15 @@ describe("mentions, reply-to, and room history", () => {
     expect(bEntry).toHaveProperty("agent_sig");
     expect(bEntry).toHaveProperty("key_id");
     expect(bEntry).toHaveProperty("sig_canonical");
+    // #20: a v2 envelope (#9) signs over message_type/priority/attachments, so
+    // a snapshot that quotes the signature but drops what it covers can never
+    // be verified — the recipient would compare the signed message_type against
+    // nothing, fail the binding, and downgrade every genuinely signed snapshot
+    // to [unverified]. They must ride along, and must match the delivery.
+    const delivered = inboxA.body.messages.find((m: { body: { text: string } }) => m.body.text === "b reply");
+    expect(bEntry.message_type).toBe(delivered.message_type);
+    expect(bEntry.priority).toBe(delivered.priority);
+    expect(bEntry.attachments).toEqual([]);
   });
 
   it("never serves room history to a non-member (history IDOR guard)", async () => {

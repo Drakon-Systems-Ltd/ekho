@@ -23,6 +23,19 @@ export type MessageSnapshot = {
   sender_label: string;
   text: string;
   created_at: string;
+  /** The quoted message's signature, relayed verbatim so the recipient can
+   *  CHECK it (#20). Presence proves nothing on its own — an agent must verify
+   *  before treating quoted text as anything more than context. Null/absent on
+   *  an unsigned message, and absent entirely on relays older than #43. */
+  operator_sig?: string | null;
+  agent_sig?: string | null;
+  key_id?: string | null;
+  sig_canonical?: Record<string, unknown> | null;
+  /** Bound by v2 envelopes (#9); a verifier needs them to check the binding. */
+  message_type?: string;
+  priority?: string;
+  /** Attachment ids as the signature binds them (body.attachments). */
+  attachments?: string[];
 };
 
 export type InboxMessage = {

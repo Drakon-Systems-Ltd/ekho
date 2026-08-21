@@ -17,10 +17,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import datetime
-from typing import Any, Dict, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Optional, Sequence, Set
 
 from ekho import identity as _identity
 from ekho import verify_inbound
+from ekho.types import InboxMessage
 from ekho.verify import VerificationResult
 
 from .messages import iso_now
@@ -497,3 +498,89 @@ def should_autowake(
     if signed and verification is not None:
         return bool(verification.verified)
     return True
+
+
+def make_snapshot_verifier(
+    *,
+    identity_obj: Any,
+    self_agent_id: str,
+    fleet_id: Optional[str],
+    roster: Sequence[Any],
+    now: datetime,
+) -> Callable[[Optional[Dict[str, Any]]], bool]:
+    """Build the verifier for QUOTED snapshots (``reply_to``, room history, floor
+    tails) for one turn, from the same trust root the autowake path uses: this
+    agent's pinned operator keys plus the batch roster.
+
+    Since #43 the relay copies the quoted message's signature onto the snapshot.
+    Presence of those fields is NOT verification (#20) — a forged ``agent_sig``
+    is trivially cheap, and until this ran, junk in that field bought a snapshot
+    the most-trusted position in the prompt. So run the ordinary inbound
+    verifier over it; there is deliberately no second, laxer verifier for
+    quoted text.
+
+    Two consequences worth naming:
+
+    - When verification cannot run at all (no pinned keys, no fleet id), every
+      snapshot is UNVERIFIED. The dormant state must never read as "looks
+      signed". An older relay that omits ``sig_canonical`` (or the v2-bound
+      ``message_type`` / ``priority`` / ``attachments``) fails the checks for
+      the same reason, which is the safe direction to fail in.
+    - The nonce set is fresh per turn rather than the live seen-nonce set. A
+      quote is by definition a re-presentation of a message that may already
+      have been delivered and had its nonce burned; the burn exists to stop a
+      replayed message WAKING a turn, and a snapshot can never wake one. The
+      staleness window is left at the verifier's default, so a snapshot
+      replayed from beyond it still reads UNVERIFIED.
+    """
+    operator_keys = dict(getattr(identity_obj, "pinned_operator_keys", None) or {})
+    if not operator_keys or not fleet_id:
+        return lambda _snapshot: False
+    roster_by_agent = {getattr(r, "agent_id", None): r for r in (roster or [])}
+
+    def _verify(snapshot: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        text = snapshot.get("text")
+        attachments = snapshot.get("attachments")
+        as_message = InboxMessage(
+            message_id=str(snapshot.get("message_id") or ""),
+            conversation_id="",
+            correlation_id="",
+            sender_agent_id=str(snapshot.get("sender_agent_id") or ""),
+            message_type=str(snapshot.get("message_type") or ""),
+            priority=str(snapshot.get("priority") or ""),
+            # ``text`` -> ``body["text"]``: body_sha256 must bind the snapshot's
+            # own text, not some other field's.
+            body={
+                "text": text if isinstance(text, str) else "",
+                "attachments": list(attachments) if isinstance(attachments, list) else [],
+            },
+            metadata={},
+            created_at=str(snapshot.get("created_at") or ""),
+            deadline_at="",
+            sender_kind=snapshot.get("sender_kind"),
+            operator_sig=snapshot.get("operator_sig"),
+            agent_sig=snapshot.get("agent_sig"),
+            key_id=snapshot.get("key_id"),
+            sig_canonical=snapshot.get("sig_canonical"),
+        )
+        return bool(
+            verify_inbound(
+                as_message,
+                self_agent_id=self_agent_id,
+                fleet_id=fleet_id,
+                operator_keys=operator_keys,
+                roster_by_agent=roster_by_agent,
+                seen_nonces=set(),
+                now=now,
+            ).verified
+        )
+
+    return _verify
+
+
+#: The fail-closed default (#20): when no verifier is supplied, nothing is
+#: verified. Never "it has a signature field, so call it signed".
+def no_snapshot_verification(_snapshot: Optional[Dict[str, Any]]) -> bool:
+    return False
