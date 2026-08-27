@@ -287,8 +287,9 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_LOGIN_MAX_FAILURES` | `10` | Failed operator logins (per account and per IP) before throttling |
 | `EKHO_LOGIN_WINDOW_SECONDS` | `900` | Rolling window over which those failures are counted |
 | `EKHO_LOGIN_THROTTLE_MAX_BUCKETS` | `50000` | Memory bound for login-throttle account/IP buckets |
-| `EKHO_OPERATOR_REQUIRE_TAILNET` | `0` | Set `1` to require operator requests to carry a Tailscale identity |
-| `EKHO_TRUSTED_PROXY_IPS` | loopback | Socket addresses allowed to speak for clients via `X-Forwarded-For` (the reverse proxy in front of the relay) |
+| `EKHO_OPERATOR_REQUIRE_TAILNET` | `0` | Set `1` to require operator requests to arrive from a trusted proxy (`EKHO_TRUSTED_PROXY_IPS`) carrying a Tailscale identity |
+| `EKHO_OPERATOR_TAILNET_USER` | — | Optional: restrict operator access to a single Tailscale login |
+| `EKHO_TRUSTED_PROXY_IPS` | loopback | Socket addresses trusted to speak for clients — the `X-Forwarded-For` client IP and the Tailscale identity headers are believed only from these peers |
 | `EKHO_ATTACHMENT_FLEET_QUOTA_BYTES` | `1073741824` | Total attachment bytes per fleet (1 GiB) |
 | `EKHO_ATTACHMENT_UPLOAD_MAX_PER_WINDOW` | `20` | Attachment uploads per uploader per minute |
 | `EKHO_ATTACHMENT_UNBOUND_TTL_SECONDS` / `EKHO_ATTACHMENT_RETENTION_SECONDS` | `21600` / `2592000` | GC: unbound uploads after 6h, message-bound after 30 days |

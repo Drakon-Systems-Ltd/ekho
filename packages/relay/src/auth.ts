@@ -2,7 +2,7 @@ import { FastifyReply, FastifyRequest } from "fastify";
 import { config } from "./config";
 import { db } from "./db";
 import { hashSecret, sha256, sign, timingSafeEqualStr } from "./utils";
-import { evaluateTailnetGate, tailnetLoginFromHeaders } from "./tailnet";
+import { evaluateRequestTailnetGate } from "./tailnet";
 import { verifyOperatorSession } from "./operator-session";
 
 declare module "fastify" {
@@ -69,10 +69,10 @@ export async function requireAgentAuth(request: FastifyRequest, reply: FastifyRe
 
 export async function requireOperatorAuth(request: FastifyRequest, reply: FastifyReply) {
   // Tailnet gate (defense in depth): even a valid token is rejected off-tailnet.
-  const gate = evaluateTailnetGate({
-    require: config.operatorRequireTailnet,
-    allowedUser: config.operatorTailnetUser,
-    login: tailnetLoginFromHeaders(request.headers as Record<string, unknown>)
+  // The identity header only counts from a trusted proxy peer (#60).
+  const gate = evaluateRequestTailnetGate({
+    ip: request.ip,
+    headers: request.headers as Record<string, unknown>
   });
   if (!gate.allowed) {
     return reply.code(403).send({ error: gate.reason });
