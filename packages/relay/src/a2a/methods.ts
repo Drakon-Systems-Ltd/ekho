@@ -70,6 +70,24 @@ export interface A2AMethodContext {
   targetAgentId?: string;
 }
 
+/**
+ * #58: fetch a task the caller is a participant of, or refuse. A task the caller
+ * is not on is reported as NOT FOUND rather than forbidden — an A2A task id is
+ * guessable-adjacent and "forbidden" would confirm another agent's task exists,
+ * which is the disclosure the native /v1/messages/:id/status route already
+ * avoids for the same reason.
+ */
+function requireOwnTask(ctx: A2AMethodContext, taskId: string) {
+  const task = ctx.tasks.getTaskForParticipant(taskId, {
+    fleetId: ctx.senderFleetId,
+    agentId: ctx.senderAgentId,
+  });
+  if (!task) {
+    throw new JsonRpcException(A2A_TASK_NOT_FOUND, `task ${taskId} not found`);
+  }
+  return task;
+}
+
 export async function messageSend(ctx: A2AMethodContext, params: unknown): Promise<A2ATask> {
   const p = assertObject(params);
   const messageRaw = p.message;
@@ -90,13 +108,37 @@ export async function messageSend(ctx: A2AMethodContext, params: unknown): Promi
     );
   }
 
+  // #58: the recipient must be a live agent in the SENDER's own fleet. The
+  // per-agent route already resolves fleet-scoped, but params.recipientAgentId
+  // on the fleet hub does not — without this a cross-fleet id would mint a task
+  // row stamped with the wrong fleet before createMessage refused delivery.
+  if (!ctx.db.findFleetAgent(ctx.senderFleetId, recipientId)) {
+    throw new JsonRpcException(JSONRPC_INVALID_PARAMS, `recipient agent ${recipientId} not found`);
+  }
+
   // Reuse existing task if taskId provided
   let task: A2ATask;
   if (message.taskId) {
-    const existing = ctx.tasks.getTask(message.taskId);
-    if (!existing) {
+    // #58: continuing a task requires being on it. Without this any enrolled
+    // agent could append to a stranger's task history — and read the whole
+    // history back, since the method returns the task.
+    const participants = ctx.tasks.taskParticipants(message.taskId);
+    const onTask =
+      participants !== null &&
+      participants.fleetId === ctx.senderFleetId &&
+      (participants.recipientAgentId === ctx.senderAgentId || participants.senderAgentId === ctx.senderAgentId);
+    if (!onTask) {
       throw new JsonRpcException(A2A_TASK_NOT_FOUND, `task ${message.taskId} not found`);
     }
+    // ...and the message must go to the OTHER party on that task, not be
+    // re-addressed to a third agent who was never part of the exchange.
+    if (recipientId !== participants.recipientAgentId && recipientId !== participants.senderAgentId) {
+      throw new JsonRpcException(
+        JSONRPC_INVALID_PARAMS,
+        `recipient ${recipientId} is not a participant of task ${message.taskId}`
+      );
+    }
+    const existing = ctx.tasks.getTask(message.taskId)!;
     if (TERMINAL_STATES.includes(existing.status.state)) {
       throw new JsonRpcException(A2A_TASK_NOT_CANCELABLE, `task ${message.taskId} is in terminal state`);
     }
@@ -106,6 +148,7 @@ export async function messageSend(ctx: A2AMethodContext, params: unknown): Promi
     task = ctx.tasks.createTask({
       fleetId: ctx.senderFleetId,
       agentId: recipientId,
+      senderAgentId: ctx.senderAgentId,
       contextId: message.contextId,
       initialMessage: message,
     });
@@ -135,10 +178,7 @@ export async function messageSend(ctx: A2AMethodContext, params: unknown): Promi
 export function tasksGet(ctx: A2AMethodContext, params: unknown): A2ATask {
   const p = assertObject(params);
   const taskId = requireString(p, "id");
-  const task = ctx.tasks.getTask(taskId);
-  if (!task) {
-    throw new JsonRpcException(A2A_TASK_NOT_FOUND, `task ${taskId} not found`);
-  }
+  const task = requireOwnTask(ctx, taskId);
   // If historyLength = 0, strip history
   if (p.historyLength === 0) {
     return { ...task, history: [] };
@@ -154,9 +194,14 @@ export function tasksList(ctx: A2AMethodContext, params: unknown): { tasks: A2AT
   const offset = typeof p.offset === "number" ? Math.max(0, p.offset) : 0;
   const state = typeof p.state === "string" ? (p.state as TaskState) : undefined;
 
+  // #58: scoped to the caller's own tasks in the caller's own fleet. The
+  // per-agent endpoint narrows further to the tasks shared with that agent —
+  // it used to be the ONLY filter, which is how /a2a (targetAgentId undefined)
+  // returned every task in the fleet.
   return ctx.tasks.listTasks({
     fleetId: ctx.senderFleetId,
-    agentId: ctx.targetAgentId,
+    participantAgentId: ctx.senderAgentId,
+    counterpartyAgentId: ctx.targetAgentId,
     state,
     limit,
     offset,
@@ -166,10 +211,7 @@ export function tasksList(ctx: A2AMethodContext, params: unknown): { tasks: A2AT
 export function tasksCancel(ctx: A2AMethodContext, params: unknown): A2ATask {
   const p = assertObject(params);
   const taskId = requireString(p, "id");
-  const existing = ctx.tasks.getTask(taskId);
-  if (!existing) {
-    throw new JsonRpcException(A2A_TASK_NOT_FOUND, `task ${taskId} not found`);
-  }
+  const existing = requireOwnTask(ctx, taskId);
   if (TERMINAL_STATES.includes(existing.status.state)) {
     throw new JsonRpcException(
       A2A_TASK_NOT_CANCELABLE,
