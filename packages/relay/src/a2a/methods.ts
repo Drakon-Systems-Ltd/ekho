@@ -1,11 +1,16 @@
 import type { EkhoDb } from "../db";
 import { id } from "../utils";
+import { evaluateMessageGate, type MessageGateDenial } from "../message-gate";
 import type { A2ATaskStore } from "./task-store";
 import {
   JsonRpcException,
   A2A_TASK_NOT_FOUND,
   A2A_TASK_NOT_CANCELABLE,
   JSONRPC_INVALID_PARAMS,
+  EKHO_SENDER_NOT_PERMITTED,
+  EKHO_RATE_LIMIT_EXCEEDED,
+  EKHO_BLOCKED_BY_POLICY,
+  EKHO_BLOCKED_BY_EXTENSION,
 } from "./jsonrpc";
 import type { A2AMessage, A2ATask, TaskState } from "./types";
 import { TERMINAL_STATES } from "./types";
@@ -66,8 +71,46 @@ export interface A2AMethodContext {
   tasks: A2ATaskStore;
   senderAgentId: string;
   senderFleetId: string;
+  /** The AUTHENTICATED sender's agents.status — drives the quarantine/pause gate (#59). */
+  senderStatus: string;
   /** Optional: when called from /agents/{id}/a2a this constrains target */
   targetAgentId?: string;
+}
+
+/**
+ * #59: turn a shared message-gate denial into a JSON-RPC error. The A2A
+ * transport must fail for exactly the reasons POST /v1/messages fails, and say
+ * which one — a quarantined sender that got back a generic internal error would
+ * look like a relay bug and be retried forever. Codes are documented in
+ * docs/a2a.md; `data` carries what a client can act on.
+ */
+function gateDenialToRpcError(denial: MessageGateDenial): JsonRpcException {
+  switch (denial.kind) {
+    case "sender_status":
+      return new JsonRpcException(
+        EKHO_SENDER_NOT_PERMITTED,
+        `sender agent is ${denial.status}`,
+        { status: denial.status }
+      );
+    case "rate_limit":
+      return new JsonRpcException(
+        EKHO_RATE_LIMIT_EXCEEDED,
+        "rate limit exceeded",
+        { retryAfterSeconds: denial.retryAfterSeconds, limit: denial.limit }
+      );
+    case "policy":
+      return new JsonRpcException(
+        EKHO_BLOCKED_BY_POLICY,
+        "blocked by policy",
+        denial.policy ? { policy: denial.policy } : undefined
+      );
+    case "extension":
+      return new JsonRpcException(
+        EKHO_BLOCKED_BY_EXTENSION,
+        `blocked by extension ${denial.extension}: ${denial.reason}`,
+        { extension: denial.extension }
+      );
+  }
 }
 
 /**
@@ -116,6 +159,25 @@ export async function messageSend(ctx: A2AMethodContext, params: unknown): Promi
     throw new JsonRpcException(JSONRPC_INVALID_PARAMS, `recipient agent ${recipientId} not found`);
   }
 
+  // The Ekho message this A2A message becomes. Built up front so the gate sees
+  // exactly the body that would be delivered, not an approximation of it.
+  const { body } = messageToEkhoBody(message);
+
+  // #59: same admission gate as POST /v1/messages — quarantine/pause, rate
+  // limit, policy, extensions — BEFORE any task row or Ekho message exists.
+  const gate = await evaluateMessageGate({
+    db: ctx.db,
+    agent: { id: ctx.senderAgentId, fleetId: ctx.senderFleetId, status: ctx.senderStatus },
+    recipientId,
+    messageType: "a2a.message",
+    priority: "normal",
+    body,
+    metadata: message.metadata,
+  });
+  if (!gate.allowed) {
+    throw gateDenialToRpcError(gate);
+  }
+
   // Reuse existing task if taskId provided
   let task: A2ATask;
   if (message.taskId) {
@@ -155,7 +217,6 @@ export async function messageSend(ctx: A2AMethodContext, params: unknown): Promi
   }
 
   // Create corresponding Ekho message for store-and-forward delivery
-  const { body } = messageToEkhoBody(message);
   const { messageId } = ctx.db.createMessage({
     fleetId: ctx.senderFleetId,
     senderAgentId: ctx.senderAgentId,

@@ -146,6 +146,10 @@ async function handleJsonRpc(args: {
     tasks,
     senderAgentId: request.agent.id,
     senderFleetId: request.agent.fleetId,
+    // #59: status comes from the authenticated agents row. requireAgentAuth
+    // authenticates a quarantined/paused agent quite happily — refusing to
+    // CARRY its messages is the gate's job, not authentication's.
+    senderStatus: request.agent.status,
     targetAgentId,
   };
 

@@ -62,6 +62,23 @@ can never name, message, read or cancel anything belonging to another fleet.
 A task the caller is not on is reported as `TaskNotFound` (`-32001`) rather than a
 forbidden, so the endpoint never confirms that another agent's task exists.
 
+**Sending clears the same gate as `POST /v1/messages`.** Quarantine/pause, rate
+limits, the policy engine and licensed extension hooks are evaluated by shared
+code (`src/message-gate.ts`) before any task row or message is created — the two
+transports cannot drift. Denials map to these JSON-RPC error codes:
+
+| Code | Meaning | `data` |
+|---|---|---|
+| `-32050` | Sender is quarantined or paused | `status` |
+| `-32051` | Sender is over its rate limit | `retryAfterSeconds`, `limit` |
+| `-32052` | Blocked by a fleet policy | `policy` |
+| `-32053` | Blocked by an extension | `extension` |
+
+These live in the JSON-RPC implementation-defined server-error range
+(`-32000`..`-32099`), clear of the codes A2A reserves. Like all JSON-RPC errors
+they are returned in the response body with HTTP 200; `message/stream` returns the
+error object instead of opening an SSE stream.
+
 ## Quick example
 
 Send a message to `agent_executor`:
@@ -110,7 +127,9 @@ The task is now queued for delivery via Ekho's store-and-forward mechanism. Poll
 
 ## Mapping to Ekho internals
 
-Each A2A task is backed by a row in `a2a_tasks` and joined to one or more `messages` rows via `a2a_task_messages`. The task row records both participants — `sender_agent_id` (the creator) and `agent_id` (the recipient) — which is what scopes the task methods above. The underlying Ekho message carries `message_type: "a2a.message"` with the full A2A message envelope in `body_json`. This gives A2A tasks the same guarantees as native Ekho messages: signed delivery, retry/backoff, dead-letter, rate limiting, and operator visibility.
+Each A2A task is backed by a row in `a2a_tasks` and joined to one or more `messages` rows via `a2a_task_messages`. The task row records both participants — `sender_agent_id` (the creator) and `agent_id` (the recipient) — which is what scopes the task methods above. The underlying Ekho message carries `message_type: "a2a.message"` with the full A2A message envelope in `body_json`, so a policy matching on `message_type` can target A2A traffic specifically.
+
+This gives A2A tasks the same guarantees as native Ekho messages: signed delivery, retry/backoff, dead-letter, rate limiting, and operator visibility.
 
 ## Positioning
 
