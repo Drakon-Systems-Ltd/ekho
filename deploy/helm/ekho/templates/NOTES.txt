@@ -41,7 +41,7 @@ chart README for why replicaCount must stay at 1).
 3. Create your first operator. Inside the relay pod run:
 
    kubectl --namespace {{ .Release.Namespace }} exec -it {{ include "ekho.fullname" . }}-0 -- \
-     tsx packages/relay/src/scripts/create-operator.ts
+     tsx packages/relay/src/setup.ts
 
    (Or run the setup script: npm run setup)
 
