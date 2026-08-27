@@ -700,6 +700,28 @@ export class EkhoDb {
   }
 
   /**
+   * Resolve a valid message target WITHIN a fleet, or null. The fleet is part of
+   * the lookup, not a filter applied afterwards, so an id from another fleet
+   * simply does not resolve — the rule that agents can't talk across fleets,
+   * expressed once. Used by the A2A routes (#58) to reject a foreign or dead
+   * target before any task row is minted.
+   *
+   * Admits exactly what isDeliverableAgent admits, so a target that resolves here
+   * is one createMessage will accept: live non-revoked agents, plus the fleet's
+   * own synthetic operator recipient (op_<fleetId>, revoked by design — that's
+   * how an agent addresses the operator). The id is fleet-derived, so this never
+   * resolves another fleet's operator.
+   */
+  findFleetAgent(fleetId: string, agentId: string): { id: string; fleet_id: string; display_name: string | null; runtime: string | null; status: string } | null {
+    const row = this.db.prepare(
+      `SELECT id, fleet_id, display_name, runtime, status
+       FROM agents
+       WHERE id = ? AND fleet_id = ? AND (id = ? OR (runtime != 'operator' AND revoked_at IS NULL))`
+    ).get(agentId, fleetId, `op_${fleetId}`) as { id: string; fleet_id: string; display_name: string | null; runtime: string | null; status: string } | undefined;
+    return row ?? null;
+  }
+
+  /**
    * If conversationId is a room in this fleet, return its member agent ids
    * (minus the sender, excluding the synthetic operator + revoked agents).
    * Otherwise null. This is what makes a room a shared space: any message

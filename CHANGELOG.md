@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Security
+- **A2A task methods are scoped to the caller and its fleet (#58).** `POST /a2a` passed no target agent, so `tasks/list` returned every `a2a_tasks` row in the fleet, and `tasks/get` / `tasks/cancel` resolved a task by id with no fleet or caller check at all — any enrolled agent could read another agent's task history and cancel its work. `a2a_tasks` now records `sender_agent_id` alongside the recipient (migration 020 backfills it from the task's first linked message), and every A2A read/cancel is scoped to the task's two participants within their own fleet; a task the caller is not on returns `TaskNotFound` (`-32001`) rather than confirming it exists. `message/send` with someone else's `taskId` is refused the same way, and the per-agent endpoint now resolves its target inside the caller's fleet, so a foreign or revoked agent id 404s instead of minting an orphan task.
+- **A2A sends clear the same admission gate as `POST /v1/messages` (#59).** `message/send` and `message/stream` reached `createMessage` directly after nothing more than authentication — and `requireAgentAuth` authenticates quarantined and paused agents — so switching transport from `/v1/messages` to `/a2a` bought a sender an exemption from quarantine, rate limits, the policy engine and extension hooks, while `docs/a2a.md` promised the opposite. Both paths now call one shared gate (`src/message-gate.ts`) before any task or message row exists; on A2A the denials map to JSON-RPC `-32050` (quarantined/paused), `-32051` (rate limit), `-32052` (policy) and `-32053` (extension), and `message/stream` returns the error instead of opening an SSE stream.
+
 ## [0.4.5] - 2026-08-21
 
 ### Security

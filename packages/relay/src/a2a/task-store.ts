@@ -7,6 +7,7 @@ interface TaskRow {
   id: string;
   fleet_id: string;
   agent_id: string;
+  sender_agent_id: string | null;
   context_id: string;
   state: TaskState;
   history_json: string;
@@ -22,6 +23,8 @@ export class A2ATaskStore {
   createTask(input: {
     fleetId: string;
     agentId: string;
+    /** The agent that created the task (#58) — half of the participant pair. */
+    senderAgentId: string;
     contextId?: string;
     initialMessage?: A2AMessage;
     metadata?: Record<string, unknown>;
@@ -33,12 +36,13 @@ export class A2ATaskStore {
 
     this.db.prepare(
       `INSERT INTO a2a_tasks
-       (id, fleet_id, agent_id, context_id, state, history_json, artifacts_json, metadata_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, fleet_id, agent_id, sender_agent_id, context_id, state, history_json, artifacts_json, metadata_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       taskId,
       input.fleetId,
       input.agentId,
+      input.senderAgentId,
       contextId,
       "submitted",
       JSON.stringify(history),
@@ -59,36 +63,76 @@ export class A2ATaskStore {
     };
   }
 
+  /**
+   * Unscoped read. Internal callers only (status updates, cancel bookkeeping) —
+   * anything reachable from an A2A request MUST go through getTaskForParticipant.
+   */
   getTask(taskId: string): A2ATask | null {
     const row = this.db.prepare("SELECT * FROM a2a_tasks WHERE id = ?").get(taskId) as TaskRow | undefined;
     if (!row) return null;
     return this.rowToTask(row);
   }
 
+  /**
+   * #58: the only task read an A2A caller gets. A task is visible to exactly the
+   * two agents on it — the sender that created it and the recipient it was
+   * addressed to — and only within their own fleet. Everyone else gets null,
+   * which the method layer renders as TaskNotFound so the endpoint never
+   * discloses that another agent's task exists.
+   *
+   * Rows migrated from before sender_agent_id existed and whose sender could not
+   * be recovered hold NULL, which matches no caller: fail closed.
+   */
+  getTaskForParticipant(taskId: string, scope: { fleetId: string; agentId: string }): A2ATask | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM a2a_tasks WHERE id = ? AND fleet_id = ? AND (agent_id = ? OR sender_agent_id = ?)"
+      )
+      .get(taskId, scope.fleetId, scope.agentId, scope.agentId) as TaskRow | undefined;
+    if (!row) return null;
+    return this.rowToTask(row);
+  }
+
+  /** Participants of a task, for callers that must check membership themselves. */
+  taskParticipants(taskId: string): { fleetId: string; recipientAgentId: string; senderAgentId: string | null } | null {
+    const row = this.db
+      .prepare("SELECT fleet_id, agent_id, sender_agent_id FROM a2a_tasks WHERE id = ?")
+      .get(taskId) as { fleet_id: string; agent_id: string; sender_agent_id: string | null } | undefined;
+    if (!row) return null;
+    return { fleetId: row.fleet_id, recipientAgentId: row.agent_id, senderAgentId: row.sender_agent_id };
+  }
+
+  /**
+   * #58: listing is participant-scoped by construction — fleetId and
+   * participantAgentId are REQUIRED, so there is no call shape that produces a
+   * fleet-wide scan. `counterpartyAgentId` narrows further to the tasks shared
+   * with one other agent (what /agents/{id}/a2a asks for); it never widens.
+   */
   listTasks(filters: {
-    fleetId?: string;
-    agentId?: string;
+    fleetId: string;
+    participantAgentId: string;
+    counterpartyAgentId?: string;
     state?: TaskState;
     limit: number;
     offset: number;
   }): { tasks: A2ATask[]; total: number } {
-    const conditions: string[] = [];
-    const params: Array<string | number> = [];
+    const conditions: string[] = ["fleet_id = ?", "(agent_id = ? OR sender_agent_id = ?)"];
+    const params: Array<string | number> = [
+      filters.fleetId,
+      filters.participantAgentId,
+      filters.participantAgentId,
+    ];
 
-    if (filters.fleetId) {
-      conditions.push("fleet_id = ?");
-      params.push(filters.fleetId);
-    }
-    if (filters.agentId) {
-      conditions.push("agent_id = ?");
-      params.push(filters.agentId);
+    if (filters.counterpartyAgentId) {
+      conditions.push("(agent_id = ? OR sender_agent_id = ?)");
+      params.push(filters.counterpartyAgentId, filters.counterpartyAgentId);
     }
     if (filters.state) {
       conditions.push("state = ?");
       params.push(filters.state);
     }
 
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const where = `WHERE ${conditions.join(" AND ")}`;
     const totalRow = this.db
       .prepare(`SELECT COUNT(*) as count FROM a2a_tasks ${where}`)
       .get(...params) as { count: number };

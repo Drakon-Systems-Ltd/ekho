@@ -37,6 +37,11 @@ interface AgentRow {
   status: string;
 }
 
+/**
+ * Unscoped lookup — ONLY for the public Agent Card, which is discovery data the
+ * A2A spec serves unauthenticated. Every authenticated path resolves its target
+ * through db.findFleetAgent(callerFleetId, ...) instead (#58).
+ */
 function findAgent(agentId: string): AgentRow | null {
   const row = db
     .raw()
@@ -93,7 +98,13 @@ export async function registerA2ARoutes(app: FastifyInstance) {
     "/agents/:agentId/a2a",
     { preHandler: requireAgentAuth },
     async (request, reply) => {
-      const target = findAgent(request.params.agentId);
+      if (!request.agent) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      // #58: resolve the target inside the CALLER's fleet. An agent from another
+      // fleet is indistinguishable from one that does not exist — same 404, so
+      // this endpoint is not a cross-fleet agent-existence oracle either.
+      const target = db.findFleetAgent(request.agent.fleetId, request.params.agentId);
       if (!target) {
         return reply.code(404).send({ error: "agent not found" });
       }
@@ -135,6 +146,10 @@ async function handleJsonRpc(args: {
     tasks,
     senderAgentId: request.agent.id,
     senderFleetId: request.agent.fleetId,
+    // #59: status comes from the authenticated agents row. requireAgentAuth
+    // authenticates a quarantined/paused agent quite happily — refusing to
+    // CARRY its messages is the gate's job, not authentication's.
+    senderStatus: request.agent.status,
     targetAgentId,
   };
 

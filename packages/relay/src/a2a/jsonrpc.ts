@@ -40,6 +40,20 @@ export const A2A_UNSUPPORTED_OPERATION = -32004;
 export const A2A_CONTENT_TYPE_NOT_SUPPORTED = -32005;
 export const A2A_INVALID_AGENT_RESPONSE = -32006;
 
+// Ekho-specific admission failures (#59). A2A has no error code for "the relay
+// refuses to carry this message", so these live in the JSON-RPC
+// implementation-defined server-error range (-32000..-32099), deliberately clear
+// of the -32001..-32009 block A2A reserves for itself. Each is the JSON-RPC face
+// of one shared message-gate denial — see src/message-gate.ts and docs/a2a.md.
+/** Sender is quarantined or paused: authenticated, but not permitted to send. */
+export const EKHO_SENDER_NOT_PERMITTED = -32050;
+/** Sender is over its rate limit; `data.retryAfterSeconds` says when to retry. */
+export const EKHO_RATE_LIMIT_EXCEEDED = -32051;
+/** A fleet policy denied this message; `data.policy` names it. */
+export const EKHO_BLOCKED_BY_POLICY = -32052;
+/** A licensed extension's onBeforeMessage hook rejected the message. */
+export const EKHO_BLOCKED_BY_EXTENSION = -32053;
+
 export class JsonRpcException extends Error {
   constructor(public code: number, message: string, public data?: unknown) {
     super(message);

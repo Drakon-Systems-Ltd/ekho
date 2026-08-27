@@ -120,6 +120,12 @@ describe("transactional migrations (M6)", () => {
     // …and the attachments table (migration 008) so migration 019 (ALTER TABLE
     // attachments ADD COLUMN bound_message_id/bound_at) applies cleanly too.
     db.exec("CREATE TABLE attachments (id TEXT PRIMARY KEY, fleet_id TEXT, uploader_kind TEXT, uploader_id TEXT, filename TEXT, mime TEXT, size_bytes INTEGER, storage_path TEXT, created_at TEXT)");
+    // …and the a2a tables (migration 005) plus messages (migration 001) so
+    // migration 020 (ALTER TABLE a2a_tasks ADD COLUMN sender_agent_id, then a
+    // backfill that joins through a2a_task_messages to messages) applies cleanly.
+    db.exec("CREATE TABLE a2a_tasks (id TEXT PRIMARY KEY, fleet_id TEXT, agent_id TEXT, context_id TEXT, state TEXT, history_json TEXT, artifacts_json TEXT, metadata_json TEXT, created_at TEXT, updated_at TEXT)");
+    db.exec("CREATE TABLE a2a_task_messages (task_id TEXT, message_id TEXT, PRIMARY KEY (task_id, message_id))");
+    db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, fleet_id TEXT, sender_agent_id TEXT, created_at TEXT)");
     // Mark every migration through 014 as applied so runMigrationsOn runs 015+.
     const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
     for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
@@ -133,5 +139,46 @@ describe("transactional migrations (M6)", () => {
       { id: "c", peer_autoreply: 1 }  // already on, unchanged
     ]);
     expect(versions(db)).toContain(15);
+  });
+
+  // #58 — migration 020 adds a2a_tasks.sender_agent_id, the column the A2A
+  // task-scoping check reads. On an upgraded relay the existing tasks must
+  // recover their owner from the Ekho message they were linked to, or every
+  // in-flight task would become invisible to the agent that created it.
+  it("migration 020 backfills a2a_tasks.sender_agent_id from the linked message", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+    db.exec(`
+      CREATE TABLE a2a_tasks (
+        id TEXT PRIMARY KEY, fleet_id TEXT, agent_id TEXT, context_id TEXT, state TEXT,
+        history_json TEXT, artifacts_json TEXT, metadata_json TEXT, created_at TEXT, updated_at TEXT
+      );
+      CREATE TABLE a2a_task_messages (task_id TEXT, message_id TEXT, PRIMARY KEY (task_id, message_id));
+      CREATE TABLE messages (id TEXT PRIMARY KEY, fleet_id TEXT, sender_agent_id TEXT, created_at TEXT);
+    `);
+    db.exec(`
+      INSERT INTO a2a_tasks (id, fleet_id, agent_id, context_id, state, history_json, artifacts_json, created_at, updated_at)
+      VALUES ('task_linked', 'flt_1', 'agent_recipient', 'ctx_1', 'submitted', '[]', '[]', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z'),
+             ('task_orphan', 'flt_1', 'agent_recipient', 'ctx_2', 'submitted', '[]', '[]', '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z');
+      INSERT INTO messages (id, fleet_id, sender_agent_id, created_at)
+      VALUES ('msg_first', 'flt_1', 'agent_creator', '2026-06-01T00:00:00.000Z'),
+             ('msg_later', 'flt_1', 'agent_replier', '2026-06-02T00:00:00.000Z');
+      INSERT INTO a2a_task_messages (task_id, message_id) VALUES ('task_linked', 'msg_first'), ('task_linked', 'msg_later');
+    `);
+    // Only 020 is unapplied.
+    const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
+    for (let v = 1; v <= 19; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
+
+    runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+
+    expect(hasColumn(db, "a2a_tasks", "sender_agent_id")).toBe(true);
+    const rows = db.prepare("SELECT id, sender_agent_id FROM a2a_tasks ORDER BY id").all();
+    expect(rows).toEqual([
+      // Recovered from the EARLIEST linked message — the one that created it.
+      { id: "task_linked", sender_agent_id: "agent_creator" },
+      // No link to recover from: stays NULL, which matches no caller (fail closed).
+      { id: "task_orphan", sender_agent_id: null }
+    ]);
+    expect(versions(db)).toContain(20);
   });
 });

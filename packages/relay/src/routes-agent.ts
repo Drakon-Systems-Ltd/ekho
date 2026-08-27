@@ -5,7 +5,7 @@ import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadS
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
-import { getExtensions } from "./license";
+import { evaluateMessageGate, sendGateDenial } from "./message-gate";
 
 /**
  * Stream an attachment to the client with hardened headers. EVERY type is forced
@@ -124,43 +124,20 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.success ? "unauthorized" : parsed.error.flatten() });
     }
 
-    if (request.agent.status === "quarantined" || request.agent.status === "paused") {
-      return reply.code(403).send({ error: `agent is ${request.agent.status}` });
-    }
-
-    const rateCheck = db.checkAndIncrementRateLimit(request.agent.id, request.agent.fleetId);
-    if (!rateCheck.allowed) {
-      const retryAfter = config.rateLimitWindowSeconds;
-      return reply.code(429).send({ error: "rate limit exceeded", retry_after_seconds: retryAfter });
-    }
-
-    const policyResult = db.evaluateMessagePolicies(
-      request.agent.fleetId,
-      request.agent.id,
-      parsed.data.recipient.id ?? null,
-      parsed.data.message_type,
-      parsed.data.priority
-    );
-    if (!policyResult.allowed) {
-      return reply.code(403).send({ error: "blocked by policy", policy: policyResult.deniedByPolicy });
-    }
-
-    for (const ext of getExtensions()) {
-      if (ext.onBeforeMessage) {
-        try {
-          await ext.onBeforeMessage({
-            fleetId: request.agent.fleetId,
-            senderAgentId: request.agent.id,
-            recipientId: parsed.data.recipient.id ?? null,
-            messageType: parsed.data.message_type,
-            priority: parsed.data.priority,
-            body: parsed.data.body as Record<string, unknown>,
-            metadata: parsed.data.metadata as Record<string, unknown> | undefined
-          });
-        } catch (err) {
-          return reply.code(403).send({ error: `blocked by extension ${ext.name}: ${err instanceof Error ? err.message : String(err)}` });
-        }
-      }
+    // Quarantine/pause, rate limit, policy and extension checks live in the
+    // shared gate (#59) so the A2A transport enforces the identical set — see
+    // message-gate.ts. The rejection shapes below are unchanged.
+    const gate = await evaluateMessageGate({
+      db,
+      agent: request.agent,
+      recipientId: parsed.data.recipient.id ?? null,
+      messageType: parsed.data.message_type,
+      priority: parsed.data.priority,
+      body: parsed.data.body as Record<string, unknown>,
+      metadata: parsed.data.metadata as Record<string, unknown> | undefined
+    });
+    if (!gate.allowed) {
+      return sendGateDenial(reply, gate);
     }
 
     // Fold a peer signature into metadata (relayed verbatim). operator_sig is NOT

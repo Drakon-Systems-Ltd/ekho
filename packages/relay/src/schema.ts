@@ -248,6 +248,11 @@ CREATE TABLE IF NOT EXISTS a2a_tasks (
   id TEXT PRIMARY KEY,
   fleet_id TEXT NOT NULL,
   agent_id TEXT NOT NULL,
+  -- #58: the agent that CREATED the task. agent_id is the recipient; without the
+  -- sender there is no owner to scope tasks/list, tasks/get and tasks/cancel to.
+  -- Nullable so migration 020 can add it to an existing table (rows it cannot
+  -- backfill stay NULL and are visible only to their recipient — fail closed).
+  sender_agent_id TEXT,
   context_id TEXT NOT NULL,
   state TEXT NOT NULL,
   history_json TEXT NOT NULL DEFAULT '[]',
@@ -262,6 +267,9 @@ CREATE TABLE IF NOT EXISTS a2a_tasks (
 CREATE INDEX IF NOT EXISTS idx_a2a_tasks_agent ON a2a_tasks(agent_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_a2a_tasks_fleet ON a2a_tasks(fleet_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_a2a_tasks_context ON a2a_tasks(context_id);
+-- NOTE: the sender index is created by migration 020, NOT here — schema.ts is
+-- exec'd on every boot BEFORE migrations run, so on an existing a2a_tasks table
+-- sender_agent_id does not exist yet and indexing it would abort the boot.
 
 CREATE TABLE IF NOT EXISTS a2a_task_messages (
   task_id TEXT NOT NULL,
