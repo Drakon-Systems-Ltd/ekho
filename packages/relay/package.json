@@ -1,6 +1,6 @@
 {
   "name": "@ekho/relay",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Ekho relay server \u2014 private communication and control layer for distributed AI agents.",
   "main": "src/server.ts",
   "scripts": {
