@@ -30,12 +30,10 @@ jobs:
       - run: npm run typecheck
       - run: npx vitest run
 
-      # Publish SDK to npm (if NPM_TOKEN is set)
       - name: Publish @drakon-systems/ekho-sdk to npm
         run: npm publish -w @drakon-systems/ekho-sdk --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        continue-on-error: true
 
       # The agent-side plugin. Until 0.3.0 this had no release path at all: it was
       # copied onto each machine by hand and patched in place, so every box

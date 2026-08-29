@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-29
+
+### Notes
+- No SDK surface change. Version bumped in lockstep with the OpenClaw plugin warning-throttle release; no agent protocol break.
+
 ## [0.4.6] - 2026-08-27
 
 ### Notes
