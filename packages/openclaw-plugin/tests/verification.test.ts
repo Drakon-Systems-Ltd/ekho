@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +21,9 @@ import {
   syncPinnedOperatorKeys,
   shouldAutowake,
   buildSignedSendFields,
+  resetAdvisoryRevocationWarningStateForTests,
+  ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY,
+  ADVISORY_REVOCATION_WARNING_MAX_SCOPES,
 } from "../src/verification";
 import { verifyCanonical, fromB64url } from "../src/identity";
 
@@ -74,6 +77,10 @@ function capture() {
   return { notes, log: { warn: (...a: unknown[]) => notes.push(a.join(" ")), info: () => {} } };
 }
 const QUIET = { warn: () => {}, info: () => {} };
+
+beforeEach(() => {
+  resetAdvisoryRevocationWarningStateForTests();
+});
 
 describe("identity store", () => {
   it("creates and persists a stable identity", () => {
@@ -259,6 +266,340 @@ describe("syncPinnedOperatorKeys — unsigned revoked is ADVISORY (#27)", () => 
       )
     ).toBe(false);
     expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+  });
+});
+
+describe("syncPinnedOperatorKeys — advisory warning throttle", () => {
+  const unsignedOp1 = { key_id: OP1_KID, public_key: OP1_PUB, revoked: true };
+  const unsignedOp2 = { key_id: OP2_KID, public_key: OP2_PUB, revoked: true };
+  const liveOp1 = { key_id: OP1_KID, public_key: OP1_PUB };
+  const pinned = (): EkhoIdentity => ({
+    seedHex: "00".repeat(32),
+    pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+  });
+
+  it("emits once when the advisory set first appears, then suppresses identical repeats", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    expect(syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log)).toBe(false);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(OP1_KID);
+    expect(notes[0].toLowerCase()).toContain("without a valid revocation signature");
+    expect(notes[0]).toContain("ADVISORY");
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(1);
+  });
+
+  it("emits again when the advisory set changes", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(1);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1, unsignedOp2], FLEET, log);
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).toContain(OP1_KID);
+    expect(notes[1]).toContain(OP2_KID);
+    expect(notes[1]).toMatch(/2 operator keys/);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1, unsignedOp2], FLEET, log);
+    expect(notes).toHaveLength(2);
+
+    syncPinnedOperatorKeys(id, [unsignedOp2], FLEET, log);
+    expect(notes).toHaveLength(3);
+    expect(notes[2]).toContain(OP2_KID);
+    expect(notes[2]).not.toContain(OP1_KID);
+  });
+
+  it("aggregates one warning per poll, not one line per key", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    syncPinnedOperatorKeys(id, [unsignedOp1, unsignedOp2], FLEET, log);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(OP1_KID);
+    expect(notes[0]).toContain(OP2_KID);
+  });
+
+  it("resets on clear so a later recurrence is visible", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(1);
+
+    syncPinnedOperatorKeys(id, [liveOp1], FLEET, log);
+    expect(notes).toHaveLength(1);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).toContain(OP1_KID);
+    expect(notes[1]).toContain("ADVISORY");
+  });
+
+  it("does not cross-suppress another fleet or identity", () => {
+    const id = pinned();
+    const other: EkhoIdentity = { seedHex: "11".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const { notes, log } = capture();
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(1);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], "flt_other", log);
+    expect(notes).toHaveLength(2);
+
+    syncPinnedOperatorKeys(other, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(3);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(3);
+  });
+
+  it("emits a bounded periodic summary of identical repeats, then stays quiet until the next interval", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(1);
+
+    for (let i = 0; i < ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY - 1; i++) {
+      syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    }
+    expect(notes).toHaveLength(1);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).toContain("suppressed");
+    expect(notes[1]).toContain(String(ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY));
+    expect(notes[1]).toContain(OP1_KID);
+    expect(notes[1]).toContain("ADVISORY");
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log);
+    expect(notes).toHaveLength(2);
+  });
+
+  it("does not change trust semantics: still advisory, no unpin, no tombstone, still blocks new adoption", () => {
+    const pinnedId: EkhoIdentity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [OP1_KID]: OP1_PUB } };
+    const { notes, log } = capture();
+    expect(syncPinnedOperatorKeys(pinnedId, [unsignedOp1], FLEET, log)).toBe(false);
+    expect(syncPinnedOperatorKeys(pinnedId, [unsignedOp1], FLEET, log)).toBe(false);
+    expect(pinnedId.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(pinnedId.revokedOperatorKeys ?? {}).toEqual({});
+    expect(notes).toHaveLength(1);
+
+    const fresh: EkhoIdentity = { seedHex: "22".repeat(32), pinnedOperatorKeys: {} };
+    const esig = signCanonical(endorsementPayload(FLEET, OP2_KID, OP2_PUB), OP1_SEED);
+    const chainRoot: EkhoIdentity = {
+      seedHex: "33".repeat(32),
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB }
+    };
+    expect(
+      syncPinnedOperatorKeys(fresh, [unsignedOp1, { key_id: OP2_KID, public_key: OP2_PUB }], FLEET, QUIET)
+    ).toBe(true);
+    expect(fresh.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+    expect(fresh.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
+    expect(fresh.revokedOperatorKeys ?? {}).toEqual({});
+    expect(
+      syncPinnedOperatorKeys(
+        chainRoot,
+        [{ key_id: OP2_KID, public_key: OP2_PUB, revoked: true, endorsed_by_key_id: OP1_KID, endorsement_sig: esig }],
+        FLEET,
+        QUIET
+      )
+    ).toBe(false);
+    expect(chainRoot.pinnedOperatorKeys[OP2_KID]).toBeUndefined();
+    expect(chainRoot.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+  });
+
+  it("a later valid signed revocation still tombstones and unpins after an advisory warning", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    expect(syncPinnedOperatorKeys(id, [unsignedOp1], FLEET, log)).toBe(false);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+    expect(notes).toHaveLength(1);
+
+    expect(
+      syncPinnedOperatorKeys(
+        id,
+        [{ key_id: OP1_KID, public_key: OP1_PUB, revoked: true, revoked_at: REVOKED_AT, revocation_sig: revSig(OP2_SEED, OP1_KID) }],
+        FLEET,
+        log
+      )
+    ).toBe(true);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBeUndefined();
+    expect(id.pinnedOperatorKeys[OP2_KID]).toBe(OP2_PUB);
+    expect(id.revokedOperatorKeys?.[OP1_KID]).toBe(REVOKED_AT);
+    expect(notes.join("\n")).toMatch(/revoked \(signed/);
+  });
+
+  it("caps tracked scopes at 64: eviction re-warns that scope only, never hides a live neighbour", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    const cap = ADVISORY_REVOCATION_WARNING_MAX_SCOPES;
+    for (let i = 0; i < cap + 1; i++) {
+      syncPinnedOperatorKeys(id, [unsignedOp1], `flt_cap_${i}`, log);
+    }
+    expect(notes).toHaveLength(cap + 1);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], `flt_cap_${cap}`, log);
+    expect(notes).toHaveLength(cap + 1);
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], "flt_cap_0", log);
+    expect(notes).toHaveLength(cap + 2);
+    expect(notes[cap + 1]).toContain(OP1_KID);
+    expect(notes[cap + 1]).toContain("ADVISORY");
+
+    syncPinnedOperatorKeys(id, [unsignedOp1], `flt_cap_${cap}`, log);
+    expect(notes).toHaveLength(cap + 2);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+  });
+
+  it("rotating invalid signature bytes do not defeat set dedupe", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    for (let i = 0; i < 6; i++) {
+      const rogue = new Uint8Array(32).fill(9 + i);
+      expect(
+        syncPinnedOperatorKeys(
+          id,
+          [{ ...unsignedOp1, revoked_at: REVOKED_AT, revocation_sig: revSig(rogue, OP1_KID) }],
+          FLEET,
+          log
+        )
+      ).toBe(false);
+    }
+    expect(notes).toHaveLength(1);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+  });
+
+  it("never interpolates seedHex into advisory warnings", () => {
+    const seedHex = "c0ffee00".repeat(8);
+    const id: EkhoIdentity = {
+      seedHex,
+      pinnedOperatorKeys: { [OP1_KID]: OP1_PUB, [OP2_KID]: OP2_PUB }
+    };
+    const { notes, log } = capture();
+    syncPinnedOperatorKeys(id, [unsignedOp1, unsignedOp2], FLEET, log);
+    const text = notes.join("\n");
+    expect(text).toContain("ADVISORY");
+    expect(text).not.toContain(seedHex);
+    expect(text.toLowerCase()).not.toContain(seedHex);
+  });
+
+  it("bounds the rendered key list and still fingerprints the complete sorted set", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    const kids = Array.from({ length: 12 }, (_, i) => `adv${String(i).padStart(2, "0")}${"x".repeat(80)}`);
+    const claims = kids.map((key_id) => ({ key_id, public_key: OP1_PUB, revoked: true as const }));
+    syncPinnedOperatorKeys(id, claims, FLEET, log);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/\(\+4 omitted\)/);
+    expect(notes[0].length).toBeLessThan(1200);
+    expect(notes[0]).toContain("adv00");
+    expect(notes[0]).not.toContain(kids[11]);
+    expect(notes[0]).not.toContain(id.seedHex);
+
+    const tweaked = claims.map((c, i) => (i === 11 ? { ...c, key_id: `advZZ${"y".repeat(80)}` } : c));
+    syncPinnedOperatorKeys(id, tweaked, FLEET, log);
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).toMatch(/\(\+4 omitted\)/);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+  });
+
+  it("emits again when a NUL-composite key ID splits into a set containing a valid key ID", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    const composite = `${OP1_KID}\0junk`;
+    syncPinnedOperatorKeys(id, [{ key_id: composite, public_key: OP1_PUB, revoked: true }], FLEET, log);
+    expect(notes).toHaveLength(1);
+    syncPinnedOperatorKeys(id, [{ key_id: composite, public_key: OP1_PUB, revoked: true }], FLEET, log);
+    expect(notes).toHaveLength(1);
+
+    syncPinnedOperatorKeys(
+      id,
+      [
+        { key_id: OP1_KID, public_key: OP1_PUB, revoked: true },
+        { key_id: "junk", public_key: OP2_PUB, revoked: true }
+      ],
+      FLEET,
+      log
+    );
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).toContain(OP1_KID);
+    expect(notes[1]).toContain("junk");
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+  });
+
+  it("escapes control characters so advisory warnings and summaries stay one bounded line", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    // C1 CSI/OSC first so \u009b/\u009d stay inside the 32-char escaped-output
+    // cap. Escape-then-truncate of a longer form is the next test.
+    const kid = `\u009b\u009d\n\r\t\0\u2028\u2029`;
+    const claim = { key_id: kid, public_key: OP1_PUB, revoked: true as const };
+    const rawControls = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+    syncPinnedOperatorKeys(id, [claim], FLEET, log);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).not.toMatch(rawControls);
+    expect(notes[0]).toContain("\\n");
+    expect(notes[0]).toContain("\\r");
+    expect(notes[0]).toContain("\\t");
+    expect(notes[0]).toContain("\\0");
+    expect(notes[0]).toContain("\\u2028");
+    expect(notes[0]).toContain("\\u2029");
+    expect(notes[0]).toContain("\\u009b");
+    expect(notes[0]).toContain("\\u009d");
+    expect(notes[0]).toContain("ADVISORY");
+    expect(notes[0].length).toBeLessThan(1200);
+
+    for (let i = 0; i < ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY; i++) {
+      syncPinnedOperatorKeys(id, [claim], FLEET, log);
+    }
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).not.toMatch(rawControls);
+    expect(notes[1]).toContain("suppressed");
+    expect(notes[1]).toContain("\\n");
+    expect(notes[1]).toContain("\\u009b");
+    expect(notes[1]).toContain("\\u009d");
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
+  });
+
+  it("escapes C1 controls before applying the 32-character per-key bound", () => {
+    const id = pinned();
+    const { notes, log } = capture();
+    // Raw length 12 < 32; each C1 expands to 6 escaped chars (72 > 32).
+    // Truncate-then-escape would emit the full 72 with no ellipsis.
+    const kid = "\u009b\u009d".repeat(6);
+    const claim = { key_id: kid, public_key: OP1_PUB, revoked: true as const };
+    const rawControls = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+    const truncatedKid = "\\u009b\\u009d\\u009b\\u009d\\u009b\\u...";
+    syncPinnedOperatorKeys(id, [claim], FLEET, log);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).not.toMatch(rawControls);
+    const rendered = notes[0].match(/operator key (.+?) as REVOKED/)?.[1];
+    expect(rendered).toBe(truncatedKid);
+    expect(rendered?.endsWith("...")).toBe(true);
+    expect(rendered?.slice(0, -3).length).toBe(32);
+    expect(notes[0]).not.toContain("\\u009b\\u009d".repeat(6));
+    expect(notes[0].length).toBeLessThan(1200);
+
+    for (let i = 0; i < ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY; i++) {
+      syncPinnedOperatorKeys(id, [claim], FLEET, log);
+    }
+    expect(notes).toHaveLength(2);
+    expect(notes[1]).not.toMatch(rawControls);
+    expect(notes[1]).toContain("suppressed");
+    expect(notes[1]).toContain(`Keys: ${truncatedKid}`);
+    expect(notes[1]).not.toContain("\\u009b\\u009d".repeat(6));
+    expect(notes[1].length).toBeLessThan(1200);
+    expect(id.pinnedOperatorKeys[OP1_KID]).toBe(OP1_PUB);
+    expect(id.revokedOperatorKeys ?? {}).toEqual({});
   });
 });
 

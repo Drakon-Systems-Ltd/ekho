@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Unsigned/invalid operator-key revocation warnings no longer storm the log.** `noteAdvisoryClaim` used to emit one warning per key per inbox poll. Identical unsigned claims now emit one aggregate warning when the advisory set first appears or changes, stay quiet on identical repeats, and emit a reminder every 120 polls (~10 minutes at the default 5s interval). A process-local 64-scope cap may evict an older identity+fleet entry and re-emit that scope's first warning; it cannot suppress another identity or fleet. Clearing the set resets the throttle so a later recurrence is logged again. Warnings list a bounded key sample with an omitted count; the throttle fingerprints the complete sorted set. State is process-local and scoped by the identity public key + fleet. Trust is unchanged: unsigned/invalid revocation remains advisory, blocks new adoption for that poll, and never unpins or tombstones.
+
 ## [0.4.6] - 2026-08-27
 
 ### Notes
