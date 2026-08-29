@@ -14,7 +14,7 @@ import {
   verifyCanonical
 } from "./identity.js";
 import { verifyInbound, type RosterEntryLike, type SignedMessage, type VerifyResult } from "./verify.js";
-import type { EkhoIdentity, OperatorKeyAdmission } from "./credentials.js";
+import { identityPublicKey, type EkhoIdentity, type OperatorKeyAdmission } from "./credentials.js";
 
 export interface OperatorKeyEntryLike {
   key_id?: string;
@@ -51,6 +51,8 @@ interface ClaimCtx {
   revokedLedger: Record<string, string>;
   admissions: Record<string, OperatorKeyAdmission>;
   signedByAPinnedKey: (payload: unknown, sig: string) => boolean;
+  /** identity+fleet scope for advisory-warning throttle. Never logged. */
+  scopeKey: string;
 }
 
 interface RelayKeyClaims {
@@ -60,6 +62,123 @@ interface RelayKeyClaims {
   pinRemoved: boolean;
   ledgerChanged: boolean;
   admissionsChanged: boolean;
+}
+
+/** How many identical advisory polls to swallow before a reminder. ~5s poll
+ *  → a reminder about every 10 minutes, not 150k lines in a day and a half. */
+export const ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY = 120;
+/** Process-local cap on identity+fleet throttle scopes. Eviction re-emits that
+ *  scope's next first-seen warning; it cannot mute a different live scope. */
+export const ADVISORY_REVOCATION_WARNING_MAX_SCOPES = 64;
+const MAX_ADVISORY_KEYS_IN_LOG = 8;
+const MAX_ADVISORY_KID_CHARS = 32;
+
+interface AdvisoryWarnEntry {
+  fingerprint: string;
+  suppressed: number;
+}
+
+/** Process-local only. Keyed by identity public key + fleet so one box cannot
+ *  mute another identity or fleet. Cleared when the advisory set goes empty. */
+const advisoryWarnByScope = new Map<string, AdvisoryWarnEntry>();
+
+/** Test-only isolation for the process-local Map. Not plugin runtime API. */
+export function resetAdvisoryRevocationWarningStateForTests(): void {
+  advisoryWarnByScope.clear();
+}
+
+function advisoryScopeKey(identity: EkhoIdentity, fleetId: string | null | undefined): string {
+  return `${identityPublicKey(identity)}\0${fleetId ?? ""}`;
+}
+
+function touchAdvisoryScope(scopeKey: string, entry: AdvisoryWarnEntry): void {
+  advisoryWarnByScope.delete(scopeKey);
+  advisoryWarnByScope.set(scopeKey, entry);
+  while (advisoryWarnByScope.size > ADVISORY_REVOCATION_WARNING_MAX_SCOPES) {
+    const oldest = advisoryWarnByScope.keys().next().value;
+    if (oldest === undefined || oldest === scopeKey) break;
+    advisoryWarnByScope.delete(oldest);
+  }
+}
+
+/** Relay-supplied key IDs are untrusted. Escape C0/C1 controls (U+0000–U+001F,
+ *  U+007F–U+009F, including CSI/OSC) and Unicode line separators so each warning
+ *  stays one bounded line; truncate the escaped form, never the raw id. */
+function formatKidForLog(kid: string): string {
+  let escaped = "";
+  for (const ch of kid) {
+    const code = ch.charCodeAt(0);
+    if (ch === "\\") escaped += "\\\\";
+    else if (ch === "\n") escaped += "\\n";
+    else if (ch === "\r") escaped += "\\r";
+    else if (ch === "\t") escaped += "\\t";
+    else if (ch === "\0") escaped += "\\0";
+    else if (code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x2028 || code === 0x2029) {
+      escaped += `\\u${code.toString(16).padStart(4, "0")}`;
+    } else {
+      escaped += ch;
+    }
+  }
+  if (escaped.length <= MAX_ADVISORY_KID_CHARS) return escaped;
+  return `${escaped.slice(0, MAX_ADVISORY_KID_CHARS)}...`;
+}
+
+/** Bounded sample for the log line. Fingerprinting uses the complete sorted set. */
+function formatAdvisoryKeyList(kids: string[]): string {
+  const shown = kids.slice(0, MAX_ADVISORY_KEYS_IN_LOG).map(formatKidForLog);
+  const omitted = kids.length - shown.length;
+  const list = shown.join(", ");
+  if (omitted <= 0) return list;
+  return `${list} (+${omitted} omitted)`;
+}
+
+function formatAdvisoryWarning(kids: string[]): string {
+  if (kids.length === 1) {
+    return (
+      `[ekho] relay reports operator key ${formatKidForLog(kids[0])} as REVOKED without a valid revocation signature. ` +
+        `Treating the claim as ADVISORY: the key is NOT unpinned and NOT tombstoned, but it will not ` +
+        `be newly adopted until a signed revocation arrives.`
+    );
+  }
+  return (
+    `[ekho] relay reports ${kids.length} operator keys as REVOKED without a valid revocation signature: ` +
+      `${formatAdvisoryKeyList(kids)}. Treating the claim as ADVISORY: the keys are NOT unpinned and NOT ` +
+      `tombstoned, but they will not be newly adopted until a signed revocation arrives.`
+  );
+}
+
+function formatAdvisorySummary(kids: string[], suppressed: number): string {
+  return (
+    `[ekho] still treating ${kids.length} unsigned/invalid operator-key revocation claim(s) as ADVISORY ` +
+      `(suppressed ${suppressed} identical warning(s) this process). Keys: ${formatAdvisoryKeyList(kids)}. ` +
+      `Not unpinned, not tombstoned; still blocking new adoption.`
+  );
+}
+
+/** One aggregate warning when the advisory set appears or changes; identical
+ *  repeats are silent; a bounded reminder keeps the condition visible; an empty
+ *  set forgets the scope so a later recurrence is logged again. Trust is
+ *  untouched — this is log volume only. */
+function warnAdvisoryRevocations(ctx: ClaimCtx, advisory: Set<string>): void {
+  if (advisory.size === 0) {
+    advisoryWarnByScope.delete(ctx.scopeKey);
+    return;
+  }
+  const kids = [...advisory].sort();
+  // Canonical JSON is unambiguous; NUL-join collides `["a\0b"]` with `["a","b"]`.
+  const fingerprint = sha256Hex(JSON.stringify(kids));
+  const prev = advisoryWarnByScope.get(ctx.scopeKey);
+  if (!prev || prev.fingerprint !== fingerprint) {
+    ctx.log?.warn?.(formatAdvisoryWarning(kids));
+    touchAdvisoryScope(ctx.scopeKey, { fingerprint, suppressed: 0 });
+    return;
+  }
+  prev.suppressed += 1;
+  if (prev.suppressed >= ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY) {
+    ctx.log?.warn?.(formatAdvisorySummary(kids, prev.suppressed));
+    prev.suppressed = 0;
+    touchAdvisoryScope(ctx.scopeKey, prev);
+  }
 }
 
 /** Apply the relay's revocation / un-revocation claims to the working trust root
@@ -74,6 +193,7 @@ function applyRelayKeyClaims(ctx: ClaimCtx): RelayKeyClaims {
   };
   clearTombstonesOnSignedUnrevoke(ctx, out);
   applySignedRevocations(ctx, out);
+  warnAdvisoryRevocations(ctx, out.advisory);
   return out;
 }
 
@@ -144,7 +264,7 @@ function applySignedRevocations(ctx: ClaimCtx, out: RelayKeyClaims): void {
       sig && at && ctx.fleetId && ctx.signedByAPinnedKey(revocationPayload(ctx.fleetId, kid, at), sig)
     );
     if (!proven) {
-      noteAdvisoryClaim(ctx, out, kid);
+      noteAdvisoryClaim(out, kid);
     } else if (isLastPinnedKey(ctx, kid)) {
       noteLastRootRefusal(ctx, kid);
     } else {
@@ -154,20 +274,16 @@ function applySignedRevocations(ctx: ClaimCtx, out: RelayKeyClaims): void {
 }
 
 /** The relay says a key is dead but cannot prove it. Skip the key for NEW
- *  adoption, write nothing, say so out loud.
+ *  adoption, write nothing. Visibility is the process-local aggregate throttle
+ *  in warnAdvisoryRevocations — not a per-key line on every poll.
  *
  *  Deleting the pin here is the tempting one-liner and it is wrong twice over:
  *  it lets whoever controls the relay drop trust unilaterally, AND a deleted pin
  *  is re-admitted on the very next poll by the same still-valid endorsement.
  *  Rejecting a key takes a revokedOperatorKeys tombstone, not a deletion — and a
  *  tombstone takes a signature. */
-function noteAdvisoryClaim(ctx: ClaimCtx, out: RelayKeyClaims, kid: string): void {
+function noteAdvisoryClaim(out: RelayKeyClaims, kid: string): void {
   out.advisory.add(kid);
-  ctx.log?.warn?.(
-    `[ekho] relay reports operator key ${kid} as REVOKED without a valid revocation signature. ` +
-      `Treating the claim as ADVISORY: the key is NOT unpinned and NOT tombstoned, but it will not ` +
-      `be newly adopted until a signed revocation arrives.`
-  );
 }
 
 function isLastPinnedKey(ctx: ClaimCtx, kid: string): boolean {
@@ -254,7 +370,16 @@ export function syncPinnedOperatorKeys(
   // Phases 1 and 2 (#27) — mutates `pinned` / `revokedLedger` / `admissions` in
   // place and reports back what it touched.
   const claims = applyRelayKeyClaims(
-    { operatorKeys, fleetId, log, pinned, revokedLedger, admissions, signedByAPinnedKey }
+    {
+      operatorKeys,
+      fleetId,
+      log,
+      pinned,
+      revokedLedger,
+      admissions,
+      signedByAPinnedKey,
+      scopeKey: advisoryScopeKey(identity, fleetId)
+    }
   );
   const advisory = claims.advisory;
   let changed = claims.pinRemoved;
