@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-08-31
+
+### Fixed
+- **The OpenClaw plugin loads under OpenClaw 2026.8.1 / OpenClaw 2.0.** The ESM plugin bundle previously inlined the CommonJS SDK and emitted esbuild's dynamic `require("node:crypto")` shim, which the gateway rejects at import time. The SDK now publishes dual CJS/ESM outputs, the plugin bundles the ESM entry, and the build fails if a dynamic-require shim returns. A bare-Node regression reproduces the real loader conditions without Vitest's ambient `require`.
+
 ## [0.4.7] - 2026-08-29
 
 ### Fixed

@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-08-31
+
+### Changed
+- Published dual CommonJS and ESM entry points. Existing `require()` consumers keep the CommonJS build; `import` consumers receive `dist/esm`. No protocol or client API changed.
+
 ## [0.4.7] - 2026-08-29
 
 ### Notes
