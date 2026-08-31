@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,9 +26,9 @@ function tmpDir() {
 }
 
 /**
- * Stage a bundle somewhere it can be imported: the host provides `openclaw` at
- * load time (build.mjs marks it external), so stand up a minimal stub of the
- * one SDK entry point the plugin imports.
+ * Stage a bundle somewhere it can be imported, and hand back the directory: the
+ * host provides `openclaw` at load time (build.mjs marks it external), so stand
+ * up a minimal stub of the one SDK entry point the plugin imports.
  */
 function stageBundle(source: string): string {
   const dir = tmpDir();
@@ -51,9 +52,8 @@ function stageBundle(source: string): string {
       "  return { ...def, tools, register(api) { api.__registeredTools = tools; } };\n" +
       "}\n"
   );
-  const entry = path.join(dir, "index.mjs");
-  fs.writeFileSync(entry, source);
-  return entry;
+  fs.writeFileSync(path.join(dir, "index.mjs"), source);
+  return dir;
 }
 
 /**
@@ -65,13 +65,13 @@ function stageBundle(source: string): string {
  * box's real agent identity and start talking to the production relay as it.
  * Every test here needs only the bytes on disk, so it gets an empty home.
  */
-async function startPlugin(entry: string) {
+async function startPlugin(dir: string) {
   const lines: string[] = [];
   const record = (...a: unknown[]) => lines.push(a.map(String).join(" "));
   const home = process.env.HOME;
   process.env.HOME = tmpDir();
   try {
-    const mod = await import(pathToFileURL(entry).href);
+    const mod = await import(pathToFileURL(path.join(dir, "index.mjs")).href);
     // No relayBaseUrl: startup must still identify itself, so a box that never
     // connects is still answerable.
     mod.default.register({ pluginConfig: {}, logger: { info: record, warn: record, error: record, debug: record } });
@@ -102,23 +102,30 @@ async function inboxBuildField(plugin: { tools: Array<{ name: string; execute: F
 
 const buildLine = (lines: string[]) => lines.find((l) => l.startsWith("[ekho-build]"));
 
+/**
+ * One real build for the whole file. Both suites below need the same artifact,
+ * and build.mjs clears dist/ before writing it, so a second suite building its
+ * own copy in a parallel worker would pull dist out from under this one.
+ */
+let dist = "";
+
+beforeAll(() => {
+  // Build for real — a stamp that only exists in the test's imagination is
+  // exactly the failure mode under repair. process.execPath, not "node": the
+  // build must run under the interpreter running the tests, not whatever PATH
+  // happens to resolve.
+  execFileSync(process.execPath, ["build.mjs"], { cwd: PKG_DIR, stdio: "pipe" });
+  dist = fs.readFileSync(DIST, "utf-8");
+}, 120_000);
+
+afterAll(() => {
+  for (const dir of tmpDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+  tmpDirs.length = 0;
+});
+
 describe("the built bundle carries its own identity", () => {
-  let dist = "";
-
-  beforeAll(() => {
-    // Build for real — a stamp that only exists in the test's imagination is
-    // exactly the failure mode under repair.
-    execFileSync("node", ["build.mjs"], { cwd: PKG_DIR, stdio: "pipe" });
-    dist = fs.readFileSync(DIST, "utf-8");
-  }, 120_000);
-
-  afterAll(() => {
-    for (const dir of tmpDirs) {
-      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-    }
-    tmpDirs.length = 0;
-  });
-
   it("stamps dist with a well-formed version, commit, build time and digest", () => {
     // Before this change the same grep over dist returned nothing at all: the
     // version lived only in package.json, beside the bundle rather than in it.
@@ -255,5 +262,143 @@ describe("the built bundle carries its own identity", () => {
     // it poll" and "which bundle is polling".
     expect(dist).toContain("build=${");
     expect(dist).toMatch(/listening for inbound \(poll \$\{[^}]+\}ms\)/);
+  });
+});
+
+/**
+ * Import the staged bundle from a bare `node` process and report what happened.
+ *
+ * The gateway loads the extension with a plain ESM import in its own process.
+ * Importing it from inside vitest does not reproduce that: vitest's module
+ * runner leaves an ambient `require` in scope, which is precisely why the suite
+ * above stayed green through two releases that could not load anywhere else.
+ * So the import happens in a child `process.execPath` — a real ESM loader, no
+ * shims — and HOME is redirected for the same reason it is above.
+ */
+function loadInChild(dir: string) {
+  // Imported through the same loader as the bundle, so "the bundle got no
+  // ambient require" is measured rather than assumed.
+  fs.writeFileSync(path.join(dir, "probe.mjs"), 'export const ambientRequire = typeof require !== "undefined";\n');
+  fs.writeFileSync(
+    path.join(dir, "load.mjs"),
+    // The gateway's startup path: import the extension, then register it.
+    'const probe = await import("./probe.mjs");\n' +
+      'const mod = await import("./index.mjs");\n' +
+      "const plugin = mod.default;\n" +
+      "const logged = [];\n" +
+      'const record = (...a) => logged.push(a.map(String).join(" "));\n' +
+      "plugin.register({ pluginConfig: {}, logger: { info: record, warn: record, error: record, debug: record } });\n" +
+      "console.log(JSON.stringify({\n" +
+      "  ambientRequire: probe.ambientRequire,\n" +
+      "  tools: plugin.tools.map((t) => t.name),\n" +
+      "  logged\n" +
+      "}));\n"
+  );
+  const run = spawnSync(process.execPath, ["load.mjs"], {
+    cwd: dir,
+    env: { ...process.env, HOME: tmpDir() },
+    encoding: "utf8"
+  });
+  let report: { ambientRequire?: boolean; tools?: string[]; logged?: string[] } = {};
+  try {
+    report = JSON.parse(run.stdout.trim().split("\n").pop() ?? "{}");
+  } catch {
+    /* the load failed before it could report; the assertions below say so */
+  }
+  return { status: run.status, stdout: run.stdout, stderr: run.stderr, report };
+}
+
+/**
+ * ekho#68: the bundle must import under a real ESM loader.
+ *
+ * 0.4.5 and 0.4.6 shipped a bundle that OpenClaw 2026.8.1 refused at load time:
+ *
+ *     Error: Dynamic require of "node:crypto" is not supported
+ *
+ * so the plugin sat at status=error on every box on the 2.0 gateway. The bundle
+ * is ESM, but the Ekho SDK resolved to its CommonJS build, and esbuild lowered
+ * that build's `require("node:crypto")` to its own `__require` shim — which
+ * throws unless the loader happens to leave an ambient `require` in scope. It
+ * runs at the top of the module, so the entire import dies, not just the code
+ * path that hashes.
+ */
+describe("the built bundle imports under a real ESM loader", () => {
+  let load: ReturnType<typeof loadInChild>;
+
+  beforeAll(() => {
+    load = loadInChild(stageBundle(dist));
+  }, 60_000);
+
+  it("imports without a dynamic require the loader cannot honour", () => {
+    // The exact failure reported from the fleet on OpenClaw 2026.8.1.
+    expect(load.stderr).not.toMatch(/Dynamic require of "[^"]+" is not supported/);
+    expect(load.status, `node exited ${load.status}\n${load.stderr}`).toBe(0);
+  });
+
+  it("was loaded by a process that supplies no ambient require", () => {
+    // Keeps the test above honest: under vitest this would be `true`, which is
+    // how a bundle that could not load anywhere else kept a green suite.
+    expect(load.report.ambientRequire, `child did not report back\n${load.stderr}`).toBe(false);
+  });
+
+  it("registers its tools once that import succeeds", () => {
+    expect(load.report.tools).toEqual(["ekho_send", "ekho_open_room", "ekho_inbox"]);
+    expect(load.report.logged?.join("\n")).toContain("[ekho-adapter] registered tools:");
+  });
+
+  it("carries no CommonJS require shim at all", () => {
+    // The property rather than the one symptom: a CommonJS dependency added
+    // later brings the shim back, and it should fail here rather than on a
+    // fleet box. Reported as the offending lines — a whole-bundle diff is
+    // unreadable.
+    const shim = dist
+      .split("\n")
+      .map((line, i) => [i + 1, line] as const)
+      .filter(([, line]) => line.includes("Dynamic require of") || /\b__require\b/.test(line))
+      .map(([n, line]) => `${n}: ${line.trim()}`);
+    expect(shim, "esbuild lowered a require() into the bundle").toEqual([]);
+  });
+});
+
+/**
+ * The bundle inlines the Ekho SDK, and the SDK ships only what its `files` list
+ * publishes. A build that reaches for something outside that list works in this
+ * checkout and nowhere else — and it would take the fix for the load failure
+ * above down with it, since that fix is about which SDK build gets inlined. So
+ * the published layout is checked against the artifact rather than assumed.
+ */
+describe("the built bundle inlines only SDK files the SDK publishes", () => {
+  it("resolves every inlined SDK module inside `npm pack`'s file list", () => {
+    // Resolved from the plugin package the way esbuild resolves it, not by
+    // assuming a sibling directory: in an installed layout the SDK is under
+    // node_modules, and the check has to hold there too.
+    const sdkDir = fs.realpathSync(
+      path.dirname(createRequire(path.join(PKG_DIR, "package.json")).resolve("@drakon-systems/ekho-sdk/package.json"))
+    );
+    const real = (p: string) => {
+      try { return fs.realpathSync(p); } catch { return p; }
+    };
+
+    // esbuild labels each inlined module with its path relative to the build's
+    // working directory, which is the plugin package.
+    const inlinedSdkFiles = [...dist.matchAll(/^\/\/ (\S+\.(?:js|mjs|cjs|ts))$/gm)]
+      .map((m) => real(path.resolve(PKG_DIR, m[1])))
+      .filter((abs) => abs.startsWith(`${sdkDir}${path.sep}`))
+      .map((abs) => path.relative(sdkDir, abs).split(path.sep).join("/"));
+    expect(inlinedSdkFiles.length, "no SDK module inlined — the bundle stopped using the SDK?").toBeGreaterThan(0);
+
+    const packed: string[] = JSON.parse(
+      execFileSync("npm", ["pack", "--dry-run", "--json", "-w", "@drakon-systems/ekho-sdk"], {
+        cwd: path.join(PKG_DIR, "..", ".."),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"]
+      })
+    )[0].files.map((f: { path: string }) => f.path);
+
+    expect(packed.length, "npm pack listed no files").toBeGreaterThan(0);
+    const unpublished = inlinedSdkFiles.filter((f) => !packed.includes(f));
+    expect(unpublished, `inlined SDK files missing from the published tarball; packed: ${packed.join(", ")}`).toEqual(
+      []
+    );
   });
 });

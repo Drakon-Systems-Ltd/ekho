@@ -9,7 +9,7 @@ import type {
   HeartbeatPayload,
   ProposeActionPayload,
   ActionResultPayload
-} from "./types";
+} from "./types.js";
 
 export type FloorResult = {
   granted: boolean;

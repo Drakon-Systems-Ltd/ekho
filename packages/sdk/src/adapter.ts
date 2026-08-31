@@ -1,4 +1,4 @@
-import { EkhoAgentClient } from "./client";
+import { EkhoAgentClient } from "./client.js";
 import type {
   AgentCredentials,
   InboxMessage,
@@ -6,7 +6,7 @@ import type {
   SendMessagePayload,
   ProposeActionPayload,
   ActionResultPayload
-} from "./types";
+} from "./types.js";
 
 export type AdapterHooks = {
   onMessage?: (message: InboxMessage, adapter: EkhoAgentAdapter) => Promise<void>;

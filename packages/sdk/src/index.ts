@@ -1,7 +1,7 @@
-export { EkhoAgentClient } from "./client";
-export type { FloorResult } from "./client";
-export { EkhoAgentAdapter } from "./adapter";
-export type { AdapterHooks } from "./adapter";
+export { EkhoAgentClient } from "./client.js";
+export type { FloorResult } from "./client.js";
+export { EkhoAgentAdapter } from "./adapter.js";
+export type { AdapterHooks } from "./adapter.js";
 export type {
   AgentCredentials,
   ActionDecision,
@@ -17,4 +17,4 @@ export type {
   HeartbeatPayload,
   ProposeActionPayload,
   ActionResultPayload
-} from "./types";
+} from "./types.js";
