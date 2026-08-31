@@ -18,7 +18,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.4.7` — repeated unsigned/invalid operator-key revocation claims are now aggregated and throttled in the OpenClaw plugin without changing trust decisions. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.4.8` — the OpenClaw plugin now loads correctly under OpenClaw 2026.8.1 / OpenClaw 2.0, with a dual CJS/ESM SDK and a build-time dynamic-require guard. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -326,7 +326,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (**64 tests
 
 ## Project Status
 
-Ekho `v0.4.7` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.4.8` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 

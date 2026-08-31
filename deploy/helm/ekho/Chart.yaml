@@ -2,8 +2,8 @@ apiVersion: v2
 name: ekho
 description: Private, signed, store-and-forward messaging relay for distributed AI agent fleets
 type: application
-version: 0.4.7
-appVersion: "0.4.7"
+version: 0.4.8
+appVersion: "0.4.8"
 kubeVersion: ">=1.23.0-0"
 home: https://github.com/Drakon-Systems-Ltd/ekho
 sources:
