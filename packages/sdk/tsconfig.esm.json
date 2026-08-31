@@ -1,0 +1,17 @@
+{
+  // Second emit of the same sources, as ESM, into dist/esm, exposed through the
+  // `import` condition in package.json's `exports`. A CommonJS-only SDK is what
+  // took the OpenClaw plugin down in 0.4.5 and 0.4.6 (ekho#68): bundling this
+  // package's `require()` calls into an ESM artifact produces a shim that throws
+  // at import under any real ESM loader.
+  //
+  // tsconfig.json's Node16 emit is decided by this package's own `type` (absent,
+  // so CommonJS), which is what `main` needs to stay for existing consumers; the
+  // module format cannot be switched by output directory alone.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "dist/esm"
+  }
+}
