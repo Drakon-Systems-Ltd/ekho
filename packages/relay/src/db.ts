@@ -2829,7 +2829,7 @@ export class EkhoDb {
     const rows = this.db.prepare(
       `SELECT id, sender_agent_id, recipient_kind, recipient_id, body_json, created_at
        FROM messages WHERE ${whereSql}
-       ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`
+       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
     ).all(...params, limit, offset) as Array<Record<string, unknown>>;
     rows.reverse(); // chronological (oldest -> newest) for display
     const items = rows.map((m) => {

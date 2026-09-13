@@ -51,4 +51,37 @@ describe("feed conversation history", () => {
     const texts = res.items.map((i: Record<string, unknown>) => JSON.parse(String(i.message_body_json)).text);
     expect(texts).toEqual(["📰 item 3", "📰 item 4"]);
   });
+
+  it("keyset-pages a feed with no gaps or duplicates when items share one millisecond", () => {
+    // The (created_at, id) cursor must agree with the row sort order. This
+    // reproduces the tie window a feed poll creates when it inserts several
+    // items in one batch — id is a random UUID, so ordering only holds if the
+    // sort key and the cursor key are the same column.
+    const conv = "feed-tie";
+    const tiedIds = ["m-c", "m-a", "m-e", "m-b", "m-d", "m-f"];
+    for (const id of tiedIds) seedFeedItem(conv, id, `📰 ${id}`, "HN", "2026-06-01T12:00:00.000Z");
+
+    const seen: string[] = [];
+    let before: { at: string; id: string } | null = null;
+    for (let guard = 0; guard < 10; guard++) {
+      const res = relay.db.getConversation(relay.fleetId, conv, {
+        sortOrder: "desc",
+        limit: 2,
+        offset: 0,
+        beforeAt: before?.at,
+        beforeId: before?.id
+      });
+      const items = res.items as Array<{ id: string; created_at: string }>;
+      if (!items.length) break;
+      // getConversation returns chronological (oldest -> newest); the next
+      // cursor is the oldest (first) row of this page.
+      for (const i of items) seen.push(i.id);
+      const oldest = items[0];
+      before = { at: oldest.created_at, id: oldest.id };
+    }
+    const unique = new Set(seen);
+    expect(unique.size).toBe(tiedIds.length);
+    expect(seen.length).toBe(tiedIds.length);
+    for (const id of tiedIds) expect(unique.has(id)).toBe(true);
+  });
 });
