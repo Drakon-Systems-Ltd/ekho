@@ -9,13 +9,71 @@ permissions:
   contents: write
   packages: write
 
+# Release shape (0.4.9+)
+#
+# Through 0.4.8 this was one serial job: test → npm publish → image → GitHub
+# Release. Two consecutive releases died inside it:
+#   - v0.4.7 failed at the test step (an order-dependent test), so nothing at all
+#     was published for that tag.
+#   - v0.4.8 published both npm packages, then the QEMU-emulated arm64 image
+#     build ran past the 45-minute job ceiling and was cancelled. The image and
+#     the GitHub Release never appeared, the Helm chart pointed at an image tag
+#     that did not exist, and the run could not be replayed because npm refuses
+#     to publish over an existing version.
+#
+# So now: one verify gate, then npm and the per-arch images in parallel on
+# native runners, a manifest merge, and the GitHub Release only once every
+# artefact is actually there. npm publish skips a version that is already on
+# the registry so a re-run after a downstream failure is clean.
+
 jobs:
-  release:
+  # Nothing publishes anywhere until the tag matches the workspace version and
+  # the full suite passes on the tagged commit.
+  verify:
     runs-on: ubuntu-latest
-    # 0.3.1 finished in under two minutes, but that was amd64 only. The emulated
-    # arm64 build compiles native modules from source, so the ceiling is raised
-    # to leave real headroom rather than have a release fail at the last step.
-    timeout-minutes: 45
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build -w @drakon-systems/ekho-sdk
+      - run: npm run typecheck
+      - run: npx vitest run
+
+      - name: Resolve version and image name
+        id: meta
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF#refs/tags/v}"
+          workspace="$(node -p "require('./packages/sdk/package.json').version")"
+          if [ "$version" != "$workspace" ]; then
+            echo "::error::tag v${version} does not match workspace version ${workspace} — run scripts/bump-version.sh and the lockstep edits before tagging"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # GHCR / Docker require lowercase repository names; the org slug is mixed-case.
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+  # The SDK and the agent-side plugin. Until 0.3.0 the plugin had no release
+  # path at all: it was copied onto each machine by hand and patched in place,
+  # so every box reported 0.2.1 regardless of the code it was actually running.
+  #
+  # Deliberately NOT continue-on-error. A silently skipped publish is the
+  # failure mode that hid the private container image for three releases —
+  # a release that cannot ship the plugin should fail loudly and be re-cut.
+  # The only thing skipped is a version that is verifiably already on npm.
+  publish-npm:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
@@ -27,30 +85,51 @@ jobs:
 
       - run: npm ci
       - run: npm run build -w @drakon-systems/ekho-sdk
-      - run: npm run typecheck
-      - run: npx vitest run
+      - run: npm run build -w @drakon-systems/ekho-openclaw-plugin
 
-      - name: Publish @drakon-systems/ekho-sdk to npm
-        run: npm publish -w @drakon-systems/ekho-sdk --access public
+      - name: Publish to npm (skip versions already on the registry)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          for ws in @drakon-systems/ekho-sdk @drakon-systems/ekho-openclaw-plugin; do
+            if [ -n "$(npm view "${ws}@${VERSION}" version 2>/dev/null)" ]; then
+              echo "${ws}@${VERSION} is already on npm — skipping"
+              continue
+            fi
+            npm publish -w "$ws" --access public
+          done
 
-      # The agent-side plugin. Until 0.3.0 this had no release path at all: it was
-      # copied onto each machine by hand and patched in place, so every box
-      # reported 0.2.1 regardless of the code it was actually running.
-      #
-      # Deliberately NOT continue-on-error. A silently skipped publish is the
-      # failure mode that hid the private container image for three releases —
-      # a release that cannot ship the plugin should fail loudly and be re-cut.
-      - name: Build the OpenClaw plugin
-        run: npm run build -w @drakon-systems/ekho-openclaw-plugin
+  # Through 0.3.1 the image was built only for the runner's own architecture,
+  # so it was amd64-only. Ekho targets Tailscale meshes, homelabs and edge
+  # nodes — Raspberry Pis, Apple Silicon, Oracle's ARM free tier — where arm64
+  # is the common case, not the exception. Our own relay host is aarch64.
+  #
+  # 0.4.x cross-built arm64 under QEMU on an amd64 runner. The Dockerfile
+  # compiles better-sqlite3 from source in both stages, and under emulation
+  # that grew from ~2 minutes (0.4.4) to 21 (0.4.6) to 44+ (0.4.8, cancelled).
+  # Each architecture now builds natively on its own runner and pushes by
+  # digest; the manifest is assembled in the merge job below.
+  build-image:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
 
-      - name: Publish @drakon-systems/ekho-openclaw-plugin to npm
-        run: npm publish -w @drakon-systems/ekho-openclaw-plugin --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Platform slug
+        id: plat
+        run: echo "slug=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
-      # Build and publish the relay container image to GHCR
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -58,60 +137,106 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Required to cross-build the arm64 image on an amd64 runner.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # GHCR / Docker require lowercase repository names; the org slug is mixed-case.
-      - name: Compute lowercase image name
-        id: img
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Docker image labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.verify.outputs.image }}
+          tags: type=raw,value=${{ needs.verify.outputs.version }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ needs.verify.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ steps.plat.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.plat.outputs.slug }}
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.plat.outputs.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 7
+
+  merge-image:
+    needs: [verify, build-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Docker image metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ steps.img.outputs.name }}
+          images: ${{ needs.verify.outputs.image }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
 
-      # Through 0.3.1 this built only for the runner's own architecture, so the
-      # published image was amd64-only. Ekho targets Tailscale meshes, homelabs
-      # and edge nodes — Raspberry Pis, Apple Silicon, Oracle's ARM free tier —
-      # where arm64 is the common case, not the exception. Our own relay host is
-      # aarch64 and could not have run the image we were publishing.
-      #
-      # arm64 is cross-built under QEMU, which is slow here: the Dockerfile
-      # compiles better-sqlite3 from source in both stages. Hence the raised
-      # job timeout below. If this proves too slow or flaky, the better fix is
-      # a native ARM runner building in parallel and a merged manifest.
-      - name: Build and push image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create and push the multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ needs.verify.outputs.image }}
+        run: |
+          set -euo pipefail
+          # A short-manifest publish is exactly the failure mode this release
+          # shape exists to prevent: one architecture missing (e.g. a digest
+          # artifact expired after a delayed re-run) must fail loudly, never
+          # ship a partial-arch image under semver/latest tags.
+          digest_count=$(find . -maxdepth 1 -type f | wc -l)
+          if [ "$digest_count" -ne 2 ]; then
+            echo "::error::expected 2 platform digests (amd64+arm64), found ${digest_count} — a build-image job likely failed or its digest artifact expired"
+            exit 1
+          fi
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
 
-      # Create GitHub Release
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      - name: Inspect the published manifest
+        run: docker buildx imagetools inspect ${{ needs.verify.outputs.image }}:${{ needs.verify.outputs.version }}
 
+  # Only once every artefact the release page advertises actually exists.
+  github-release:
+    needs: [verify, publish-npm, merge-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          name: "Ekho v${{ steps.version.outputs.VERSION }}"
+          name: "Ekho v${{ needs.verify.outputs.version }}"
           body: |
-            ## Ekho v${{ steps.version.outputs.VERSION }}
+            ## Ekho v${{ needs.verify.outputs.version }}
 
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
 
@@ -121,7 +246,7 @@ jobs:
             npm install @drakon-systems/ekho-sdk
 
             # Docker
-            docker pull ${{ steps.img.outputs.name }}:${{ steps.version.outputs.VERSION }}
+            docker pull ${{ needs.verify.outputs.image }}:${{ needs.verify.outputs.version }}
 
             # From source
             git clone https://github.com/${{ github.repository }}.git

@@ -84,12 +84,17 @@ describe("release version lockstep", () => {
     }
   });
 
-  it("does not mark the SDK npm publish step continue-on-error", () => {
+  it("does not mark the npm publish step continue-on-error", () => {
+    // Since 0.4.9 one step publishes both packages and skips a version that is
+    // already on the registry. Skipping a verifiably published version is the
+    // only tolerated non-publish; a failed publish must still fail the release.
     const workflow = read(".github/workflows/release.yml");
     const step = workflow.split(/^\s+- name:\s*/m).find((chunk) =>
-      chunk.startsWith("Publish @drakon-systems/ekho-sdk to npm")
+      chunk.startsWith("Publish to npm")
     );
-    expect(step, "SDK publish step").toBeTruthy();
+    expect(step, "npm publish step").toBeTruthy();
+    expect(step).toContain("@drakon-systems/ekho-sdk");
+    expect(step).toContain("@drakon-systems/ekho-openclaw-plugin");
     const keys = step!
       .split("\n")
       .map((line) => line.trim())

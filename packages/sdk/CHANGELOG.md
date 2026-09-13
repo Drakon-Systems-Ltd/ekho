@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-13
+
+### Changed
+- Version bump only, in lockstep with the workspace. The release pipeline was rebuilt after the v0.4.7 and v0.4.8 tags shipped incompletely; see the root [CHANGELOG.md](../../CHANGELOG.md). No package behaviour changes.
+
 ## [0.4.8] - 2026-08-31
 
 ### Changed
