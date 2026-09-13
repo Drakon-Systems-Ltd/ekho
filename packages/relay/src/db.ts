@@ -1442,7 +1442,7 @@ export class EkhoDb {
     for (const cid of roomConvIds) {
       const rows = (this.db.prepare(
         `SELECT id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at FROM messages
-         WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+         WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`
       ).all(fleetId, cid, HISTORY_LIMIT) as Array<Record<string, unknown>>).reverse(); // chronological
       historyByConv.set(cid, rows);
       contextRows.push(...rows);
@@ -1650,7 +1650,7 @@ export class EkhoDb {
   getConversationTail(fleetId: string, conversationId: string, limit: number) {
     const rows = (this.db.prepare(
       `SELECT id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at FROM messages
-       WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`
+       WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`
     ).all(fleetId, conversationId, Math.max(1, limit)) as Array<Record<string, unknown>>).reverse();
     if (rows.length === 0) return [];
     const senderIds = Array.from(new Set(rows.map((r) => String(r.sender_agent_id))));
@@ -1825,7 +1825,7 @@ export class EkhoDb {
       `SELECT id, conversation_id, correlation_id, message_type, priority, recipient_kind, recipient_id,
               body_json, metadata_json, created_at, expires_at, status
        FROM messages WHERE ${where.join(" AND ")}
-       ORDER BY created_at DESC, id DESC LIMIT ?`
+       ORDER BY created_at DESC, rowid DESC LIMIT ?`
     ).all(...params, Math.max(1, options.limit)) as Array<Record<string, unknown>>;
     if (rows.length === 0) return [];
 
@@ -2505,7 +2505,7 @@ export class EkhoDb {
     const recentRows = this.db.prepare(
       `SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id FROM (
          SELECT conversation_id, body_json, created_at, sender_agent_id, recipient_id,
-                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC, id DESC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC, rowid DESC) AS rn
          FROM messages WHERE fleet_id = ? AND conversation_id NOT LIKE 'feed-%'
        ) WHERE rn = 1 ORDER BY created_at DESC LIMIT 25`
     ).all(fleetId) as Array<Record<string, unknown>>;
@@ -2829,7 +2829,7 @@ export class EkhoDb {
     const rows = this.db.prepare(
       `SELECT id, sender_agent_id, recipient_kind, recipient_id, body_json, created_at
        FROM messages WHERE ${whereSql}
-       ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+       ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`
     ).all(...params, limit, offset) as Array<Record<string, unknown>>;
     rows.reverse(); // chronological (oldest -> newest) for display
     const items = rows.map((m) => {

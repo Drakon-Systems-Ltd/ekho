@@ -4,6 +4,15 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-13
+
+### Fixed
+- **Releases build each architecture natively and can be re-cut.** The v0.4.7 and v0.4.8 tags never shipped a container image or a GitHub Release: 0.4.7 failed on an order-dependent test, and 0.4.8 published both npm packages but the QEMU-emulated arm64 image build overran the 45-minute job ceiling (2 min on 0.4.4, 21 on 0.4.6, 44+ on 0.4.8) and was cancelled, leaving the Helm chart pointing at an image tag that did not exist. The release workflow now runs one verify gate (tag must match the workspace version, full suite must pass), then npm publish and native amd64/arm64 image builds in parallel, merges the manifest, and only then creates the GitHub Release. npm publish skips a version that is already on the registry, so a run that fails downstream can be replayed instead of stranding the tag.
+- **Sent and inbox history ordering is deterministic within a millisecond.** Every newest-first message query tiebroke on the message id, which is random, so two messages created in the same millisecond came back in arbitrary order (the 0.4.7 release-run failure). The tiebreak is now SQLite's insertion order (`rowid`). A regression test freezes the clock to force the tie.
+
+### Changed
+- Helm chart, OpenAPI, README, relay agent card, metrics and health versions move to 0.4.9 in lockstep with the packages. No relay, SDK or plugin behaviour changes beyond the ordering fix.
+
 ## [0.4.8] - 2026-08-31
 
 ### Fixed

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
 import { addSeconds, nowIso } from "../src/utils";
 
@@ -336,6 +336,28 @@ describe("agent read-back endpoints", () => {
       const huge = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/sent?limit=99999");
       expect(huge.status).toBe(200);
       expect(huge.body.messages.length).toBeLessThanOrEqual(100);
+    });
+
+    it("orders same-millisecond sends by insertion, not by random id", async () => {
+      // v0.4.7's release run failed on the test above: two sends landed in the
+      // same millisecond and the tiebreak was the random message id, so
+      // "newest first" was a coin flip. Freeze the clock so every send shares
+      // one created_at and the order can only come from insertion (rowid).
+      const a = await relay.enrollAgent("rb-sent-tie-a");
+      const b = await relay.enrollAgent("rb-sent-tie-b");
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        for (let i = 1; i <= 5; i++) await send(a, b.agent_id, `tie ${i}`);
+      } finally {
+        vi.useRealTimers();
+      }
+      const res = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/sent?limit=5");
+      expect(res.status).toBe(200);
+      const texts = res.body.messages.map((m: { body: { text: string } }) => m.body.text);
+      expect(texts).toEqual(["tie 5", "tie 4", "tie 3", "tie 2", "tie 1"]);
+      // Prove the tie actually happened, otherwise this test proves nothing.
+      const stamps = new Set(res.body.messages.map((m: { created_at: string }) => m.created_at));
+      expect(stamps.size).toBe(1);
     });
 
     it("clamps hostile limits instead of 500ing", async () => {
