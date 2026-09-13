@@ -140,6 +140,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Docker image labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.verify.outputs.image }}
+          tags: type=raw,value=${{ needs.verify.outputs.version }}
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
@@ -147,6 +154,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ needs.verify.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ steps.plat.outputs.slug }}
           cache-to: type=gha,mode=max,scope=${{ steps.plat.outputs.slug }}
 
@@ -162,7 +170,7 @@ jobs:
           name: digests-${{ steps.plat.outputs.slug }}
           path: /tmp/digests/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   merge-image:
     needs: [verify, build-image]
@@ -201,6 +209,15 @@ jobs:
           IMAGE: ${{ needs.verify.outputs.image }}
         run: |
           set -euo pipefail
+          # A short-manifest publish is exactly the failure mode this release
+          # shape exists to prevent: one architecture missing (e.g. a digest
+          # artifact expired after a delayed re-run) must fail loudly, never
+          # ship a partial-arch image under semver/latest tags.
+          digest_count=$(find . -maxdepth 1 -type f | wc -l)
+          if [ "$digest_count" -ne 2 ]; then
+            echo "::error::expected 2 platform digests (amd64+arm64), found ${digest_count} — a build-image job likely failed or its digest artifact expired"
+            exit 1
+          fi
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf "${IMAGE}@sha256:%s " *)
