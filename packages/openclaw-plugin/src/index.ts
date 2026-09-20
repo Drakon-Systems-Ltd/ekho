@@ -4,7 +4,7 @@ import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
-import { getCachedInbox } from "./autoreply.js";
+import { effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
 import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
 import { inboxMessageView } from "./inbox-trust.js";
@@ -245,7 +245,7 @@ const plugin = defineToolPlugin({
     displayName: Type.Optional(Type.String({ description: "Display name shown in the operator console" })),
     heartbeatIntervalMs: Type.Optional(Type.Number({ description: "Heartbeat interval in ms (default 30000)" })),
     peerAutoreply: Type.Optional(Type.Boolean({ description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)" })),
-    peerTurnBudget: Type.Optional(Type.Number({ description: "Max times a teammate may wake this agent per conversation before the latch closes (default 25)" }))
+    peerTurnBudget: Type.Optional(Type.Number({ description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence." }))
   }),
   tools: (tool) => [
     tool({
@@ -341,7 +341,9 @@ const plugin = defineToolPlugin({
         const roster = (cached.roster ?? []) as unknown as Array<Record<string, unknown>>;
         const controls = (cached.controls ?? []) as unknown as Array<Record<string, unknown>>;
         const peerAutoreply = Boolean(cached.peer_autoreply);
-        const peerTurnBudget = Number(cached.peer_turn_budget) || 0;
+        // Effective per-agent cap; 0 = no limit (reported as null, never a fake number).
+        const peerTurnBudget = normalizeTurnBudget(cached.peer_turn_budget);
+        const conversationBudgets = cached.conversation_budgets ?? {};
         const peerTurnsUsed = cached.peer_turns_used ?? {};
 
         // Download each message's attachments to a scoped local dir and surface
@@ -360,8 +362,9 @@ const plugin = defineToolPlugin({
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.
           operator_trusted: operatorTrusted,
-          // Bounded delegation, surfaced top-level so the agent can reason about
-          // its peer budget even before reading individual messages.
+          // Peer delegation, surfaced top-level so the agent can reason about
+          // its peer budget even before reading individual messages. null = no
+          // turn limit (the default); a number = the cap in force.
           peer_autoreply: peerAutoreply,
           peer_turn_budget: peerTurnBudget > 0 ? peerTurnBudget : null,
           // One pure, unit-tested projection per message (ekho#20). The verdict
@@ -372,7 +375,12 @@ const plugin = defineToolPlugin({
             inboxMessageView(e.message as unknown as Record<string, unknown>, e.verification, {
               operatorTrusted,
               attachments: localAttachments[i],
-              peerTurnBudget,
+              // A project-mode room's own budget (or "no limit") wins for its conversation.
+              peerTurnBudget: effectiveConversationBudget(
+                { conversation_budgets: conversationBudgets },
+                String(e.message.conversation_id ?? ""),
+                peerTurnBudget
+              ),
               peerTurnsUsed: peerTurnsUsed as Record<string, number>
             })
           ),

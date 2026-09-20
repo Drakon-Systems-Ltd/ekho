@@ -43,7 +43,7 @@
       },
       "peerTurnBudget": {
         "type": "number",
-        "description": "Max times a teammate may wake this agent per conversation before the latch closes (default 25)"
+        "description": "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence."
       }
     }
   },

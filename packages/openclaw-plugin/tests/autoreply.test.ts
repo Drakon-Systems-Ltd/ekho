@@ -21,7 +21,11 @@ import {
   clearDeferred,
   DEFERRED_RETRY_TTL_MS,
   PROGRESS_REFRESH_MAX_PER_WINDOW,
-  DEFAULT_PEER_TURN_BUDGET
+  DEFAULT_PEER_TURN_BUDGET,
+  NO_PEER_TURN_LIMIT,
+  applyPeerLatch,
+  applyPeerRateGate,
+  withLocalRoomCap
 } from "../src/autoreply";
 import { makeSnapshotVerifier, NO_SNAPSHOT_VERIFICATION } from "../src/verification";
 import {
@@ -310,8 +314,9 @@ describe("bounded peer delegation", () => {
     expect(p).toContain("on it");
   });
 
-  it("defaults the per-conversation budget to 25", () => {
-    expect(DEFAULT_PEER_TURN_BUDGET).toBe(25);
+  it("has NO default turn limit", () => {
+    expect(NO_PEER_TURN_LIMIT).toBe(0);
+    expect(DEFAULT_PEER_TURN_BUDGET).toBe(NO_PEER_TURN_LIMIT);
   });
 
   it("a project room's budget overrides the per-agent budget for that conversation only", () => {
@@ -319,7 +324,15 @@ describe("bounded peer delegation", () => {
     expect(effectiveConversationBudget(batch, "room_x", 25)).toBe(100);
     expect(effectiveConversationBudget(batch, "other-conv", 25)).toBe(25);
     expect(effectiveConversationBudget({} as any, "room_x", 25)).toBe(25); // older relay: field absent
-    expect(effectiveConversationBudget({ conversation_budgets: { room_x: 0 } } as any, "room_x", 25)).toBe(25); // nonsense ignored
+    // A room cap overrides an UNLIMITED agent default…
+    expect(effectiveConversationBudget(batch, "room_x", NO_PEER_TURN_LIMIT)).toBe(100);
+    expect(effectiveConversationBudget(batch, "other-conv", NO_PEER_TURN_LIMIT)).toBe(NO_PEER_TURN_LIMIT);
+    // …and an explicit 0 means "this room has no limit", even for a capped agent.
+    expect(effectiveConversationBudget({ conversation_budgets: { room_x: 0 } } as any, "room_x", 25)).toBe(NO_PEER_TURN_LIMIT);
+    // Junk entries are ignored -> per-agent budget.
+    for (const junk of [-4, Number.NaN, Number.POSITIVE_INFINITY, "9", null]) {
+      expect(effectiveConversationBudget({ conversation_budgets: { room_x: junk } } as any, "room_x", 25)).toBe(25);
+    }
   });
 
   it("budget line uses the project room's own cap for the turn arithmetic", () => {
@@ -413,6 +426,138 @@ describe("bounded peer delegation", () => {
   it("relay budget overrides the bootstrap budget", () => {
     expect(effectivePeerSettings({ peer_autoreply: true, peer_turn_budget: 3 }, { peerEnabled: true, peerTurnBudget: 99 }))
       .toEqual({ peerEnabled: true, peerTurnBudget: 3 });
+  });
+});
+
+// Turn limits are opt-in: no default cap anywhere. 0 = no limit internally,
+// null on the wire / in reports. A positive integer behaves exactly as before.
+describe("no default turn limit", () => {
+  const peer = (i: number, over: Record<string, unknown> = {}) =>
+    msg({ message_id: `p${i}`, sender_kind: "agent", sender_agent_id: `peer_${i}`, conversation_id: "c", ...over });
+
+  it("resolves to no limit when neither the relay nor local config sets a cap", () => {
+    for (const relay of [{}, { peer_turn_budget: null }, { peer_turn_budget: 0 }, { peer_turn_budget: -5 }]) {
+      for (const local of [0, undefined as unknown as number, -1, Number.NaN]) {
+        expect(effectivePeerSettings(relay, { peerEnabled: true, peerTurnBudget: local }).peerTurnBudget).toBe(NO_PEER_TURN_LIMIT);
+      }
+    }
+  });
+
+  it("precedence: relay cap > local cap > no limit (local cap applies when the relay says no limit)", () => {
+    const local = { peerEnabled: true, peerTurnBudget: 12 };
+    expect(effectivePeerSettings({ peer_turn_budget: 40 }, local).peerTurnBudget).toBe(40); // relay wins, even when looser
+    expect(effectivePeerSettings({ peer_turn_budget: 3 }, local).peerTurnBudget).toBe(3);
+    expect(effectivePeerSettings({ peer_turn_budget: null }, local).peerTurnBudget).toBe(12); // relay: no limit -> box owner's cap
+    expect(effectivePeerSettings({ peer_turn_budget: 0 }, local).peerTurnBudget).toBe(12);
+    expect(effectivePeerSettings({}, local).peerTurnBudget).toBe(12); // older relay
+  });
+
+  it("a local cap also applies to a project room the relay leaves unlimited, never to a room the relay capped", () => {
+    const batch = { conversation_budgets: { open_room: 0, capped_room: 80 } };
+    const resolved = withLocalRoomCap(batch, 12);
+    expect(resolved.conversation_budgets).toEqual({ open_room: 12, capped_room: 80 });
+    expect(batch.conversation_budgets).toEqual({ open_room: 0, capped_room: 80 }); // input not mutated
+    expect(withLocalRoomCap(batch, 0)).toBe(batch); // no local cap -> untouched
+    expect(withLocalRoomCap({} as any, 12)).toEqual({});
+  });
+
+  it("an unlimited latch never closes past 200 peer wakes — and raises no stall", () => {
+    const s = createAutoReplyState();
+    let woken = 0;
+    for (let i = 0; i < 250; i++) {
+      const { kept, latchedConvs } = applyPeerLatch([peer(i)], s, {}, NO_PEER_TURN_LIMIT);
+      woken += kept.length;
+      expect(latchedConvs.size).toBe(0); // nothing withheld -> no conversation.stalled
+      expect(peerLatchOpen(s, "c", NO_PEER_TURN_LIMIT)).toBe(true);
+    }
+    expect(woken).toBe(250);
+  });
+
+  it("the per-peer rate gate still suppresses a burst when there is no turn limit", () => {
+    const s = createAutoReplyState();
+    // 200 messages from ONE peer inside the window: the rate gate (unchanged,
+    // 5 per 60s) is what bounds this, with or without a turn limit.
+    const burst = Array.from({ length: 200 }, (_, i) => peer(i, { sender_agent_id: "chatty" }));
+    const rateKept = applyPeerRateGate(burst, s);
+    expect(rateKept).toHaveLength(5);
+    const { kept, latchedConvs } = applyPeerLatch(rateKept, s, {}, NO_PEER_TURN_LIMIT);
+    expect(kept).toHaveLength(5);
+    expect(latchedConvs.size).toBe(0);
+    // Next poll, same window: still suppressed.
+    expect(applyPeerRateGate([peer(999, { sender_agent_id: "chatty" })], s)).toHaveLength(0);
+    // The operator is never rate-limited.
+    expect(applyPeerRateGate([msg({ message_id: "op1" })], s)).toHaveLength(1);
+  });
+
+  it("a positive cap behaves exactly as before: closes at the cap, reports withheld, operator re-opens", () => {
+    const s = createAutoReplyState();
+    const first = applyPeerLatch([peer(1), peer(2), peer(3)], s, {}, 2);
+    expect(first.kept.map((m) => m.message_id)).toEqual(["p1", "p2"]);
+    expect(first.latchedConvs.get("c")).toBe(1);
+    expect(markConversationEscalated(s, "c")).toBe(true);  // one stall notice per close
+    expect(markConversationEscalated(s, "c")).toBe(false);
+    resetPeerLatch(s, "c"); // operator message / progress signal
+    expect(applyPeerLatch([peer(4)], s, {}, 2).kept).toHaveLength(1);
+    expect(markConversationEscalated(s, "c")).toBe(true);  // re-armed
+  });
+
+  it("operator sets a cap, then clears it: the latch closes, then opens for good", () => {
+    const s = createAutoReplyState();
+    // Unlimited to start: 30 wakes, none counted against a cap.
+    for (let i = 0; i < 30; i++) expect(applyPeerLatch([peer(i)], s, {}, NO_PEER_TURN_LIMIT).kept).toHaveLength(1);
+    expect(s.peerTurnsByConversation.get("c") ?? 0).toBe(0);
+
+    // Operator sets a cap of 3: it counts from now, not from the 30 earlier wakes.
+    const capped = effectivePeerSettings({ peer_turn_budget: 3 }, { peerEnabled: true, peerTurnBudget: 0 }).peerTurnBudget;
+    for (let i = 30; i < 33; i++) expect(applyPeerLatch([peer(i)], s, {}, capped).kept).toHaveLength(1);
+    const closed = applyPeerLatch([peer(33)], s, {}, capped);
+    expect(closed.kept).toHaveLength(0);
+    expect(closed.latchedConvs.get("c")).toBe(1);
+
+    // Operator clears it (relay now sends null): open again, no operator nudge needed.
+    const cleared = effectivePeerSettings({ peer_turn_budget: null }, { peerEnabled: true, peerTurnBudget: 0 }).peerTurnBudget;
+    expect(cleared).toBe(NO_PEER_TURN_LIMIT);
+    for (let i = 34; i < 60; i++) {
+      const r = applyPeerLatch([peer(i)], s, {}, cleared);
+      expect(r.kept).toHaveLength(1);
+      expect(r.latchedConvs.size).toBe(0);
+    }
+  });
+
+  it("a per-room cap overrides an unlimited agent default, for that room only", () => {
+    const s = createAutoReplyState();
+    const batch = { conversation_budgets: { room_capped: 2 } };
+    const inRoom = (i: number) => peer(i, { conversation_id: "room_capped" });
+    expect(applyPeerLatch([inRoom(1), inRoom(2), inRoom(3)], s, batch, NO_PEER_TURN_LIMIT).kept).toHaveLength(2);
+    // A different conversation stays unlimited.
+    const elsewhere = Array.from({ length: 50 }, (_, i) => peer(100 + i, { conversation_id: "dm" }));
+    expect(applyPeerLatch(elsewhere, s, batch, NO_PEER_TURN_LIMIT).kept).toHaveLength(50);
+  });
+
+  it("an unlimited room overrides a capped agent", () => {
+    const s = createAutoReplyState();
+    const batch = { conversation_budgets: { room_open: 0 } };
+    const many = Array.from({ length: 40 }, (_, i) => peer(i, { conversation_id: "room_open" }));
+    expect(applyPeerLatch(many, s, batch, 3).kept).toHaveLength(40);
+  });
+
+  it("the prompt carries no budget countdown when there is no limit", () => {
+    const m = peer(1);
+    const batch = { messages: [m], operator_trusted: false, roster: [] } as any;
+    const p = buildPrompt([m], batch, undefined, "self", NO_PEER_TURN_LIMIT, {});
+    expect(p).not.toContain("Bounded delegation");
+    expect(p).not.toContain("Infinity");
+  });
+
+  it("ekho_inbox cache reports the budget in force: relay cap, else local cap, else 0 (no limit)", () => {
+    recordBatch({ messages: [], peer_autoreply: true, peer_turn_budget: null } as any);
+    expect(getCachedInbox().peer_turn_budget).toBe(NO_PEER_TURN_LIMIT);
+    recordBatch({ messages: [], peer_autoreply: true, peer_turn_budget: null, conversation_budgets: { r: 0, q: 9 } } as any, { peerTurnBudget: 12 });
+    expect(getCachedInbox().peer_turn_budget).toBe(12);
+    expect(getCachedInbox().conversation_budgets).toEqual({ r: 12, q: 9 });
+    recordBatch({ messages: [], peer_autoreply: true, peer_turn_budget: 40 } as any, { peerTurnBudget: 12 });
+    expect(getCachedInbox().peer_turn_budget).toBe(40);
+    recordBatch({ messages: [] } as any); // leave the module cache unlimited for later tests
   });
 });
 

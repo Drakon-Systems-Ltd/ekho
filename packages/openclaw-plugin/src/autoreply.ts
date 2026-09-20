@@ -104,6 +104,8 @@ interface InboxBatch {
   roster?: RosterEntry[];
   // Operator-controlled bounded delegation (live). Absent on older relays.
   peer_autoreply?: boolean | null;
+  // Operator-set cap on peer wakes per conversation. null/absent/non-positive =
+  // the relay sets no limit (then a local `peerTurnBudget` cap, if any, applies).
   peer_turn_budget?: number | null;
   // Verifiable identity (absent on older relays).
   fleet_id?: string | null;
@@ -114,15 +116,32 @@ interface InboxBatch {
   // Rooms (among this batch) this agent is a member of — so a reply to a room
   // message can be framed as going to the named room. Absent on older relays.
   rooms?: Array<{ id: string; name: string }>;
-  // Project-mode rooms this agent belongs to: conversation id -> the higher
-  // per-room budget that overrides peer_turn_budget there. Absent on older relays.
+  // Project-mode rooms this agent belongs to: conversation id -> that room's
+  // budget, overriding peer_turn_budget there. Positive = the room's cap; 0 =
+  // the room has no limit. Absent on older relays.
   conversation_budgets?: Record<string, number> | null;
 }
 
+/** "No limit" for a peer turn budget. Budgets are opt-in: there is no built-in
+ *  default cap. A positive integer is a cap; this (0) means unlimited. */
+export const NO_PEER_TURN_LIMIT = 0;
+
+/** Normalise any budget-ish value to a positive integer cap, or NO_PEER_TURN_LIMIT. */
+export function normalizeTurnBudget(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.trunc(value) : NO_PEER_TURN_LIMIT;
+}
+
+/** True when a (normalised) budget is an actual cap rather than "no limit". */
+export function isCapped(budget: number): boolean {
+  return budget > 0;
+}
+
 /**
- * Resolve the effective peer-delegation settings for a poll: the relay (console)
- * value when present, otherwise the bootstrap default from plugin config. Makes
- * the operator console the live source of truth without an agent restart.
+ * Resolve the effective peer-delegation settings for a poll. Budget precedence:
+ *   1. a positive relay (console) budget wins — the operator's live setting;
+ *   2. otherwise (relay says no limit / older relay omits the field) a positive
+ *      local `peerTurnBudget` applies — the box owner's tighter choice is respected;
+ *   3. otherwise NO_PEER_TURN_LIMIT: the latch never closes.
  */
 export function effectivePeerSettings(
   batch: { peer_autoreply?: boolean | null; peer_turn_budget?: number | null },
@@ -130,21 +149,51 @@ export function effectivePeerSettings(
 ): { peerEnabled: boolean; peerTurnBudget: number } {
   const relayPeer = batch.peer_autoreply;
   const peerEnabled = typeof relayPeer === "boolean" ? relayPeer : defaults.peerEnabled;
-  const relayBudget = batch.peer_turn_budget;
-  const peerTurnBudget =
-    typeof relayBudget === "number" && relayBudget > 0 ? relayBudget : defaults.peerTurnBudget;
+  const relayBudget = normalizeTurnBudget(batch.peer_turn_budget);
+  const peerTurnBudget = isCapped(relayBudget) ? relayBudget : normalizeTurnBudget(defaults.peerTurnBudget);
   return { peerEnabled, peerTurnBudget };
 }
 
-/** The peer budget in force for ONE conversation: a project-mode room's own
- *  budget when the relay supplies one, otherwise the per-agent budget. */
+/**
+ * The peer budget in force for ONE conversation (NO_PEER_TURN_LIMIT = unlimited).
+ * A project-mode room's own entry overrides the per-agent budget: a positive
+ * entry is that room's cap, and an explicit 0 means "this room has no limit"
+ * even when the agent itself is capped. No entry -> the per-agent `fallback`.
+ * Pass a batch through `withLocalRoomCap` first so a locally configured cap
+ * still applies to rooms the relay leaves unlimited.
+ */
 export function effectiveConversationBudget(
   batch: { conversation_budgets?: Record<string, number> | null },
   conversationId: string,
   fallback: number
 ): number {
-  const v = batch.conversation_budgets?.[conversationId];
-  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : fallback;
+  const budgets = batch.conversation_budgets;
+  if (budgets && Object.prototype.hasOwnProperty.call(budgets, conversationId)) {
+    const v = budgets[conversationId];
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) return normalizeTurnBudget(v);
+  }
+  return normalizeTurnBudget(fallback);
+}
+
+/**
+ * Apply the local `peerTurnBudget` cap to project-mode rooms the relay reports
+ * as unlimited (entry 0), mirroring agent-level precedence: a relay cap wins,
+ * but where the relay sets no limit the box owner's local cap is respected.
+ * Returns the batch unchanged when there is nothing to rewrite.
+ */
+export function withLocalRoomCap<B extends { conversation_budgets?: Record<string, number> | null }>(
+  batch: B,
+  localPeerTurnBudget: number
+): B {
+  const localCap = normalizeTurnBudget(localPeerTurnBudget);
+  const budgets = batch.conversation_budgets;
+  if (!isCapped(localCap) || !budgets) return batch;
+  let changed = false;
+  const next: Record<string, number> = {};
+  for (const [conv, v] of Object.entries(budgets)) {
+    if (v === 0) { next[conv] = localCap; changed = true; } else next[conv] = v;
+  }
+  return changed ? { ...batch, conversation_budgets: next } : batch;
 }
 
 // Message types that warrant waking the agent. Everything else (heartbeat,
@@ -163,13 +212,14 @@ const PROGRESS_SIGNAL_TYPES = new Set(["handoff", "claim", "complete"]);
 const PEER_RATE_MAX = 5; // turns per peer per window before suppression
 const PEER_RATE_WINDOW_MS = 60_000;
 
-// Bounded delegation: a teammate may wake this agent at most this many times per
-// conversation before the latch closes (delivered + visible via ekho_inbox, but
-// no turn). An operator message or progress signal re-opens it, and closure
-// escalates a conversation.stalled notice. Sized for real working sessions —
-// the per-peer rate gate still caps runaway loops, and project-mode rooms can
-// override it per conversation.
-export const DEFAULT_PEER_TURN_BUDGET = 25;
+// Optional turn limit: when the operator (console) or the box owner (local
+// `peerTurnBudget`) sets a cap, a teammate may wake this agent at most that many
+// times per conversation before the latch closes (delivered + visible via
+// ekho_inbox, but no turn). An operator message or progress signal re-opens it,
+// and closure escalates a conversation.stalled notice. There is NO default cap —
+// an unasked-for limit stalls real work. The per-peer rate gate above is a
+// separate mechanism and always applies, so runaway loops stay bounded.
+export const DEFAULT_PEER_TURN_BUDGET = NO_PEER_TURN_LIMIT;
 // A spawned reply turn gets this long before SIGTERM. 180s only fitted trivial
 // acks — real handoffs (read files, run tools, think) routinely need minutes,
 // and a killed turn is a silently consumed message: acked, no reply, work
@@ -226,10 +276,11 @@ let lastBatchMeta: {
   controls: ControlEntry[];
   conversation_history: Record<string, MsgSnapshot[]>;
   // Bounded-delegation state, so a manual ekho_inbox read shows how much peer
-  // budget is left: the effective cap, the on/off flag, and per-conversation
-  // consumed counts (conversation_id -> turns used).
+  // budget is left: the effective per-agent cap (NO_PEER_TURN_LIMIT = none), the
+  // on/off flag, per-room overrides, and per-conversation consumed counts.
   peer_autoreply: boolean;
   peer_turn_budget: number;
+  conversation_budgets: Record<string, number>;
   peer_turns_used: Record<string, number>;
 } = {
   operator_trusted: false,
@@ -237,7 +288,8 @@ let lastBatchMeta: {
   controls: [],
   conversation_history: {},
   peer_autoreply: false,
-  peer_turn_budget: DEFAULT_PEER_TURN_BUDGET,
+  peer_turn_budget: NO_PEER_TURN_LIMIT,
+  conversation_budgets: {},
   peer_turns_used: {}
 };
 
@@ -307,18 +359,20 @@ function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
   }
 }
 
-export function recordBatch(batch: InboxBatch) {
+export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number } = {}) {
   const relayPeer = batch.peer_autoreply;
-  const relayBudget = batch.peer_turn_budget;
+  const localBudget = normalizeTurnBudget(local.peerTurnBudget);
+  // Same precedence the latch uses, so ekho_inbox reports the budget in force.
+  const effBudget = effectivePeerSettings(batch, { peerEnabled: false, peerTurnBudget: localBudget }).peerTurnBudget;
   lastBatchMeta = {
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
     conversation_history: batch.conversation_history ?? {},
-    // Relay is the source of truth; older relays omit these -> off / default cap.
+    // Relay is the source of truth; older relays omit these -> off / no relay cap.
     peer_autoreply: typeof relayPeer === "boolean" ? relayPeer : false,
-    peer_turn_budget:
-      typeof relayBudget === "number" && relayBudget > 0 ? relayBudget : DEFAULT_PEER_TURN_BUDGET,
+    peer_turn_budget: effBudget,
+    conversation_budgets: withLocalRoomCap(batch, localBudget).conversation_budgets ?? {},
     peer_turns_used: lastBatchMeta.peer_turns_used
   };
   for (const msg of batch.messages) {
@@ -447,7 +501,10 @@ export function getCachedInbox(): {
   controls: ControlEntry[];
   conversation_history: Record<string, MsgSnapshot[]>;
   peer_autoreply: boolean;
+  /** Effective per-agent cap; NO_PEER_TURN_LIMIT (0) = no limit. */
   peer_turn_budget: number;
+  /** Project-mode room overrides (positive = cap, 0 = that room has no limit). */
+  conversation_budgets: Record<string, number>;
   peer_turns_used: Record<string, number>;
 } {
   const entries = Array.from(lastBatch.values());
@@ -462,6 +519,7 @@ export function getCachedInbox(): {
     conversation_history: lastBatchMeta.conversation_history,
     peer_autoreply: lastBatchMeta.peer_autoreply,
     peer_turn_budget: lastBatchMeta.peer_turn_budget,
+    conversation_budgets: lastBatchMeta.conversation_budgets,
     peer_turns_used: lastBatchMeta.peer_turns_used
   };
 }
@@ -584,8 +642,10 @@ function markNonceSeen(state: AutoReplyState, nonce: string) {
   }
 }
 
-/** True while this conversation still has peer-turn budget left. */
+/** True while this conversation still has peer-turn budget left. With no limit
+ *  (NO_PEER_TURN_LIMIT, or any non-positive budget) the latch never closes. */
 export function peerLatchOpen(state: AutoReplyState, conversationId: string, budget: number): boolean {
+  if (!isCapped(normalizeTurnBudget(budget))) return true;
   return (state.peerTurnsByConversation.get(conversationId) ?? 0) < budget;
 }
 
@@ -600,6 +660,48 @@ export function consumePeerLatch(state: AutoReplyState, conversationId: string):
     if (oldest === undefined) break;
     state.peerTurnsByConversation.delete(oldest);
   }
+}
+
+/**
+ * The per-conversation latch over messages that already survived the rate gate.
+ * Operator messages always pass. A peer message passes while its conversation's
+ * budget is open — always, when no limit is in force — and is otherwise withheld
+ * (still delivered + visible via ekho_inbox, just no turn). Returns the messages
+ * to wake on and, per conversation, how many real peer messages a CLOSED latch
+ * withheld (the caller raises one conversation.stalled notice for each). With no
+ * limit nothing is ever withheld, so no stall notice can be raised.
+ */
+export function applyPeerLatch(
+  rateKept: InboxMessage[],
+  state: AutoReplyState,
+  batch: { conversation_budgets?: Record<string, number> | null },
+  peerTurnBudget: number,
+  log?: Logger
+): { kept: InboxMessage[]; latchedConvs: Map<string, number> } {
+  const kept: InboxMessage[] = [];
+  // conversation_id -> count of real peer messages withheld on a closed latch.
+  const latchedConvs = new Map<string, number>();
+  for (const m of rateKept) {
+    if (m.sender_kind === "operator") {
+      kept.push(m);
+      continue;
+    }
+    // Project-mode rooms carry their own budget (or "no limit") for this conversation.
+    const convBudget = effectiveConversationBudget(batch, m.conversation_id, peerTurnBudget);
+    if (peerLatchOpen(state, m.conversation_id, convBudget)) {
+      // Wakes are only counted against a cap. With no limit nothing accrues,
+      // so a cap the operator sets LATER starts from zero instead of closing
+      // the conversation on the spot for wakes that predate it.
+      if (isCapped(convBudget)) consumePeerLatch(state, m.conversation_id);
+      kept.push(m);
+    } else {
+      latchedConvs.set(m.conversation_id, (latchedConvs.get(m.conversation_id) ?? 0) + 1);
+      log?.info?.(
+        `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${convBudget} reached); delivered without a turn`
+      );
+    }
+  }
+  return { kept, latchedConvs };
 }
 
 /** Re-open a conversation's latch — the operator engaging (or a peer progress
@@ -812,7 +914,7 @@ export function collectVerificationRejects(
  * Per-peer rate gate (Part C, rule 5). Operator is exempt. Returns the subset
  * of `real` that survives suppression; suppressed peers are logged once.
  */
-function applyPeerRateGate(real: InboxMessage[], state: AutoReplyState, log?: Logger): InboxMessage[] {
+export function applyPeerRateGate(real: InboxMessage[], state: AutoReplyState, log?: Logger): InboxMessage[] {
   const now = Date.now();
   const kept: InboxMessage[] = [];
   const suppressedPeers = new Set<string>();
@@ -1313,7 +1415,8 @@ export function startAutoReply(opts: {
   const { client, api, selfAgentId, log } = opts;
   const pollIntervalMs = opts.pollIntervalMs ?? 5000;
   const peerEnabled = opts.peerEnabled ?? false;
-  const peerTurnBudget = opts.peerTurnBudget ?? DEFAULT_PEER_TURN_BUDGET;
+  // Local bootstrap cap: positive = cap when the relay sets none; 0/absent = no limit.
+  const peerTurnBudget = normalizeTurnBudget(opts.peerTurnBudget);
   const requireSigned: RequireSignedMode = opts.requireSigned ?? "warn";
 
   const state = createAutoReplyState();
@@ -1328,9 +1431,12 @@ export function startAutoReply(opts: {
       return;
     }
     if (!batch || !Array.isArray(batch.messages)) return;
+    // Rooms the relay leaves unlimited still honour a locally configured cap;
+    // resolved once here so the latch, the stall notice and the prompt agree.
+    batch = withLocalRoomCap(batch, peerTurnBudget);
 
     // Expose the freshly delivered batch to ekho_inbox (Part B1).
-    recordBatch(batch);
+    recordBatch(batch, { peerTurnBudget });
 
     // Agent-side verification: maintain the trust root from the inbox and compute
     // a per-message verdict. Dormant (empty verdicts) until the agent has pinned
@@ -1505,7 +1611,8 @@ export function startAutoReply(opts: {
             stash.verifications,
             selfAgentId,
             eff.peerTurnBudget,
-            { [conv]: Math.max(0, convBudget - used) },
+            // No limit -> no countdown: the prompt only carries a budget line for a cap.
+            isCapped(convBudget) ? { [conv]: Math.max(0, convBudget - used) } : {},
             // #16: tell the turn it is late, and how late. Without this it
             // answers a 10-minute-old message as if it were the thread head.
             { conversationId: conv, heldMs: Math.max(0, Date.now() - stash.firstDeferredAtMs) },
@@ -1545,26 +1652,7 @@ export function startAutoReply(opts: {
     // Per-peer rolling rate gate first (operator exempt), then the per-conversation
     // latch on the surviving teammate messages (the structural loop-breaker).
     const rateKept = applyPeerRateGate(real, state, log);
-    const kept: InboxMessage[] = [];
-    // conversation_id -> count of real peer messages withheld on a closed latch.
-    const latchedConvs = new Map<string, number>();
-    for (const m of rateKept) {
-      if (m.sender_kind === "operator") {
-        kept.push(m);
-        continue;
-      }
-      // Project-mode rooms carry their own (higher) budget for this conversation.
-      const convBudget = effectiveConversationBudget(batch, m.conversation_id, eff.peerTurnBudget);
-      if (peerLatchOpen(state, m.conversation_id, convBudget)) {
-        consumePeerLatch(state, m.conversation_id);
-        kept.push(m);
-      } else {
-        latchedConvs.set(m.conversation_id, (latchedConvs.get(m.conversation_id) ?? 0) + 1);
-        log?.info?.(
-          `[ekho-autoreply] peer latch closed for conversation ${m.conversation_id} (budget ${convBudget} reached); delivered without a turn`
-        );
-      }
-    }
+    const { kept, latchedConvs } = applyPeerLatch(rateKept, state, batch, eff.peerTurnBudget, log);
 
     // No silent death: when a real peer message is withheld on a closed latch,
     // raise ONE operator-visible escalation per conversation-close (deduped via
@@ -1584,14 +1672,16 @@ export function startAutoReply(opts: {
       }
     }
 
-    // Remaining peer budget per peer-triggered conversation, AFTER this turn's
-    // consumption (clamped >= 0). Threaded into the prompt so the woken agent
-    // knows how many wakes are left before the latch auto-pauses.
+    // Remaining peer budget per peer-triggered CAPPED conversation, AFTER this
+    // turn's consumption (clamped >= 0). Threaded into the prompt so the woken
+    // agent knows how many wakes are left before the latch auto-pauses. A
+    // conversation with no limit gets no entry — and so no countdown line.
     const peerBudgetRemaining: Record<string, number> = {};
     for (const m of kept) {
       if (m.sender_kind === "operator") continue;
       const used = state.peerTurnsByConversation.get(m.conversation_id) ?? 0;
       const convBudget = effectiveConversationBudget(batch, m.conversation_id, eff.peerTurnBudget);
+      if (!isCapped(convBudget)) continue;
       peerBudgetRemaining[m.conversation_id] = Math.max(0, convBudget - used);
     }
     // Expose the post-consumption per-conversation counts to ekho_inbox.
@@ -1670,7 +1760,8 @@ export function startAutoReply(opts: {
 
   log?.info?.(
     `[ekho-autoreply] listening for inbound (poll ${pollIntervalMs}ms) as ${selfAgentId} ` +
-    `(peer_delegation=${peerEnabled ? "on" : "off"}, budget=${peerTurnBudget}, ` +
+    `(peer_delegation=${peerEnabled ? "on" : "off"}, ` +
+    `local_turn_limit=${isCapped(peerTurnBudget) ? peerTurnBudget : "none"}, ` +
     `build=${formatBuildIdentityShort(buildIdentity())})`
   );
 

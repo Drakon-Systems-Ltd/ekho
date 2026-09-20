@@ -26,6 +26,7 @@ export interface EkhoPluginConfig {
   heartbeatIntervalMs?: number;
   // Bounded agent-to-agent delegation (default off — opt-in per fleet).
   peerAutoreply?: boolean;
+  // Optional local turn limit: positive = cap when the relay sets none; 0/absent = no limit.
   peerTurnBudget?: number;
   // Operator signing public key(s) to bootstrap-pin as the trust root (the
   // trusted out-of-band channel for agents that predate signing).
