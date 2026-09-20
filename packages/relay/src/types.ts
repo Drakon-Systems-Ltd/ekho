@@ -176,14 +176,16 @@ export const endorseAgentKeySchema = z.object({
 export const peerAutoreplySchema = z.object({
   autoreply: z.boolean(),
   // Optional — when omitted, the existing per-agent budget is left untouched.
-  budget: z.number().int().min(1).max(200).optional()
+  // A positive integer is a cap; 0 or null clears it (no limit — the default).
+  budget: z.number().int().min(0).max(200).nullable().optional()
 });
 
-// Room project mode: a higher per-room peer budget for designated working rooms.
+// Room project mode: the room's own peer budget overrides the per-agent one.
 export const projectModeSchema = z.object({
   enabled: z.boolean(),
   // Optional — when omitted, the room's existing budget is left untouched.
-  budget: z.number().int().min(1).max(500).optional()
+  // A positive integer is a cap; 0 or null clears it (no limit — the default).
+  budget: z.number().int().min(0).max(500).nullable().optional()
 });
 
 // Operator profile: the team-visible display name (e.g. "Michael"). Trimmed,

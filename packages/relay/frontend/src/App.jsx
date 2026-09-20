@@ -28,6 +28,7 @@ import {
   relativeTime,
 } from "./components";
 import SecurityScreen from "./SecurityScreen.jsx";
+import { budgetInputValue, budgetLabel, parseBudgetInput, savedBudget } from "./budget.js";
 // The console's entire state/logic layer lives in consoleState.js (useConsoleState),
 // shared with the Wire renderer. This file is the classic render layer only.
 import {
@@ -1209,7 +1210,7 @@ function formatActivity(e, nameOf) {
     case "agent.trust_changed":
       return { who: target, line: `operator trust ${p.operator_trusted ? "ON" : "OFF"}` };
     case "agent.peer_autoreply_changed":
-      return { who: target, line: `delegation ${p.peer_autoreply ? `ON · budget ${p.peer_turn_budget}` : "OFF"}` };
+      return { who: target, line: `delegation ${p.peer_autoreply ? `ON · ${p.peer_turn_budget > 0 ? `turn limit ${p.peer_turn_budget}` : "no turn limit"}` : "OFF"}` };
     case "room.created": {
       const roomName = (typeof p.name === "string" && p.name.trim()) || target || "untitled";
       return { who: "Operator", line: `created room “${roomName}”${Array.isArray(p.members) ? ` · ${p.members.length} members` : ""}` };
@@ -1465,7 +1466,7 @@ function HealthTab({ agents, initialized }) {
                 <Badge tone="muted" title="Agent plugin predates turn telemetry">turns —</Badge>
               )}
               {a.operator_trusted ? <Badge tone="ok">trusted</Badge> : null}
-              {a.peer_autoreply ? <Badge>delegation · {a.peer_turn_budget}</Badge> : <Badge>solo</Badge>}
+              {a.peer_autoreply ? <Badge>delegation · {budgetLabel(a.peer_turn_budget)}</Badge> : <Badge>solo</Badge>}
             </div>
           </article>
         );
@@ -1647,14 +1648,16 @@ function TopologyTab({ data, initialized, onSelect, settings }) {
 
 function PeerControl({ agent, pending, onSet }) {
   const enabled = Boolean(agent.peer_autoreply);
-  const savedBudget = agent.peer_turn_budget ?? 25;
-  const [budget, setBudget] = useState(savedBudget);
-  useEffect(() => { setBudget(savedBudget); }, [savedBudget]);
+  // null from the relay = no limit (the default); a positive integer = a cap.
+  const saved = savedBudget(agent.peer_turn_budget);
+  const [budget, setBudget] = useState(budgetInputValue(saved));
+  useEffect(() => { setBudget(budgetInputValue(saved)); }, [saved]);
 
   const commitBudget = () => {
-    const next = Math.max(1, Math.min(200, Math.trunc(Number(budget) || savedBudget)));
-    setBudget(next);
-    if (enabled && next !== savedBudget) onSet(agent.id, true, next);
+    const next = parseBudgetInput(budget, 200);
+    if (next === null) { setBudget(budgetInputValue(saved)); return; }
+    setBudget(budgetInputValue(next));
+    if (enabled && next !== saved) onSet(agent.id, true, next); // 0 clears the cap
   };
 
   return (
@@ -1671,12 +1674,14 @@ function PeerControl({ agent, pending, onSet }) {
       </label>
       {enabled ? (
         <div className="access-row__budget">
-          <span className="access-row__budget-label">Budget</span>
+          <span className="access-row__budget-label">Turn limit</span>
           <input
             className="access-row__budget-input"
             type="number"
-            min={1}
+            min={0}
             max={200}
+            placeholder="No limit"
+            title="Optional cap on teammate wakes per conversation. Leave blank (or 0) for no limit."
             value={budget}
             disabled={pending}
             onChange={(e) => setBudget(e.target.value)}
@@ -1697,7 +1702,7 @@ function AccessTab({ agents, initialized, trustPending, onSetTrust, peerPending,
     <div className="cards">
       <div className="access-caption">
         <strong>Operator-trusted channel:</strong> when ON, this agent recognizes the console operator as its verified principal (risky actions still require approval).<br />
-        <strong>Agent-to-agent delegation:</strong> when ON, teammates can wake this agent to collaborate, bounded by the per-conversation turn budget.
+        <strong>Agent-to-agent delegation:</strong> when ON, teammates can wake this agent to collaborate. No turn limit by default — set one per agent if you want a conversation to pause after that many teammate wakes; clear it to remove the limit.
       </div>
       {agents.map((agent) => {
         const trusted = Boolean(agent.operator_trusted);
@@ -1787,32 +1792,38 @@ function PoliciesTab({ policies, initialized, onCreate, onEdit, onDelete }) {
   );
 }
 
-/** Per-room project-mode control: OFF by default; when ON the room carries its
- *  own (higher) agent-to-agent turn budget, so long working sessions don't
- *  stall on the per-agent default. */
+/** Per-room project-mode control: OFF by default; when ON the room's own
+ *  agent-to-agent turn limit (or "no limit") overrides each member's per-agent
+ *  setting for this conversation. */
 function RoomProjectMode({ room, onSet }) {
-  const saved = room.project_turn_budget ?? 100;
-  const [budget, setBudget] = useState(saved);
-  useEffect(() => { setBudget(saved); }, [saved, room.id]);
-  const clamp = (v) => Math.max(1, Math.min(500, Math.trunc(Number(v) || saved)));
+  const saved = savedBudget(room.project_turn_budget);
+  const [budget, setBudget] = useState(budgetInputValue(saved));
+  useEffect(() => { setBudget(budgetInputValue(saved)); }, [saved, room.id]);
+  const commit = () => {
+    const next = parseBudgetInput(budget, 500);
+    if (next === null) { setBudget(budgetInputValue(saved)); return; }
+    setBudget(budgetInputValue(next));
+    if (next !== saved) onSet(room.id, true, next); // 0 clears the cap
+  };
   return (
-    <label className="room-project" title="Project mode: this room gets its own, higher agent-to-agent turn budget for long working sessions">
+    <label className="room-project" title="Project mode: this room's own agent-to-agent turn limit (or no limit) overrides each member's per-agent setting">
       <input
         type="checkbox"
         checked={Boolean(room.project_mode)}
-        onChange={(e) => onSet(room.id, e.target.checked, clamp(budget))}
+        onChange={(e) => onSet(room.id, e.target.checked)}
       />
       <span>Project mode</span>
       {room.project_mode ? (
         <input
           className="room-project__budget"
           type="number"
-          min="1"
+          min="0"
           max="500"
+          placeholder="No limit"
           value={budget}
           onChange={(e) => setBudget(e.target.value)}
-          onBlur={() => { const next = clamp(budget); setBudget(next); if (next !== saved) onSet(room.id, true, next); }}
-          title="Turns each member may be woken by teammates in this room before pausing"
+          onBlur={commit}
+          title="Optional: turns each member may be woken by teammates in this room before pausing. Leave blank (or 0) for no limit."
         />
       ) : null}
     </label>
@@ -1875,7 +1886,7 @@ function RoomModal({ agents, rooms, saving, onCreate, onDelete, onSetProjectMode
               <div className="room-list__meta">
                 <strong># {r.name}</strong>
                 <span className="muted"> · {r.members?.length ?? 0} member{(r.members?.length ?? 0) === 1 ? "" : "s"}</span>
-                {r.project_mode ? <span className="room-list__project">project · {r.project_turn_budget}</span> : null}
+                {r.project_mode ? <span className="room-list__project">project · {budgetLabel(r.project_turn_budget)}</span> : null}
               </div>
               <RoomProjectMode room={r} onSet={onSetProjectMode} />
               <button className="button button--sm button--danger" onClick={() => onDelete(r.id)}>Delete</button>

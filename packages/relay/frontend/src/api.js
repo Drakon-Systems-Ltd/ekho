@@ -149,7 +149,8 @@ export const setRoomProjectMode = (token, roomId, { enabled, budget }) =>
   request(`/v1/operator/rooms/${encodeURIComponent(roomId)}/project-mode`, {
     token,
     method: "POST",
-    body: budget ? { enabled, budget } : { enabled },
+    // budget: a positive cap, 0 to clear it (no limit), undefined to leave it untouched.
+    body: budget === undefined ? { enabled } : { enabled, budget },
   });
 
 // Operator profile — the team-visible display name (e.g. "Michael"). GET on load

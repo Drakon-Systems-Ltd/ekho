@@ -43,10 +43,24 @@ export interface AgentIdentityKeyRow {
 
 const IDEMPOTENT_DDL_ERROR = /duplicate column|already exists/i;
 
-// Per-agent peer turn budget applied to new enrollments and used as the read
-// fallback. The rolling per-peer rate gate, the per-conversation latch, and the
-// stall escalation keep runaway loops bounded even at this size.
-export const DEFAULT_PEER_TURN_BUDGET = 25;
+// Peer turn budgets are OPT-IN. 0 in storage means "no limit" and is the default
+// for new agents and rooms; a positive integer is a cap an operator chose. There
+// is deliberately no built-in default cap: a limit nobody asked for stalls real
+// work. The rolling per-peer rate gate (agent side) still bounds runaway loops.
+export const NO_TURN_LIMIT = 0;
+// The relay used to hard-wire defaults (agents: 6, then 25; project rooms: 100);
+// migration 021 converts rows still holding them to NO_TURN_LIMIT, exactly once.
+
+/** Storage → wire: a positive cap, or null for "no limit". Never a fake number. */
+export function turnBudgetOut(stored: unknown): number | null {
+  const n = Number(stored);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** API input → storage: null and 0 both clear the cap. */
+export function turnBudgetIn(input: number | null): number {
+  return typeof input === "number" && input > 0 ? input : NO_TURN_LIMIT;
+}
 
 /** The canonical per-agent DM conversation id. Keyed by the AGENT — never the
  *  shared op_<fleetId> operator — so every operator↔agent 1:1 exchange threads
@@ -55,10 +69,6 @@ export const DEFAULT_PEER_TURN_BUDGET = 25;
 export function canonicalDmId(fleetId: string, agentId: string): string {
   return `dm-${fleetId}-${agentId}`;
 }
-
-// Per-room budget while project mode is ON — high enough for a real working
-// session; the operator toggle (default OFF) is the opt-in.
-export const DEFAULT_PROJECT_TURN_BUDGET = 100;
 
 /** Split a migration file into individual statements. A naive ';' split is safe
  *  here: every migration is pure DDL with no ';' inside a string literal
@@ -594,11 +604,12 @@ export class EkhoDb {
       // migration 009 with DEFAULT 0, so an implicit insert would land a fresh
       // agent OFF. Setting it here makes newly enrolled agents land ON on both
       // fresh (schema.ts DEFAULT 1) and migrated databases.
-      // peer_turn_budget likewise set explicitly: migrated DBs carry the old
-      // column DEFAULT (6), so an implicit insert would under-budget new agents.
+      // peer_turn_budget likewise set explicitly to "no limit": migrated DBs
+      // carry an old column DEFAULT (6 or 25) that SQLite cannot alter, so an
+      // implicit insert would silently cap a newly enrolled agent.
       this.db.prepare(
         "INSERT INTO agents (id, fleet_id, display_name, runtime, status, hostname, policy_profile, created_at, peer_autoreply, peer_turn_budget) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)"
-      ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now, DEFAULT_PEER_TURN_BUDGET);
+      ).run(agentId, input.fleetId, input.displayName, input.runtime, "healthy", input.hostname ?? null, "default", now, NO_TURN_LIMIT);
 
       this.db.prepare(
         "INSERT INTO agent_credentials (id, agent_id, secret_hash, status, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -1162,8 +1173,10 @@ export class EkhoDb {
     const agentId = createdBy.kind === "agent" ? createdBy.id : null;
     const tx = this.db.transaction(() => {
       this.db.prepare(
-        "INSERT INTO rooms (id, fleet_id, name, created_at, created_by_operator_id, created_by_agent_id) VALUES (?, ?, ?, ?, ?, ?)"
-      ).run(roomId, fleetId, name, createdAt, operatorId, agentId);
+        // project_turn_budget set explicitly to "no limit": a migrated DB still
+        // carries the column DEFAULT 100 from migration 017 (SQLite cannot alter it).
+        "INSERT INTO rooms (id, fleet_id, name, created_at, created_by_operator_id, created_by_agent_id, project_turn_budget) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      ).run(roomId, fleetId, name, createdAt, operatorId, agentId, NO_TURN_LIMIT);
       const memberStmt = this.db.prepare("INSERT OR IGNORE INTO room_members (room_id, agent_id) VALUES (?, ?)");
       for (const m of members) memberStmt.run(roomId, m);
       // actor = whoever opened it, so the operator console's events feed shows
@@ -1188,19 +1201,21 @@ export class EkhoDb {
     return rooms.map((room) => ({
       ...room,
       project_mode: Boolean(room.project_mode),
-      project_turn_budget: Number(room.project_turn_budget) || DEFAULT_PROJECT_TURN_BUDGET,
+      project_turn_budget: turnBudgetOut(room.project_turn_budget),
       members: memberStmt.all(room.id) as Array<{ agent_id: string; display_name: string; status: string }>
     }));
   }
 
-  /** Toggle a room's project mode (higher per-room peer budget). Returns the
-   *  new settings, or null if the room doesn't exist in this fleet. */
-  setRoomProjectMode(fleetId: string, roomId: string, operatorId: string, enabled: boolean, budget?: number) {
+  /** Toggle a room's project mode (the room's own peer budget overrides the
+   *  per-agent one). `budget`: a positive cap, 0/null to clear it (no limit),
+   *  undefined to leave it untouched. Returns the new settings, or null if the
+   *  room doesn't exist in this fleet. */
+  setRoomProjectMode(fleetId: string, roomId: string, operatorId: string, enabled: boolean, budget?: number | null) {
     const room = this.db.prepare("SELECT id FROM rooms WHERE id = ? AND fleet_id = ?").get(roomId, fleetId);
     if (!room) return null;
-    if (typeof budget === "number" && budget > 0) {
+    if (budget !== undefined) {
       this.db.prepare("UPDATE rooms SET project_mode = ?, project_turn_budget = ? WHERE id = ? AND fleet_id = ?")
-        .run(enabled ? 1 : 0, budget, roomId, fleetId);
+        .run(enabled ? 1 : 0, turnBudgetIn(budget), roomId, fleetId);
     } else {
       this.db.prepare("UPDATE rooms SET project_mode = ? WHERE id = ? AND fleet_id = ?")
         .run(enabled ? 1 : 0, roomId, fleetId);
@@ -1209,7 +1224,7 @@ export class EkhoDb {
       .get(roomId, fleetId) as { project_mode: number; project_turn_budget: number };
     const result = {
       project_mode: Boolean(row.project_mode),
-      project_turn_budget: Number(row.project_turn_budget) || DEFAULT_PROJECT_TURN_BUDGET
+      project_turn_budget: turnBudgetOut(row.project_turn_budget)
     };
     this.recordEvent(fleetId, "room.project_mode_changed", "operator", operatorId, "room", roomId, roomId, result);
     return result;
@@ -1342,7 +1357,7 @@ export class EkhoDb {
     const fleetId = self ? String(self.fleet_id) : null;
     const operatorTrusted = Boolean(self?.operator_trusted);
     const peerAutoreply = Boolean(self?.peer_autoreply);
-    const peerTurnBudget = Number(self?.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET;
+    const peerTurnBudget = turnBudgetOut(self?.peer_turn_budget);
 
     // Resolve each distinct sender's runtime so messages can be tagged
     // operator vs agent. The synthetic op_<fleetId> sender has runtime
@@ -1500,7 +1515,10 @@ export class EkhoDb {
 
     // Per-conversation budget overrides: rooms this agent belongs to that are in
     // project mode. Sent on EVERY poll (not just when a delivery is present) so
-    // the plugin's latch always has the live per-room ceiling.
+    // the plugin's latch always has the live per-room setting. A positive value
+    // is that room's cap; 0 means "this room has no limit" and overrides a
+    // per-agent cap. (The map's values stay numeric for wire compatibility: a
+    // plugin older than 0.5 reads a non-positive entry as "no override".)
     const conversation_budgets: Record<string, number> = {};
     if (fleetId) {
       const projectRooms = this.db.prepare(
@@ -1509,7 +1527,7 @@ export class EkhoDb {
          WHERE r.fleet_id = ? AND rm.agent_id = ? AND r.project_mode = 1`
       ).all(fleetId, agentId) as Array<{ id: string; project_turn_budget: number }>;
       for (const r of projectRooms) {
-        conversation_budgets[r.id] = Number(r.project_turn_budget) || DEFAULT_PROJECT_TURN_BUDGET;
+        conversation_budgets[r.id] = turnBudgetOut(r.project_turn_budget) ?? NO_TURN_LIMIT;
       }
     }
 
@@ -1563,6 +1581,8 @@ export class EkhoDb {
       operator_trusted: operatorTrusted,
       peer_autoreply: peerAutoreply,
       peer_turn_budget: peerTurnBudget,
+      // ^ null = no limit (the default). Plugins older than this change read a
+      //   null/absent budget as "use my local default" (25 there).
       // Project-mode rooms override the per-agent budget for that conversation.
       conversation_budgets,
       roster,
@@ -2079,28 +2099,30 @@ export class EkhoDb {
 
   /**
    * Enable/disable bounded agent-to-agent delegation for an agent, optionally
-   * setting its per-conversation turn budget. The agent reads both live on its
-   * next inbox poll (no restart). Returns the resulting state, or null if the
-   * agent is unknown. Mirrors setAgentTrust.
+   * setting its per-conversation turn budget: a positive cap, 0/null to clear
+   * it (no limit — the default), undefined to leave it untouched. The agent
+   * reads both live on its next inbox poll (no restart). Returns the resulting
+   * state (peer_turn_budget null = no limit), or null if the agent is unknown.
+   * Mirrors setAgentTrust.
    */
   setPeerAutoreply(
     fleetId: string,
     agentId: string,
     operatorId: string,
     autoreply: boolean,
-    budget?: number
-  ): { peer_autoreply: boolean; peer_turn_budget: number } | null {
+    budget?: number | null
+  ): { peer_autoreply: boolean; peer_turn_budget: number | null } | null {
     const agent = this.db.prepare("SELECT id FROM agents WHERE id = ? AND fleet_id = ? AND runtime != 'operator'").get(agentId, fleetId) as Record<string, unknown> | undefined;
     if (!agent) {
       return null;
     }
-    if (typeof budget === "number") {
-      this.db.prepare("UPDATE agents SET peer_autoreply = ?, peer_turn_budget = ? WHERE id = ? AND fleet_id = ?").run(autoreply ? 1 : 0, budget, agentId, fleetId);
+    if (budget !== undefined) {
+      this.db.prepare("UPDATE agents SET peer_autoreply = ?, peer_turn_budget = ? WHERE id = ? AND fleet_id = ?").run(autoreply ? 1 : 0, turnBudgetIn(budget), agentId, fleetId);
     } else {
       this.db.prepare("UPDATE agents SET peer_autoreply = ? WHERE id = ? AND fleet_id = ?").run(autoreply ? 1 : 0, agentId, fleetId);
     }
     const row = this.db.prepare("SELECT peer_autoreply, peer_turn_budget FROM agents WHERE id = ? AND fleet_id = ?").get(agentId, fleetId) as Record<string, unknown>;
-    const result = { peer_autoreply: Boolean(row.peer_autoreply), peer_turn_budget: Number(row.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET };
+    const result = { peer_autoreply: Boolean(row.peer_autoreply), peer_turn_budget: turnBudgetOut(row.peer_turn_budget) };
     this.recordEvent(fleetId, "agent.peer_autoreply_changed", "operator", operatorId, "agent", agentId, null, result);
     return result;
   }
@@ -2318,7 +2340,7 @@ export class EkhoDb {
         consecutive_missed_heartbeats: Number(a.consecutive_missed_heartbeats) || 0,
         operator_trusted: Boolean(a.operator_trusted),
         peer_autoreply: Boolean(a.peer_autoreply),
-        peer_turn_budget: Number(a.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET,
+        peer_turn_budget: turnBudgetOut(a.peer_turn_budget),
         last_heartbeat_at: hb?.received_at ?? null,
         metrics,
         health,
@@ -2651,7 +2673,7 @@ export class EkhoDb {
       ...row,
       operator_trusted: Boolean(row.operator_trusted),
       peer_autoreply: Boolean(row.peer_autoreply),
-      peer_turn_budget: Number(row.peer_turn_budget) || DEFAULT_PEER_TURN_BUDGET
+      peer_turn_budget: turnBudgetOut(row.peer_turn_budget)
     }));
 
     const totalRow = this.db.prepare(

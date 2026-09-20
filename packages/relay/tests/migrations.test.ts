@@ -108,7 +108,8 @@ describe("transactional migrations (M6)", () => {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
     // Simulate a legacy DB: the column was created DEFAULT 0 by migration 009.
-    db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_autoreply INTEGER NOT NULL DEFAULT 0)");
+    // (peer_turn_budget, same migration, is there too — migration 021 updates it.)
+    db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_autoreply INTEGER NOT NULL DEFAULT 0, peer_turn_budget INTEGER NOT NULL DEFAULT 6)");
     db.exec("INSERT INTO agents (id, peer_autoreply) VALUES ('a', 0), ('b', 0), ('c', 1)");
     // A legacy DB also has the rooms table (migration 010) — needed so the later
     // migration 016 (ALTER TABLE rooms) applies cleanly when runMigrationsOn runs
@@ -155,6 +156,9 @@ describe("transactional migrations (M6)", () => {
       );
       CREATE TABLE a2a_task_messages (task_id TEXT, message_id TEXT, PRIMARY KEY (task_id, message_id));
       CREATE TABLE messages (id TEXT PRIMARY KEY, fleet_id TEXT, sender_agent_id TEXT, created_at TEXT);
+      -- agents (009) and rooms (017) budget columns, so migration 021 applies cleanly after 020.
+      CREATE TABLE agents (id TEXT PRIMARY KEY, peer_turn_budget INTEGER NOT NULL DEFAULT 6);
+      CREATE TABLE rooms (id TEXT PRIMARY KEY, project_turn_budget INTEGER NOT NULL DEFAULT 100);
     `);
     db.exec(`
       INSERT INTO a2a_tasks (id, fleet_id, agent_id, context_id, state, history_json, artifacts_json, created_at, updated_at)
@@ -180,5 +184,72 @@ describe("transactional migrations (M6)", () => {
       { id: "task_orphan", sender_agent_id: null }
     ]);
     expect(versions(db)).toContain(20);
+  });
+
+  // Turn budgets became opt-in (0 = no limit). Migration 021 clears rows still
+  // holding a value the relay used to hard-wire and preserves everything else.
+  describe("migration 021 — no default turn limit", () => {
+    function legacyDb() {
+      const db = new Database(":memory:");
+      db.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+      // The column definitions a real upgraded relay carries (009 and 017).
+      db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_turn_budget INTEGER NOT NULL DEFAULT 6)");
+      db.exec("CREATE TABLE rooms (id TEXT PRIMARY KEY, project_mode INTEGER NOT NULL DEFAULT 0, project_turn_budget INTEGER NOT NULL DEFAULT 100)");
+      db.exec(`
+        INSERT INTO agents (id, peer_turn_budget) VALUES
+          ('old_default_6', 6), ('old_default_25', 25), ('custom_8', 8), ('custom_200', 200), ('custom_1', 1);
+        INSERT INTO rooms (id, project_mode, project_turn_budget) VALUES
+          ('room_default', 0, 100), ('room_default_on', 1, 100), ('room_custom_150', 1, 150), ('room_custom_25', 1, 25);
+      `);
+      const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
+      for (let v = 1; v <= 20; v++) mark.run(v, "2026-09-01T00:00:00.000Z");
+      return db;
+    }
+    const agentBudgets = (db: Database.Database) =>
+      Object.fromEntries((db.prepare("SELECT id, peer_turn_budget AS b FROM agents").all() as Array<{ id: string; b: number }>).map((r) => [r.id, r.b]));
+    const roomBudgets = (db: Database.Database) =>
+      Object.fromEntries((db.prepare("SELECT id, project_turn_budget AS b FROM rooms").all() as Array<{ id: string; b: number }>).map((r) => [r.id, r.b]));
+
+    it("clears legacy-default rows to 0 and preserves operator-chosen values", () => {
+      const db = legacyDb();
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      expect(versions(db)).toContain(21);
+      expect(agentBudgets(db)).toEqual({
+        old_default_6: 0, old_default_25: 0,           // retired defaults → no limit
+        custom_8: 8, custom_200: 200, custom_1: 1      // operator choices survive
+      });
+      expect(roomBudgets(db)).toEqual({
+        room_default: 0, room_default_on: 0,           // retired default → no limit
+        room_custom_150: 150, room_custom_25: 25       // 25 is not a ROOM default: kept
+      });
+      // Project-mode flags are untouched.
+      expect(db.prepare("SELECT project_mode FROM rooms WHERE id = 'room_default_on'").get()).toEqual({ project_mode: 1 });
+    });
+
+    it("runs once: a cap of 25/100 the operator sets AFTER the upgrade survives later boots", () => {
+      const db = legacyDb();
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      db.exec("UPDATE agents SET peer_turn_budget = 25 WHERE id = 'custom_8'");
+      db.exec("UPDATE agents SET peer_turn_budget = 6 WHERE id = 'custom_1'");
+      db.exec("UPDATE rooms SET project_turn_budget = 100 WHERE id = 'room_custom_150'");
+
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR); // next boot
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR); // and the one after
+
+      expect(agentBudgets(db).custom_8).toBe(25);
+      expect(agentBudgets(db).custom_1).toBe(6);
+      expect(roomBudgets(db).room_custom_150).toBe(100);
+      expect(versions(db).filter((v) => v === 21)).toEqual([21]);
+    });
+
+    it("a fresh schema.ts database defaults new rows to 0 (no limit)", () => {
+      const db = new Database(":memory:");
+      db.exec(schemaSql);
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      const colDefault = (table: string, col: string) =>
+        (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; dflt_value: string | null }>).find((c) => c.name === col)?.dflt_value;
+      expect(colDefault("agents", "peer_turn_budget")).toBe("0");
+      expect(colDefault("rooms", "project_turn_budget")).toBe("0");
+    });
   });
 });

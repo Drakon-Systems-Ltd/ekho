@@ -90,11 +90,11 @@ describe("resume + project mode", () => {
   });
 
   describe("project mode", () => {
-    it("defaults OFF (budget 100) and toggles via the operator endpoint", async () => {
+    it("defaults OFF with no room limit (null) and toggles via the operator endpoint", async () => {
       let rooms = (await relay.operatorRequest("GET", "/v1/operator/rooms")).body.rooms as Array<Record<string, unknown>>;
       let room = rooms.find((r) => r.id === roomId)!;
       expect(room.project_mode).toBe(false);
-      expect(room.project_turn_budget).toBe(100);
+      expect(room.project_turn_budget).toBeNull(); // no limit — never a fake number
 
       const res = await relay.operatorRequest("POST", `/v1/operator/rooms/${roomId}/project-mode`, {
         enabled: true,
@@ -125,16 +125,58 @@ describe("resume + project mode", () => {
       expect(after.body.conversation_budgets ?? {}).toEqual({});
     });
 
-    it("enables with the 100 default when budget is omitted; rejects invalid budgets and unknown rooms", async () => {
+    it("enables with NO limit when budget is omitted, and tells members the room is unlimited", async () => {
       const res = await relay.operatorRequest("POST", `/v1/operator/rooms/${roomId}/project-mode`, { enabled: true });
       expect(res.status).toBe(200);
-      expect(res.body.project_turn_budget).toBe(100);
+      expect(res.body.project_mode).toBe(true);
+      expect(res.body.project_turn_budget).toBeNull();
 
-      const bad = await relay.operatorRequest("POST", `/v1/operator/rooms/${roomId}/project-mode`, {
-        enabled: true,
-        budget: 0
-      });
-      expect(bad.status).toBe(400);
+      // On the wire the per-room map stays numeric: 0 = "this room has no limit"
+      // (overrides a per-agent cap). Older plugins read a non-positive entry as
+      // "no override", which is the documented compatibility behaviour.
+      const inbox = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      expect(inbox.body.conversation_budgets).toEqual({ [roomId]: 0 });
+    });
+
+    it("operator sets a room cap, then clears it with 0 and with null", async () => {
+      const path = `/v1/operator/rooms/${roomId}/project-mode`;
+      const set = await relay.operatorRequest("POST", path, { enabled: true, budget: 150 });
+      expect(set.body.project_turn_budget).toBe(150);
+
+      // Omitting budget leaves the cap untouched.
+      const untouched = await relay.operatorRequest("POST", path, { enabled: true });
+      expect(untouched.body.project_turn_budget).toBe(150);
+
+      const clearedZero = await relay.operatorRequest("POST", path, { enabled: true, budget: 0 });
+      expect(clearedZero.status).toBe(200);
+      expect(clearedZero.body.project_turn_budget).toBeNull();
+
+      await relay.operatorRequest("POST", path, { enabled: true, budget: 40 });
+      const clearedNull = await relay.operatorRequest("POST", path, { enabled: true, budget: null });
+      expect(clearedNull.status).toBe(200);
+      expect(clearedNull.body.project_turn_budget).toBeNull();
+
+      const rooms = (await relay.operatorRequest("GET", "/v1/operator/rooms")).body.rooms as Array<Record<string, unknown>>;
+      expect(rooms.find((r) => r.id === roomId)!.project_turn_budget).toBeNull();
+      const inbox = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      expect(inbox.body.conversation_budgets).toEqual({ [roomId]: 0 });
+    });
+
+    it("a cap of exactly 100 set by the operator sticks (it is a choice, not the old default)", async () => {
+      const res = await relay.operatorRequest("POST", `/v1/operator/rooms/${roomId}/project-mode`, { enabled: true, budget: 100 });
+      expect(res.body.project_turn_budget).toBe(100);
+      const inbox = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      expect(inbox.body.conversation_budgets).toEqual({ [roomId]: 100 });
+    });
+
+    it("rejects invalid budgets and unknown rooms", async () => {
+      const path = `/v1/operator/rooms/${roomId}/project-mode`;
+      for (const budget of [-1, 1.5, 501, "10"]) {
+        const bad = await relay.operatorRequest("POST", path, { enabled: true, budget });
+        expect(bad.status, `budget=${String(budget)}`).toBe(400);
+      }
+      // The upper bound itself is accepted.
+      expect((await relay.operatorRequest("POST", path, { enabled: true, budget: 500 })).status).toBe(200);
 
       const missing = await relay.operatorRequest("POST", "/v1/operator/rooms/room_nope/project-mode", { enabled: true });
       expect(missing.status).toBe(404);
@@ -142,9 +184,10 @@ describe("resume + project mode", () => {
   });
 
   describe("default peer budget", () => {
-    it("newly enrolled agents start with a 25-turn peer budget", async () => {
+    it("newly enrolled agents start with NO peer turn limit (null on the wire)", async () => {
       const inbox = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
-      expect(inbox.body.peer_turn_budget).toBe(25);
+      expect(inbox.body.peer_turn_budget).toBeNull();
+      expect(inbox.body.conversation_budgets ?? {}).toEqual({});
     });
   });
 });

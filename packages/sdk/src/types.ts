@@ -81,10 +81,12 @@ export type InboxResponse = {
   roster?: RosterEntry[];
   /** Operator-controlled bounded agent-to-agent delegation (live; absent on older relays). */
   peer_autoreply?: boolean;
-  /** Per-conversation peer-turn budget set by the operator. */
-  peer_turn_budget?: number;
-  /** Project-mode rooms this agent belongs to: conversation id -> the higher
-   *  per-room budget that overrides peer_turn_budget there (absent on older relays). */
+  /** Per-conversation peer-turn cap set by the operator. `null` = no limit (the
+   *  default); a positive integer = the cap. Absent on older relays. */
+  peer_turn_budget?: number | null;
+  /** Project-mode rooms this agent belongs to: conversation id -> that room's
+   *  budget, which overrides peer_turn_budget there. A positive integer is the
+   *  room's cap; `0` means the room has no limit. Absent on older relays. */
   conversation_budgets?: Record<string, number>;
   /** Recent thread per room conversation (id -> chronological snapshots); {} for direct. */
   conversation_history?: Record<string, MessageSnapshot[]>;

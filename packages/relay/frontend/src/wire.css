@@ -458,7 +458,7 @@ code,.code-block{font-family:ui-monospace,Menlo,monospace}
 .switch input:checked + .tr{background:var(--ok)}
 .switch input:checked + .tr::after{transform:translateX(16px)}
 .switch input:focus-visible + .tr{outline:2px solid var(--focus);outline-offset:2px}
-.budget-input{width:64px;border:1px solid var(--line);background:var(--paper);border-radius:9px;padding:5px 8px;font-size:13.5px;text-align:center}
+.budget-input{width:84px;border:1px solid var(--line);background:var(--paper);border-radius:9px;padding:5px 8px;font-size:13.5px;text-align:center}
 .danger{width:100%;text-align:center;color:var(--down);font-weight:650;font-size:14px;padding:10px;border-radius:12px}
 .danger:hover{background:color-mix(in oklab,var(--down),transparent 92%)}
 .ghostbtn{width:100%;text-align:center;color:var(--ink2);font-weight:650;font-size:14px;padding:10px;border-radius:12px;border:1px solid var(--line);margin-bottom:8px}

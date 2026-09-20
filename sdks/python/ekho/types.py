@@ -198,9 +198,12 @@ class InboxResponse:
     # Operator-controlled bounded agent-to-agent delegation (None if the relay
     # predates the feature — the client then falls back to its local default).
     peer_autoreply: Optional[bool] = None
+    # Operator-set cap on peer wakes per conversation. None = no limit (the
+    # default) or a relay that predates the field; a positive int = the cap.
     peer_turn_budget: Optional[int] = None
-    # Project-mode rooms this agent belongs to: conversation id -> the higher
-    # per-room budget that overrides peer_turn_budget there ({} on older relays).
+    # Project-mode rooms this agent belongs to: conversation id -> that room's
+    # budget, which overrides peer_turn_budget there. A positive int is the
+    # room's cap; 0 means the room has no limit ({} on older relays).
     conversation_budgets: Dict[str, int] = field(default_factory=dict)
     # Pinned operator signing keys (incl. revoked, so the agent can drop them).
     operator_keys: List[OperatorKeyEntry] = field(default_factory=list)

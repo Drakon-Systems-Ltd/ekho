@@ -380,18 +380,18 @@ describe("Relay integration", () => {
     it("toggles per-agent peer-autoreply + budget, live on the inbox", async () => {
       const agent = await relay.enrollAgent("peer-agent");
 
-      // Defaults: ON, budget 25 — both in the agent list and the agent's inbox.
-      // Peer auto-reply is on by default now; the latch still caps ping-pong.
+      // Defaults: ON with NO turn limit (null) — both in the agent list and the
+      // agent's inbox. A limit exists only when the operator sets one.
       const list = await relay.operatorRequest("GET", "/v1/operator/agents");
       const row = list.body.agents.find((a: { id: string }) => a.id === agent.agent_id);
       expect(row.peer_autoreply).toBe(true);
-      expect(row.peer_turn_budget).toBe(25);
+      expect(row.peer_turn_budget).toBeNull();
 
       const inbox0 = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox");
       expect(inbox0.body.peer_autoreply).toBe(true);
-      expect(inbox0.body.peer_turn_budget).toBe(25);
+      expect(inbox0.body.peer_turn_budget).toBeNull();
 
-      // The operator can still raise the budget for an already-on agent.
+      // The operator can set a cap for an already-on agent.
       const on = await relay.operatorRequest("POST", `/v1/operator/agents/${agent.agent_id}/peer-autoreply`, {
         autoreply: true,
         budget: 8
@@ -410,6 +410,39 @@ describe("Relay integration", () => {
       });
       expect(off.body.peer_autoreply).toBe(false);
       expect(off.body.peer_turn_budget).toBe(8);
+    });
+
+    it("operator clears a per-agent cap with 0 or null, live on the inbox", async () => {
+      const agent = await relay.enrollAgent("peer-clear");
+      const path = `/v1/operator/agents/${agent.agent_id}/peer-autoreply`;
+
+      // 25 typed in by an operator is a real cap, not the retired default.
+      const set = await relay.operatorRequest("POST", path, { autoreply: true, budget: 25 });
+      expect(set.body.peer_turn_budget).toBe(25);
+      expect((await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox")).body.peer_turn_budget).toBe(25);
+
+      const clearedZero = await relay.operatorRequest("POST", path, { autoreply: true, budget: 0 });
+      expect(clearedZero.status).toBe(200);
+      expect(clearedZero.body).toEqual({ agent_id: agent.agent_id, peer_autoreply: true, peer_turn_budget: null });
+      expect((await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox")).body.peer_turn_budget).toBeNull();
+
+      await relay.operatorRequest("POST", path, { autoreply: true, budget: 12 });
+      const clearedNull = await relay.operatorRequest("POST", path, { autoreply: true, budget: null });
+      expect(clearedNull.status).toBe(200);
+      expect(clearedNull.body.peer_turn_budget).toBeNull();
+
+      const list = await relay.operatorRequest("GET", "/v1/operator/agents");
+      expect(list.body.agents.find((a: { id: string }) => a.id === agent.agent_id).peer_turn_budget).toBeNull();
+    });
+
+    it("400s peer-autoreply budgets that are negative, fractional, non-numeric or over the bound", async () => {
+      const agent = await relay.enrollAgent("peer-bad-budget");
+      const path = `/v1/operator/agents/${agent.agent_id}/peer-autoreply`;
+      for (const budget of [-1, 2.5, 201, "8"]) {
+        const res = await relay.operatorRequest("POST", path, { autoreply: true, budget });
+        expect(res.status, `budget=${String(budget)}`).toBe(400);
+      }
+      expect((await relay.operatorRequest("POST", path, { autoreply: true, budget: 200 })).status).toBe(200);
     });
 
     it("404s peer-autoreply for an unknown agent", async () => {
