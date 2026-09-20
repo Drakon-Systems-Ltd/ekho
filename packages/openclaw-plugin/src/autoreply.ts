@@ -798,10 +798,10 @@ function noteProgressRefresh(state: AutoReplyState, conversationId: string, nowM
  * SAFETY MODEL: the OPERATOR (your verified principal) auto-triggers a turn when
  * this agent currently trusts the operator (the Access-tab toggle). Bounded
  * agent-to-agent delegation is ON by default (`peerEnabled`), so teammates wake
- * the agent too — but each peer wake is latched per conversation in the tick
- * (`peerTurnBudget`), with the rolling per-peer rate gate as a backstop, so
- * agent↔agent ping-pong is capped, not unbounded. An operator message in a
- * conversation re-energises its latch. Opt out per agent from the console or
+ * the agent too. The rolling per-peer rate gate always bounds agent↔agent
+ * ping-pong. There is no turn limit by default; when the operator (or a local
+ * `peerTurnBudget`) sets one, peer wakes are latched per conversation at that
+ * cap and an operator message re-energises the latch. Opt out per agent from the console or
  * with `"peerAutoreply": false`.
  */
 /** Why `isRealInbound` said no. Used so a `real=0` poll is diagnosable (#4)

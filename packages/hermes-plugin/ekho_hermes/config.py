@@ -14,7 +14,10 @@ from typing import Optional
 from .verification import parse_require_signed_mode
 
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
-DEFAULT_PEER_TURN_BUDGET = 25
+# Peer turn budgets are opt-in: 0 = no limit (the default). A positive value is a
+# local cap that applies when the relay (operator console) has not set one.
+NO_PEER_TURN_LIMIT = 0
+DEFAULT_PEER_TURN_BUDGET = NO_PEER_TURN_LIMIT
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -66,8 +69,9 @@ class EkhoConfig:
     agent_secret: Optional[str] = None
     heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     # Bounded agent-to-agent delegation. ON by default: teammates can wake this
-    # agent, still latched per conversation by peer_turn_budget so it can never
-    # become unbounded ping-pong. An operator disables it per agent from the
+    # agent. There is no turn limit unless one is set — by the operator on the
+    # console (wins), or locally via EKHO_PEER_TURN_BUDGET — and the per-peer
+    # rate gate always bounds runaway ping-pong. An operator disables it per agent from the
     # console (the relay value overrides this default), or via EKHO_PEER_AUTOREPLY=0.
     peer_autoreply: bool = True
     peer_turn_budget: int = DEFAULT_PEER_TURN_BUDGET
@@ -118,7 +122,7 @@ class EkhoConfig:
         except ValueError:
             budget = DEFAULT_PEER_TURN_BUDGET
         if budget <= 0:
-            budget = DEFAULT_PEER_TURN_BUDGET
+            budget = NO_PEER_TURN_LIMIT  # 0 / negative / junk -> no limit
 
         return cls(
             relay_url=_clean(env.get("EKHO_RELAY_URL")),

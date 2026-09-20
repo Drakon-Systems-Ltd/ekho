@@ -163,11 +163,38 @@ def test_format_inbox_surfaces_peer_budget():
     assert msg["peer_remaining"] == 4
 
 
-def test_format_inbox_peer_budget_omitted_when_no_budget():
-    # Backward-compatible: without a budget, no per-message peer_* fields.
-    out = format_inbox([_msg()], operator_trusted=False)
-    assert out["peer_turn_budget"] is None
-    assert "peer_remaining" not in out["messages"][0]
+def test_format_inbox_no_limit_reports_null_budget_and_null_remaining():
+    # No turn limit: one stable shape, with None (JSON null) — never a fake
+    # number, never inf (which JSON cannot carry).
+    import json
+
+    for unset in (None, 0, -1):
+        out = format_inbox(
+            [_msg()], operator_trusted=False,
+            peer_turn_budget=unset, peer_turns_used={"c1": 2},
+        )
+        assert out["peer_turn_budget"] is None
+        m = out["messages"][0]
+        assert m["peer_turn_budget"] is None
+        assert m["peer_remaining"] is None
+        wire = json.loads(json.dumps(out, allow_nan=False))
+        assert wire["messages"][0]["peer_remaining"] is None
+
+
+def test_format_inbox_room_budget_wins_for_its_conversation():
+    conv = _msg()["conversation_id"] if isinstance(_msg(), dict) else _msg().conversation_id
+    # Room cap over an unlimited agent.
+    capped = format_inbox(
+        [_msg()], operator_trusted=False, peer_turn_budget=0,
+        peer_turns_used={conv: 1}, conversation_budgets={conv: 4},
+    )["messages"][0]
+    assert (capped["peer_turn_budget"], capped["peer_remaining"]) == (4, 3)
+    # Unlimited room over a capped agent.
+    open_room = format_inbox(
+        [_msg()], operator_trusted=False, peer_turn_budget=6,
+        conversation_budgets={conv: 0},
+    )["messages"][0]
+    assert (open_room["peer_turn_budget"], open_room["peer_remaining"]) == (None, None)
 
 
 def test_format_inbox_no_peer_budget_on_operator_messages():

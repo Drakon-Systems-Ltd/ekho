@@ -372,6 +372,7 @@ def _handle_ekho_inbox(args: dict, **_kw) -> str:
         peer_autoreply=cached.get("peer_autoreply", False),
         peer_turn_budget=cached.get("peer_turn_budget"),
         peer_turns_used=cached.get("peer_turns_used"),
+        conversation_budgets=cached.get("conversation_budgets"),
     )
     return _tool_result(result)
 

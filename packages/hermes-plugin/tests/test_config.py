@@ -4,11 +4,11 @@ from ekho_hermes.config import EkhoConfig
 
 
 def test_peer_autoreply_defaults_on_when_unset():
-    # Bounded delegation is ON by default now: an UNSET env var yields True (the
-    # latch still caps peer ping-pong per conversation).
+    # Peer delegation is ON by default: an UNSET env var yields True. There is
+    # no default turn limit (0) — the rate gate bounds ping-pong.
     cfg = EkhoConfig.from_env(env={"EKHO_RELAY_URL": "http://relay"})
     assert cfg.peer_autoreply is True
-    assert cfg.peer_turn_budget == 25
+    assert cfg.peer_turn_budget == 0
 
 
 def test_peer_autoreply_truthy_values():
@@ -44,18 +44,26 @@ def test_peer_turn_budget_parsed():
     assert cfg.peer_turn_budget == 10
 
 
-def test_peer_turn_budget_invalid_falls_back_to_default():
+def test_peer_turn_budget_invalid_means_no_limit():
     cfg = EkhoConfig.from_env(
         env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": "nope"}
     )
-    assert cfg.peer_turn_budget == 25
+    assert cfg.peer_turn_budget == 0
 
 
-def test_peer_turn_budget_floor_of_one():
+def test_peer_turn_budget_zero_or_negative_means_no_limit():
+    for raw in ("0", "-3", "", "   "):
+        cfg = EkhoConfig.from_env(
+            env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": raw}
+        )
+        assert cfg.peer_turn_budget == 0, raw
+
+
+def test_peer_turn_budget_positive_is_a_local_cap():
     cfg = EkhoConfig.from_env(
-        env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": "0"}
+        env={"EKHO_RELAY_URL": "http://relay", "EKHO_PEER_TURN_BUDGET": "25"}
     )
-    assert cfg.peer_turn_budget == 25  # <=0 is meaningless -> default
+    assert cfg.peer_turn_budget == 25  # 25 typed in is a real cap, not a default
 
 
 def test_require_signed_defaults_to_warn():
