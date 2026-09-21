@@ -510,14 +510,6 @@ def note_progress_refresh(
     return True
 
 
-@dataclass
-class _ResolvedBudgets:
-    """A room-budget map that already has the local cap applied, shaped like an
-    inbox so effective_conversation_budget can read it without re-resolving."""
-
-    conversation_budgets: Dict[str, int]
-
-
 def reconcile_peer_latches(
     state: AutoReplyState, inbox: Any, fallback: int, local_budget: int = NO_PEER_TURN_LIMIT
 ) -> None:
@@ -529,12 +521,20 @@ def reconcile_peer_latches(
     tracked = set(state.peer_turns_by_conversation) | set(state.escalated_closed_convs)
     if not tracked:
         return
-    # Resolve the room map ONCE per poll, not once per tracked conversation.
-    resolved = _ResolvedBudgets(
-        with_local_room_cap(getattr(inbox, "conversation_budgets", None), local_budget)
-    )
+    # Resolve the room map ONCE per poll and read it directly. Going through
+    # effective_conversation_budget here would copy the whole map again for
+    # every tracked conversation. Same rule as that function: a valid room entry
+    # (cap, or explicit 0 = no limit) wins, otherwise the per-agent fallback.
+    budgets = with_local_room_cap(getattr(inbox, "conversation_budgets", None), local_budget)
+    agent_budget = normalize_turn_budget(fallback)
     for conv in tracked:
-        if effective_conversation_budget(resolved, conv, fallback) <= 0:
+        value = budgets.get(conv)
+        in_force = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else agent_budget
+        )
+        if in_force <= 0:
             reset_peer_latch(state, conv)
 
 

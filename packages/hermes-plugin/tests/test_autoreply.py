@@ -2226,6 +2226,23 @@ def test_cap_survives_hundreds_of_reset_consume_cycles_on_one_conversation():
     assert not peer_latch_open(state, "c", 1)
 
 
+def test_reconcile_uses_the_same_budget_rule_as_the_latch():
+    # reconcile reads the resolved room map directly (no per-conversation copy),
+    # so pin it to effective_conversation_budget for every shape of entry.
+    cases = {"capped_room": 3, "open_room": 0, "junk_room": "9", "bool_room": True, "neg_room": -2}
+    inbox = InboxResponse(messages=[], controls=[], operator_trusted=False, roster=[],
+                          peer_autoreply=True, conversation_budgets=cases)
+    for agent_budget in (0, 5):
+        for local in (0, 12):
+            state = _state()
+            for conv in list(cases) + ["no_entry"]:
+                autoreply.consume_peer_latch(state, conv)
+            autoreply.reconcile_peer_latches(state, inbox, agent_budget, local)
+            for conv in list(cases) + ["no_entry"]:
+                capped = autoreply.effective_conversation_budget(inbox, conv, agent_budget, local) > 0
+                assert (conv in state.peer_turns_by_conversation) == capped, (conv, agent_budget, local)
+
+
 def test_stall_marker_set_is_bounded_so_reconcile_cannot_grow_forever():
     state, notices = _state(), []
     for i in range(700):
