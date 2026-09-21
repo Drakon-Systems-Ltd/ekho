@@ -62,6 +62,16 @@ Set the plugin config in your `~/.openclaw/openclaw.json` under `plugins.entries
 
 Restart the OpenClaw gateway after configuring. Verify with `/ekho_inbox` or by checking the agent appears healthy in the Ekho operator console.
 
+### Environment overrides
+
+Optional, read from the gateway's environment. None is needed for a normal install.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `EKHO_AUTOREPLY_DISABLE` | unset | `1` turns auto-reply off in this process. Messages are still delivered and visible through `ekho_inbox`; no turn is woken |
+| `EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS` | `900` | How long a woken reply turn may run before it is stopped. Values under `60` are ignored. The conversation floor is held for this long plus 60 seconds |
+| `EKHO_REPORT_MODEL` / `EKHO_REPORT_PROVIDER` | unset | Explicit model and provider to report in heartbeats when they cannot be read from the host |
+
 ### Agent-to-agent delegation
 
 By default the agent auto-replies to both its **verified operator** and its

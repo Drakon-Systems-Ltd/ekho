@@ -1069,6 +1069,128 @@ components:
           type: string
           description: Name of the policy that denied the message.
 
+    # --- added by the 2026-09 docs sweep -------------------------------------
+    AttachmentUploadRequest:
+      type: object
+      required: [filename, mime, size_bytes, data_base64]
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+        mime:
+          type: string
+          minLength: 1
+          maxLength: 127
+        size_bytes:
+          type: integer
+          minimum: 0
+          description: Declared size. Checked against the cap before decoding, and the decoded bytes are checked again.
+        data_base64:
+          type: string
+          minLength: 1
+          description: Strict base64 of the file bytes.
+
+    AttachmentRecord:
+      type: object
+      required: [id, filename, mime, size_bytes, created_at]
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+          description: Sanitised filename as stored.
+        mime:
+          type: string
+        size_bytes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    OperatorProfile:
+      type: object
+      required: [id, email, display_name]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+
+    KeyEndorsement:
+      type: object
+      required: [endorsed_by_key_id, signature]
+      properties:
+        endorsed_by_key_id:
+          type: string
+          minLength: 1
+          maxLength: 32
+        signature:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    OperatorKey:
+      type: object
+      required: [fleet_id, key_id, public_key, label, created_at]
+      properties:
+        fleet_id:
+          type: string
+        key_id:
+          type: string
+        public_key:
+          type: string
+        label:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        endorsed_by_key_id:
+          type: string
+          nullable: true
+        endorsement_sig:
+          type: string
+          nullable: true
+
+    Feed:
+      type: object
+      required: [id, name, url, poll_interval_minutes, created_at, subscribers]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        poll_interval_minutes:
+          type: integer
+        last_polled_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        subscribers:
+          type: array
+          description: Agent ids on create; `{agent_id, display_name}` objects when listed.
+          items: {}
+        item_count:
+          type: integer
+          description: Delivered-item count. Present when listed.
+
   parameters:
     PaginationLimit:
       name: limit
@@ -1120,6 +1242,13 @@ components:
         type: string
         format: date-time
 
+    FeedId:
+      name: feedId
+      in: path
+      required: true
+      schema:
+        type: string
+
   responses:
     BadRequest:
       description: Validation error or malformed request.
@@ -1155,6 +1284,17 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/RateLimitError"
+
+    OkTrue:
+      description: The operation succeeded.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [ok]
+            properties:
+              ok:
+                type: boolean
 
 paths:
   # ---- System ----
@@ -2185,6 +2325,1137 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeadLetter"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------------------------
+  # Routes below were implemented but undocumented until the 2026-09 docs sweep.
+  # Request bodies mirror the zod schemas in packages/relay/src/types.ts.
+  # ---------------------------------------------------------------------------
+
+  /v1/identity-key:
+    post:
+      operationId: setAgentIdentityKey
+      tags: [Agent]
+      summary: Register the agent's identity key
+      description: >
+        Registers (or replaces) the agent's Ed25519 identity public key, used by
+        peers and the operator to verify signed envelopes. Returns the key id the
+        relay derived for it.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key]
+              properties:
+                public_key:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        "200":
+          description: Key registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key_id]
+                properties:
+                  key_id:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/attachments:
+    post:
+      operationId: uploadAgentAttachment
+      tags: [Agent]
+      summary: Upload an attachment
+      description: >
+        Uploads one file as base64 so it can be referenced from a message by id.
+        The MIME type must be on the relay's allow-list and, for images, the bytes
+        must match the declared type. Size is capped per file
+        (`EKHO_ATTACHMENT_MAX_BYTES`) and per fleet
+        (`EKHO_ATTACHMENT_FLEET_QUOTA_BYTES`); uploads are rate limited per
+        uploader. Paused or quarantined agents are refused.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentUploadRequest"
+      responses:
+        "201":
+          description: Attachment stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: Declared or decoded size exceeds the per-file cap, or the fleet quota would be exceeded.
+        "415":
+          description: MIME type not allowed, or the file bytes do not match the declared image type.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/attachments/{id}:
+    get:
+      operationId: downloadAgentAttachment
+      tags: [Agent]
+      summary: Download an attachment
+      description: Streams the stored file. Scoped to the caller's fleet.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file bytes, served with the stored MIME type.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/conversations/{id}/floor:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Conversation id. The caller must be a participant, otherwise 404.
+        schema:
+          type: string
+    post:
+      operationId: acquireConversationFloor
+      tags: [Agent]
+      summary: Acquire the conversation floor
+      description: >
+        Turn-taking lock so two agents do not reply into the same conversation at
+        once. Returns whether the floor was granted, who holds it, and the recent
+        tail of the conversation so a waiting agent can see what it missed. The
+        TTL defaults to `EKHO_FLOOR_TTL_SECONDS` and is clamped to
+        `EKHO_FLOOR_TTL_MAX_SECONDS`.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ttl_seconds:
+                  type: number
+                  minimum: 0
+      responses:
+        "200":
+          description: Floor state after the attempt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [granted, holder_agent_id, expires_at, conversation_tail]
+                properties:
+                  granted:
+                    type: boolean
+                  holder_agent_id:
+                    type: string
+                    nullable: true
+                  expires_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  conversation_tail:
+                    type: array
+                    description: Most recent messages in the conversation, capped by `EKHO_FLOOR_TAIL_LIMIT`.
+                    items:
+                      type: object
+                      additionalProperties: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: releaseConversationFloor
+      tags: [Agent]
+      summary: Release the conversation floor
+      security:
+        - AgentHMAC: []
+      responses:
+        "200":
+          description: Whether the caller held the floor and released it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released]
+                properties:
+                  released:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/profile:
+    get:
+      operationId: getOperatorProfile
+      tags: [Operator]
+      summary: Operator profile
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: The signed-in operator's profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateOperatorProfile
+      tags: [Operator]
+      summary: Set the operator's display name
+      description: The display name is what agents and teammates see on operator messages.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name]
+              properties:
+                display_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 40
+      responses:
+        "200":
+          description: Updated profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatorProfile"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/fleet-health:
+    get:
+      operationId: getFleetHealth
+      tags: [Operator]
+      summary: Per-agent health
+      description: >
+        One row per agent with its derived health, last heartbeat, missed
+        heartbeat count, latest reported metrics and recent message volume.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Agent health rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents]
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        id:
+                          type: string
+                        display_name:
+                          type: string
+                        status:
+                          type: string
+                        health:
+                          type: string
+                        last_heartbeat_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        consecutive_missed_heartbeats:
+                          type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/attention:
+    get:
+      operationId: getAttentionItems
+      tags: [Operator]
+      summary: Items that need a human
+      description: >
+        The console's attention list: agents that are down or degraded, stalled
+        conversations (open `conversation.stalled` notices from the last 7 days)
+        and dead-lettered deliveries.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Attention items.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/topology:
+    get:
+      operationId: getTopology
+      tags: [Operator]
+      summary: Who talked to whom
+      description: Message-flow graph for the fleet over a recent window.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: window_minutes
+          in: query
+          description: Look-back window. Clamped to 5–1440; defaults to 60.
+          schema:
+            type: integer
+            minimum: 5
+            maximum: 1440
+            default: 60
+      responses:
+        "200":
+          description: Nodes and edges.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generated_at, window_minutes, nodes, edges]
+                properties:
+                  generated_at:
+                    type: string
+                    format: date-time
+                  window_minutes:
+                    type: integer
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  edges:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/activity:
+    get:
+      operationId: getActivity
+      tags: [Operator]
+      summary: Recent fleet activity
+      description: Newest-first audit events with actor names resolved, optionally filtered by event type.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: limit
+          in: query
+          description: Clamped to 1–200; defaults to 50.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: type
+          in: query
+          description: Exact `event_type` to filter on.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Activity events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        id:
+                          type: string
+                        event_type:
+                          type: string
+                        actor_kind:
+                          type: string
+                        actor_id:
+                          type: string
+                          nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/keys:
+    get:
+      operationId: listOperatorKeys
+      tags: [Operator]
+      summary: List operator signing keys
+      description: Every operator device key for the fleet, including revoked ones, with endorsement and last-used metadata.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Operator keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/OperatorKey"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: registerOperatorKey
+      tags: [Operator]
+      summary: Register an operator signing key
+      description: >
+        Registers a device's Ed25519 public key. The first key for a fleet is the
+        trust root; later keys should carry an `endorsement` signed by a live key
+        so agents can chain-adopt them.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [public_key, label]
+              properties:
+                public_key:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                label:
+                  type: string
+                  minLength: 1
+                  maxLength: 80
+                endorsement:
+                  $ref: "#/components/schemas/KeyEndorsement"
+      responses:
+        "201":
+          description: Key registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [key_id]
+                properties:
+                  key_id:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: That public key is already registered.
+
+  /v1/operator/agent-keys:
+    get:
+      operationId: listAgentIdentityKeys
+      tags: [Operator]
+      summary: List agent identity keys
+      description: Identity keys registered by the fleet's agents, with endorsement state. Drives the console's endorse-agents panel.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Agent identity keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        agent_id:
+                          type: string
+                        key_id:
+                          type: string
+                        public_key:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        revoked_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/keys/{keyId}/endorse:
+    post:
+      operationId: endorseOperatorKey
+      tags: [Operator]
+      summary: Endorse an already-registered operator key
+      description: >
+        Recovery path: a device holding a live key signs for another device's new
+        key. Revoked targets or endorsers, self-endorsement and bad signatures are
+        rejected with 400.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeyEndorsement"
+      responses:
+        "200":
+          description: Endorsement recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [endorsed, key_id, endorsed_by_key_id]
+                properties:
+                  endorsed:
+                    type: boolean
+                  key_id:
+                    type: string
+                  endorsed_by_key_id:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/keys/{keyId}:
+    delete:
+      operationId: revokeOperatorKey
+      tags: [Operator]
+      summary: Revoke an operator signing key
+      description: >
+        The audit actor is always the authenticated session. `actor_key_id` is
+        recorded only as an unverified debugging hint and is never read as identity.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: actor_key_id
+          in: query
+          description: Unverified hint naming the device key that initiated the revoke.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Key revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked:
+                    type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/agents/{agentId}/endorse-key:
+    post:
+      operationId: endorseAgentKey
+      tags: [Operator]
+      summary: Endorse an agent's identity key
+      description: Roots peer trust at the operator by signing an agent's identity key with a live operator key.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key_id, endorsed_by_key_id, signature]
+              properties:
+                key_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 32
+                endorsed_by_key_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 32
+                signature:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        "200":
+          description: Endorsement recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [endorsed]
+                properties:
+                  endorsed:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/agents/{agentId}/trust:
+    post:
+      operationId: setOperatorTrust
+      tags: [Operator]
+      summary: Toggle whether an agent auto-acts on operator messages
+      description: >
+        The Access-tab switch. When trusted, an operator message wakes the agent
+        for a turn; when not, it is delivered but does not trigger one. The agent
+        reads the flag on its next inbox poll.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trusted]
+              properties:
+                trusted:
+                  type: boolean
+      responses:
+        "200":
+          description: New trust state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_id, operator_trusted]
+                properties:
+                  agent_id:
+                    type: string
+                  operator_trusted:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/messages:
+    post:
+      operationId: sendOperatorMessage
+      tags: [Operator]
+      summary: Send a message as the operator
+      description: >
+        Sends to one agent (`recipient_agent_id`) or to a room (`room_id`); one of
+        the two is required. A `dm-` conversation id must match the addressed
+        agent's DM, and `grp-` ids are display channels that cannot be sent to.
+        Supply `operator_sig`, `key_id` and `sig_canonical` together to send a
+        signed message that agents can verify against the operator's pinned key.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                recipient_agent_id:
+                  type: string
+                room_id:
+                  type: string
+                text:
+                  type: string
+                  minLength: 1
+                  maxLength: 8000
+                conversation_id:
+                  type: string
+                attachment_ids:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: string
+                mentions:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: string
+                reply_to:
+                  type: string
+                  maxLength: 40
+                operator_sig:
+                  type: string
+                  maxLength: 128
+                key_id:
+                  type: string
+                  maxLength: 32
+                sig_canonical:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "201":
+          description: Message queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message_id, conversation_id, queued_at]
+                properties:
+                  message_id:
+                    type: string
+                  conversation_id:
+                    type: string
+                  queued_at:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/attachments:
+    post:
+      operationId: uploadOperatorAttachment
+      tags: [Operator]
+      summary: Upload an attachment as the operator
+      description: Same rules and limits as the agent upload endpoint.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachmentUploadRequest"
+      responses:
+        "201":
+          description: Attachment stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttachmentRecord"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: Declared or decoded size exceeds the per-file cap, or the fleet quota would be exceeded.
+        "415":
+          description: MIME type not allowed, or the file bytes do not match the declared image type.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/operator/attachments/{id}:
+    get:
+      operationId: downloadOperatorAttachment
+      tags: [Operator]
+      summary: Download an attachment as the operator
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file bytes, served with the stored MIME type.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/rooms:
+    get:
+      operationId: listRooms
+      tags: [Operator]
+      summary: List rooms
+      description: Named conversations with a chosen set of member agents, newest first.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Rooms with their members.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rooms]
+                properties:
+                  rooms:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        project_mode:
+                          type: boolean
+                        members:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              agent_id:
+                                type: string
+                              display_name:
+                                type: string
+                              status:
+                                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createRoom
+      tags: [Operator]
+      summary: Create a room
+      description: An empty `member_agent_ids` adds every live agent in the fleet.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                member_agent_ids:
+                  type: array
+                  maxItems: 50
+                  default: []
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Room created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, name, created_at, members]
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+                  members:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/rooms/{roomId}:
+    delete:
+      operationId: deleteRoom
+      tags: [Operator]
+      summary: Delete a room
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: roomId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/OkTrue"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/feeds:
+    get:
+      operationId: listFeeds
+      tags: [Operator]
+      summary: List feeds
+      description: RSS/Atom feeds the relay polls and delivers to subscribed agents as untrusted `feed-` conversations.
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Feeds with subscribers and delivered-item counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [feeds]
+                properties:
+                  feeds:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Feed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createFeed
+      tags: [Operator]
+      summary: Create a feed
+      description: >
+        The URL must be a public http(s) address; private, loopback and link-local
+        targets are refused. An empty `subscriber_agent_ids` subscribes every live
+        agent.
+      security:
+        - OperatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, url]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                url:
+                  type: string
+                  format: uri
+                  maxLength: 2000
+                poll_interval_minutes:
+                  type: integer
+                  minimum: 5
+                  maximum: 1440
+                  default: 30
+                subscriber_agent_ids:
+                  type: array
+                  maxItems: 50
+                  default: []
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Feed created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Feed"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/feeds/{feedId}:
+    delete:
+      operationId: deleteFeed
+      tags: [Operator]
+      summary: Delete a feed
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/FeedId"
+      responses:
+        "200":
+          $ref: "#/components/responses/OkTrue"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/feeds/{feedId}/subscribers:
+    post:
+      operationId: setFeedSubscribers
+      tags: [Operator]
+      summary: Replace a feed's subscribers
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/FeedId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_ids:
+                  type: array
+                  maxItems: 50
+                  default: []
+                  items:
+                    type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/OkTrue"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/feeds/{feedId}/poll:
+    post:
+      operationId: pollFeedNow
+      tags: [Operator]
+      summary: Poll a feed immediately
+      description: Fetches the feed now instead of waiting for its interval. The first poll of a new feed seeds its history without delivering it.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/FeedId"
+      responses:
+        "200":
+          description: Poll result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivered, total]
+                properties:
+                  delivered:
+                    type: integer
+                    description: New items delivered to subscribers by this poll.
+                  total:
+                    type: integer
+                    description: Items present in the fetched feed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/feeds/{feedId}/items:
+    get:
+      operationId: listFeedItems
+      tags: [Operator]
+      summary: Recently delivered feed items
+      description: The 50 most recently delivered items.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - $ref: "#/components/parameters/FeedId"
+      responses:
+        "200":
+          description: Feed items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        guid:
+                          type: string
+                        title:
+                          type: string
+                          nullable: true
+                        link:
+                          type: string
+                          nullable: true
+                        delivered_at:
+                          type: string
+                          format: date-time
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":

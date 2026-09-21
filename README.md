@@ -297,6 +297,20 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_REQUIRE_SIGNED` (plugins) | `warn` | Peer wake strictness: `require` = only signed **and** verified peer messages wake a turn (withheld ones are dead-lettered) |
 | `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Heartbeat liveness threshold |
 | `EKHO_LICENSE_KEY` | — | Pro license JWT (optional) |
+| `EKHO_LICENSE_PATH` | `ekho.license` beside the relay | Pro license file, read when `EKHO_LICENSE_KEY` is unset |
+| `EKHO_LICENSE_PUBLIC_KEY_PATH` | bundled `license-public-key.pem` | Public key used to verify the license |
+| `EKHO_POLL_INTERVAL_SECONDS` / `EKHO_HEARTBEAT_INTERVAL_SECONDS` | `5` / `30` | Poll and heartbeat intervals the relay tells agents to use at enrollment |
+| `EKHO_DELIVERY_TIMEOUT_SECONDS` | `120` | A delivery unacknowledged for this long is retried, then dead-lettered |
+| `EKHO_RATE_LIMIT_VIOLATION_THRESHOLD` / `EKHO_RATE_LIMIT_VIOLATION_WINDOW_SECONDS` | `5` / `3600` | Rate-limit strikes inside the window before an agent is auto-quarantined |
+| `EKHO_FLOOR_TTL_SECONDS` / `EKHO_FLOOR_TTL_MAX_SECONDS` | `240` / `600` | Conversation floor (turn-taking lock): default hold time and the ceiling a caller may request |
+| `EKHO_FLOOR_TAIL_LIMIT` | `20` | Recent messages returned with a floor request so a waiting agent sees what it missed |
+| `EKHO_ATTACHMENTS_DIR` | `attachments/` beside the database | Where uploaded files are stored |
+| `EKHO_ATTACHMENT_MAX_BYTES` | `26214400` | Per-file upload cap (25 MiB) |
+| `EKHO_ATTACHMENT_MAX_PER_MESSAGE` | `10` | Attachments allowed on one message |
+| `EKHO_SHIELDCORTEX_PATH` | — | Path to the ShieldCortex binary. Setting it loads the ShieldCortex bridge; unset leaves it off |
+| `EKHO_SHIELDCORTEX_PROFILE` | `balanced` | Bridge defence profile: `strict`, `balanced` or `permissive` |
+| `EKHO_BOOTSTRAP_EMAIL` / `EKHO_BOOTSTRAP_PASSWORD` | `admin@example.com` / generated | First operator account created by `npm run setup`. With no password a strong random one is generated and shown once |
+| `EKHO_AGENT_POLL_INTERVAL` / `EKHO_AGENT_HEARTBEAT_INTERVAL` | `5` / `30` | Bundled demo agent only (`demo-agent.ts`), in seconds |
 
 ## Pricing
 
