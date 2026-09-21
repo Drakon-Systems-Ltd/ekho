@@ -744,6 +744,14 @@ export function resetPeerLatch(state: AutoReplyState, conversationId: string): v
 export function markConversationEscalated(state: AutoReplyState, conversationId: string): boolean {
   if (state.escalatedClosedConvs.has(conversationId)) return false;
   state.escalatedClosedConvs.add(conversationId);
+  // Bounded like the counters (a Set iterates oldest-first). Forgetting a very
+  // old marker costs at most one repeat notice; keeping them all made every
+  // poll's reconcile scan grow without limit.
+  while (state.escalatedClosedConvs.size > PEER_LATCH_CONVERSATION_CAP) {
+    const oldest = state.escalatedClosedConvs.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    state.escalatedClosedConvs.delete(oldest);
+  }
   return true;
 }
 

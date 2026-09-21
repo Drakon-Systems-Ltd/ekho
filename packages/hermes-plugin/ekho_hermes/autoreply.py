@@ -510,6 +510,14 @@ def note_progress_refresh(
     return True
 
 
+@dataclass
+class _ResolvedBudgets:
+    """A room-budget map that already has the local cap applied, shaped like an
+    inbox so effective_conversation_budget can read it without re-resolving."""
+
+    conversation_budgets: Dict[str, int]
+
+
 def reconcile_peer_latches(
     state: AutoReplyState, inbox: Any, fallback: int, local_budget: int = NO_PEER_TURN_LIMIT
 ) -> None:
@@ -519,8 +527,14 @@ def reconcile_peer_latches(
     later restores it always gets a fresh cycle — even if no peer message arrived
     while the cap was off (a quiet poll never reaches the latch loop)."""
     tracked = set(state.peer_turns_by_conversation) | set(state.escalated_closed_convs)
+    if not tracked:
+        return
+    # Resolve the room map ONCE per poll, not once per tracked conversation.
+    resolved = _ResolvedBudgets(
+        with_local_room_cap(getattr(inbox, "conversation_budgets", None), local_budget)
+    )
     for conv in tracked:
-        if effective_conversation_budget(inbox, conv, fallback, local_budget) <= 0:
+        if effective_conversation_budget(resolved, conv, fallback) <= 0:
             reset_peer_latch(state, conv)
 
 
@@ -1721,6 +1735,12 @@ def process_inbox_once(
         if conv in state.escalated_closed_convs:
             continue
         state.escalated_closed_convs.add(conv)
+        # Bounded like the counters. Forgetting an old marker costs at most one
+        # repeat notice; keeping them all made every poll's reconcile scan grow.
+        while len(state.escalated_closed_convs) > PEER_LATCH_CONVERSATION_CAP:
+            # A set has no order; any marker but the one just raised will do.
+            victim = next(c for c in state.escalated_closed_convs if c != conv)
+            state.escalated_closed_convs.discard(victim)
         if not callable(raise_notice):
             continue
         try:

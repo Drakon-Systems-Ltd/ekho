@@ -2226,6 +2226,21 @@ def test_cap_survives_hundreds_of_reset_consume_cycles_on_one_conversation():
     assert not peer_latch_open(state, "c", 1)
 
 
+def test_stall_marker_set_is_bounded_so_reconcile_cannot_grow_forever():
+    state, notices = _state(), []
+    for i in range(700):
+        conv = f"closed_{i}"
+        for j in range(2):  # cap 1: first wake spawns, second closes + raises a notice
+            inbox = InboxResponse(
+                messages=[_peer(i * 10 + j, conversation_id=conv, sender=f"p{i}_{j}")], controls=[],
+                operator_trusted=False, roster=[], peer_autoreply=True, peer_turn_budget=1,
+            )
+            _tick(state, inbox, notices, now=float(i * 10 + j))
+    assert len(notices) == 700  # every close still notified exactly once
+    assert len(state.escalated_closed_convs) <= autoreply.PEER_LATCH_CONVERSATION_CAP
+    assert "closed_699" in state.escalated_closed_convs  # the newest marker is never the victim
+
+
 def test_counter_map_stays_bounded_when_there_is_no_limit():
     state = _state()
     for i in range(1000):

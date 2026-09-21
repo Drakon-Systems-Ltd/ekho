@@ -527,6 +527,14 @@ describe("no default turn limit", () => {
     expect(peerLatchOpen(s, "c", 1)).toBe(false);
   });
 
+  it("bounds the stall-marker set, so the per-poll reconcile scan cannot grow forever", () => {
+    const s = createAutoReplyState();
+    for (let i = 0; i < 2000; i++) expect(markConversationEscalated(s, `closed_${i}`)).toBe(true);
+    expect(s.escalatedClosedConvs.size).toBeLessThanOrEqual(500);
+    expect(s.escalatedClosedConvs.has("closed_1999")).toBe(true); // newest kept, oldest dropped
+    expect(s.escalatedClosedConvs.has("closed_0")).toBe(false);
+  });
+
   it("keeps the per-conversation counter map bounded when there is no limit", () => {
     // Every handoff re-energises its conversation. With no cap the evicting
     // consume path never runs, so a reset must not leave a zero entry behind.
