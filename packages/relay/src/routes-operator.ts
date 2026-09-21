@@ -484,7 +484,8 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ agent_id: params.agentId, operator_trusted: result });
   });
 
-  // Toggle bounded agent-to-agent delegation (+ optional turn budget) per agent.
+  // Toggle agent-to-agent delegation per agent, and set or clear (0/null) its
+  // optional turn limit. No limit is the default.
   // The agent reads both live on its next inbox poll — no restart.
   app.post("/v1/operator/agents/:agentId/peer-autoreply", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
@@ -533,7 +534,8 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ ok: true });
   });
 
-  // Project mode: a higher per-room peer budget for designated working rooms.
+  // Project mode: the room's own turn setting (a cap, or no limit — the default)
+  // overrides each member's per-agent one in that conversation.
   // Members read the override live on their next inbox poll — no restart.
   app.post("/v1/operator/rooms/:roomId/project-mode", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) return reply.code(401).send({ error: "unauthorized" });

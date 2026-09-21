@@ -996,7 +996,7 @@ describe("deferred (held-back) turn staleness", () => {
 // #11: `complete` is a progress signal but never a trigger type, so it spawns no
 // turn and passes no rate gate — yet it reset the conversation's peer latch.
 // A peer could interleave unlimited `complete`s and hold the budget at zero
-// forever, defeating the 25-wake cap it is supposed to bound.
+// forever, defeating an operator-set wake cap it is supposed to bound.
 describe("progress-signal budget refresh is bounded (#11)", () => {
   const complete = (conv = "c1") => ({
     sender_kind: "agent",

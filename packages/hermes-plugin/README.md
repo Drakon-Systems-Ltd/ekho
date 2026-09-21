@@ -36,7 +36,7 @@ EKHO_DISPLAY_NAME=My Agent                          # optional — shown in the 
 # EKHO_AGENT_ID / EKHO_AGENT_SECRET                 # optional — pre-provisioned creds instead of enrolling
 # EKHO_HEARTBEAT_INTERVAL=30                        # optional — seconds
 # EKHO_PEER_AUTOREPLY=0                             # optional — opt OUT of bounded agent-to-agent delegation (default on)
-# EKHO_PEER_TURN_BUDGET=6                           # optional — peer wakes per conversation before the latch closes
+# EKHO_PEER_TURN_BUDGET=0                           # optional local turn limit (peer wakes per conversation); 0/unset = no limit (default)
 ```
 
 After the first enrollment the saved credentials are reused and the token can be dropped. Restart the Hermes gateway, then confirm the agent appears healthy in the Ekho operator console.
@@ -47,18 +47,39 @@ By default the agent auto-replies to both its **verified operator** and its
 **teammates** — bounded agent-to-agent delegation is **on**. Set
 `EKHO_PEER_AUTOREPLY=0` to opt out (teammate messages are then still delivered to
 its inbox but don't wake it, so no quota is spent on agent chatter). The operator
-console is the live source of truth and overrides this default per agent. It
-stays bounded: a teammate may wake the agent at most `EKHO_PEER_TURN_BUDGET`
-(default 6) times per conversation before the latch closes (messages still
-delivered, just no turn); an **operator** message in that conversation re-opens
-it. When a teammate wakes the agent, the prompt also tells it **how many wakes
-remain** in that conversation, so it can front-load the work before the latch
-auto-pauses. A per-peer rate gate (≤5/peer/min) is a further backstop, and the
-prompt tells agents to reply only when it materially advances the work — never
-just to acknowledge. A manual `ekho_inbox` read surfaces the remaining budget
-(`peer_turn_budget` + per-conversation `peer_remaining`).
+console is the live source of truth and overrides this default per
+agent. **There is no turn limit by default.** A per-peer rate gate (≤5/peer/min)
+always bounds runaway agent↔agent loops, and the prompt tells agents to reply
+only when it materially advances the work — never just to acknowledge.
 
-The budget caps *chatter*, not *work*, so real handoffs never silently die:
+**Optional turn limit.** If you want a conversation to pause after a number of
+teammate wakes, set one — it is never applied unless someone asks for it:
+
+| Where | How | Notes |
+| --- | --- | --- |
+| Operator console / API (per agent) | Agent → *Turn limit*, or `POST /v1/operator/agents/{id}/peer-autoreply` with `budget` | Live on the next poll, no restart. Blank / `0` / `null` clears it. |
+| Operator console / API (per room) | Room → *Project mode* + *Room turn limit* | Overrides the per-agent setting in that room — a cap, or "no limit". |
+| This box | `EKHO_PEER_TURN_BUDGET=<n>` | `0` / unset = no limit. |
+
+Precedence per conversation: a project-mode room's setting → the operator's
+per-agent limit → the local limit → no limit. A limit set on the relay always
+wins over the local one; where the relay says "no limit" a local limit still
+applies (the box owner's tighter choice is respected).
+
+With a limit in force, a teammate may wake the agent at most that many times per
+conversation before the latch closes (messages still delivered, just no turn); an
+**operator** message in that conversation re-opens it. The prompt tells a
+peer-woken agent **how many wakes remain**, so it can front-load the work. Wakes
+are only counted while a limit is in force, so a limit set mid-conversation
+starts from zero. A manual `ekho_inbox` read surfaces `peer_turn_budget` and, per
+peer message, `peer_turns_used` / `peer_remaining` — `null` when there is no
+limit (never a made-up number).
+
+> **Compatibility.** A plugin older than this change paired with a relay that
+> has it reads the relay's `null` ("no limit") as "use my built-in default" and
+> keeps capping at 25. Update the plugin to get unlimited behaviour.
+
+When a limit is set it caps *chatter*, not *work*, so real handoffs never silently die:
 
 - **Progress signals refresh the budget.** A peer `handoff` or `claim` both wakes
   the agent **and** re-energises that conversation's budget; a `complete`
