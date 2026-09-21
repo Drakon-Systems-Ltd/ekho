@@ -349,7 +349,6 @@ class AutoReplyState:
     in_flight: bool = False
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
-    peer_conv_order: List[str] = field(default_factory=list)
     # conversation_id -> {"messages": [...], "verifications": {...},
     # "first_deferred_at": float} for messages held back because another agent
     # had the floor. Retried on later ticks until DEFERRED_RETRY_TTL_S; without
@@ -475,14 +474,17 @@ def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
 
 def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
     """Record that a peer woke the agent in this conversation (FIFO-capped)."""
-    if conversation_id not in state.peer_turns_by_conversation:
-        state.peer_conv_order.append(conversation_id)
+    # Assigning to an existing key keeps its insertion position, so the dict is
+    # its own oldest-first queue (same as the TypeScript Map). A separate order
+    # list went stale the moment reset_peer_latch started removing entries:
+    # each reset+consume cycle queued the conversation again, and once the list
+    # passed the cap every consume evicted its own counter, defeating the cap.
     state.peer_turns_by_conversation[conversation_id] = (
         state.peer_turns_by_conversation.get(conversation_id, 0) + 1
     )
-    while len(state.peer_conv_order) > PEER_LATCH_CONVERSATION_CAP:
-        evicted = state.peer_conv_order.pop(0)
-        state.peer_turns_by_conversation.pop(evicted, None)
+    while len(state.peer_turns_by_conversation) > PEER_LATCH_CONVERSATION_CAP:
+        oldest = next(iter(state.peer_turns_by_conversation))
+        state.peer_turns_by_conversation.pop(oldest, None)
 
 
 def note_progress_refresh(
@@ -506,6 +508,20 @@ def note_progress_refresh(
             next(iter(state.progress_refreshes_by_conversation))
         )
     return True
+
+
+def reconcile_peer_latches(
+    state: AutoReplyState, inbox: Any, fallback: int, local_budget: int = NO_PEER_TURN_LIMIT
+) -> None:
+    """Reconcile tracked latches with the budgets in force for THIS poll, before
+    any early return. A conversation whose effective budget is now "no limit"
+    keeps no wake count and no stall marker, so an operator who clears a cap and
+    later restores it always gets a fresh cycle — even if no peer message arrived
+    while the cap was off (a quiet poll never reaches the latch loop)."""
+    tracked = set(state.peer_turns_by_conversation) | set(state.escalated_closed_convs)
+    for conv in tracked:
+        if effective_conversation_budget(inbox, conv, fallback, local_budget) <= 0:
+            reset_peer_latch(state, conv)
 
 
 def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
@@ -1491,6 +1507,7 @@ def process_inbox_once(
     room_budgets = with_local_room_cap(
         getattr(inbox, "conversation_budgets", None), peer_turn_budget
     )
+    reconcile_peer_latches(state, inbox, eff_budget, peer_turn_budget)
 
     real = [
         m

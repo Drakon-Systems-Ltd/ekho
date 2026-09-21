@@ -2199,6 +2199,33 @@ def test_cap_cleared_then_restored_starts_a_fresh_cycle_with_a_fresh_notice():
     assert len(notices) == 2  # ...and the new close raises a NEW notice
 
 
+def test_cap_cleared_during_a_quiet_poll_still_starts_a_fresh_cycle():
+    # GPT-6 confirmation round: with no peer message while the cap was off, the
+    # latch loop never ran, so the exhausted count survived the clear.
+    state, notices = _state(), []
+    assert _tick(state, _peer_inbox(1, peer_turn_budget=1), notices, now=1.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(2, peer_turn_budget=1), notices, now=2.0)["spawned"] == 0
+    assert len(notices) == 1
+    quiet = InboxResponse(messages=[], controls=[], operator_trusted=False, roster=[],
+                          peer_autoreply=True, peer_turn_budget=None)
+    _tick(state, quiet, notices, now=3.0)  # cap cleared, nothing to deliver
+    assert len(state.peer_turns_by_conversation) == 0
+    assert _tick(state, _peer_inbox(4, peer_turn_budget=1), notices, now=4.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(5, peer_turn_budget=1), notices, now=5.0)["spawned"] == 0
+    assert len(notices) == 2
+
+
+def test_cap_survives_hundreds_of_reset_consume_cycles_on_one_conversation():
+    # The old side queue gained a duplicate per cycle; past 500 copies every
+    # consume evicted its own counter and the cap stopped holding.
+    state = _state()
+    for _ in range(600):
+        autoreply.reset_peer_latch(state, "c")
+        autoreply.consume_peer_latch(state, "c")
+    assert state.peer_turns_by_conversation.get("c") == 1
+    assert not peer_latch_open(state, "c", 1)
+
+
 def test_counter_map_stays_bounded_when_there_is_no_limit():
     state = _state()
     for i in range(1000):

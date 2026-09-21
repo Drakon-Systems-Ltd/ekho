@@ -24,6 +24,7 @@ import {
   DEFAULT_PEER_TURN_BUDGET,
   NO_PEER_TURN_LIMIT,
   applyPeerLatch,
+  reconcilePeerLatches,
   applyPeerRateGate,
   withLocalRoomCap
 } from "../src/autoreply";
@@ -490,6 +491,40 @@ describe("no default turn limit", () => {
     expect(reclosed.kept).toHaveLength(0);
     // ...and the new close is allowed to raise a NEW operator-visible notice.
     expect(markConversationEscalated(s, "c")).toBe(true);
+  });
+
+  it("a cap cleared during a QUIET poll still starts a fresh cycle when restored", () => {
+    // GPT-6 confirmation round: with no peer message while the cap was off,
+    // applyPeerLatch never ran, so the exhausted count survived the clear.
+    const s = createAutoReplyState();
+    applyPeerLatch([peer(1)], s, {}, 1);
+    expect(applyPeerLatch([peer(2)], s, {}, 1).kept).toHaveLength(0);
+    expect(markConversationEscalated(s, "c")).toBe(true);
+    reconcilePeerLatches(s, {}, NO_PEER_TURN_LIMIT); // empty poll, cap cleared
+    expect(s.peerTurnsByConversation.size).toBe(0);
+    expect(applyPeerLatch([peer(3)], s, {}, 1).kept).toHaveLength(1); // cap restored: fresh budget
+    expect(applyPeerLatch([peer(4)], s, {}, 1).kept).toHaveLength(0);
+    expect(markConversationEscalated(s, "c")).toBe(true); // and a fresh notice
+  });
+
+  it("reconcile leaves a capped conversation alone — per conversation, room override included", () => {
+    const s = createAutoReplyState();
+    const batch = { conversation_budgets: { room: 2 } };
+    applyPeerLatch([peer(1, { conversation_id: "room" })], s, batch, NO_PEER_TURN_LIMIT);
+    applyPeerLatch([peer(2, { conversation_id: "room" })], s, batch, NO_PEER_TURN_LIMIT);
+    reconcilePeerLatches(s, batch, NO_PEER_TURN_LIMIT); // agent unlimited, room capped at 2
+    expect(s.peerTurnsByConversation.get("room")).toBe(2);
+    expect(peerLatchOpen(s, "room", 2)).toBe(false);
+  });
+
+  it("a cap survives hundreds of reset/consume cycles on one conversation", () => {
+    const s = createAutoReplyState();
+    for (let i = 0; i < 600; i++) {
+      resetPeerLatch(s, "c");
+      consumePeerLatch(s, "c");
+    }
+    expect(s.peerTurnsByConversation.get("c")).toBe(1);
+    expect(peerLatchOpen(s, "c", 1)).toBe(false);
   });
 
   it("keeps the per-conversation counter map bounded when there is no limit", () => {

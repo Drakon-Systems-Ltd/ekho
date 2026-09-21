@@ -708,6 +708,24 @@ export function applyPeerLatch(
   return { kept, latchedConvs };
 }
 
+/**
+ * Reconcile tracked latches with the budgets in force for THIS poll, before any
+ * early return. A conversation whose effective budget is now "no limit" keeps no
+ * wake count and no stall marker, so an operator who clears a cap and later
+ * restores it always gets a fresh cycle — even if no peer message arrived while
+ * the cap was off (a quiet poll never reaches applyPeerLatch).
+ */
+export function reconcilePeerLatches(
+  state: AutoReplyState,
+  batch: { conversation_budgets?: Record<string, number> | null },
+  peerTurnBudget: number
+): void {
+  const tracked = new Set<string>([...state.peerTurnsByConversation.keys(), ...state.escalatedClosedConvs]);
+  for (const conv of tracked) {
+    if (!isCapped(effectiveConversationBudget(batch, conv, peerTurnBudget))) resetPeerLatch(state, conv);
+  }
+}
+
 /** Re-open a conversation's latch — the operator engaging (or a peer progress
  *  signal) re-energises it. Also re-arms the stall escalation for this
  *  conversation, so a future close raises a fresh operator-visible notice. */
@@ -1529,6 +1547,7 @@ export function startAutoReply(opts: {
     // The console (relay) is the live source of truth; fall back to the
     // plugin-config bootstrap defaults when the relay omits the fields.
     const eff = effectivePeerSettings(batch, { peerEnabled, peerTurnBudget });
+    reconcilePeerLatches(state, batch, eff.peerTurnBudget);
     const real = batch.messages.filter((m) =>
       isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
