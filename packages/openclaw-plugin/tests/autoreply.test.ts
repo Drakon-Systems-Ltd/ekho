@@ -473,6 +473,37 @@ describe("no default turn limit", () => {
     expect(woken).toBe(250);
   });
 
+  it("cap -> cleared -> cap again starts a fresh cycle: fresh count, fresh stall notice", () => {
+    // GPT-6 review of #71: clearing a cap used to keep the exhausted count and the
+    // escalation marker, so re-capping withheld at once and never re-notified.
+    const s = createAutoReplyState();
+    expect(applyPeerLatch([peer(1)], s, {}, 1).kept).toHaveLength(1); // cap 1: first wake
+    const closed = applyPeerLatch([peer(2)], s, {}, 1);
+    expect(closed.kept).toHaveLength(0);
+    expect(closed.latchedConvs.get("c")).toBe(1);
+    expect(markConversationEscalated(s, "c")).toBe(true); // stall raised once
+    // Operator clears the cap: an unlimited wake goes through and wipes the old cycle.
+    expect(applyPeerLatch([peer(3)], s, {}, NO_PEER_TURN_LIMIT).kept).toHaveLength(1);
+    // Operator restores cap 1: a full fresh budget, not an instant close...
+    expect(applyPeerLatch([peer(4)], s, {}, 1).kept).toHaveLength(1);
+    const reclosed = applyPeerLatch([peer(5)], s, {}, 1);
+    expect(reclosed.kept).toHaveLength(0);
+    // ...and the new close is allowed to raise a NEW operator-visible notice.
+    expect(markConversationEscalated(s, "c")).toBe(true);
+  });
+
+  it("keeps the per-conversation counter map bounded when there is no limit", () => {
+    // Every handoff re-energises its conversation. With no cap the evicting
+    // consume path never runs, so a reset must not leave a zero entry behind.
+    const s = createAutoReplyState();
+    for (let i = 0; i < 1000; i++) {
+      resetPeerLatch(s, `conv_${i}`);
+      applyPeerLatch([peer(i, { conversation_id: `conv_${i}` })], s, {}, NO_PEER_TURN_LIMIT);
+    }
+    expect(s.peerTurnsByConversation.size).toBe(0);
+    expect(s.escalatedClosedConvs.size).toBe(0);
+  });
+
   it("the per-peer rate gate still suppresses a burst when there is no turn limit", () => {
     const s = createAutoReplyState();
     // 200 messages from ONE peer inside the window: the rate gate (unchanged,
@@ -1010,7 +1041,7 @@ describe("progress-signal budget refresh is bounded (#11)", () => {
     for (let i = 0; i < 3; i++) {
       state.peerTurnsByConversation.set("c1", 25);
       expect(refreshBudgetForProgressSignals(state, [complete()], "self").has("c1")).toBe(true);
-      expect(state.peerTurnsByConversation.get("c1")).toBe(0);
+      expect(state.peerTurnsByConversation.get("c1") ?? 0).toBe(0); // reset = entry removed; absence means zero
     }
   });
 

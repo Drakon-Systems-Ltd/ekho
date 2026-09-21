@@ -17,17 +17,18 @@ export function budgetInputValue(value) {
 /**
  * Parse what the operator typed into a budget input.
  *   blank or 0      -> 0     (clear the cap: no limit)
- *   positive number -> integer clamped to [1, max]
- *   anything else   -> null  (invalid: caller reverts, sends nothing)
+ *   positive integer -> clamped to [1, max]
+ *   anything else   -> null  (invalid: caller reverts, sends nothing). A
+ *                      fraction is invalid, never truncated: "0.4" must not
+ *                      silently become 0 and clear an existing cap.
  */
 export function parseBudgetInput(raw, max) {
   const text = String(raw ?? "").trim();
   if (text === "") return 0;
   const n = Number(text);
-  if (!Number.isFinite(n) || n < 0) return null;
-  const whole = Math.trunc(n);
-  if (whole === 0) return 0;
-  return Math.min(max, whole);
+  if (!Number.isInteger(n) || n < 0) return null;
+  if (n === 0) return 0;
+  return Math.min(max, n);
 }
 
 /** Normalise a relay value (null | number) to the 0-or-positive form the inputs compare on. */

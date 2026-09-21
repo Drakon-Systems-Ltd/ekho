@@ -19,8 +19,11 @@ describe("console turn-limit helpers", () => {
     expect(parseBudgetInput("   ", 200)).toBe(0);
     expect(parseBudgetInput("0", 200)).toBe(0);
     expect(parseBudgetInput("12", 200)).toBe(12);
-    expect(parseBudgetInput("12.9", 200)).toBe(12);
-    expect(parseBudgetInput("0.4", 200)).toBe(0);
+    // A fraction is invalid, never truncated: "0.4" used to become 0 and
+    // silently CLEAR an existing cap (GPT-6 review of #71).
+    expect(parseBudgetInput("12.9", 200)).toBeNull();
+    expect(parseBudgetInput("0.4", 200)).toBeNull();
+    expect(parseBudgetInput("1e2", 200)).toBe(100);
     expect(parseBudgetInput("9999", 200)).toBe(200);
     expect(parseBudgetInput("9999", 500)).toBe(500);
     expect(parseBudgetInput("-5", 200)).toBeNull();

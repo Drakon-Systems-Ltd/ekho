@@ -2183,6 +2183,36 @@ def test_unlimited_latch_never_closes_past_200_peer_wakes_and_never_stalls():
     assert state.peer_turns_by_conversation.get("proj-1", 0) == 0  # nothing accrues
 
 
+def test_cap_cleared_then_restored_starts_a_fresh_cycle_with_a_fresh_notice():
+    # GPT-6 review of #71: clearing a cap used to keep the exhausted count and the
+    # escalation marker, so re-capping withheld at once and never re-notified.
+    state, notices = _state(), []
+    assert _tick(state, _peer_inbox(1, peer_turn_budget=1), notices, now=1.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(2, peer_turn_budget=1), notices, now=2.0)["spawned"] == 0
+    assert len(notices) == 1  # stall raised once for the first close
+    # Operator clears the cap: an unlimited wake goes through and wipes the old cycle.
+    assert _tick(state, _peer_inbox(3, peer_turn_budget=None), notices, now=3.0)["spawned"] == 1
+    assert state.peer_turns_by_conversation.get("proj-1", 0) == 0
+    # Operator restores cap 1: a full fresh budget, not an instant close...
+    assert _tick(state, _peer_inbox(4, peer_turn_budget=1), notices, now=4.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(5, peer_turn_budget=1), notices, now=5.0)["spawned"] == 0
+    assert len(notices) == 2  # ...and the new close raises a NEW notice
+
+
+def test_counter_map_stays_bounded_when_there_is_no_limit():
+    state = _state()
+    for i in range(1000):
+        conv = f"conv_{i}"
+        autoreply.reset_peer_latch(state, conv)
+        inbox = InboxResponse(
+            messages=[_peer(i, conversation_id=conv, sender=f"peer{i}")], controls=[],
+            operator_trusted=False, roster=[], peer_autoreply=True, peer_turn_budget=None,
+        )
+        _tick(state, inbox, now=float(i))
+    assert len(state.peer_turns_by_conversation) == 0
+    assert len(state.escalated_closed_convs) == 0
+
+
 def test_rate_gate_still_suppresses_a_burst_when_there_is_no_turn_limit():
     state, notices, spawned = _state(), [], 0
     # 200 messages from ONE peer inside the 60s window: the (unchanged) per-peer

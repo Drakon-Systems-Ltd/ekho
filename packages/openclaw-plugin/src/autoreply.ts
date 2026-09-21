@@ -693,6 +693,10 @@ export function applyPeerLatch(
       // so a cap the operator sets LATER starts from zero instead of closing
       // the conversation on the spot for wakes that predate it.
       if (isCapped(convBudget)) consumePeerLatch(state, m.conversation_id);
+      // No limit in force: drop any count and stall marker left over from an
+      // earlier cap. Otherwise cap -> cleared -> cap again would resume from the
+      // old exhausted count, withhold at once, and never raise a fresh notice.
+      else resetPeerLatch(state, m.conversation_id);
       kept.push(m);
     } else {
       latchedConvs.set(m.conversation_id, (latchedConvs.get(m.conversation_id) ?? 0) + 1);
@@ -708,7 +712,9 @@ export function applyPeerLatch(
  *  signal) re-energises it. Also re-arms the stall escalation for this
  *  conversation, so a future close raises a fresh operator-visible notice. */
 export function resetPeerLatch(state: AutoReplyState, conversationId: string): void {
-  state.peerTurnsByConversation.set(conversationId, 0);
+  // Absence already means zero. Deleting (rather than storing 0) keeps the map
+  // bounded when no cap is in force and consumePeerLatch's eviction never runs.
+  state.peerTurnsByConversation.delete(conversationId);
   state.escalatedClosedConvs.delete(conversationId);
 }
 

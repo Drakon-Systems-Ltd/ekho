@@ -512,7 +512,9 @@ def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
     """Re-open a conversation's latch — the operator engaging (or a peer progress
     signal) re-energises it. Also re-arms the stall escalation for this
     conversation, so a future close raises a fresh operator-visible notice."""
-    state.peer_turns_by_conversation[conversation_id] = 0
+    # Absence already means zero. Popping (rather than storing 0) keeps the map
+    # bounded when no cap is in force and consume_peer_latch's eviction never runs.
+    state.peer_turns_by_conversation.pop(conversation_id, None)
     state.escalated_closed_convs.discard(conversation_id)
 
 
@@ -1676,6 +1678,12 @@ def process_inbox_once(
             # the conversation on the spot for wakes that predate it.
             if conv_budget > 0:
                 consume_peer_latch(state, conv)
+            else:
+                # No limit in force: drop any count and stall marker left over
+                # from an earlier cap. Otherwise cap -> cleared -> cap again would
+                # resume from the old exhausted count, withhold at once, and
+                # never raise a fresh notice.
+                reset_peer_latch(state, conv)
             kept.append(m)
         else:
             latched += 1
