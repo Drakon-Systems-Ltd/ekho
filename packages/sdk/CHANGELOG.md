@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-21
+
 ### Changed
 - `InboxResponse.peer_turn_budget` is now typed `number | null` (Python: `Optional[int]`, unchanged). `null` means **no turn limit**, which is the relay's new default — the relay no longer invents a cap of 25. In `conversation_budgets` a positive value is a project-mode room's cap and `0` now means that room has no limit. Types and docs only; no client behaviour change. See the root [CHANGELOG](../../CHANGELOG.md).
 

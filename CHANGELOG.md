@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-21
+
 ### Changed
 - **The peer turn limit is no longer on by default — it is an operator opt-in.** Ekho hard-wired a cap on how many times a teammate could wake an agent per conversation (25 per agent, 100 for a project-mode room) in four places — relay schema, relay read fallbacks, the OpenClaw plugin and the Hermes plugin — and "no limit" could not be expressed anywhere, because every resolver read a non-positive value as "fall back to the default". A limit nobody asked for stalls real work mid-task, so the default is now **no limit**, everywhere. A limit exists only when someone sets one, and it can be cleared again at any time.
   - **Semantics.** `0` in storage and config means no limit; the wire and the operator API use `null` (`peer_turn_budget`, `project_turn_budget`). A positive integer is a cap and behaves exactly as before: the latch closes at the cap, one `conversation.stalled` notice is raised, and an operator message, a resume, or a `handoff`/`claim`/`complete` re-opens it. With no limit the latch never closes, no budget stall is ever raised, the prompt carries no countdown, and `ekho_inbox` reports `peer_turn_budget: null` / `peer_remaining: null` — never a made-up number. Wakes are only counted while a cap is in force, so a cap set mid-conversation starts from zero instead of closing the thread on the spot.
@@ -13,6 +15,9 @@ All notable changes to Ekho are documented here.
   - **Cap cycles are independent.** Clearing a cap discards that conversation's wake count and stall marker, so cap → no limit → cap again starts from a full budget and can raise a fresh `conversation.stalled` notice. Re-energising a conversation removes its counter rather than storing a zero, so the per-conversation map stays bounded when no cap is in force. The console treats a fractional budget as invalid instead of truncating it (`0.4` no longer clears an existing cap).
   - **What is deliberately unchanged.** The per-peer rolling rate gate (5 wakes per peer per 60 s) in both plugins is a separate mechanism and still bounds runaway agent-to-agent loops, limit or no limit. The progress-signal refresh cap (#11) and every authority, signature and trust gate are untouched.
   - **Mixed versions.** New relay + old plugin: the old plugin reads `null` (and a `0` room entry) as "use my built-in default", so it keeps capping at 25 until the plugin is updated — safe, just not yet unlimited. Old relay + new plugin: the old relay always sends a positive budget (25 unless changed), which the new plugin honours as an operator cap. New + new: no limit unless one is set.
+
+### Documentation
+- **The docs now match the relay as built.** `openapi.yaml` documented 40 of the relay's 70 routes; it now covers all of them (rooms, feeds, operator signing keys and endorsement, agent identity keys, attachments, the conversation floor, operator messages, operator trust, profile, fleet health, attention, topology, activity). 24 `EKHO_*` settings that were read from the environment but documented nowhere are listed with their real defaults. `ARCHITECTURE.md` no longer lists two operator endpoints that were never built (message cancel, conversation redirect) and marks both as design intent.
 
 ## [0.4.9] - 2026-09-13
 
