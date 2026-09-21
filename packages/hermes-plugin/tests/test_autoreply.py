@@ -1136,8 +1136,9 @@ def test_tick_escalation_failure_never_breaks_the_tick():
 # --- project mode (per-conversation budget override) + default budget --------
 
 
-def test_default_budget_is_25():
-    assert DEFAULT_PEER_TURN_BUDGET == 25
+def test_there_is_no_default_turn_limit():
+    assert autoreply.NO_PEER_TURN_LIMIT == 0
+    assert DEFAULT_PEER_TURN_BUDGET == autoreply.NO_PEER_TURN_LIMIT
 
 
 def test_effective_conversation_budget_prefers_project_room_override():
@@ -1149,11 +1150,24 @@ def test_effective_conversation_budget_prefers_project_room_override():
     assert effective_conversation_budget(inbox, "other-conv", 25) == 25
     bare = InboxResponse(messages=[], controls=[], operator_trusted=False, roster=[])
     assert effective_conversation_budget(bare, "room_x", 25) == 25  # older relay
-    junk = InboxResponse(
+    # A room cap overrides an UNLIMITED agent default…
+    assert effective_conversation_budget(inbox, "room_x", 0) == 100
+    assert effective_conversation_budget(inbox, "other-conv", 0) == 0
+    # …and an explicit 0 means "this room has no limit", even for a capped agent…
+    open_room = InboxResponse(
         messages=[], controls=[], operator_trusted=False, roster=[],
         conversation_budgets={"room_x": 0},
     )
-    assert effective_conversation_budget(junk, "room_x", 25) == 25  # nonsense ignored
+    assert effective_conversation_budget(open_room, "room_x", 25) == 0
+    # …unless the box owner configured a local cap, which still applies there.
+    assert effective_conversation_budget(open_room, "room_x", 25, 12) == 12
+    assert effective_conversation_budget(inbox, "room_x", 25, 12) == 100  # relay room cap wins
+    junk = InboxResponse(
+        messages=[], controls=[], operator_trusted=False, roster=[],
+        conversation_budgets={"room_x": -4, "room_y": "9", "room_z": True},
+    )
+    for conv in ("room_x", "room_y", "room_z"):
+        assert effective_conversation_budget(junk, conv, 25) == 25  # nonsense ignored
 
 
 def test_tick_project_room_budget_overrides_agent_budget():
@@ -2126,3 +2140,224 @@ def test_snapshot_text_is_mapped_into_body_text():
     empty_text_sig = _signed_snapshot("operator", "")
     assert _snap_verifier()(dict(empty_text_sig, text=RETRACTION)) is False
     assert _snap_verifier()(_signed_snapshot("operator", RETRACTION)) is True
+
+
+# --- No default turn limit ---------------------------------------------------
+# Turn limits are opt-in. 0 = no limit internally, None/null in reports and on
+# the wire. A positive integer behaves exactly as before.
+
+
+def _tick(state, inbox, notices=None, now=0.0, local_budget=0, events=None):
+    client = _notice_client(inbox, notices) if notices is not None else FakeClient(inbox)
+    return process_inbox_once(
+        client, "self", state, spawn=_spawn_recorder(events if events is not None else []),
+        now=now, peer_enabled=True, peer_turn_budget=local_budget,
+    )
+
+
+def _peer_inbox(i, sender=None, **kw):
+    return InboxResponse(
+        messages=[_peer(i, sender=sender or f"peer{i}")], controls=[],
+        operator_trusted=False, roster=[], peer_autoreply=True, **kw,
+    )
+
+
+def test_effective_peer_turn_budget_precedence():
+    eff = autoreply.effective_peer_turn_budget
+    assert eff(None, 0) == 0 and eff(0, 0) == 0 and eff(-5, -1) == 0  # nothing set -> no limit
+    assert eff(40, 12) == 40   # relay cap wins, even when looser
+    assert eff(3, 12) == 3
+    assert eff(None, 12) == 12  # relay: no limit -> the box owner's local cap
+    assert eff(0, 12) == 12
+    assert eff(True, "9") == 0  # junk is not a cap
+
+
+def test_unlimited_latch_never_closes_past_200_peer_wakes_and_never_stalls():
+    state, notices, spawned = _state(), [], 0
+    for i in range(250):
+        s = _tick(state, _peer_inbox(i, peer_turn_budget=None), notices, now=float(i))
+        spawned += s["spawned"]
+    assert spawned == 250
+    assert notices == []  # no conversation.stalled without a cap
+    assert peer_latch_open(state, "proj-1", 0)
+    assert state.peer_turns_by_conversation.get("proj-1", 0) == 0  # nothing accrues
+
+
+def test_cap_cleared_then_restored_starts_a_fresh_cycle_with_a_fresh_notice():
+    # GPT-6 review of #71: clearing a cap used to keep the exhausted count and the
+    # escalation marker, so re-capping withheld at once and never re-notified.
+    state, notices = _state(), []
+    assert _tick(state, _peer_inbox(1, peer_turn_budget=1), notices, now=1.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(2, peer_turn_budget=1), notices, now=2.0)["spawned"] == 0
+    assert len(notices) == 1  # stall raised once for the first close
+    # Operator clears the cap: an unlimited wake goes through and wipes the old cycle.
+    assert _tick(state, _peer_inbox(3, peer_turn_budget=None), notices, now=3.0)["spawned"] == 1
+    assert state.peer_turns_by_conversation.get("proj-1", 0) == 0
+    # Operator restores cap 1: a full fresh budget, not an instant close...
+    assert _tick(state, _peer_inbox(4, peer_turn_budget=1), notices, now=4.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(5, peer_turn_budget=1), notices, now=5.0)["spawned"] == 0
+    assert len(notices) == 2  # ...and the new close raises a NEW notice
+
+
+def test_cap_cleared_during_a_quiet_poll_still_starts_a_fresh_cycle():
+    # GPT-6 confirmation round: with no peer message while the cap was off, the
+    # latch loop never ran, so the exhausted count survived the clear.
+    state, notices = _state(), []
+    assert _tick(state, _peer_inbox(1, peer_turn_budget=1), notices, now=1.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(2, peer_turn_budget=1), notices, now=2.0)["spawned"] == 0
+    assert len(notices) == 1
+    quiet = InboxResponse(messages=[], controls=[], operator_trusted=False, roster=[],
+                          peer_autoreply=True, peer_turn_budget=None)
+    _tick(state, quiet, notices, now=3.0)  # cap cleared, nothing to deliver
+    assert len(state.peer_turns_by_conversation) == 0
+    assert _tick(state, _peer_inbox(4, peer_turn_budget=1), notices, now=4.0)["spawned"] == 1
+    assert _tick(state, _peer_inbox(5, peer_turn_budget=1), notices, now=5.0)["spawned"] == 0
+    assert len(notices) == 2
+
+
+def test_cap_survives_hundreds_of_reset_consume_cycles_on_one_conversation():
+    # The old side queue gained a duplicate per cycle; past 500 copies every
+    # consume evicted its own counter and the cap stopped holding.
+    state = _state()
+    for _ in range(600):
+        autoreply.reset_peer_latch(state, "c")
+        autoreply.consume_peer_latch(state, "c")
+    assert state.peer_turns_by_conversation.get("c") == 1
+    assert not peer_latch_open(state, "c", 1)
+
+
+def test_reconcile_uses_the_same_budget_rule_as_the_latch():
+    # reconcile reads the resolved room map directly (no per-conversation copy),
+    # so pin it to effective_conversation_budget for every shape of entry.
+    cases = {"capped_room": 3, "open_room": 0, "junk_room": "9", "bool_room": True, "neg_room": -2}
+    inbox = InboxResponse(messages=[], controls=[], operator_trusted=False, roster=[],
+                          peer_autoreply=True, conversation_budgets=cases)
+    for agent_budget in (0, 5):
+        for local in (0, 12):
+            state = _state()
+            for conv in list(cases) + ["no_entry"]:
+                autoreply.consume_peer_latch(state, conv)
+            autoreply.reconcile_peer_latches(state, inbox, agent_budget, local)
+            for conv in list(cases) + ["no_entry"]:
+                capped = autoreply.effective_conversation_budget(inbox, conv, agent_budget, local) > 0
+                assert (conv in state.peer_turns_by_conversation) == capped, (conv, agent_budget, local)
+
+
+def test_stall_marker_set_is_bounded_so_reconcile_cannot_grow_forever():
+    state, notices = _state(), []
+    for i in range(700):
+        conv = f"closed_{i}"
+        for j in range(2):  # cap 1: first wake spawns, second closes + raises a notice
+            inbox = InboxResponse(
+                messages=[_peer(i * 10 + j, conversation_id=conv, sender=f"p{i}_{j}")], controls=[],
+                operator_trusted=False, roster=[], peer_autoreply=True, peer_turn_budget=1,
+            )
+            _tick(state, inbox, notices, now=float(i * 10 + j))
+    assert len(notices) == 700  # every close still notified exactly once
+    assert len(state.escalated_closed_convs) <= autoreply.PEER_LATCH_CONVERSATION_CAP
+    assert "closed_699" in state.escalated_closed_convs  # the newest marker is never the victim
+
+
+def test_counter_map_stays_bounded_when_there_is_no_limit():
+    state = _state()
+    for i in range(1000):
+        conv = f"conv_{i}"
+        autoreply.reset_peer_latch(state, conv)
+        inbox = InboxResponse(
+            messages=[_peer(i, conversation_id=conv, sender=f"peer{i}")], controls=[],
+            operator_trusted=False, roster=[], peer_autoreply=True, peer_turn_budget=None,
+        )
+        _tick(state, inbox, now=float(i))
+    assert len(state.peer_turns_by_conversation) == 0
+    assert len(state.escalated_closed_convs) == 0
+
+
+def test_rate_gate_still_suppresses_a_burst_when_there_is_no_turn_limit():
+    state, notices, spawned = _state(), [], 0
+    # 200 messages from ONE peer inside the 60s window: the (unchanged) per-peer
+    # rate gate bounds this, with or without a turn limit.
+    for i in range(200):
+        s = _tick(state, _peer_inbox(i, sender="chatty", peer_turn_budget=None), notices, now=i * 0.1)
+        spawned += s["spawned"]
+    assert spawned == autoreply.PEER_RATE_MAX == 5
+    assert notices == []  # rate suppression is not a budget stall
+
+
+def test_operator_sets_a_cap_then_clears_it():
+    state, notices = _state(), []
+    n = iter(range(10_000))
+
+    def run(count, relay_budget):
+        woke = 0
+        for _ in range(count):
+            i = next(n)
+            woke += _tick(state, _peer_inbox(i, peer_turn_budget=relay_budget), notices, now=float(i))["spawned"]
+        return woke
+
+    assert run(30, None) == 30           # unlimited
+    assert run(5, 3) == 3                # cap of 3 counts from NOW, then closes
+    assert len(notices) == 1 and notices[0]["budget"] == 3
+    assert run(40, None) == 40           # cleared: open again, no operator nudge needed
+    assert len(notices) == 1
+
+
+def test_room_cap_overrides_unlimited_agent_default_for_that_room_only():
+    state, spawned = _state(), 0
+    for i in range(5):
+        spawned += _tick(
+            state, _peer_inbox(i, peer_turn_budget=None, conversation_budgets={"proj-1": 2}), now=float(i)
+        )["spawned"]
+    assert spawned == 2
+    other = 0
+    for i in range(5, 45):
+        inbox = InboxResponse(
+            messages=[_peer(i, conversation_id="dm-1", sender=f"peer{i}")], controls=[],
+            operator_trusted=False, roster=[], peer_autoreply=True,
+            conversation_budgets={"proj-1": 2},
+        )
+        other += _tick(state, inbox, now=float(i))["spawned"]
+    assert other == 40  # a different conversation stays unlimited
+
+
+def test_unlimited_room_overrides_a_capped_agent():
+    state, spawned = _state(), 0
+    for i in range(40):
+        spawned += _tick(
+            state, _peer_inbox(i, peer_turn_budget=3, conversation_budgets={"proj-1": 0}), now=float(i)
+        )["spawned"]
+    assert spawned == 40
+
+
+def test_local_cap_applies_when_relay_says_no_limit():
+    state, notices, spawned = _state(), [], 0
+    for i in range(6):
+        spawned += _tick(
+            state, _peer_inbox(i, peer_turn_budget=None), notices, now=float(i), local_budget=4
+        )["spawned"]
+    assert spawned == 4
+    assert notices[0]["budget"] == 4
+    # …and to a project room the relay leaves unlimited.
+    state2, spawned2 = _state(), 0
+    for i in range(6):
+        spawned2 += _tick(
+            state2, _peer_inbox(i, peer_turn_budget=None, conversation_budgets={"proj-1": 0}),
+            now=float(i), local_budget=4,
+        )["spawned"]
+    assert spawned2 == 4
+
+
+def test_no_budget_line_in_prompt_and_null_report_when_unlimited(monkeypatch):
+    reset_cache()
+    prompts = []
+    monkeypatch.setattr(
+        autoreply, "trigger_turn",
+        lambda msgs, *a, **kw: prompts.append(kw.get("peer_budget_remaining")),
+    )
+    _tick(_state(), _peer_inbox(0, peer_turn_budget=None))
+    assert prompts == [{}]  # no remaining entry -> build_prompt emits no countdown
+    cached = get_cached_inbox()
+    assert cached["peer_turn_budget"] == 0  # 0 internally; format_inbox reports None
+    p = build_prompt([_peer(0)], operator_trusted=False, self_agent_id="self",
+                     peer_turn_budget=0, peer_budget_remaining={})
+    assert "Bounded delegation" not in p
+    assert "peer turn" not in p

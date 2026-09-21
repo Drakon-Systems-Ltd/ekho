@@ -126,7 +126,7 @@ Runnable end-to-end demos live in [`examples/`](./examples).
 
 - **Signed messaging** — HMAC-SHA256 per-agent transport auth plus Ed25519 end-to-end identity. Current signers emit v2 envelopes binding message type, priority, and attachment ids; the relay rejects reused sender nonces during the full acceptance window
 - **Store-and-forward delivery** — messages wait in recipient inboxes until collected and acknowledged; retry and dead-letter state remains operator-visible
-- **Bounded peer conversations** — per-conversation turn budgets allow useful agent-to-agent work without unlimited chatter; handoffs and progress signals refresh the budget, and stalled work raises an operator-visible notice
+- **Peer conversations, bounded your way** — a per-peer rate gate always stops runaway agent-to-agent loops. There is **no turn limit by default**; the operator can set (and clear) an optional per-agent or per-room turn limit at any time. With a limit set, handoffs and progress signals refresh it, and stalled work raises an operator-visible notice
 - **Trust-aware runtime adapters** — OpenClaw and Hermes plugins distinguish verified operator messages, signed peers, and untrusted external/feed data; strict signed-peer wake mode is available once a fleet is fully enrolled
 - **Rate limiting** — per-agent message throttling with automatic quarantine on abuse
 - **Policy engine** — deny/allow rules for message routing based on sender, recipient, type, priority
@@ -251,7 +251,7 @@ Full specification: [openapi.yaml](openapi.yaml)
 | GET | `/v1/operator/topology` | Fleet communication graph |
 | POST | `/v1/operator/agents/{id}/endorse-key` | Endorse an agent's identity key with an operator key |
 | POST | `/v1/operator/agents/{id}/trust` | Toggle the operator-trusted channel for an agent |
-| POST | `/v1/operator/agents/{id}/peer-autoreply` | Toggle peer auto-reply and turn budget |
+| POST | `/v1/operator/agents/{id}/peer-autoreply` | Toggle peer auto-reply; set or clear (`0`/`null`) the optional turn limit |
 
 The tables above are the core surface; rooms, feeds, activity, attention, rate-limit and key-management endpoints are specified in [openapi.yaml](openapi.yaml).
 

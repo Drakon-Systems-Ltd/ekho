@@ -11,10 +11,10 @@ structural loop-breaker), and turns are serialized so only one runs at a time.
 SAFETY MODEL (identical to OpenClaw): the OPERATOR (the relay-verified
 principal) auto-triggers a turn while this agent trusts the operator (the
 Access-tab toggle). Bounded agent-to-agent delegation is ON by default, so
-teammate messages also wake the agent — but every peer wake is latched per
-conversation (``peer_turn_budget``), with a per-peer rate gate as a backstop, so
-agent↔agent ping-pong is capped, not unbounded. An operator message in a
-conversation re-energises its latch. Opt out per agent from the console or with
+teammate messages also wake the agent. A per-peer rate gate always bounds
+agent↔agent ping-pong. There is no turn limit by default; when the operator (or
+a local ``EKHO_PEER_TURN_BUDGET``) sets one, peer wakes are latched per
+conversation at that cap and an operator message re-energises the latch. Opt out per agent from the console or with
 ``EKHO_PEER_AUTOREPLY=0``.
 
 No Hermes imports live here, and nothing is hardcoded — the SDK client and the
@@ -79,13 +79,42 @@ PROGRESS_REFRESH_WINDOW_S = 3600.0
 PEER_RATE_MAX = 5  # turns per peer per window before suppression
 PEER_RATE_WINDOW_S = 60.0
 
-# Bounded delegation: a peer may wake this agent at most this many times per
-# conversation before the latch closes (delivered + visible via ekho_inbox, but
-# no turn). An operator message or progress signal re-opens it, and closure
-# escalates a conversation.stalled notice. Sized for real working sessions —
-# the per-peer rate gate still caps runaway loops, and project-mode rooms can
-# override it per conversation.
-DEFAULT_PEER_TURN_BUDGET = 25
+# Optional turn limit: when the operator (console) or the box owner
+# (EKHO_PEER_TURN_BUDGET) sets a cap, a peer may wake this agent at most that
+# many times per conversation before the latch closes (delivered + visible via
+# ekho_inbox, but no turn). An operator message or progress signal re-opens it,
+# and closure escalates a conversation.stalled notice. There is NO default cap —
+# an unasked-for limit stalls real work. The per-peer rate gate above is a
+# separate mechanism and always applies, so runaway loops stay bounded.
+NO_PEER_TURN_LIMIT = 0  # "no limit"; a positive int is a cap
+DEFAULT_PEER_TURN_BUDGET = NO_PEER_TURN_LIMIT
+
+
+def normalize_turn_budget(value: Any) -> int:
+    """A positive integer cap, or NO_PEER_TURN_LIMIT for anything else."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return NO_PEER_TURN_LIMIT
+    return value if value >= 1 else NO_PEER_TURN_LIMIT
+
+
+def effective_peer_turn_budget(relay_budget: Any, local_budget: Any) -> int:
+    """Budget precedence: a positive relay (console) budget wins; otherwise
+    (relay says no limit, or an older relay omits the field) a positive local
+    cap applies — the box owner's tighter choice is respected; otherwise no limit."""
+    relay = normalize_turn_budget(relay_budget)
+    return relay if relay > 0 else normalize_turn_budget(local_budget)
+
+
+def with_local_room_cap(conversation_budgets: Any, local_budget: Any) -> Dict[str, int]:
+    """Project-mode room budgets with the local cap applied to rooms the relay
+    reports as unlimited (entry 0). A room the relay capped is left alone."""
+    budgets = dict(conversation_budgets) if isinstance(conversation_budgets, dict) else {}
+    local_cap = normalize_turn_budget(local_budget)
+    if local_cap > 0:
+        for conv, value in budgets.items():
+            if value == 0 and not isinstance(value, bool):
+                budgets[conv] = local_cap
+    return budgets
 
 
 def _turn_timeout_s() -> float:
@@ -146,7 +175,8 @@ _last_batch_meta: Dict[str, Any] = {
     # budget is left: the effective cap, the on/off flag, and per-conversation
     # consumed counts (conversation_id -> turns used).
     "peer_autoreply": False,
-    "peer_turn_budget": DEFAULT_PEER_TURN_BUDGET,
+    "peer_turn_budget": NO_PEER_TURN_LIMIT,
+    "conversation_budgets": {},
     "peer_turns_used": {},
 }
 
@@ -159,7 +189,8 @@ def reset_cache() -> None:
         _last_batch_meta["roster"] = []
         _last_batch_meta["controls"] = []
         _last_batch_meta["peer_autoreply"] = False
-        _last_batch_meta["peer_turn_budget"] = DEFAULT_PEER_TURN_BUDGET
+        _last_batch_meta["peer_turn_budget"] = NO_PEER_TURN_LIMIT
+        _last_batch_meta["conversation_budgets"] = {}
         _last_batch_meta["peer_turns_used"] = {}
 
 
@@ -224,7 +255,7 @@ def record_verifications(
                 entry["verification"] = verdict
 
 
-def record_batch(inbox: Any) -> None:
+def record_batch(inbox: Any, local_peer_turn_budget: int = NO_PEER_TURN_LIMIT) -> None:
     """Record a freshly delivered inbox batch so ``ekho_inbox`` can read it.
 
     ``inbox`` is an SDK ``InboxResponse`` (``.messages``, ``.operator_trusted``,
@@ -239,14 +270,16 @@ def record_batch(inbox: Any) -> None:
         _last_batch_meta["roster"] = list(getattr(inbox, "roster", []) or [])
         _last_batch_meta["controls"] = list(getattr(inbox, "controls", []) or [])
         # Bounded-delegation knobs the relay surfaces (source of truth). Older
-        # relays omit them -> keep peer off / the default budget.
+        # relays omit them -> keep peer off / no relay cap. The budget recorded is
+        # the one IN FORCE (same precedence as the latch); 0 = no limit.
         relay_peer = getattr(inbox, "peer_autoreply", None)
         _last_batch_meta["peer_autoreply"] = bool(relay_peer) if relay_peer is not None else False
         relay_budget = getattr(inbox, "peer_turn_budget", None)
-        _last_batch_meta["peer_turn_budget"] = (
-            int(relay_budget)
-            if isinstance(relay_budget, int) and relay_budget > 0
-            else DEFAULT_PEER_TURN_BUDGET
+        _last_batch_meta["peer_turn_budget"] = effective_peer_turn_budget(
+            relay_budget, local_peer_turn_budget
+        )
+        _last_batch_meta["conversation_budgets"] = with_local_room_cap(
+            getattr(inbox, "conversation_budgets", None), local_peer_turn_budget
         )
         for msg in getattr(inbox, "messages", []) or []:
             message_id = getattr(msg, "message_id", None)
@@ -296,6 +329,7 @@ def get_cached_inbox() -> Dict[str, Any]:
             "verifications": verifications,
             "peer_autoreply": _last_batch_meta["peer_autoreply"],
             "peer_turn_budget": _last_batch_meta["peer_turn_budget"],
+            "conversation_budgets": dict(_last_batch_meta["conversation_budgets"]),
             "peer_turns_used": dict(_last_batch_meta["peer_turns_used"]),
         }
 
@@ -315,7 +349,6 @@ class AutoReplyState:
     in_flight: bool = False
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
-    peer_conv_order: List[str] = field(default_factory=list)
     # conversation_id -> {"messages": [...], "verifications": {...},
     # "first_deferred_at": float} for messages held back because another agent
     # had the floor. Retried on later ticks until DEFERRED_RETRY_TTL_S; without
@@ -351,18 +384,27 @@ def mark_seen(state: AutoReplyState, message_id: str) -> None:
 
 
 def peer_latch_open(state: AutoReplyState, conversation_id: str, budget: int) -> bool:
-    """True while this conversation still has peer-turn budget left."""
+    """True while this conversation still has peer-turn budget left. With no
+    limit (NO_PEER_TURN_LIMIT, or any non-positive budget) the latch never closes."""
+    if normalize_turn_budget(budget) <= 0:
+        return True
     return state.peer_turns_by_conversation.get(conversation_id, 0) < budget
 
 
-def effective_conversation_budget(inbox: Any, conversation_id: str, fallback: int) -> int:
-    """The peer budget in force for ONE conversation: a project-mode room's own
-    budget when the relay supplies one, otherwise the per-agent budget."""
-    budgets = getattr(inbox, "conversation_budgets", None) or {}
-    value = budgets.get(conversation_id) if isinstance(budgets, dict) else None
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return fallback
+def effective_conversation_budget(
+    inbox: Any, conversation_id: str, fallback: int, local_budget: int = NO_PEER_TURN_LIMIT
+) -> int:
+    """The peer budget in force for ONE conversation (NO_PEER_TURN_LIMIT =
+    unlimited). A project-mode room's own entry overrides the per-agent budget:
+    a positive entry is that room's cap, and an explicit 0 means "this room has
+    no limit" even when the agent itself is capped — except that a locally
+    configured cap (``local_budget``) still applies there. No entry -> ``fallback``."""
+    budgets = with_local_room_cap(getattr(inbox, "conversation_budgets", None), local_budget)
+    if conversation_id in budgets:
+        value = budgets[conversation_id]
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return normalize_turn_budget(fallback)
 
 
 def stash_deferred(
@@ -432,14 +474,17 @@ def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
 
 def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
     """Record that a peer woke the agent in this conversation (FIFO-capped)."""
-    if conversation_id not in state.peer_turns_by_conversation:
-        state.peer_conv_order.append(conversation_id)
+    # Assigning to an existing key keeps its insertion position, so the dict is
+    # its own oldest-first queue (same as the TypeScript Map). A separate order
+    # list went stale the moment reset_peer_latch started removing entries:
+    # each reset+consume cycle queued the conversation again, and once the list
+    # passed the cap every consume evicted its own counter, defeating the cap.
     state.peer_turns_by_conversation[conversation_id] = (
         state.peer_turns_by_conversation.get(conversation_id, 0) + 1
     )
-    while len(state.peer_conv_order) > PEER_LATCH_CONVERSATION_CAP:
-        evicted = state.peer_conv_order.pop(0)
-        state.peer_turns_by_conversation.pop(evicted, None)
+    while len(state.peer_turns_by_conversation) > PEER_LATCH_CONVERSATION_CAP:
+        oldest = next(iter(state.peer_turns_by_conversation))
+        state.peer_turns_by_conversation.pop(oldest, None)
 
 
 def note_progress_refresh(
@@ -465,11 +510,41 @@ def note_progress_refresh(
     return True
 
 
+def reconcile_peer_latches(
+    state: AutoReplyState, inbox: Any, fallback: int, local_budget: int = NO_PEER_TURN_LIMIT
+) -> None:
+    """Reconcile tracked latches with the budgets in force for THIS poll, before
+    any early return. A conversation whose effective budget is now "no limit"
+    keeps no wake count and no stall marker, so an operator who clears a cap and
+    later restores it always gets a fresh cycle — even if no peer message arrived
+    while the cap was off (a quiet poll never reaches the latch loop)."""
+    tracked = set(state.peer_turns_by_conversation) | set(state.escalated_closed_convs)
+    if not tracked:
+        return
+    # Resolve the room map ONCE per poll and read it directly. Going through
+    # effective_conversation_budget here would copy the whole map again for
+    # every tracked conversation. Same rule as that function: a valid room entry
+    # (cap, or explicit 0 = no limit) wins, otherwise the per-agent fallback.
+    budgets = with_local_room_cap(getattr(inbox, "conversation_budgets", None), local_budget)
+    agent_budget = normalize_turn_budget(fallback)
+    for conv in tracked:
+        value = budgets.get(conv)
+        in_force = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else agent_budget
+        )
+        if in_force <= 0:
+            reset_peer_latch(state, conv)
+
+
 def reset_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
     """Re-open a conversation's latch — the operator engaging (or a peer progress
     signal) re-energises it. Also re-arms the stall escalation for this
     conversation, so a future close raises a fresh operator-visible notice."""
-    state.peer_turns_by_conversation[conversation_id] = 0
+    # Absence already means zero. Popping (rather than storing 0) keeps the map
+    # bounded when no cap is in force and consume_peer_latch's eviction never runs.
+    state.peer_turns_by_conversation.pop(conversation_id, None)
     state.escalated_closed_convs.discard(conversation_id)
 
 
@@ -1048,8 +1123,9 @@ def build_prompt(
             room_cap = (conversation_budgets or {}).get(conv)
             cap = room_cap if isinstance(room_cap, int) and room_cap > 0 else (peer_turn_budget or 0)
             remaining = peer_budget_remaining[conv]
-            turn = cap - remaining  # post-consumption count = this wake's number
-            budget = _budget_note(turn, cap, remaining, conv in operator_convs)
+            if cap > 0:  # no limit -> no countdown line (the loop sends no entry anyway)
+                turn = cap - remaining  # post-consumption count = this wake's number
+                budget = _budget_note(turn, cap, remaining, conv in operator_convs)
             annotated_convs.add(conv)
         # A room message: replying goes to the whole room (recipient is the
         # room), so point the agent at ekho_send with room_id, not a 1:1 reply.
@@ -1345,7 +1421,7 @@ def process_inbox_once(
     messages = list(getattr(inbox, "messages", []) or [])
 
     # Expose the freshly delivered batch to ekho_inbox.
-    record_batch(inbox)
+    record_batch(inbox, peer_turn_budget)
 
     ack_all = [
         {"message_id": m.message_id, "status": "received", "received_at": iso_now()}
@@ -1438,11 +1514,14 @@ def process_inbox_once(
     relay_peer = getattr(inbox, "peer_autoreply", None)
     eff_peer_enabled = bool(relay_peer) if relay_peer is not None else peer_enabled
     relay_budget = getattr(inbox, "peer_turn_budget", None)
-    eff_budget = (
-        int(relay_budget)
-        if isinstance(relay_budget, int) and relay_budget > 0
-        else peer_turn_budget
+    # Precedence: relay cap > local cap > no limit (0).
+    eff_budget = effective_peer_turn_budget(relay_budget, peer_turn_budget)
+    # Room overrides, with the local cap applied to rooms the relay leaves
+    # unlimited — resolved once so the latch, the notice and the prompt agree.
+    room_budgets = with_local_room_cap(
+        getattr(inbox, "conversation_budgets", None), peer_turn_budget
     )
+    reconcile_peer_latches(state, inbox, eff_budget, peer_turn_budget)
 
     real = [
         m
@@ -1553,7 +1632,7 @@ def process_inbox_once(
             base_hist = getattr(inbox, "conversation_history", None) or {}
             hist = {**base_hist, **({conv: tail} if isinstance(tail, list) else {})}
             used = state.peer_turns_by_conversation.get(conv, 0)
-            conv_budget = effective_conversation_budget(inbox, conv, eff_budget)
+            conv_budget = effective_conversation_budget(inbox, conv, eff_budget, peer_turn_budget)
             state.in_flight = True
             try:
                 trigger_turn(
@@ -1566,9 +1645,12 @@ def process_inbox_once(
                     self_agent_id=self_agent_id,
                     conversation_history=hist,
                     peer_turn_budget=eff_budget,
-                    peer_budget_remaining={conv: max(0, conv_budget - used)},
+                    # No limit -> no countdown line in the prompt.
+                    peer_budget_remaining=(
+                        {conv: max(0, conv_budget - used)} if conv_budget > 0 else {}
+                    ),
                     rooms=getattr(inbox, "rooms", None),
-                    conversation_budgets=getattr(inbox, "conversation_budgets", None),
+                    conversation_budgets=room_budgets,
                     # #16: tell the turn it is late, and how late. Without this it
                     # answers a 10-minute-old message as if it were the thread head.
                     deferred={
@@ -1619,10 +1701,20 @@ def process_inbox_once(
             kept.append(m)
             continue
         conv = getattr(m, "conversation_id", "")
-        # Project-mode rooms carry their own (higher) budget for this conversation.
-        conv_budget = effective_conversation_budget(inbox, conv, eff_budget)
+        # Project-mode rooms carry their own budget (or "no limit") for this conversation.
+        conv_budget = effective_conversation_budget(inbox, conv, eff_budget, peer_turn_budget)
         if peer_latch_open(state, conv, conv_budget):
-            consume_peer_latch(state, conv)
+            # Wakes are only counted against a cap. With no limit nothing accrues,
+            # so a cap the operator sets LATER starts from zero instead of closing
+            # the conversation on the spot for wakes that predate it.
+            if conv_budget > 0:
+                consume_peer_latch(state, conv)
+            else:
+                # No limit in force: drop any count and stall marker left over
+                # from an earlier cap. Otherwise cap -> cleared -> cap again would
+                # resume from the old exhausted count, withhold at once, and
+                # never raise a fresh notice.
+                reset_peer_latch(state, conv)
             kept.append(m)
         else:
             latched += 1
@@ -1643,6 +1735,12 @@ def process_inbox_once(
         if conv in state.escalated_closed_convs:
             continue
         state.escalated_closed_convs.add(conv)
+        # Bounded like the counters. Forgetting an old marker costs at most one
+        # repeat notice; keeping them all made every poll's reconcile scan grow.
+        while len(state.escalated_closed_convs) > PEER_LATCH_CONVERSATION_CAP:
+            # A set has no order; any marker but the one just raised will do.
+            victim = next(c for c in state.escalated_closed_convs if c != conv)
+            state.escalated_closed_convs.discard(victim)
         if not callable(raise_notice):
             continue
         try:
@@ -1650,7 +1748,7 @@ def process_inbox_once(
                 conversation_id=conv,
                 reason="peer_turn_budget_exhausted",
                 pending_count=pending,
-                budget=effective_conversation_budget(inbox, conv, eff_budget),
+                budget=effective_conversation_budget(inbox, conv, eff_budget, peer_turn_budget),
             )
         except Exception as exc:  # noqa: BLE001 — escalation is best-effort
             log.debug("[ekho-autoreply] stall escalation failed for %s: %s", conv, exc)
@@ -1664,7 +1762,9 @@ def process_inbox_once(
             continue
         conv = getattr(m, "conversation_id", "")
         used = state.peer_turns_by_conversation.get(conv, 0)
-        conv_budget = effective_conversation_budget(inbox, conv, eff_budget)
+        conv_budget = effective_conversation_budget(inbox, conv, eff_budget, peer_turn_budget)
+        if conv_budget <= 0:
+            continue  # no limit -> no entry, and so no countdown line
         peer_budget_remaining[conv] = max(0, conv_budget - used)
 
     # Expose the post-consumption per-conversation counts to ekho_inbox.
@@ -1719,7 +1819,7 @@ def process_inbox_once(
                 peer_turn_budget=eff_budget,
                 peer_budget_remaining=peer_budget_remaining,
                 rooms=getattr(inbox, "rooms", None),
-                conversation_budgets=getattr(inbox, "conversation_budgets", None),
+                conversation_budgets=room_budgets,
                 snapshot_verifier=snapshot_verifier,
             )
             spawned = 1
@@ -1810,11 +1910,11 @@ def start_autoreply(
         _bundle_note = ""
     log.info(
         "[ekho-autoreply] listening for inbound (poll %.0fs) as %s "
-        "(peer_delegation=%s, budget=%d)%s",
+        "(peer_delegation=%s, local_turn_limit=%s)%s",
         poll_interval_s,
         self_agent_id,
         "on" if peer_enabled else "off",
-        peer_turn_budget,
+        peer_turn_budget if normalize_turn_budget(peer_turn_budget) > 0 else "none",
         _bundle_note,
     )
 

@@ -646,7 +646,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .access-row__peer { display: flex; flex-direction: column; gap: 8px; padding-top: 9px; border-top: 1px solid var(--hair); }
 .access-row__budget { display: flex; align-items: center; gap: 8px; padding-left: 2px; }
 .access-row__budget-label { font-size: 12px; color: var(--muted); }
-.access-row__budget-input { width: 58px; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--hair-strong); background: rgba(255, 255, 255, 0.04); color: var(--text); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.access-row__budget-input { width: 84px; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--hair-strong); background: rgba(255, 255, 255, 0.04); color: var(--text); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .access-row__budget-input:disabled { opacity: 0.55; }
 .access-row__budget-unit { font-size: 12px; color: var(--muted); }
 .room-caption { font-size: 12px; line-height: 1.5; color: var(--muted); padding: 0 0 12px; }
@@ -659,7 +659,7 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 .room-list__project { margin-left: 8px; font-size: 10.5px; font-family: var(--mono); color: var(--warn); border: 1px solid rgba(251, 191, 36, 0.35); border-radius: 5px; padding: 1px 8px; }
 .room-project { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .room-project input[type="checkbox"] { width: 14px; height: 14px; flex: 0 0 auto; }
-.room-project__budget { width: 64px; padding: 4px 7px; font-size: 12px; font-family: var(--mono); }
+.room-project__budget { width: 84px; padding: 4px 7px; font-size: 12px; font-family: var(--mono); }
 .health-row { gap: 9px; }
 .health-row__stats { display: flex; align-items: center; gap: 9px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .health-stat { color: var(--text); }

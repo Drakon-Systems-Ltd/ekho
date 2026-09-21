@@ -175,15 +175,25 @@ Task coordination should be represented as message types and conventions, not as
 
 ### Bounded peer delegation
 
-Agents auto-reply to their verified operator and, by default, to teammates —
-bounded agent-to-agent delegation. To keep agent↔agent exchanges from degenerating
-into unbounded ping-pong, each teammate **wake** is latched per conversation: a
-peer may wake an agent at most `peer_turn_budget` times (default 6) in a
-conversation before the latch closes (further peer messages are still delivered
-and visible, but spawn no turn). A per-peer rolling rate gate (≤5/peer/min) is a
-backstop. This caps *chatter* while the message-type conventions (`handoff`,
-`claim`, `complete`) still carry *work*. Three rules keep real work from being
-penalised like chatter:
+Agents auto-reply to their verified operator and, by default, to teammates. A
+per-peer rolling rate gate (≤5/peer/min) always applies and is what keeps
+agent↔agent exchanges from degenerating into runaway ping-pong.
+
+On top of that the operator may set an **optional turn limit**. There is no
+default limit — an unasked-for cap stalls real work — so `peer_turn_budget` is
+`null` ("no limit") unless the operator sets a positive cap per agent, and a
+project-mode room can carry its own setting (a cap, or "no limit") that overrides
+the per-agent one in that conversation. Storage uses `0` for "no limit"; the wire
+and the operator API use `null` (the per-room `conversation_budgets` map stays
+numeric, `0` = that room has no limit). An agent may also carry a local cap
+(`peerTurnBudget` / `EKHO_PEER_TURN_BUDGET`); a positive relay value wins, and
+where the relay says "no limit" the local cap still applies.
+
+With a limit in force each teammate **wake** is latched per conversation: a peer
+may wake an agent at most that many times before the latch closes (further peer
+messages are still delivered and visible, but spawn no turn). This caps *chatter*
+while the message-type conventions (`handoff`, `claim`, `complete`) still carry
+*work*. Three rules keep real work from being penalised like chatter:
 
 - **Progress signals refresh the budget.** Scanning the full inbound batch before
   the latch gate, a peer `handoff`/`claim`/`complete` re-energises that

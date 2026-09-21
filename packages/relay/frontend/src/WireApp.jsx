@@ -19,6 +19,7 @@ import { WireAvatar, RoomAvatar, ChannelMark, Tick, castSlug, fallbackHue, prese
 import { OpsCenter, LedgerItems, WirePolicyModal } from "./WireOps.jsx";
 import { dmChannelKey, groupConversationsByChannel } from "./channels.js";
 import { resumeConversation as apiResumeConversation } from "./api.js";
+import { budgetInputValue, budgetLabel, parseBudgetInput, savedBudget } from "./budget.js";
 
 /* ================= small utilities ================= */
 
@@ -340,21 +341,24 @@ function InfoPanel({ S, active, pins, togglePin, onClose, onOpenDm }) {
               onChange={(e) => S.handleSetTrust(agent.id, e.target.checked)} /><span className="tr" /></label>
           </div>
           <div className="irow">
-            <span className="lab">Delegation<small>Teammates may wake it, budget-bounded</small></span>
+            <span className="lab">Delegation<small>Teammates may wake it</small></span>
             <label className="switch"><input type="checkbox" checked={Boolean(agent.peer_autoreply)}
               disabled={S.peerPending === agent.id}
               onChange={(e) => S.handleSetPeerAutoreply(agent.id, e.target.checked)} /><span className="tr" /></label>
           </div>
           {agent.peer_autoreply ? (
             <div className="irow">
-              <span className="lab">Turn budget<small>Peer wakes per conversation</small></span>
-              <input className="budget-input" type="number" min="1" max="200" defaultValue={agent.peer_turn_budget ?? 25}
+              <span className="lab">Turn limit<small>Optional cap on peer wakes per conversation — blank = no limit</small></span>
+              <input className="budget-input" type="number" min="0" max="200" placeholder="No limit"
+                defaultValue={budgetInputValue(agent.peer_turn_budget)}
                 key={`${agent.id}-${agent.peer_turn_budget}`}
                 disabled={S.peerPending === agent.id}
                 onBlur={(e) => {
-                  const next = Math.max(1, Math.min(200, Math.trunc(Number(e.target.value) || agent.peer_turn_budget || 25)));
-                  e.target.value = String(next);
-                  if (next !== agent.peer_turn_budget) S.handleSetPeerAutoreply(agent.id, true, next);
+                  const saved = savedBudget(agent.peer_turn_budget);
+                  const next = parseBudgetInput(e.target.value, 200);
+                  if (next === null) { e.target.value = budgetInputValue(saved); return; }
+                  e.target.value = budgetInputValue(next);
+                  if (next !== saved) S.handleSetPeerAutoreply(agent.id, true, next); // 0 clears the cap
                 }}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }} />
             </div>
@@ -422,19 +426,22 @@ function InfoPanel({ S, active, pins, togglePin, onClose, onOpenDm }) {
         <div className="icard">
           <div className="ihead">Project mode</div>
           <div className="irow">
-            <span className="lab">Higher turn budget<small>For long working sessions in this room</small></span>
+            <span className="lab">Room turn setting<small>This room's limit (or no limit) overrides each member's own</small></span>
             <label className="switch"><input type="checkbox" checked={Boolean(room.project_mode)}
-              onChange={(e) => S.handleSetProjectMode(room.id, e.target.checked, room.project_turn_budget || 100)} /><span className="tr" /></label>
+              onChange={(e) => S.handleSetProjectMode(room.id, e.target.checked)} /><span className="tr" /></label>
           </div>
           {room.project_mode ? (
             <div className="irow">
-              <span className="lab">Room budget<small>Wakes per member before pausing</small></span>
-              <input className="budget-input" type="number" min="1" max="500" defaultValue={room.project_turn_budget ?? 100}
+              <span className="lab">Room turn limit<small>Optional wakes per member before pausing — blank = no limit</small></span>
+              <input className="budget-input" type="number" min="0" max="500" placeholder="No limit"
+                defaultValue={budgetInputValue(room.project_turn_budget)}
                 key={`${room.id}-${room.project_turn_budget}`}
                 onBlur={(e) => {
-                  const next = Math.max(1, Math.min(500, Math.trunc(Number(e.target.value) || room.project_turn_budget || 100)));
-                  e.target.value = String(next);
-                  if (next !== room.project_turn_budget) S.handleSetProjectMode(room.id, true, next);
+                  const saved = savedBudget(room.project_turn_budget);
+                  const next = parseBudgetInput(e.target.value, 500);
+                  if (next === null) { e.target.value = budgetInputValue(saved); return; }
+                  e.target.value = budgetInputValue(next);
+                  if (next !== saved) S.handleSetProjectMode(room.id, true, next); // 0 clears the cap
                 }}
                 onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }} />
             </div>
@@ -805,18 +812,21 @@ export default function WireApp() {
 
   // The agent-to-agent turn budget governing the open conversation — a glanceable
   // read-only chip; the info panel holds the editable control. Rooms in project
-  // mode carry their own ceiling; a DM shows that agent's peer budget (or "solo"
-  // when delegation is off). Feeds/broadcasts have no budget.
+  // mode carry their own setting; a DM shows that agent's peer turn limit ("no
+  // limit" unless the operator set one, or "solo" when delegation is off).
+  // Feeds/broadcasts have no budget.
+  const budgetChipLabel = (v) => (savedBudget(v) > 0 ? `turn limit ${budgetLabel(v)}` : "no turn limit");
   const budgetChip = (() => {
     if (!active) return null;
     if (active.kind === "dm") {
       const agent = S.agents.find((a) => a.id === active.agentId);
       if (!agent) return null;
-      return agent.peer_autoreply ? { label: `budget ${agent.peer_turn_budget ?? 25}` } : { label: "solo" };
+      return agent.peer_autoreply ? { label: budgetChipLabel(agent.peer_turn_budget) } : { label: "solo" };
     }
     if (active.kind === "room") {
       const room = active.room || {};
-      return room.project_mode ? { label: `budget ${room.project_turn_budget ?? 100}`, tag: "project" } : { label: "budget 25" };
+      // Outside project mode each member's own per-agent setting applies.
+      return room.project_mode ? { label: budgetChipLabel(room.project_turn_budget), tag: "project" } : { label: "per-agent limits" };
     }
     return null;
   })();
@@ -939,7 +949,7 @@ export default function WireApp() {
                 <div className="acts">
                   {budgetChip ? (
                     <button className={`budgetchip${budgetChip.tag ? " budgetchip--project" : ""}`}
-                      title="Agent-to-agent turn budget for this conversation — click for details"
+                      title="Agent-to-agent turn limit for this conversation (none unless you set one) — click for details"
                       onClick={() => { setInfoOpen(true); setBellOpen(false); }}>
                       {budgetChip.label}{budgetChip.tag ? <span className="bc-tag">{budgetChip.tag}</span> : null}
                     </button>

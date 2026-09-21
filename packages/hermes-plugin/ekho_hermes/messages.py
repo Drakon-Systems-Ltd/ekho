@@ -321,6 +321,7 @@ def inbox_message_view(
     attachments: Optional[Sequence[Any]] = None,
     peer_turn_budget: Optional[int] = None,
     peer_turns_used: Optional[Dict[str, int]] = None,
+    conversation_budgets: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Project one cached inbox entry into what ``ekho_inbox`` returns for it.
 
@@ -369,15 +370,20 @@ def inbox_message_view(
         base["note"] = envelope["note"]
         return base
 
-    # Bounded-delegation budget left for this peer conversation, so a manual
-    # inbox read shows how many more times a teammate can wake this agent before
-    # the latch auto-pauses. Additive + peer-only.
-    if peer_turn_budget:
-        conv = _message_get(message, "conversation_id")
-        used = int((peer_turns_used or {}).get(conv, 0))
-        base["peer_turns_used"] = used
-        base["peer_turn_budget"] = int(peer_turn_budget)
-        base["peer_remaining"] = max(0, int(peer_turn_budget) - used)
+    # Turn-limit state for this peer conversation, so a manual inbox read shows
+    # how many more times a teammate can wake this agent before the latch
+    # auto-pauses. Always emitted, one shape: with no limit the budget and the
+    # remaining count are None (JSON null) — never a fake number. A project-mode
+    # room's own budget (or "no limit") wins for its conversation.
+    conv = _message_get(message, "conversation_id")
+    cap = peer_turn_budget
+    if isinstance(conversation_budgets, dict) and conv in conversation_budgets:
+        cap = conversation_budgets[conv]
+    cap = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0 else 0
+    used = int((peer_turns_used or {}).get(conv, 0))
+    base["peer_turns_used"] = used
+    base["peer_turn_budget"] = cap if cap > 0 else None
+    base["peer_remaining"] = max(0, cap - used) if cap > 0 else None
     base["from"] = envelope["from"]
     return base
 
@@ -405,6 +411,7 @@ def format_inbox(
     peer_autoreply: bool = False,
     peer_turn_budget: Optional[int] = None,
     peer_turns_used: Optional[Dict[str, int]] = None,
+    conversation_budgets: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Shape an inbox batch into the dict ``ekho_inbox`` returns.
 
@@ -431,16 +438,22 @@ def format_inbox(
                 attachments=_message_get(message, "attachment_local_paths"),
                 peer_turn_budget=peer_turn_budget,
                 peer_turns_used=peer_turns_used,
+                conversation_budgets=conversation_budgets,
             )
         )
 
     return {
         "count": len(formatted),
         "operator_trusted": bool(operator_trusted),
-        # Bounded delegation, surfaced top-level so the agent can reason about its
-        # peer budget even before reading individual messages.
+        # Peer delegation, surfaced top-level so the agent can reason about its
+        # peer budget even before reading individual messages. None = no turn
+        # limit (the default); an int = the cap in force.
         "peer_autoreply": bool(peer_autoreply),
-        "peer_turn_budget": int(peer_turn_budget) if peer_turn_budget else None,
+        "peer_turn_budget": (
+            int(peer_turn_budget)
+            if isinstance(peer_turn_budget, int) and peer_turn_budget > 0
+            else None
+        ),
         "messages": formatted,
         "roster": _format_roster(roster),
     }

@@ -265,6 +265,86 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ControlAction"
+        peer_autoreply:
+          type: boolean
+          description: Operator-controlled peer auto-reply for this agent (live).
+        peer_turn_budget:
+          type: [integer, "null"]
+          minimum: 1
+          description: >
+            Optional operator-set cap on how many times a teammate may wake this
+            agent per conversation. `null` means NO LIMIT, which is the default —
+            a limit exists only when the operator sets one. Agent plugins older
+            than this change read `null` as "use my local default" (25 there).
+        conversation_budgets:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          description: >
+            Project-mode rooms this agent belongs to, keyed by conversation id.
+            The room's value overrides `peer_turn_budget` in that conversation: a
+            positive integer is the room's cap, `0` means the room has no limit.
+            Values stay numeric for compatibility (older plugins read a
+            non-positive entry as "no override").
+
+    TurnBudgetInput:
+      type: [integer, "null"]
+      minimum: 0
+      description: >
+        Optional turn limit. A positive integer sets a cap; `0` or `null` clears
+        it (no limit — the default). Omit the field to leave the current value
+        untouched. Negative or non-integer values are rejected with 400.
+
+    PeerAutoreplyRequest:
+      type: object
+      required: [autoreply]
+      properties:
+        autoreply:
+          type: boolean
+        budget:
+          allOf:
+            - $ref: "#/components/schemas/TurnBudgetInput"
+          maximum: 200
+
+    PeerAutoreplyResponse:
+      type: object
+      required: [agent_id, peer_autoreply, peer_turn_budget]
+      properties:
+        agent_id:
+          type: string
+        peer_autoreply:
+          type: boolean
+        peer_turn_budget:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 200
+          description: The cap now in force, or `null` for no limit.
+
+    ProjectModeRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        budget:
+          allOf:
+            - $ref: "#/components/schemas/TurnBudgetInput"
+          maximum: 500
+
+    ProjectModeResponse:
+      type: object
+      required: [room_id, project_mode, project_turn_budget]
+      properties:
+        room_id:
+          type: string
+        project_mode:
+          type: boolean
+        project_turn_budget:
+          type: [integer, "null"]
+          minimum: 1
+          maximum: 500
+          description: The room's cap, or `null` for no limit.
 
     MessageRecipient:
       type: object
@@ -532,6 +612,7 @@ components:
         budget:
           type: integer
           minimum: 1
+          description: The cap that was reached. Stalls are only raised when a cap is in force.
       description: >
         An operator-visible notice that a conversation has stalled. Recorded as a
         `conversation.stalled` event surfaced via `/v1/operator/events`.
@@ -1511,8 +1592,9 @@ paths:
       tags: [Agent]
       summary: Raise an operator-visible notice (e.g. a stalled conversation)
       description: >
-        Records an operator-visible event when a conversation stalls — today, the
-        peer-turn budget is exhausted while a real peer message was withheld.
+        Records an operator-visible event when a conversation stalls — today, an
+        operator-set peer turn limit is exhausted while a real peer message was
+        withheld. (With no limit set — the default — this is never raised.)
         Surfaces as a `conversation.stalled` event in `/v1/operator/events`.
         Idempotent per (fleet, agent, conversation) until the next operator
         engagement re-opens the conversation, so a polling agent can call it every
@@ -1796,6 +1878,84 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/agents/{agentId}/peer-autoreply:
+    post:
+      operationId: setPeerAutoreply
+      tags: [Operator]
+      summary: Toggle peer auto-reply; set or clear the optional turn limit
+      description: >
+        Enables or disables teammate wakes for an agent and, optionally, sets or
+        clears its per-conversation turn limit. There is no default limit: the
+        agent is unlimited until a positive `budget` is set, and `0`/`null`
+        clears it again. The agent reads both live on its next inbox poll — no
+        restart. The per-peer rate gate on the agent is separate and always on.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: agentId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PeerAutoreplyRequest"
+      responses:
+        "200":
+          description: Resulting settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PeerAutoreplyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/operator/rooms/{roomId}/project-mode:
+    post:
+      operationId: setRoomProjectMode
+      tags: [Operator]
+      summary: Toggle a room's project mode; set or clear the room turn limit
+      description: >
+        With project mode on, the room's own turn setting overrides each
+        member's per-agent one in that conversation: a positive `budget` is the
+        room's cap, and no budget (`0`/`null`, the default) means the room has
+        no limit even for members that are capped elsewhere. Members read it
+        live on their next inbox poll.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: roomId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectModeRequest"
+      responses:
+        "200":
+          description: Resulting settings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectModeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/operator/agents/{agentId}/rate-limits:
     get:

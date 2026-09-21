@@ -263,13 +263,16 @@ export function inboxMessageView(
   if (envelope.from_kind === "feed" || envelope.from_kind === "operator" || signature === "failed") {
     return { ...base, from: envelope.from, trust: envelope.trust, note: envelope.note };
   }
-  const budget = Number(opts.peerTurnBudget ?? 0);
+  // Always emitted for a peer message, in one shape. With no turn limit the
+  // budget and the remaining count are null — never a fake number, never
+  // Infinity (which JSON cannot carry). `peer_turns_used` counts wakes charged
+  // against a cap, so it stays 0 while no cap is in force.
+  const rawBudget = Number(opts.peerTurnBudget ?? 0);
+  const budget = Number.isFinite(rawBudget) && rawBudget >= 1 ? Math.trunc(rawBudget) : 0;
+  const used = Number((opts.peerTurnsUsed ?? {})[String(message.conversation_id)] ?? 0);
   const peerBudget =
     budget > 0
-      ? (() => {
-          const used = Number((opts.peerTurnsUsed ?? {})[String(message.conversation_id)] ?? 0);
-          return { peer_turns_used: used, peer_turn_budget: budget, peer_remaining: Math.max(0, budget - used) };
-        })()
-      : {};
+      ? { peer_turns_used: used, peer_turn_budget: budget, peer_remaining: Math.max(0, budget - used) }
+      : { peer_turns_used: used, peer_turn_budget: null, peer_remaining: null };
   return { ...base, ...peerBudget, from: message.sender_agent_id };
 }

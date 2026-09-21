@@ -6,6 +6,7 @@ import React, { useMemo, useState } from "react";
 import { Badge, EmptyState, Modal, Skeleton, relativeTime, clockTime } from "./components.jsx";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { humanizeEvent, parsePayload } from "./consoleState.js";
+import { budgetLabel } from "./budget.js";
 import { WireAvatar, presenceOf } from "./wireIdentity.jsx";
 
 /* ---------- shared bits ---------- */
@@ -428,7 +429,7 @@ export function OpsCenter({ S, section, setSection, onClose, onOpenConversation,
                       <span className="rt">{a.runtime}</span>
                       {a.metrics?.model ? <span className="pill">{a.metrics.model}{a.metrics.provider ? ` · ${a.metrics.provider}` : ""}</span> : null}
                       {a.operator_trusted ? null : <span className="pill warn">untrusted</span>}
-                      {a.peer_autoreply ? <span className="pill">delegation · {a.peer_turn_budget}</span> : <span className="pill">solo</span>}
+                      {a.peer_autoreply ? <span className="pill">delegation · {budgetLabel(a.peer_turn_budget)}</span> : <span className="pill">solo</span>}
                     </div>
                     {lv !== "ok" && a.health?.reason ? <div className="why">{a.health.reason}</div> : null}
                     <div className="stats">

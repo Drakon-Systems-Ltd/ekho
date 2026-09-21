@@ -35,5 +35,5 @@ optional_env:
     description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default off; 1/true/yes/on to enable)"
     prompt: "Enable agent-to-agent delegation? (1/0)"
   - name: EKHO_PEER_TURN_BUDGET
-    description: "Max times a teammate may wake this agent per conversation before the latch closes (default 6). An operator message re-opens it."
+    description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence. An operator message re-opens a closed latch."
     prompt: "Peer turn budget per conversation"

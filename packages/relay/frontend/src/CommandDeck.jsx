@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { loadSession, clearSession, getTopology, getActivity, controlAgent, setAgentTrust, setPeerAutoreply, sendOperatorMessage } from "./api";
 import { usePageVisible } from "./hooks";
+import { budgetLabel } from "./budget.js";
 import "./deck.css";
 
 const POLL_MS = 5000;
@@ -115,7 +116,7 @@ function intelLine(e, nameOf) {
   else if (t === "message.delivered") { tag = "RCV"; text = "received a message"; }
   else if (t.startsWith("room.")) { tag = "ROOM"; text = t === "room.created" ? "created a room" : "room update"; }
   else if (t === "agent.trust_changed") { tag = "TRUST"; text = "operator trust " + (p.operator_trusted ? "ON" : "OFF"); }
-  else if (t === "agent.peer_autoreply_changed") { tag = "DLG"; text = "delegation " + (p.peer_autoreply ? "ON · budget " + p.peer_turn_budget : "OFF"); }
+  else if (t === "agent.peer_autoreply_changed") { tag = "DLG"; text = "delegation " + (p.peer_autoreply ? "ON · turn limit " + budgetLabel(p.peer_turn_budget) : "OFF"); }
   else if (t.includes("quarantine")) { tag = "ALERT"; cls = "--a"; text = "quarantined" + (p.reason ? " — " + p.reason : ""); }
   else if (t === "agent.pause") { tag = "PAUSE"; cls = "--w"; text = "paused"; }
   else if (t === "agent.resume") { tag = "RESUME"; text = "resumed"; }
@@ -375,7 +376,7 @@ export default function CommandDeck() {
               <div className="opscard__row"><span>ACTIVE CONV</span><b>{a.active_conversations?.length || 0}</b></div>
               <div className="flags">
                 {a.operator_trusted ? <span className="flag">TRUSTED</span> : null}
-                {a.peer_autoreply ? <span className="flag flag--c">DELEGATION · {a.peer_turn_budget}</span> : <span className="flag">SOLO</span>}
+                {a.peer_autoreply ? <span className="flag flag--c">DELEGATION · {budgetLabel(a.peer_turn_budget).toUpperCase()}</span> : <span className="flag">SOLO</span>}
               </div>
               <div className="ctlrow">
                 {a.status === "healthy" || a.status === "active"

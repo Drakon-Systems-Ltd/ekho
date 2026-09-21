@@ -181,6 +181,19 @@ describe("inboxMessageView — what ekho_inbox serves (ekho#20)", () => {
     expect((v.signature as Record<string, unknown>).status).toBe("verified");
   });
 
+  it("with no turn limit a peer message reports budget null and remaining null — never a fake number", () => {
+    for (const unset of [undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const v = inboxMessageView(peerMsg, null, { operatorTrusted: false, peerTurnBudget: unset, peerTurnsUsed: { c1: 3 } });
+      expect(v.peer_turn_budget).toBeNull();
+      expect(v.peer_remaining).toBeNull();
+      expect(v.peer_turns_used).toBe(3);
+      // Survives JSON untouched (Infinity would silently become null; a missing key would vanish).
+      const wire = JSON.parse(JSON.stringify(v));
+      expect(wire).toHaveProperty("peer_turn_budget", null);
+      expect(wire).toHaveProperty("peer_remaining", null);
+    }
+  });
+
   it("an unchecked peer is unchanged from pre-fix behaviour (no false alarm)", () => {
     const v = inboxMessageView(peerMsg, null, { operatorTrusted: false, peerTurnBudget: 25 });
     expect(v.from).toBe("agent_e894430afdd8");

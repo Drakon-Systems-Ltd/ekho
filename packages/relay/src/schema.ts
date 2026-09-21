@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS agents (
   quarantine_reason TEXT,
   operator_trusted INTEGER NOT NULL DEFAULT 0,
   peer_autoreply INTEGER NOT NULL DEFAULT 1,
-  peer_turn_budget INTEGER NOT NULL DEFAULT 25,
+  peer_turn_budget INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   created_by_operator_id TEXT,
   created_by_agent_id TEXT,
   project_mode INTEGER NOT NULL DEFAULT 0,
-  project_turn_budget INTEGER NOT NULL DEFAULT 100,
+  project_turn_budget INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 

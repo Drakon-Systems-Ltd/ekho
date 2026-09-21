@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Changed
+- **No default peer turn limit.** The plugin no longer caps teammate wakes at 25 per conversation. `peerTurnBudget` is now an *optional local limit*: a positive value is a cap used when the relay has not set one, and `0`/unset (the default) means no limit. Precedence per conversation: a project-mode room's setting (a cap, or "no limit") → the operator's per-agent cap from the relay → the local `peerTurnBudget` → no limit. A positive relay cap always wins over the local one; where the relay says "no limit" (`null`, or a `0` room entry) the local cap still applies. With no limit the latch never closes, no `conversation.stalled` is raised for budget exhaustion, the prompt carries no countdown, and `ekho_inbox` reports `peer_turn_budget: null` and, per peer message, `peer_remaining: null` (these per-message fields are now always present for peer messages). Wakes are only counted while a cap is in force, so a cap set mid-conversation starts from zero. **Unchanged:** the per-peer rate gate (5 per peer per 60 s) still bounds runaway loops, and all signature/trust gates are untouched. Against a relay older than this change the plugin still honours the positive budget that relay sends (25 unless the operator changed it). See the root [CHANGELOG](../../CHANGELOG.md) for the relay migration and its trade-off.
+
 ## [0.4.9] - 2026-09-13
 
 ### Changed
