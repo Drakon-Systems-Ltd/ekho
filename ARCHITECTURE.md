@@ -446,9 +446,9 @@ Recommended control actions:
 - Stop new outbound messages from an agent
 - Block a destination
 - Block a message type
-- Cancel queued messages
+- Cancel queued messages *(design intent, not implemented yet: there is no cancel endpoint)*
 - Require approval for certain actions
-- Redirect a message to a different agent
+- Redirect a message to a different agent *(design intent, not implemented yet: there is no redirect endpoint)*
 - Isolate an agent into a quarantine policy
 
 These controls should apply at multiple levels:
@@ -539,7 +539,7 @@ Recommended mechanisms:
 - **Pause**: stop the next action from proceeding
 - **Approve**: allow a queued action to continue
 - **Reject**: block a queued or proposed action
-- **Redirect**: route work to a different agent
+- **Redirect**: route work to a different agent *(not implemented yet)*
 - **Inject instruction**: add a high-priority control message into a conversation
 - **Escalate**: move an interaction to a human or supervisor agent
 
@@ -1233,10 +1233,9 @@ Session-authenticated operator endpoints:
 - `POST /v1/operator/agents/:agent_id/pause`
 - `POST /v1/operator/agents/:agent_id/resume`
 - `POST /v1/operator/agents/:agent_id/quarantine`
-- `POST /v1/operator/messages/:message_id/cancel`
 - `POST /v1/operator/approvals/:approval_id/approve`
 - `POST /v1/operator/approvals/:approval_id/reject`
-- `POST /v1/operator/conversations/:conversation_id/redirect`
+- `POST /v1/operator/conversations/:conversation_id/resume`
 - `GET /v1/operator/events`
 - `GET /v1/operator/agents`
 - `GET /v1/operator/conversations/:conversation_id`

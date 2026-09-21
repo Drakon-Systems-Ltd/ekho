@@ -35,6 +35,7 @@ EKHO_ENROLLMENT_TOKEN=ent_xxx.tok_xxx              # first run (mint from the op
 EKHO_DISPLAY_NAME=My Agent                          # optional — shown in the console
 # EKHO_AGENT_ID / EKHO_AGENT_SECRET                 # optional — pre-provisioned creds instead of enrolling
 # EKHO_HEARTBEAT_INTERVAL=30                        # optional — seconds
+# EKHO_OPERATOR_PUBKEY=<operator public key>        # optional — pin the operator's signing key up front instead of adopting it on first contact
 # EKHO_PEER_AUTOREPLY=0                             # optional — opt OUT of bounded agent-to-agent delegation (default on)
 # EKHO_PEER_TURN_BUDGET=0                           # optional local turn limit (peer wakes per conversation); 0/unset = no limit (default)
 ```
