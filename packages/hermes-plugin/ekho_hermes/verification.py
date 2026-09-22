@@ -79,10 +79,35 @@ def _touch_advisory_scope(scope_key: str, entry: _AdvisoryWarnEntry) -> None:
         del _advisory_warn_by_scope[oldest]
 
 
-def _format_kid_for_log(kid: str) -> str:
+def _entry_key_id(entry: Any) -> Optional[str]:
+    """The key id of one relay-served operator-key entry, normalized to ``str``.
+
+    Everything the relay sends is JSON it chose, and ``OperatorKeyEntry.from_dict``
+    copies ``key_id`` through untyped: a hostile or buggy relay can serve a number,
+    a bool, a list. Coercing once HERE — the single point where a relay-controlled
+    key id enters this module — is what keeps every downstream ``str`` annotation
+    honest, and what stops a malformed id from reaching code that assumes a string
+    (``sorted()`` over a mixed set, ``set.add()`` of an unhashable, the per-char
+    escaper). Falsiness is judged on the raw value, so a missing/empty id is still
+    "no id" rather than the string ``"None"``.
+    """
+    kid = getattr(entry, "key_id", None)
+    if not kid:
+        return None
+    return kid if isinstance(kid, str) else repr(kid)
+
+
+def _format_kid_for_log(kid: Any) -> str:
     """Relay-supplied key ids are untrusted. Escape C0/C1 controls (U+0000-U+001F,
     U+007F-U+009F, including CSI/OSC) and Unicode line separators so each warning
-    stays one bounded line; truncate the ESCAPED form, never the raw id."""
+    stays one bounded line; truncate the ESCAPED form, never the raw id.
+
+    Total by construction: it must never raise, whatever the relay served. Callers
+    normalize at the boundary (``_entry_key_id``), so the non-str branch here is
+    belt-and-braces for any future path that forgets to.
+    """
+    if not isinstance(kid, str):
+        kid = repr(kid)
     out = []
     for ch in kid:
         code = ord(ch)
@@ -100,7 +125,12 @@ def _format_kid_for_log(kid: str) -> str:
             out.append("\\u%04x" % code)
         else:
             out.append(ch)
-    escaped = "".join(out)
+    # A lone UTF-16 surrogate (json.loads decodes "\ud800" happily) is not a
+    # control character, so the escaping above passes it through — and then
+    # logging's own encode step dies on it, which the stdlib swallows in
+    # handleError, silently dropping the whole security warning. Round-tripping
+    # through UTF-8 turns anything unencodable into a visible backslash escape.
+    escaped = "".join(out).encode("utf-8", errors="backslashreplace").decode("utf-8")
     if len(escaped) <= MAX_ADVISORY_KID_CHARS:
         return escaped
     return escaped[:MAX_ADVISORY_KID_CHARS] + "..."
@@ -286,7 +316,7 @@ def _apply_signed_revocations(
     is recorded as advisory: the key is skipped for new adoption, nothing else.
     """
     for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
+        key_id = _entry_key_id(k)
         if not key_id or not getattr(k, "revoked", False):
             continue
         at = getattr(k, "revoked_at", None)
@@ -335,7 +365,7 @@ def _clear_tombstones_on_signed_unrevoke(
     does not emit unrevoke_sig.
     """
     for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
+        key_id = _entry_key_id(k)
         sig = getattr(k, "unrevoke_sig", None)
         revoked_at = getattr(k, "unrevoke_revoked_at", None) or (
             k.get("unrevoke_revoked_at") if isinstance(k, dict) else None
@@ -501,7 +531,7 @@ def sync_pinned_operator_keys(
         adopted = False
         at = iso_now()
         for k in operator_keys:
-            key_id = getattr(k, "key_id", None)
+            key_id = _entry_key_id(k)
             public_key = getattr(k, "public_key", None)
             if key_id and public_key and key_id not in advisory and key_id not in revoked_ledger:
                 pinned[key_id] = public_key
@@ -517,7 +547,7 @@ def sync_pinned_operator_keys(
             identity_obj.operator_key_admissions = admissions
             return True
     for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
+        key_id = _entry_key_id(k)
         if not key_id:
             continue
         if key_id in pinned:

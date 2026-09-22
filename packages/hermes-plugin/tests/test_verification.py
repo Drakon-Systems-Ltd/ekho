@@ -3,6 +3,7 @@ one-shot TOFU bootstrap), per-message verdicts, and the execution-authority
 gate."""
 
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -484,6 +485,96 @@ def test_escaping_happens_before_the_per_key_length_bound():
     assert rendered == "\\u009b\\u009d\\u009b\\u009d\\u009b\\u..."
     assert len(rendered[:-3]) == 32
     assert "\\u009b\\u009d" * 6 not in log.notes[0]
+
+
+def test_a_non_string_key_id_cannot_veto_a_signed_revocation_in_the_same_poll():
+    """`key_id` is copied out of the relay's JSON untyped, so a hostile relay can
+    serve a number. It used to blow up the per-char escaper with a TypeError that
+    escaped `sync_pinned_operator_keys` AFTER the signed revocation had been
+    applied to the local copies but BEFORE they were written back — silently
+    discarding the whole poll's trust work, on every poll, forever."""
+    ident = _pinned_pair()
+    log = CaptureLog()
+    poisoned = OperatorKeyEntry(key_id=12345, public_key="p", revoked=True)
+    signed_kill = OperatorKeyEntry(
+        key_id=OP2_KID,
+        public_key=OP2_PUB,
+        revoked=True,
+        revoked_at=REVOKED_AT,
+        revocation_sig=rev_sig(OP1_SEED, OP2_KID),
+    )
+
+    assert sync_pinned_operator_keys(ident, [poisoned, signed_kill], fleet_id=FLEET, log=log) is True
+
+    # The signed revocation landed exactly as it would with no poison present.
+    assert ident.revoked_operator_keys == {OP2_KID: REVOKED_AT}
+    assert OP2_KID not in ident.pinned_operator_keys
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB}
+    # ...and the malformed id is still advisory: warned about, never adopted.
+    assert any("12345" in n and "ADVISORY" in n for n in log.notes)
+    assert "12345" not in ident.pinned_operator_keys
+    assert 12345 not in ident.pinned_operator_keys
+    assert "12345" not in ident.revoked_operator_keys
+
+
+def test_non_string_key_ids_stay_advisory_and_are_never_adopted():
+    """Every shape a JSON decode can hand us, including the unhashable ones that
+    used to die in `set.add`, and a mixed set that used to die in `sorted()`."""
+    log = CaptureLog()
+    served = [
+        OperatorKeyEntry(key_id=k, public_key=OP1_PUB, revoked=True)
+        for k in (12345, 1.5, True, ["a"], {"k": "v"}, "test-key-1")
+    ]
+    ident = _pinned_pair()
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log) is False
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    assert ident.revoked_operator_keys == {}
+    assert len(log.notes) == 1
+    assert "6 operator keys" in log.notes[0]
+
+    # A never-pinned identity must not TOFU-adopt any of them either.
+    fresh = EkhoIdentity(seed_hex="44" * 32)
+    assert sync_pinned_operator_keys(fresh, served, fleet_id=FLEET, log=QUIET) is False
+    assert fresh.pinned_operator_keys == {}
+    assert fresh.tofu_at is None
+
+
+def test_a_lone_surrogate_key_id_still_produces_an_encodable_warning():
+    """`json.loads('"\\ud800"')` yields a lone surrogate: not a control character,
+    so the escaper passed it through, and logging's own encode step then died on
+    it — inside `handleError`, which swallows the exception and drops the entire
+    advisory security warning."""
+    ident = _pinned_pair()
+    log = CaptureLog()
+    kid = "\ud800" + OP1_KID
+
+    sync_pinned_operator_keys(
+        ident, [OperatorKeyEntry(key_id=kid, public_key=OP1_PUB, revoked=True)], fleet_id=FLEET, log=log
+    )
+
+    assert len(log.notes) == 1
+    # The real property: a handler can actually write this line.
+    log.notes[0].encode("utf-8")
+    assert "\\ud800" in log.notes[0]
+    assert "ADVISORY" in log.notes[0]
+    assert OP1_KID[:8] in log.notes[0]
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    assert ident.revoked_operator_keys == {}
+
+
+def test_a_real_logger_emits_the_advisory_warning_for_a_hostile_key_id(caplog):
+    """End to end through stdlib logging, where the swallow actually happened."""
+    ident = _pinned_pair()
+    served = [
+        OperatorKeyEntry(key_id=k, public_key=OP1_PUB, revoked=True)
+        for k in ("\ud800\udfff", 12345, "\u009bok")
+    ]
+    with caplog.at_level(logging.WARNING, logger="ekho_hermes.verification"):
+        sync_pinned_operator_keys(ident, served, fleet_id=FLEET)
+    records = [r for r in caplog.records if "ADVISORY" in r.getMessage()]
+    assert len(records) == 1
+    # What a StreamHandler would do, minus the swallow.
+    logging.Formatter().format(records[0]).encode("utf-8")
 
 
 def test_throttled_advisory_claims_still_never_unpin_tombstone_or_admit():
