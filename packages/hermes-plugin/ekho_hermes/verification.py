@@ -15,7 +15,9 @@ Bridges the SDK verifier (ekho.verify_inbound) to the autoreply loop:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Sequence, Set
 
@@ -30,6 +32,168 @@ from .messages import iso_now
 # cannot prove must never pass in silence, so callers that don't inject a logger
 # still get the warning (#27).
 logger = logging.getLogger(__name__)
+
+#: How many identical advisory polls to swallow before a reminder. ~5s poll
+#: -> a reminder about every 10 minutes, not 150k lines in a day and a half (#74,
+#: porting the OpenClaw-side fix from #66).
+ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY = 120
+#: Process-local cap on identity+fleet throttle scopes. Eviction re-emits that
+#: scope's next first-seen warning; it cannot mute a different live scope.
+ADVISORY_REVOCATION_WARNING_MAX_SCOPES = 64
+MAX_ADVISORY_KEYS_IN_LOG = 8
+MAX_ADVISORY_KID_CHARS = 32
+
+
+@dataclass
+class _AdvisoryWarnEntry:
+    """What one identity+fleet scope has already said about its advisory set."""
+
+    fingerprint: str
+    suppressed: int
+
+
+#: Process-local only. Keyed by identity public key + fleet so one box cannot
+#: mute another identity or fleet. Cleared when the advisory set goes empty.
+_advisory_warn_by_scope: Dict[str, _AdvisoryWarnEntry] = {}
+
+
+def reset_advisory_revocation_warning_state_for_tests() -> None:
+    """Test-only isolation for the process-local scope map. Not plugin runtime API."""
+    _advisory_warn_by_scope.clear()
+
+
+def _advisory_scope_key(identity_obj: Any, fleet_id: Optional[str]) -> str:
+    """Identity+fleet scope for the advisory-warning throttle. Never logged."""
+    return f"{identity_obj.public_key_b64url()}\0{fleet_id or ''}"
+
+
+def _touch_advisory_scope(scope_key: str, entry: _AdvisoryWarnEntry) -> None:
+    """Move-to-end insert with LRU-ish eviction, so the oldest untouched scope is
+    the one dropped when the process-local map is over its cap."""
+    _advisory_warn_by_scope.pop(scope_key, None)
+    _advisory_warn_by_scope[scope_key] = entry
+    while len(_advisory_warn_by_scope) > ADVISORY_REVOCATION_WARNING_MAX_SCOPES:
+        oldest = next(iter(_advisory_warn_by_scope))
+        if oldest == scope_key:
+            break
+        del _advisory_warn_by_scope[oldest]
+
+
+def _entry_key_id(entry: Any) -> Optional[str]:
+    """The key id of one relay-served operator-key entry, normalized to ``str``.
+
+    Everything the relay sends is JSON it chose, and ``OperatorKeyEntry.from_dict``
+    copies ``key_id`` through untyped: a hostile or buggy relay can serve a number,
+    a bool, a list. Coercing once HERE — the single point where a relay-controlled
+    key id enters this module — is what keeps every downstream ``str`` annotation
+    honest, and what stops a malformed id from reaching code that assumes a string
+    (``sorted()`` over a mixed set, ``set.add()`` of an unhashable, the per-char
+    escaper). Falsiness is judged on the raw value, so a missing/empty id is still
+    "no id" rather than the string ``"None"``.
+    """
+    kid = getattr(entry, "key_id", None)
+    if not kid:
+        return None
+    return kid if isinstance(kid, str) else repr(kid)
+
+
+def _format_kid_for_log(kid: Any) -> str:
+    """Relay-supplied key ids are untrusted. Escape C0/C1 controls (U+0000-U+001F,
+    U+007F-U+009F, including CSI/OSC) and Unicode line separators so each warning
+    stays one bounded line; truncate the ESCAPED form, never the raw id.
+
+    Total by construction: it must never raise, whatever the relay served. Callers
+    normalize at the boundary (``_entry_key_id``), so the non-str branch here is
+    belt-and-braces for any future path that forgets to.
+    """
+    if not isinstance(kid, str):
+        kid = repr(kid)
+    out = []
+    for ch in kid:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\0":
+            out.append("\\0")
+        elif code < 0x20 or 0x7F <= code <= 0x9F or code in (0x2028, 0x2029):
+            out.append("\\u%04x" % code)
+        else:
+            out.append(ch)
+    # A lone UTF-16 surrogate (json.loads decodes "\ud800" happily) is not a
+    # control character, so the escaping above passes it through — and then
+    # logging's own encode step dies on it, which the stdlib swallows in
+    # handleError, silently dropping the whole security warning. Round-tripping
+    # through UTF-8 turns anything unencodable into a visible backslash escape.
+    escaped = "".join(out).encode("utf-8", errors="backslashreplace").decode("utf-8")
+    if len(escaped) <= MAX_ADVISORY_KID_CHARS:
+        return escaped
+    return escaped[:MAX_ADVISORY_KID_CHARS] + "..."
+
+
+def _format_advisory_key_list(kids: Sequence[str]) -> str:
+    """Bounded sample for the log line. Fingerprinting uses the complete sorted set."""
+    shown = [_format_kid_for_log(k) for k in kids[:MAX_ADVISORY_KEYS_IN_LOG]]
+    omitted = len(kids) - len(shown)
+    listed = ", ".join(shown)
+    if omitted <= 0:
+        return listed
+    return f"{listed} (+{omitted} omitted)"
+
+
+def _format_advisory_warning(kids: Sequence[str]) -> str:
+    if len(kids) == 1:
+        return (
+            f"[ekho] relay reports operator key {_format_kid_for_log(kids[0])} as REVOKED without a "
+            "valid revocation signature. Treating the claim as ADVISORY: the key is NOT unpinned and "
+            "NOT tombstoned, but it will not be newly adopted until a signed revocation arrives."
+        )
+    return (
+        f"[ekho] relay reports {len(kids)} operator keys as REVOKED without a valid revocation "
+        f"signature: {_format_advisory_key_list(kids)}. Treating the claim as ADVISORY: the keys are "
+        "NOT unpinned and NOT tombstoned, but they will not be newly adopted until a signed "
+        "revocation arrives."
+    )
+
+
+def _format_advisory_summary(kids: Sequence[str], suppressed: int) -> str:
+    return (
+        f"[ekho] still treating {len(kids)} unsigned/invalid operator-key revocation claim(s) as "
+        f"ADVISORY (suppressed {suppressed} identical warning(s) this process). "
+        f"Keys: {_format_advisory_key_list(kids)}. Not unpinned, not tombstoned; still blocking "
+        "new adoption."
+    )
+
+
+def _warn_advisory_revocations(log: Any, scope_key: str, advisory: Set[str]) -> None:
+    """One aggregate warning when the advisory set appears or changes; identical
+    repeats are silent; a bounded reminder keeps the condition visible; an empty
+    set forgets the scope so a later recurrence is logged again.
+
+    Trust is untouched here — this is log volume only (#74). It must never write
+    to ``pinned``, ``revoked_ledger`` or the advisory set itself.
+    """
+    if not advisory:
+        _advisory_warn_by_scope.pop(scope_key, None)
+        return
+    kids = sorted(advisory)
+    # Canonical JSON is unambiguous; a NUL-join collides ["a\0b"] with ["a", "b"].
+    fingerprint = hashlib.sha256(json.dumps(kids).encode("utf-8")).hexdigest()
+    prev = _advisory_warn_by_scope.get(scope_key)
+    if prev is None or prev.fingerprint != fingerprint:
+        log.warning("%s", _format_advisory_warning(kids))
+        _touch_advisory_scope(scope_key, _AdvisoryWarnEntry(fingerprint=fingerprint, suppressed=0))
+        return
+    prev.suppressed += 1
+    if prev.suppressed >= ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY:
+        log.warning("%s", _format_advisory_summary(kids, prev.suppressed))
+        prev.suppressed = 0
+        _touch_advisory_scope(scope_key, prev)
 
 
 def build_signed_send_fields(
@@ -75,9 +239,10 @@ def build_signed_send_fields(
     return {"agent_sig": sig, "key_id": kid, "sig_canonical": canonical}
 
 
-def _note_advisory_claim(log: Any, out: Dict[str, Any], key_id: str) -> None:
+def _note_advisory_claim(out: Dict[str, Any], key_id: str) -> None:
     """The relay says a key is dead but cannot prove it. Skip the key for NEW
-    adoption, write nothing, say so out loud.
+    adoption, write nothing. Visibility is the process-local aggregate throttle in
+    ``_warn_advisory_revocations`` — not a per-key line on every poll (#74).
 
     Deleting the pin here is the tempting one-liner and it is wrong twice over:
     it lets whoever controls the relay drop trust unilaterally, AND a deleted pin
@@ -86,12 +251,6 @@ def _note_advisory_claim(log: Any, out: Dict[str, Any], key_id: str) -> None:
     a tombstone takes a signature.
     """
     out["advisory"].add(key_id)
-    log.warning(
-        "[ekho] relay reports operator key %s as REVOKED without a valid revocation "
-        "signature. Treating the claim as ADVISORY: the key is NOT unpinned and NOT "
-        "tombstoned, but it will not be newly adopted until a signed revocation arrives.",
-        key_id,
-    )
 
 
 def _note_last_root_refusal(log: Any, key_id: str) -> None:
@@ -157,7 +316,7 @@ def _apply_signed_revocations(
     is recorded as advisory: the key is skipped for new adoption, nothing else.
     """
     for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
+        key_id = _entry_key_id(k)
         if not key_id or not getattr(k, "revoked", False):
             continue
         at = getattr(k, "revoked_at", None)
@@ -169,7 +328,7 @@ def _apply_signed_revocations(
             and signed_by_a_pinned_key(_identity.revocation_payload(fleet_id, key_id, at), sig)
         )
         if not proven:
-            _note_advisory_claim(log, out, key_id)
+            _note_advisory_claim(out, key_id)
         elif key_id in pinned and len(pinned) == 1:
             _note_last_root_refusal(log, key_id)
         else:
@@ -206,7 +365,7 @@ def _clear_tombstones_on_signed_unrevoke(
     does not emit unrevoke_sig.
     """
     for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
+        key_id = _entry_key_id(k)
         sig = getattr(k, "unrevoke_sig", None)
         revoked_at = getattr(k, "unrevoke_revoked_at", None) or (
             k.get("unrevoke_revoked_at") if isinstance(k, dict) else None
@@ -268,6 +427,7 @@ def _apply_relay_key_claims(
     revoked_ledger: Dict[str, str],
     admissions: Dict[str, Dict[str, Any]],
     signed_by_a_pinned_key: Any,
+    scope_key: str,
 ) -> Dict[str, Any]:
     """Apply the relay's revocation / un-revocation claims to the working trust
     root (#27). Mutates ``pinned``, ``revoked_ledger`` and ``admissions`` in
@@ -301,6 +461,7 @@ def _apply_relay_key_claims(
         signed_by_a_pinned_key=signed_by_a_pinned_key,
         out=out,
     )
+    _warn_advisory_revocations(log, scope_key, out["advisory"])
     return out
 
 
@@ -357,6 +518,7 @@ def sync_pinned_operator_keys(
         revoked_ledger=revoked_ledger,
         admissions=admissions,
         signed_by_a_pinned_key=signed_by_a_pinned_key,
+        scope_key=_advisory_scope_key(identity_obj, fleet_id),
     )
     advisory = claims["advisory"]
     changed = claims["pin_removed"]
@@ -369,7 +531,7 @@ def sync_pinned_operator_keys(
         adopted = False
         at = iso_now()
         for k in operator_keys:
-            key_id = getattr(k, "key_id", None)
+            key_id = _entry_key_id(k)
             public_key = getattr(k, "public_key", None)
             if key_id and public_key and key_id not in advisory and key_id not in revoked_ledger:
                 pinned[key_id] = public_key
@@ -385,7 +547,7 @@ def sync_pinned_operator_keys(
             identity_obj.operator_key_admissions = admissions
             return True
     for k in operator_keys:
-        key_id = getattr(k, "key_id", None)
+        key_id = _entry_key_id(k)
         if not key_id:
             continue
         if key_id in pinned:

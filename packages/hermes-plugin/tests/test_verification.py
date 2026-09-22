@@ -3,6 +3,8 @@ one-shot TOFU bootstrap), per-message verdicts, and the execution-authority
 gate."""
 
 import hashlib
+import logging
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -12,6 +14,8 @@ from ekho_hermes.autoreply import AutoReplyState, process_inbox_once
 from ekho_hermes.credentials import EkhoIdentity
 from ekho import verify_canonical
 from ekho_hermes.verification import (
+    ADVISORY_REVOCATION_WARNING_MAX_SCOPES,
+    ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY,
     build_signed_send_fields,
     should_autowake,
     sync_pinned_operator_keys,
@@ -280,6 +284,370 @@ def test_revocation_signature_is_bound_to_fleet_and_time():
     ]
     assert sync_pinned_operator_keys(ident, restated, fleet_id=FLEET, log=QUIET) is False
     assert ident.pinned_operator_keys[OP1_KID] == OP1_PUB
+
+
+# --- #74: the advisory warning is aggregated and throttled (port of #66) ---
+# The claim is still ADVISORY and still blocks new adoption; only the LOG VOLUME
+# changed. One unsigned-revoked key used to cost a WARNING line every ~5s poll
+# forever, which is how a fleet ended up with thousands of lines an hour.
+ADV1 = OperatorKeyEntry(key_id="test-key-1", public_key=OP1_PUB, revoked=True)
+ADV2 = OperatorKeyEntry(key_id="test-key-2", public_key=OP1_PUB, revoked=True)
+ADV3 = OperatorKeyEntry(key_id="test-key-3", public_key=OP1_PUB, revoked=True)
+THREE_ADVISORY = [ADV1, ADV2, ADV3]
+
+
+def _pinned_pair(seed="00"):
+    return EkhoIdentity(
+        seed_hex=seed * 32, pinned_operator_keys={OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    )
+
+
+def test_advisory_set_warns_once_per_poll_not_once_per_key():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    assert sync_pinned_operator_keys(ident, THREE_ADVISORY, fleet_id=FLEET, log=log) is False
+    assert len(log.notes) == 1
+    for kid in ("test-key-1", "test-key-2", "test-key-3"):
+        assert kid in log.notes[0]
+    assert "3 operator keys" in log.notes[0]
+    assert "without a valid revocation signature" in log.notes[0]
+    assert "ADVISORY" in log.notes[0]
+
+
+def test_identical_advisory_set_is_silent_on_every_later_poll():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    sync_pinned_operator_keys(ident, THREE_ADVISORY, fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+    for _ in range(10):
+        assert sync_pinned_operator_keys(ident, THREE_ADVISORY, fleet_id=FLEET, log=log) is False
+    assert len(log.notes) == 1  # the whole point of #74
+
+
+def test_identical_repeats_get_one_bounded_summary_then_go_quiet_again():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+
+    for _ in range(ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY - 1):
+        sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 2
+    assert "suppressed" in log.notes[1]
+    assert str(ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY) in log.notes[1]
+    assert "test-key-1" in log.notes[1]
+    assert "ADVISORY" in log.notes[1]
+
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 2  # counter reset — quiet until the next interval
+
+
+def test_a_changed_advisory_set_warns_immediately_and_resets_the_counter():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+
+    # A key ADDED to the set: new fingerprint, so it is visible on the spot.
+    sync_pinned_operator_keys(ident, [ADV1, ADV2], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 2
+    assert "test-key-1" in log.notes[1] and "test-key-2" in log.notes[1]
+
+    # A key REMOVED from the set: also a new fingerprint.
+    sync_pinned_operator_keys(ident, [ADV2], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 3
+    assert "test-key-2" in log.notes[2]
+    assert "test-key-1" not in log.notes[2]
+
+    # And the suppression counter restarted with the change: a full interval of
+    # identical polls is needed before the next summary.
+    for _ in range(ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY - 1):
+        sync_pinned_operator_keys(ident, [ADV2], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 3
+    sync_pinned_operator_keys(ident, [ADV2], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 4
+    assert "suppressed" in log.notes[3]
+
+
+def test_an_emptied_advisory_set_forgets_the_scope_so_a_recurrence_warns_again():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+
+    # The relay stops claiming it — nothing to say, and the scope is forgotten.
+    sync_pinned_operator_keys(ident, [OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB)], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+
+    # The SAME set coming back is a fresh condition, not a suppressed repeat.
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 2
+    assert "test-key-1" in log.notes[1]
+    assert "ADVISORY" in log.notes[1]
+    assert "suppressed" not in log.notes[1]
+
+
+def test_throttle_never_cross_suppresses_another_fleet_or_identity():
+    ident = _pinned_pair()
+    other = _pinned_pair(seed="11")
+    log = CaptureLog()
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id="flt_other", log=log)
+    assert len(log.notes) == 2
+    sync_pinned_operator_keys(other, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 3
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 3  # the first scope is still suppressed
+
+
+def test_scope_map_is_capped_and_eviction_only_re_warns_the_evicted_scope():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    cap = ADVISORY_REVOCATION_WARNING_MAX_SCOPES
+    for i in range(cap + 1):
+        sync_pinned_operator_keys(ident, [ADV1], fleet_id=f"flt_cap_{i}", log=log)
+    assert len(log.notes) == cap + 1
+
+    # The newest scope is still tracked, so it stays quiet...
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id=f"flt_cap_{cap}", log=log)
+    assert len(log.notes) == cap + 1
+    # ...while the oldest was evicted, so it warns once more (never silently).
+    sync_pinned_operator_keys(ident, [ADV1], fleet_id="flt_cap_0", log=log)
+    assert len(log.notes) == cap + 2
+    assert "test-key-1" in log.notes[cap + 1]
+    # Eviction touched logs only — trust is exactly where it was.
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    assert ident.revoked_operator_keys == {}
+
+
+def test_bounded_key_sample_with_an_omitted_count_and_a_full_set_fingerprint():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    kids = [f"test-key-{i:02d}{'x' * 80}" for i in range(12)]
+    served = [OperatorKeyEntry(key_id=k, public_key=OP1_PUB, revoked=True) for k in kids]
+    sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+    assert "(+4 omitted)" in log.notes[0]
+    assert len(log.notes[0]) < 1200
+    assert "test-key-00" in log.notes[0]
+    assert kids[11] not in log.notes[0]
+
+    # The fingerprint covers the WHOLE sorted set, not just the sample: changing
+    # only an un-shown key is still a change.
+    tweaked = served[:11] + [OperatorKeyEntry(key_id="test-key-zz" + "y" * 80, public_key=OP1_PUB, revoked=True)]
+    sync_pinned_operator_keys(ident, tweaked, fleet_id=FLEET, log=log)
+    assert len(log.notes) == 2
+    assert "(+4 omitted)" in log.notes[1]
+
+
+def test_control_characters_in_a_relay_supplied_key_id_cannot_break_the_log_line():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    # C1 CSI/OSC first so \u009b/\u009d stay inside the 32-char escaped bound.
+    kid = "\u009b\u009d\n\r\t\0\u2028\u2029"
+    claim = OperatorKeyEntry(key_id=kid, public_key=OP1_PUB, revoked=True)
+    raw_controls = re.compile(r"[\u0000-\u001f\u007f-\u009f\u2028\u2029]")
+
+    sync_pinned_operator_keys(ident, [claim], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 1
+    assert not raw_controls.search(log.notes[0])
+    for escaped in ("\\n", "\\r", "\\t", "\\0", "\\u2028", "\\u2029", "\\u009b", "\\u009d"):
+        assert escaped in log.notes[0]
+    assert "ADVISORY" in log.notes[0]
+    assert len(log.notes[0]) < 1200
+
+    # The periodic summary renders the same key ids, so it is bounded too.
+    for _ in range(ADVISORY_REVOCATION_WARNING_SUMMARY_EVERY):
+        sync_pinned_operator_keys(ident, [claim], fleet_id=FLEET, log=log)
+    assert len(log.notes) == 2
+    assert not raw_controls.search(log.notes[1])
+    assert "suppressed" in log.notes[1]
+    assert "\\u009b" in log.notes[1]
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    assert ident.revoked_operator_keys == {}
+
+
+def test_escaping_happens_before_the_per_key_length_bound():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    # Raw length 12 < 32; each C1 expands to 6 escaped chars (72 > 32), so a
+    # truncate-then-escape would emit all 72 with no ellipsis.
+    kid = "\u009b\u009d" * 6
+    sync_pinned_operator_keys(
+        ident, [OperatorKeyEntry(key_id=kid, public_key=OP1_PUB, revoked=True)], fleet_id=FLEET, log=log
+    )
+    rendered = re.search(r"operator key (.+?) as REVOKED", log.notes[0]).group(1)
+    assert rendered == "\\u009b\\u009d\\u009b\\u009d\\u009b\\u..."
+    assert len(rendered[:-3]) == 32
+    assert "\\u009b\\u009d" * 6 not in log.notes[0]
+
+
+def test_a_non_string_key_id_cannot_veto_a_signed_revocation_in_the_same_poll():
+    """`key_id` is copied out of the relay's JSON untyped, so a hostile relay can
+    serve a number. It used to blow up the per-char escaper with a TypeError that
+    escaped `sync_pinned_operator_keys` AFTER the signed revocation had been
+    applied to the local copies but BEFORE they were written back — silently
+    discarding the whole poll's trust work, on every poll, forever."""
+    ident = _pinned_pair()
+    log = CaptureLog()
+    poisoned = OperatorKeyEntry(key_id=12345, public_key="p", revoked=True)
+    signed_kill = OperatorKeyEntry(
+        key_id=OP2_KID,
+        public_key=OP2_PUB,
+        revoked=True,
+        revoked_at=REVOKED_AT,
+        revocation_sig=rev_sig(OP1_SEED, OP2_KID),
+    )
+
+    assert sync_pinned_operator_keys(ident, [poisoned, signed_kill], fleet_id=FLEET, log=log) is True
+
+    # The signed revocation landed exactly as it would with no poison present.
+    assert ident.revoked_operator_keys == {OP2_KID: REVOKED_AT}
+    assert OP2_KID not in ident.pinned_operator_keys
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB}
+    # ...and the malformed id is still advisory: warned about, never adopted.
+    assert any("12345" in n and "ADVISORY" in n for n in log.notes)
+    assert "12345" not in ident.pinned_operator_keys
+    assert 12345 not in ident.pinned_operator_keys
+    assert "12345" not in ident.revoked_operator_keys
+
+
+def test_non_string_key_ids_stay_advisory_and_are_never_adopted():
+    """Every shape a JSON decode can hand us, including the unhashable ones that
+    used to die in `set.add`, and a mixed set that used to die in `sorted()`."""
+    log = CaptureLog()
+    served = [
+        OperatorKeyEntry(key_id=k, public_key=OP1_PUB, revoked=True)
+        for k in (12345, 1.5, True, ["a"], {"k": "v"}, "test-key-1")
+    ]
+    ident = _pinned_pair()
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log) is False
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    assert ident.revoked_operator_keys == {}
+    assert len(log.notes) == 1
+    assert "6 operator keys" in log.notes[0]
+
+    # A never-pinned identity must not TOFU-adopt any of them either.
+    fresh = EkhoIdentity(seed_hex="44" * 32)
+    assert sync_pinned_operator_keys(fresh, served, fleet_id=FLEET, log=QUIET) is False
+    assert fresh.pinned_operator_keys == {}
+    assert fresh.tofu_at is None
+
+
+def test_a_lone_surrogate_key_id_still_produces_an_encodable_warning():
+    """`json.loads('"\\ud800"')` yields a lone surrogate: not a control character,
+    so the escaper passed it through, and logging's own encode step then died on
+    it — inside `handleError`, which swallows the exception and drops the entire
+    advisory security warning."""
+    ident = _pinned_pair()
+    log = CaptureLog()
+    kid = "\ud800" + OP1_KID
+
+    sync_pinned_operator_keys(
+        ident, [OperatorKeyEntry(key_id=kid, public_key=OP1_PUB, revoked=True)], fleet_id=FLEET, log=log
+    )
+
+    assert len(log.notes) == 1
+    # The real property: a handler can actually write this line.
+    log.notes[0].encode("utf-8")
+    assert "\\ud800" in log.notes[0]
+    assert "ADVISORY" in log.notes[0]
+    assert OP1_KID[:8] in log.notes[0]
+    assert ident.pinned_operator_keys == {OP1_KID: OP1_PUB, OP2_KID: OP2_PUB}
+    assert ident.revoked_operator_keys == {}
+
+
+def test_a_real_logger_emits_the_advisory_warning_for_a_hostile_key_id(caplog):
+    """End to end through stdlib logging, where the swallow actually happened."""
+    ident = _pinned_pair()
+    served = [
+        OperatorKeyEntry(key_id=k, public_key=OP1_PUB, revoked=True)
+        for k in ("\ud800\udfff", 12345, "\u009bok")
+    ]
+    with caplog.at_level(logging.WARNING, logger="ekho_hermes.verification"):
+        sync_pinned_operator_keys(ident, served, fleet_id=FLEET)
+    records = [r for r in caplog.records if "ADVISORY" in r.getMessage()]
+    assert len(records) == 1
+    # What a StreamHandler would do, minus the swallow.
+    logging.Formatter().format(records[0]).encode("utf-8")
+
+
+def test_throttled_advisory_claims_still_never_unpin_tombstone_or_admit():
+    """The #27 guarantees, re-proven across the throttled path: advisory means
+    not unpinned, not tombstoned, and still blocked from NEW adoption — for the
+    first noisy poll and every silent one after it."""
+    pinned_id = EkhoIdentity(seed_hex="00" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    unsigned_op1 = OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True)
+    log = CaptureLog()
+    for _ in range(25):
+        assert sync_pinned_operator_keys(pinned_id, [unsigned_op1], fleet_id=FLEET, log=log) is False
+    assert pinned_id.pinned_operator_keys[OP1_KID] == OP1_PUB  # never unpinned
+    assert pinned_id.revoked_operator_keys == {}  # never tombstoned
+    assert len(log.notes) == 1  # ...and it cost exactly one line
+
+    # Never newly adopted by TOFU, on any poll.
+    fresh = EkhoIdentity(seed_hex="22" * 32)
+    for _ in range(25):
+        assert sync_pinned_operator_keys(fresh, [unsigned_op1], fleet_id=FLEET, log=QUIET) is False
+    assert fresh.pinned_operator_keys == {}
+    assert fresh.revoked_operator_keys == {}
+    assert fresh.tofu_at is None
+
+    # Never newly adopted by the endorsement chain either.
+    chain_root = EkhoIdentity(seed_hex="33" * 32, pinned_operator_keys={OP1_KID: OP1_PUB})
+    esig = identity.sign_canonical(identity.endorsement_payload(FLEET, OP2_KID, OP2_PUB), OP1_SEED)
+    claimed = OperatorKeyEntry(
+        key_id=OP2_KID,
+        public_key=OP2_PUB,
+        revoked=True,
+        endorsed_by_key_id=OP1_KID,
+        endorsement_sig=esig,
+    )
+    for _ in range(25):
+        assert sync_pinned_operator_keys(chain_root, [claimed], fleet_id=FLEET, log=QUIET) is False
+    assert OP2_KID not in chain_root.pinned_operator_keys
+    assert chain_root.pinned_operator_keys[OP1_KID] == OP1_PUB
+
+
+def test_a_signed_revocation_still_lands_after_the_advisory_warning_is_throttled():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    unsigned_op1 = OperatorKeyEntry(key_id=OP1_KID, public_key=OP1_PUB, revoked=True)
+    for _ in range(5):
+        assert sync_pinned_operator_keys(ident, [unsigned_op1], fleet_id=FLEET, log=log) is False
+    assert len(log.notes) == 1
+    assert ident.pinned_operator_keys[OP1_KID] == OP1_PUB
+
+    served = [_signed_revocation(OP1_KID, OP1_PUB, OP2_SEED)]
+    assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log) is True
+    assert OP1_KID not in ident.pinned_operator_keys
+    assert ident.revoked_operator_keys[OP1_KID] == REVOKED_AT
+    assert "revoked (signed" in log.text()
+
+
+def test_rotating_invalid_signature_bytes_do_not_defeat_the_set_dedupe():
+    ident = _pinned_pair()
+    log = CaptureLog()
+    for i in range(6):
+        rogue = bytes([9 + i]) * 32
+        served = [
+            OperatorKeyEntry(
+                key_id=OP1_KID,
+                public_key=OP1_PUB,
+                revoked=True,
+                revoked_at=REVOKED_AT,
+                revocation_sig=rev_sig(rogue, OP1_KID),
+            )
+        ]
+        assert sync_pinned_operator_keys(ident, served, fleet_id=FLEET, log=log) is False
+    assert len(log.notes) == 1
+    assert ident.pinned_operator_keys[OP1_KID] == OP1_PUB
+    assert ident.revoked_operator_keys == {}
 
 
 # --- #27: signed revocation is the ONLY thing that mutates the trust root ---

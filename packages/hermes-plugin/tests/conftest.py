@@ -17,3 +17,19 @@ for path in (_PLUGIN_ROOT, _SDK_PYTHON):
     p = str(path)
     if p not in sys.path:
         sys.path.insert(0, p)
+
+import pytest  # noqa: E402
+
+from ekho_hermes.verification import (  # noqa: E402
+    reset_advisory_revocation_warning_state_for_tests,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_advisory_warning_throttle():
+    """#74: the advisory-revocation warning throttle is process-local by design,
+    so without this one test's identical advisory set silences the next test's.
+    """
+    reset_advisory_revocation_warning_state_for_tests()
+    yield
+    reset_advisory_revocation_warning_state_for_tests()
