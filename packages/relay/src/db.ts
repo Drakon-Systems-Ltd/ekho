@@ -175,6 +175,50 @@ export const RETENTION_MAX_BATCHES_PER_TICK = 10;
 /** Upper bound on rows one sweep tick deletes from one table. */
 export const RETENTION_MAX_ROWS_PER_TICK = RETENTION_BATCH_SIZE * RETENTION_MAX_BATCHES_PER_TICK;
 
+/**
+ * One batch of the heartbeat retention sweep (#75). Exported so a test can
+ * EXPLAIN QUERY PLAN it, because this statement's cost is entirely a property
+ * of the plan SQLite picks — see below.
+ *
+ * Candidates are aged rows that are NOT their agent's newest, ordered by
+ * (received_at DESC, rowid DESC) so an exact timestamp tie resolves to the
+ * later-inserted row. The correlated subquery runs once per candidate, so the
+ * whole sweep hinges on that subquery being a seek rather than a sort:
+ *
+ *   idx_heartbeats_agent_recency is (agent_id, received_at), and SQLite appends
+ *   the rowid to every non-unique index key — so the stored key is effectively
+ *   (agent_id, received_at, rowid), exactly the subquery's ORDER BY in reverse.
+ *   SQLite walks that index backwards from the end of the agent's key range and
+ *   stops on the first entry: one seek, no sort, no TEMP B-TREE. Measured on
+ *   2.3M rows (the #75 database's order of magnitude): ~30-75ms per 5,000-row
+ *   batch, i.e. well under a second for a full 50,000-row tick.
+ *
+ * Two things would break that, both regressions worth naming:
+ *
+ *   1. Dropping idx_heartbeats_agent_recency (schema.ts + migration 011). The
+ *      subquery falls back to a full scan plus TEMP B-TREE FOR ORDER BY per
+ *      candidate row: ~62s per batch on the same 2.3M rows, which would block
+ *      the event loop for minutes per tick while a backlog drains.
+ *   2. Rewriting the keep-newest test as EXISTS ("is some row for this agent
+ *      strictly newer than me"). It reads like the cheaper formulation and is
+ *      logically equivalent, but the OR in its tiebreak costs the range seek:
+ *      SQLite scans the agent's key range forward from the oldest entry until
+ *      it finds a newer row, which is O(rows per agent) per candidate instead
+ *      of O(log n). Benchmarked neutral-to-8x slower (worst on few agents with
+ *      long histories: 271ms vs 23ms per batch at 5 agents x 40k rows).
+ */
+export const HEARTBEAT_RETENTION_DELETE_SQL = `DELETE FROM heartbeats WHERE rowid IN (
+   SELECT h.rowid FROM heartbeats h
+   WHERE h.received_at < ?
+     AND h.id <> (
+       SELECT h2.id FROM heartbeats h2
+       WHERE h2.agent_id = h.agent_id
+       ORDER BY h2.received_at DESC, h2.rowid DESC
+       LIMIT 1
+     )
+   LIMIT ?
+ )`;
+
 export class EkhoDb {
   private db: Database.Database;
 
@@ -3548,23 +3592,12 @@ export class EkhoDb {
    * must never find an agent with zero heartbeat rows just because it went quiet
    * for longer than the retention window, so the newest row per agent is
    * excluded from the delete rather than aged out. Same bounded batching as
-   * sweepEventRetention. Returns rows deleted.
+   * sweepEventRetention. See HEARTBEAT_RETENTION_DELETE_SQL for why the
+   * keep-newest predicate is shaped the way it is. Returns rows deleted.
    */
   sweepHeartbeatRetention(): number {
     const cutoff = new Date(Date.now() - config.heartbeatRetentionSeconds * 1000).toISOString();
-    const stmt = this.db.prepare(
-      `DELETE FROM heartbeats WHERE rowid IN (
-         SELECT h.rowid FROM heartbeats h
-         WHERE h.received_at < ?
-           AND h.id <> (
-             SELECT h2.id FROM heartbeats h2
-             WHERE h2.agent_id = h.agent_id
-             ORDER BY h2.received_at DESC, h2.rowid DESC
-             LIMIT 1
-           )
-         LIMIT ?
-       )`
-    );
+    const stmt = this.db.prepare(HEARTBEAT_RETENTION_DELETE_SQL);
 
     let deleted = 0;
     for (let batch = 0; batch < RETENTION_MAX_BATCHES_PER_TICK; batch += 1) {
