@@ -90,6 +90,15 @@ Ekho stores everything in a single SQLite database (WAL mode).
 - **Back up** by copying the DB file (and `-wal`/`-shm` siblings) while the relay is stopped, or use `sqlite3 ekho.sqlite ".backup backup.sqlite"` for a hot backup.
 - **Volume.** Mount `EKHO_DB_PATH`'s directory on durable storage (the compose volume / Helm PVC do this).
 - Migrations apply automatically on startup; no manual migration step is needed.
+- **Retention.** The sweep prunes heartbeat history after 48h
+  (`EKHO_HEARTBEAT_RETENTION_SECONDS`, always keeping each agent's newest row)
+  and high-volume operational events after 30 days
+  (`EKHO_EVENT_RETENTION_SECONDS`). The audit trail — operator keys, policy,
+  approvals, trust and quarantine decisions, room and feed lifecycle — is
+  retained regardless of both settings. Deleting rows does not shrink the file:
+  run `VACUUM` by hand in a quiet window if you need the space back (it needs
+  roughly the database's size again in free disk and takes an exclusive lock),
+  see [Performance](performance.md#reclaiming-disk-space).
 
 ## Upgrades
 
