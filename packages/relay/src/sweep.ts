@@ -69,6 +69,29 @@ export function startSweepJob(db: EkhoDb): { stop: () => void } {
       console.error("[sweep] attachment GC failed:", err);
     }
 
+    try {
+      // #75: events grew forever (one row per heartbeat poll per agent, plus
+      // every queue/ack). Only the operational types in PRUNABLE_EVENT_TYPES are
+      // eligible — the audit trail is never pruned.
+      const events = db.sweepEventRetention();
+      if (events > 0) {
+        console.log(`[sweep] events: ${events} pruned`);
+      }
+    } catch (err) {
+      console.error("[sweep] event retention sweep failed:", err);
+    }
+
+    try {
+      // #75: heartbeat history past retention, minus each agent's newest row so
+      // a quiet agent never drops off the health board entirely.
+      const heartbeats = db.sweepHeartbeatRetention();
+      if (heartbeats > 0) {
+        console.log(`[sweep] heartbeats: ${heartbeats} pruned (kept newest per agent)`);
+      }
+    } catch (err) {
+      console.error("[sweep] heartbeat retention sweep failed:", err);
+    }
+
     // Feeds: poll any source whose interval has elapsed. Fire-and-forget — the
     // network fetch is async; pollFeed stamps last_polled_at up-front so a feed
     // can't be double-polled across ticks.

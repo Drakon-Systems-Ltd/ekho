@@ -111,7 +111,21 @@ export const config = {
   // slack for the upload→send flow). Referenced ones are kept for the retention
   // window so conversation history can still serve them, then GC'd with bytes.
   attachmentUnboundTtlSeconds: resolveNumber(process.env.EKHO_ATTACHMENT_UNBOUND_TTL_SECONDS, 6 * 3600),
-  attachmentRetentionSeconds: resolveNumber(process.env.EKHO_ATTACHMENT_RETENTION_SECONDS, 30 * 24 * 3600)
+  attachmentRetentionSeconds: resolveNumber(process.env.EKHO_ATTACHMENT_RETENTION_SECONDS, 30 * 24 * 3600),
+
+  // History retention (#75). Both tables grew forever — every agent writes a
+  // heartbeat row (and an agent.heartbeat event) every heartbeatIntervalSeconds,
+  // so a small fleet still adds millions of rows a year.
+  // Heartbeats are pure liveness, not history, so they need no long window — but
+  // 2 days survives a long weekend before an operator looks at the health board.
+  // The newest row per agent is always kept regardless of age (see
+  // sweepHeartbeatRetention), so a quiet agent never loses its last-known state.
+  heartbeatRetentionSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_RETENTION_SECONDS, 48 * 3600),
+  // 30 days matches attachmentRetentionSeconds so operators learn ONE retention
+  // number across the relay. Only high-volume operational event types are ever
+  // pruned — audit events (operator keys, policy, approvals, trust) are kept
+  // forever, whatever this is set to. See PRUNABLE_EVENT_TYPES in db.ts.
+  eventRetentionSeconds: resolveNumber(process.env.EKHO_EVENT_RETENTION_SECONDS, 30 * 24 * 3600)
 } as const;
 
 // base64 inflates by 4/3; add headroom for the JSON envelope + filename/mime fields.

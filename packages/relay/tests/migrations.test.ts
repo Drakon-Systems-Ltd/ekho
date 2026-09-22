@@ -127,6 +127,10 @@ describe("transactional migrations (M6)", () => {
     db.exec("CREATE TABLE a2a_tasks (id TEXT PRIMARY KEY, fleet_id TEXT, agent_id TEXT, context_id TEXT, state TEXT, history_json TEXT, artifacts_json TEXT, metadata_json TEXT, created_at TEXT, updated_at TEXT)");
     db.exec("CREATE TABLE a2a_task_messages (task_id TEXT, message_id TEXT, PRIMARY KEY (task_id, message_id))");
     db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, fleet_id TEXT, sender_agent_id TEXT, created_at TEXT)");
+    // …and events/heartbeats (migration 001) so migration 022 (retention indexes
+    // on events(event_type, created_at) and heartbeats(received_at)) applies cleanly.
+    db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT)");
+    db.exec("CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT)");
     // Mark every migration through 014 as applied so runMigrationsOn runs 015+.
     const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
     for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
@@ -159,6 +163,9 @@ describe("transactional migrations (M6)", () => {
       -- agents (009) and rooms (017) budget columns, so migration 021 applies cleanly after 020.
       CREATE TABLE agents (id TEXT PRIMARY KEY, peer_turn_budget INTEGER NOT NULL DEFAULT 6);
       CREATE TABLE rooms (id TEXT PRIMARY KEY, project_turn_budget INTEGER NOT NULL DEFAULT 100);
+      -- events (001) and heartbeats (001), which migration 022 indexes.
+      CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT);
+      CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT);
     `);
     db.exec(`
       INSERT INTO a2a_tasks (id, fleet_id, agent_id, context_id, state, history_json, artifacts_json, created_at, updated_at)
@@ -195,6 +202,9 @@ describe("transactional migrations (M6)", () => {
       // The column definitions a real upgraded relay carries (009 and 017).
       db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_turn_budget INTEGER NOT NULL DEFAULT 6)");
       db.exec("CREATE TABLE rooms (id TEXT PRIMARY KEY, project_mode INTEGER NOT NULL DEFAULT 0, project_turn_budget INTEGER NOT NULL DEFAULT 100)");
+      // events/heartbeats (001) are what migration 022 adds its retention indexes to.
+      db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT)");
+      db.exec("CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT)");
       db.exec(`
         INSERT INTO agents (id, peer_turn_budget) VALUES
           ('old_default_6', 6), ('old_default_25', 25), ('custom_8', 8), ('custom_200', 200), ('custom_1', 1);

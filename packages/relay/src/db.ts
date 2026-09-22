@@ -126,6 +126,55 @@ export function runMigrationsOn(rawDb: Database.Database, migrationsDir: string)
   }
 }
 
+/**
+ * Event types the retention sweep is allowed to delete (#75).
+ *
+ * This is an ALLOWLIST, deliberately, not a denylist of audit types: an event
+ * type that is not named here is RETAINED FOREVER. A denylist would mean any
+ * `recordEvent("some_new_type", ...)` added later silently starts being deleted
+ * 30 days on without anyone having decided that is acceptable — including the
+ * operator-key audit trail (#50), which must survive whatever
+ * EKHO_EVENT_RETENTION_SECONDS is set to.
+ *
+ * Everything here is high-volume operational telemetry: the per-poll echoes and
+ * per-message bookkeeping that made `events` the fastest-growing table in the
+ * database. Operator/admin decisions and security-relevant state changes
+ * (operator_key.*, agent_key.*, policy.*, approval.*, agent.trust_changed,
+ * agent.${action}, auto-quarantine/unquarantine, room and feed lifecycle,
+ * dead-lettering) are absent on purpose. When in doubt, leave a type out.
+ */
+export const PRUNABLE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "agent.heartbeat",              // one per agent per heartbeat interval — the bulk of the table
+  "message.queued",
+  "message.acked",
+  "message.policy_denied",
+  "agent.rate_limit_exceeded",
+  "attachment.rate_limit_exceeded",
+  "feed.delivered",
+  "conversation.resumed",
+  "conversation.stalled",
+  "room.project_mode_changed"
+]);
+
+const PRUNABLE_EVENT_TYPE_LIST = [...PRUNABLE_EVENT_TYPES];
+
+/**
+ * Batching for the retention sweeps. The first sweep on a relay that has been
+ * running for months faces millions of rows; one unbounded DELETE holds the
+ * write lock on a WAL database for that entire time and visibly stalls live
+ * traffic. 5,000 rows per statement keeps each lock hold in the low
+ * milliseconds, and 10 statements per table per tick bounds one tick at 50,000
+ * rows (~100k/min per table at the default 30s sweep) so a large backlog drains
+ * over a few dozen ticks instead of wedging a single one. Steady state is far
+ * below one batch. No VACUUM runs here — reclaiming the file needs ~2x the DB
+ * size in free disk and an exclusive lock, which is an explicit operator
+ * decision, not a per-tick job.
+ */
+export const RETENTION_BATCH_SIZE = 5_000;
+export const RETENTION_MAX_BATCHES_PER_TICK = 10;
+/** Upper bound on rows one sweep tick deletes from one table. */
+export const RETENTION_MAX_ROWS_PER_TICK = RETENTION_BATCH_SIZE * RETENTION_MAX_BATCHES_PER_TICK;
+
 export class EkhoDb {
   private db: Database.Database;
 
@@ -3460,6 +3509,70 @@ export class EkhoDb {
       deleted += 1;
     }
     return { deleted };
+  }
+
+  /**
+   * Prune operational events past their retention (#75). `events` grew without
+   * bound — every heartbeat poll from every agent writes an agent.heartbeat row
+   * and nothing ever deleted one — so a long-running fleet accumulates millions
+   * of rows and a multi-GB database. Only types in PRUNABLE_EVENT_TYPES are
+   * eligible; the audit trail is never pruned, whatever the retention is set to.
+   * Deletes in bounded batches and stops at the per-tick cap so one tick can
+   * never sit on the write lock draining a months-old backlog. Returns rows
+   * deleted.
+   */
+  sweepEventRetention(): number {
+    const cutoff = new Date(Date.now() - config.eventRetentionSeconds * 1000).toISOString();
+    const placeholders = PRUNABLE_EVENT_TYPE_LIST.map(() => "?").join(", ");
+    const stmt = this.db.prepare(
+      `DELETE FROM events WHERE rowid IN (
+         SELECT rowid FROM events
+         WHERE event_type IN (${placeholders}) AND created_at < ?
+         LIMIT ?
+       )`
+    );
+
+    let deleted = 0;
+    for (let batch = 0; batch < RETENTION_MAX_BATCHES_PER_TICK; batch += 1) {
+      const changes = stmt.run(...PRUNABLE_EVENT_TYPE_LIST, cutoff, RETENTION_BATCH_SIZE).changes;
+      deleted += changes;
+      if (changes < RETENTION_BATCH_SIZE) break; // backlog drained
+    }
+    return deleted;
+  }
+
+  /**
+   * Prune heartbeat history past its retention (#75), ALWAYS keeping each
+   * agent's most recent row however old it is. Heartbeats are liveness, not
+   * history, so the table is almost pure churn — but a liveness or health query
+   * must never find an agent with zero heartbeat rows just because it went quiet
+   * for longer than the retention window, so the newest row per agent is
+   * excluded from the delete rather than aged out. Same bounded batching as
+   * sweepEventRetention. Returns rows deleted.
+   */
+  sweepHeartbeatRetention(): number {
+    const cutoff = new Date(Date.now() - config.heartbeatRetentionSeconds * 1000).toISOString();
+    const stmt = this.db.prepare(
+      `DELETE FROM heartbeats WHERE rowid IN (
+         SELECT h.rowid FROM heartbeats h
+         WHERE h.received_at < ?
+           AND h.id <> (
+             SELECT h2.id FROM heartbeats h2
+             WHERE h2.agent_id = h.agent_id
+             ORDER BY h2.received_at DESC, h2.rowid DESC
+             LIMIT 1
+           )
+         LIMIT ?
+       )`
+    );
+
+    let deleted = 0;
+    for (let batch = 0; batch < RETENTION_MAX_BATCHES_PER_TICK; batch += 1) {
+      const changes = stmt.run(cutoff, RETENTION_BATCH_SIZE).changes;
+      deleted += changes;
+      if (changes < RETENTION_BATCH_SIZE) break; // backlog drained
+    }
+    return deleted;
   }
 
   // Returns the row ONLY if it belongs to fleetId. A mismatch returns undefined,

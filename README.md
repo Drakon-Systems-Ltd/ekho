@@ -294,6 +294,8 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_ATTACHMENT_UPLOAD_MAX_PER_WINDOW` | `20` | Attachment uploads per uploader per minute |
 | `EKHO_ATTACHMENT_UNBOUND_TTL_SECONDS` / `EKHO_ATTACHMENT_RETENTION_SECONDS` | `21600` / `2592000` | GC: unbound uploads after 6h, message-bound after 30 days |
 | `EKHO_ENVELOPE_NONCE_RETENTION_SECONDS` | `87600` | Signed-envelope nonce retention (24h acceptance window plus replay-safety slack) |
+| `EKHO_EVENT_RETENTION_SECONDS` | `2592000` | History retention for high-volume operational events (30 days). Audit events — operator keys, policy, approvals, trust and quarantine decisions, room/feed lifecycle — are never pruned, whatever this is set to |
+| `EKHO_HEARTBEAT_RETENTION_SECONDS` | `172800` | Heartbeat history retention (48h). Each agent always keeps its most recent heartbeat row, however old |
 | `EKHO_REQUIRE_SIGNED` (plugins) | `warn` | Peer wake strictness: `require` = only signed **and** verified peer messages wake a turn (withheld ones are dead-lettered) |
 | `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Heartbeat liveness threshold |
 | `EKHO_LICENSE_KEY` | — | Pro license JWT (optional) |

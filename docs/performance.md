@@ -31,7 +31,7 @@ Tested on a single-instance relay with SQLite (WAL mode) on macOS, Node.js 22. A
 | Message body size | < 64 KB | Limited by request body parsing, not Ekho |
 | Concurrent pollers | Up to 50 | SQLite WAL allows concurrent reads |
 | Database size | Up to 1 GB | SQLite handles multi-GB, but backup/recovery slows |
-| Event retention | Prune after 30 days | Events table grows 3x faster than messages |
+| Event retention | 30 days (automatic, `EKHO_EVENT_RETENTION_SECONDS`) | Events table grows 3x faster than messages |
 
 ## Tuning
 
@@ -61,20 +61,45 @@ EKHO_HEARTBEAT_TIMEOUT_SECONDS=300
 EKHO_HEARTBEAT_LIVENESS_THRESHOLD=5
 ```
 
-### Database maintenance
+### Retention
 
-SQLite databases grow over time. Periodically run:
+The sweep prunes history automatically — nothing to run by hand, and no query
+that could take the audit trail with it:
+
+```
+EKHO_EVENT_RETENTION_SECONDS=2592000      # operational events: 30 days (default)
+EKHO_HEARTBEAT_RETENTION_SECONDS=172800   # heartbeat history: 48h (default)
+```
+
+- **Events** are pruned by an **allowlist** of high-volume operational types
+  (`agent.heartbeat`, `message.queued`/`acked`/`policy_denied`, rate-limit
+  strikes, `feed.delivered`, conversation resumed/stalled, room project-mode
+  changes). Anything not on that list — the operator-key audit trail, policy,
+  approvals, trust changes, quarantine decisions, room and feed lifecycle, and
+  any event type added in a future release — is **kept forever**, whatever the
+  retention is set to.
+- **Heartbeats** older than the window are dropped, except each agent's most
+  recent row, which is always kept so a quiet agent never vanishes from the
+  health board.
+- Replay nonces and attachments have their own retention
+  (`EKHO_ENVELOPE_NONCE_RETENTION_SECONDS`, `EKHO_ATTACHMENT_RETENTION_SECONDS`).
+
+Pruning happens in bounded batches, capped per sweep tick, so a large backlog
+drains over several ticks instead of holding the write lock through one long
+`DELETE`.
+
+### Reclaiming disk space
+
+Deleting rows does not shrink the SQLite file — freed pages are reused for new
+writes. To hand the space back to the filesystem, run `VACUUM` **manually**,
+during a quiet window:
 
 ```sql
--- Remove old events (keep 30 days)
-DELETE FROM events WHERE created_at < datetime('now', '-30 days');
-
--- Remove old nonces (keep 24 hours)
-DELETE FROM replay_nonces WHERE created_at < datetime('now', '-1 day');
-
--- Reclaim disk space
 VACUUM;
 ```
+
+It needs roughly the database's own size again in free disk and holds an
+exclusive lock for the duration, so the relay never runs it automatically.
 
 ## When to Scale Beyond SQLite
 

@@ -199,6 +199,10 @@ CREATE INDEX IF NOT EXISTS idx_messages_recipient_status ON messages(fleet_id, r
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(fleet_id, conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_status ON message_deliveries(recipient_agent_id, status, queued_at);
 CREATE INDEX IF NOT EXISTS idx_events_fleet_created_at ON events(fleet_id, created_at);
+-- Retention sweep (#75): prunes by (event_type, created_at) across all fleets.
+-- idx_events_fleet_created_at leads on fleet_id, so without this the sweep
+-- full-scans the whole events table every tick.
+CREATE INDEX IF NOT EXISTS idx_events_type_created_at ON events(event_type, created_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_fleet_status ON approvals(fleet_id, status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_controls_target ON control_actions(fleet_id, target_kind, target_id, created_at);
 
@@ -305,6 +309,9 @@ CREATE INDEX IF NOT EXISTS idx_attachments_fleet_created ON attachments(fleet_id
 -- crashes the relay before 019 can add the column. Owning it in 019 keeps both
 -- the fresh-install and the upgrade path working. Do not reintroduce it here.
 CREATE INDEX IF NOT EXISTS idx_heartbeats_agent_recency ON heartbeats(agent_id, received_at);
+-- Retention sweep (#75): the agent_recency index leads on agent_id, so a global
+-- "everything older than the cutoff" scan cannot use it. This one can.
+CREATE INDEX IF NOT EXISTS idx_heartbeats_received_at ON heartbeats(received_at);
 CREATE INDEX IF NOT EXISTS idx_messages_sender_created ON messages(fleet_id, sender_agent_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_queued ON message_deliveries(recipient_agent_id, queued_at);
 -- Drives the topology collaboration-edge join (messages -> deliveries by message_id).
