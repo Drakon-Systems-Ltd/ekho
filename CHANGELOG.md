@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **The Hermes plugin no longer storms the log with unsigned/invalid operator-key revocation warnings.** It emitted one warning per advisory key on every inbox poll (~5s) — with 7 permanently-unsigned-revoked keys that is ~91 lines a minute, forever, because a historical pre-signing revocation is never retroactively signed. The aggregate throttle already shipped for the OpenClaw plugin in 0.4.7 is now ported verbatim: one aggregate warning when the advisory set first appears or changes, silence on identical repeats, a reminder every 120 polls (~10 minutes), a process-local 64-scope cap keyed by identity public key + fleet, a bounded control-character-safe key sample with an omitted count, and a fingerprint over the complete sorted set using canonical JSON. Clearing the set resets the throttle so a later recurrence is logged again. Trust is untouched: unsigned/invalid revocation stays advisory, still blocks new adoption for that poll, and still never unpins or tombstones.
+
 ## [0.5.0] - 2026-09-21
 
 ### Changed
