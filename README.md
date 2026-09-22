@@ -18,7 +18,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.5.0` — there is no default peer turn limit any more: a teammate can wake an agent as often as the work needs, and the operator sets (or clears) a cap per agent or per room from the console when one is wanted. The per-peer rate gate and every trust gate are unchanged. The OpenAPI spec now covers every relay route. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.5.1` — the retention sweep now prunes `events` and `heartbeats` (audit-safe allowlist, newest heartbeat per agent always kept), and the Hermes plugin's advisory-revocation warning is throttled to match the OpenClaw plugin. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -342,7 +342,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (**64 tests
 
 ## Project Status
 
-Ekho `v0.5.0` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.5.1` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 
