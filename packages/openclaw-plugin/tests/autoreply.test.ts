@@ -737,6 +737,49 @@ describe("deferred-retry (a deferred floor must not drop messages)", () => {
     expect(s.deferredByConversation.has("old")).toBe(false);
   });
 
+  // #78: default TURN_TIMEOUT 900s -> floor TTL 960s -> retry TTL 1080s.
+  it("retry TTL is derived from (and outlives) the floor TTL", () => {
+    expect(DEFERRED_RETRY_TTL_MS).toBe((900 + 60 + 120) * 1000);
+  });
+
+  it("a stash survives past the old 600s TTL while the floor can still be held (#78)", () => {
+    const s = createAutoReplyState();
+    const warns: string[] = [];
+    const dead: any[] = [];
+    const opts = { log: { warn: (m: unknown) => warns.push(String(m)) }, onDeadLetter: (r: any[]) => dead.push(...r) };
+    stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: null }, 0);
+    expect(listRetryableDeferred(s, 700_000, opts)).toEqual(["c1"]);
+    expect(listRetryableDeferred(s, 960_000, opts)).toEqual(["c1"]); // floor TTL
+    expect(s.deferredByConversation.has("c1")).toBe(true);
+    expect(warns).toEqual([]);
+    expect(dead).toEqual([]);
+  });
+
+  it("an expired stash is warned and dead-lettered, not silently dropped (#78)", () => {
+    const s = createAutoReplyState();
+    const warns: string[] = [];
+    const dead: any[] = [];
+    stashDeferred(s, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m1: null, m2: null }, 0);
+    const past = DEFERRED_RETRY_TTL_MS + 30_000;
+    const out = listRetryableDeferred(s, past, {
+      log: { warn: (m: unknown) => warns.push(String(m)) },
+      onDeadLetter: (r) => dead.push(...r)
+    });
+    expect(out).toEqual([]);
+    expect(s.deferredByConversation.has("c1")).toBe(false);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain("c1");
+    expect(warns[0]).toContain(`${past / 1000}s`);
+    expect(warns[0]).toContain("2 held-back msg(s)");
+    expect(dead.map((r) => r.message.message_id)).toEqual(["m1", "m2"]);
+    for (const r of dead) {
+      expect(r.kind).toBe("deferred_expired");
+      expect(r.key_id).toBeNull();
+      expect(r.reason).toBe(`deferred retry TTL exceeded (${past / 1000}s > ${DEFERRED_RETRY_TTL_MS / 1000}s)`);
+      expect(typeof r.rejected_at).toBe("string");
+    }
+  });
+
   it("a turn that covers the conversation clears its stash", () => {
     const s = createAutoReplyState();
     stashDeferred(s, "c1", [amsg("c1", "m1")], {}, 0);

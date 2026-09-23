@@ -18,6 +18,7 @@ import {
   type SnapshotVerifier
 } from "./verification.js";
 import type { VerifyResult } from "./verify.js";
+import type { DeadLetterRecord } from "./dead-letter.js";
 
 type Logger = {
   info?: (...a: unknown[]) => void;
@@ -241,8 +242,10 @@ const PROGRESS_REFRESH_WINDOW_MS = 60 * 60_000; // 1h
 // Deferred-retry: a conversation whose floor another agent held is retried on
 // later ticks — its messages were already consumed + acked (at-most-once), so
 // this in-memory stash is their ONLY remaining path to a turn. TTL-bounded so a
-// permanently busy room can't queue stale work forever.
-export const DEFERRED_RETRY_TTL_MS = 600_000; // 10 min from the FIRST deferral
+// permanently busy room can't queue stale work forever. Derived from the floor
+// TTL: a legitimate holder mid-turn keeps the floor up to FLOOR_TTL_SECONDS, so a
+// shorter retry window dropped the stash while the holder was still working (#78).
+export const DEFERRED_RETRY_TTL_MS = (FLOOR_TTL_SECONDS + 120) * 1000; // from the FIRST deferral
 const DEFERRED_CONVERSATION_CAP = 50;   // FIFO-evicted map of stashes
 const DEFERRED_MESSAGES_PER_CONV = 10;  // keep the newest N messages per stash
 
@@ -604,11 +607,44 @@ export function stashDeferred(
 
 /** Conversations whose stash is still within the retry TTL, oldest deferral
  *  first. Prunes expired stashes as a side effect (they are dropped, not
- *  retried forever — the operator timeline already saw the holder's turn). */
-export function listRetryableDeferred(state: AutoReplyState, nowMs: number): string[] {
+ *  retried forever — the operator timeline already saw the holder's turn).
+ *  The stash is the messages' only remaining trace (consumed + acked), so an
+ *  expiry is warned and dead-lettered, never a silent delete (#78). */
+export function listRetryableDeferred(
+  state: AutoReplyState,
+  nowMs: number,
+  opts: { log?: Logger; onDeadLetter?: (records: DeadLetterRecord[]) => void } = {}
+): string[] {
+  const { log, onDeadLetter } = opts;
   const alive: Array<{ conv: string; at: number }> = [];
   for (const [conv, stash] of state.deferredByConversation) {
-    if (nowMs - stash.firstDeferredAtMs > DEFERRED_RETRY_TTL_MS) {
+    const elapsedMs = nowMs - stash.firstDeferredAtMs;
+    if (elapsedMs > DEFERRED_RETRY_TTL_MS) {
+      const elapsedS = (elapsedMs / 1000).toFixed(0);
+      const ttlS = (DEFERRED_RETRY_TTL_MS / 1000).toFixed(0);
+      let deadLettered = stash.messages.length === 0;
+      if (onDeadLetter && stash.messages.length > 0) {
+        const rejectedAt = new Date().toISOString();
+        try {
+          onDeadLetter(
+            stash.messages.map((m) => ({
+              rejected_at: rejectedAt,
+              reason: `deferred retry TTL exceeded (${elapsedS}s > ${ttlS}s)`,
+              kind: "deferred_expired",
+              key_id: null,
+              message: m
+            }))
+          );
+          deadLettered = true;
+        } catch (err) {
+          log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${String(err)}`);
+        }
+      }
+      log?.warn?.(
+        `[ekho-autoreply] deferred conversation ${conv} expired after ${elapsedS}s ` +
+          `(TTL ${ttlS}s) — dropping ${stash.messages.length} held-back msg(s); ` +
+          (deadLettered ? "dead-lettered" : "DEAD-LETTER WRITE FAILED, msgs lost")
+      );
       state.deferredByConversation.delete(conv);
       continue;
     }
@@ -1441,6 +1477,9 @@ export function startAutoReply(opts: {
   // Sink for signed-but-invalid messages (they're acked + dropped this tick, so
   // this record is their only trace). Wired to the dead-letter file.
   onVerificationReject?: (rejects: Array<{ message: InboxMessage; verdict: VerifyResult }>) => void;
+  // Sink for deferred stashes that expired before the floor freed (#78) — the
+  // stash was their only trace. Wired to the same dead-letter file.
+  onDeadLetter?: (records: DeadLetterRecord[]) => void;
   // #5: peer wake strictness — see RequireSignedMode. Default "warn".
   requireSigned?: RequireSignedMode;
 }): () => void {
@@ -1607,7 +1646,7 @@ export function startAutoReply(opts: {
     // fresh catch-up tail from the acquire carries what the holder said since.
     const retryDeferredTurn = async () => {
       if (state.inFlight) return;
-      for (const conv of listRetryableDeferred(state, Date.now())) {
+      for (const conv of listRetryableDeferred(state, Date.now(), { log, onDeadLetter: opts.onDeadLetter })) {
         let res: { granted: boolean; holder_agent_id?: string; conversation_tail?: MsgSnapshot[] };
         try {
           res = await client.acquireFloor(conv, FLOOR_TTL_SECONDS);

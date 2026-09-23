@@ -139,8 +139,10 @@ PEER_LATCH_CONVERSATION_CAP = 500  # FIFO-evicted per-conversation counter map
 # Deferred-retry: a conversation whose floor another agent held is retried on
 # later ticks — its messages were already consumed + acked (at-most-once), so
 # this in-memory stash is their ONLY remaining path to a turn. TTL-bounded so a
-# permanently busy room can't queue stale work forever.
-DEFERRED_RETRY_TTL_S = 600.0  # 10 min from the FIRST deferral
+# permanently busy room can't queue stale work forever. Derived from the floor
+# TTL: a legitimate holder mid-turn keeps the floor up to FLOOR_TTL_SECONDS, so a
+# shorter retry window dropped the stash while the holder was still working (#78).
+DEFERRED_RETRY_TTL_S = float(FLOOR_TTL_SECONDS + 120)  # from the FIRST deferral
 DEFERRED_CONVERSATION_CAP = 50   # FIFO-evicted map of stashes
 DEFERRED_MESSAGES_PER_CONV = 10  # keep the newest N messages per stash
 
@@ -453,14 +455,46 @@ def stash_deferred(
         state.deferred_by_conversation.pop(next(iter(state.deferred_by_conversation)))
 
 
-def list_retryable_deferred(state: AutoReplyState, now: float) -> List[str]:
+def list_retryable_deferred(
+    state: AutoReplyState,
+    now: float,
+    *,
+    dead_letter_path: Optional[str] = None,
+    log: Optional[logging.Logger] = None,
+) -> List[str]:
     """Conversations whose stash is still within the retry TTL, oldest deferral
     first. Prunes expired stashes as a side effect (dropped, not retried
-    forever — the operator timeline already saw the holder's turn)."""
+    forever — the operator timeline already saw the holder's turn). The stash
+    is the messages' only remaining trace (consumed + acked), so an expiry is
+    warned and dead-lettered, never a silent pop (#78)."""
+    log = log or logger
     alive: List[Any] = []
     for conv in list(state.deferred_by_conversation.keys()):
         stash = state.deferred_by_conversation[conv]
-        if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S:
+        elapsed = now - stash["first_deferred_at"]
+        if elapsed > DEFERRED_RETRY_TTL_S:
+            messages = stash.get("messages", [])
+            verdict = VerificationResult(
+                verified=False,
+                kind="deferred_expired",
+                reason=(
+                    f"deferred retry TTL exceeded "
+                    f"({elapsed:.0f}s > {DEFERRED_RETRY_TTL_S:.0f}s)"
+                ),
+                key_id=None,
+            )
+            dead_lettered = False
+            try:
+                append_dead_letters([(m, verdict) for m in messages], path=dead_letter_path)
+                dead_lettered = True
+            except Exception as exc:  # noqa: BLE001 — the sink must never break the tick
+                log.warning("[ekho-autoreply] dead-letter write failed: %s", exc)
+            log.warning(
+                "[ekho-autoreply] deferred conversation %s expired after %.0fs "
+                "(TTL %.0fs) — dropping %d held-back msg(s); %s",
+                conv, elapsed, DEFERRED_RETRY_TTL_S, len(messages),
+                "dead-lettered" if dead_lettered else "DEAD-LETTER WRITE FAILED, msgs lost",
+            )
             state.deferred_by_conversation.pop(conv, None)
             continue
         alive.append((stash["first_deferred_at"], conv))
@@ -1611,7 +1645,9 @@ def process_inbox_once(
         acquire = getattr(client, "acquire_floor", None)
         if not callable(acquire):
             return 0
-        for conv in list_retryable_deferred(state, now):
+        for conv in list_retryable_deferred(
+            state, now, dead_letter_path=dead_letter_path, log=log
+        ):
             try:
                 res = acquire(conv, FLOOR_TTL_SECONDS) or {}
             except Exception as exc:  # noqa: BLE001 — keep the stash, retry later
