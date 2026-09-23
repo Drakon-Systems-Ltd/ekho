@@ -474,11 +474,6 @@ def list_retryable_deferred(
         elapsed = now - stash["first_deferred_at"]
         if elapsed > DEFERRED_RETRY_TTL_S:
             messages = stash.get("messages", [])
-            log.warning(
-                "[ekho-autoreply] deferred conversation %s expired after %.0fs "
-                "(TTL %.0fs) — dropping %d held-back msg(s); dead-lettered",
-                conv, elapsed, DEFERRED_RETRY_TTL_S, len(messages),
-            )
             verdict = VerificationResult(
                 verified=False,
                 kind="deferred_expired",
@@ -488,10 +483,18 @@ def list_retryable_deferred(
                 ),
                 key_id=None,
             )
+            dead_lettered = False
             try:
                 append_dead_letters([(m, verdict) for m in messages], path=dead_letter_path)
+                dead_lettered = True
             except Exception as exc:  # noqa: BLE001 — the sink must never break the tick
                 log.warning("[ekho-autoreply] dead-letter write failed: %s", exc)
+            log.warning(
+                "[ekho-autoreply] deferred conversation %s expired after %.0fs "
+                "(TTL %.0fs) — dropping %d held-back msg(s); %s",
+                conv, elapsed, DEFERRED_RETRY_TTL_S, len(messages),
+                "dead-lettered" if dead_lettered else "DEAD-LETTER WRITE FAILED, msgs lost",
+            )
             state.deferred_by_conversation.pop(conv, None)
             continue
         alive.append((stash["first_deferred_at"], conv))

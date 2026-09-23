@@ -622,10 +622,7 @@ export function listRetryableDeferred(
     if (elapsedMs > DEFERRED_RETRY_TTL_MS) {
       const elapsedS = (elapsedMs / 1000).toFixed(0);
       const ttlS = (DEFERRED_RETRY_TTL_MS / 1000).toFixed(0);
-      log?.warn?.(
-        `[ekho-autoreply] deferred conversation ${conv} expired after ${elapsedS}s ` +
-          `(TTL ${ttlS}s) — dropping ${stash.messages.length} held-back msg(s); dead-lettered`
-      );
+      let deadLettered = stash.messages.length === 0;
       if (onDeadLetter && stash.messages.length > 0) {
         const rejectedAt = new Date().toISOString();
         try {
@@ -638,10 +635,16 @@ export function listRetryableDeferred(
               message: m
             }))
           );
+          deadLettered = true;
         } catch (err) {
           log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${String(err)}`);
         }
       }
+      log?.warn?.(
+        `[ekho-autoreply] deferred conversation ${conv} expired after ${elapsedS}s ` +
+          `(TTL ${ttlS}s) — dropping ${stash.messages.length} held-back msg(s); ` +
+          (deadLettered ? "dead-lettered" : "DEAD-LETTER WRITE FAILED, msgs lost")
+      );
       state.deferredByConversation.delete(conv);
       continue;
     }
