@@ -726,15 +726,19 @@ describe("deferred-retry (a deferred floor must not drop messages)", () => {
     expect(Object.keys(stash.verifications).sort()).toEqual(["m1", "m2"]);
   });
 
-  it("retryable list is oldest-first and prunes expired stashes", () => {
+  // #78: listing is read-only. It used to PRUNE an expired stash — acked
+  // messages binned with no log and no dead-letter. Expired stashes now stay
+  // put for takeExpiredDeferred, which delivers them late.
+  it("retryable list is oldest-first and leaves expired stashes in place", () => {
     const s = createAutoReplyState();
     stashDeferred(s, "old", [amsg("old", "m1")], {}, 0);
     stashDeferred(s, "newer", [amsg("newer", "m2")], {}, 10_000);
     expect(listRetryableDeferred(s, 20_000)).toEqual(["old", "newer"]);
-    // beyond the TTL the old stash is dropped, not retried forever
+    // beyond the TTL the old stash is no longer RETRYABLE, but it is still owed
+    // a turn — the overrun path runs it late rather than dropping it.
     const past = DEFERRED_RETRY_TTL_MS + 5_000;
     expect(listRetryableDeferred(s, past)).toEqual(["newer"]);
-    expect(s.deferredByConversation.has("old")).toBe(false);
+    expect(s.deferredByConversation.has("old")).toBe(true);
   });
 
   it("a turn that covers the conversation clears its stash", () => {

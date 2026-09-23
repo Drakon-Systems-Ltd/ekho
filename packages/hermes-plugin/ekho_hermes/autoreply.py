@@ -36,6 +36,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from datetime import datetime, timezone
@@ -138,11 +139,25 @@ PEER_LATCH_CONVERSATION_CAP = 500  # FIFO-evicted per-conversation counter map
 
 # Deferred-retry: a conversation whose floor another agent held is retried on
 # later ticks — its messages were already consumed + acked (at-most-once), so
-# this in-memory stash is their ONLY remaining path to a turn. TTL-bounded so a
-# permanently busy room can't queue stale work forever.
-DEFERRED_RETRY_TTL_S = 600.0  # 10 min from the FIRST deferral
+# this in-memory stash is their ONLY remaining path to a turn.
+#
+# The retry window is DERIVED from the floor, never guessed (#78). A holder may
+# legitimately hold the floor for a whole turn, so a fixed 10 min window expired
+# while the holder was still working and the stash was binned mid-turn. The
+# relay auto-releases a floor at FLOOR_TTL_SECONDS, so past that plus a grace
+# margin the floor we deferred to is GONE: anyone holding it now is a new
+# holder, not the one we waited for. That is the point at which waiting stops
+# being useful — and the point at which the turn runs late instead (see
+# take_expired_deferred). Nothing is ever dropped for being late.
+DEFERRED_GRACE_S = 120  # margin for relay clock skew + the release round-trip
+DEFERRED_RETRY_TTL_S = float(FLOOR_TTL_SECONDS + DEFERRED_GRACE_S)
 DEFERRED_CONVERSATION_CAP = 50   # FIFO-evicted map of stashes
 DEFERRED_MESSAGES_PER_CONV = 10  # keep the newest N messages per stash
+# Dead-letter reasons for a stash that will never get its ordinary turn. Both
+# are acked work, so both leave a record on disk and a WARNING in the log.
+DEFERRED_EVICTED_REASON = "deferred_evicted_cap"
+DEFERRED_SPAWN_FAILED_REASON = "deferred_expired_spawn_failed"
+DEFERRED_RETRY_SPAWN_FAILED_REASON = "deferred_retry_spawn_failed"
 
 SEEN_CAP = 500  # FIFO-evicted dedupe set
 LAST_BATCH_CAP = 25  # ring exposed to ekho_inbox
@@ -351,9 +366,11 @@ class AutoReplyState:
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
     # conversation_id -> {"messages": [...], "verifications": {...},
     # "first_deferred_at": float} for messages held back because another agent
-    # had the floor. Retried on later ticks until DEFERRED_RETRY_TTL_S; without
-    # this a deferred message (already consumed + acked) silently never reaches
-    # the agent. Insertion-ordered dict doubles as the FIFO cap order.
+    # had the floor. Retried on later ticks until DEFERRED_RETRY_TTL_S, then
+    # delivered late without the floor; without this a deferred message
+    # (already consumed + acked) silently never reaches the agent. An entry
+    # leaves this map only via a turn or a dead-letter (#78).
+    # Insertion-ordered dict doubles as the FIFO cap order.
     deferred_by_conversation: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Conversations we've already raised a stall escalation for (so we escalate
     # at most once per close). Cleared per conversation by reset_peer_latch, so the
@@ -413,10 +430,14 @@ def stash_deferred(
     messages: List[Any],
     verifications: Optional[Dict[str, Any]],
     now: float,
-) -> None:
+) -> List[tuple]:
     """Stash (or merge into) a conversation's deferred messages so a later tick
     can retry the floor. Dedupes by message id, keeps the newest slice, and
-    preserves the FIRST deferral time (the TTL clock)."""
+    preserves the FIRST deferral time (the TTL clock).
+
+    Returns the ``(conversation_id, stash)`` pairs the FIFO cap evicted. An
+    evicted stash was already acked, so the caller MUST dead-letter it — this
+    function has no sink of its own (#78)."""
     existing = state.deferred_by_conversation.pop(conversation_id, None) or {}
     previous_by_id: Dict[Any, Any] = {}
     for m in existing.get("messages", []):
@@ -449,22 +470,47 @@ def stash_deferred(
         "verifications": kept_verifications,
         "first_deferred_at": existing.get("first_deferred_at", now),
     }
+    evicted: List[tuple] = []
     while len(state.deferred_by_conversation) > DEFERRED_CONVERSATION_CAP:
-        state.deferred_by_conversation.pop(next(iter(state.deferred_by_conversation)))
+        victim = next(iter(state.deferred_by_conversation))
+        evicted.append((victim, state.deferred_by_conversation.pop(victim)))
+    return evicted
 
 
 def list_retryable_deferred(state: AutoReplyState, now: float) -> List[str]:
     """Conversations whose stash is still within the retry TTL, oldest deferral
-    first. Prunes expired stashes as a side effect (dropped, not retried
-    forever — the operator timeline already saw the holder's turn)."""
+    first. Read-only: expired stashes are simply not listed here, and are NOT
+    removed — ``take_expired_deferred`` owns them, and delivers them late
+    instead of binning them (#78)."""
     alive: List[Any] = []
-    for conv in list(state.deferred_by_conversation.keys()):
-        stash = state.deferred_by_conversation[conv]
+    for conv, stash in state.deferred_by_conversation.items():
         if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S:
-            state.deferred_by_conversation.pop(conv, None)
             continue
         alive.append((stash["first_deferred_at"], conv))
     return [conv for _, conv in sorted(alive)]
+
+
+def take_expired_deferred(
+    state: AutoReplyState, now: float, limit: Optional[int] = None
+) -> List[tuple]:
+    """Remove and return the stashes past the retry TTL as
+    ``(conversation_id, stash)``, oldest deferral first (at most ``limit``).
+
+    Past the TTL the relay has already auto-released the floor we deferred to,
+    so there is nothing left to wait for. The caller runs the held-back turn
+    LATE, without the floor. Taking a stash therefore means "I am delivering
+    this now" — never "I am dropping this"; a caller that cannot run the turn
+    must not call this (or must dead-letter what it took)."""
+    expired = sorted(
+        (
+            (stash["first_deferred_at"], conv)
+            for conv, stash in state.deferred_by_conversation.items()
+            if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S
+        ),
+    )
+    if limit is not None:
+        expired = expired[:limit]
+    return [(conv, state.deferred_by_conversation.pop(conv)) for _, conv in expired]
 
 
 def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
@@ -782,6 +828,30 @@ def append_dead_letters(
         fh.write("\n".join(lines) + "\n")
 
 
+def append_deferred_dead_letters(
+    messages: Sequence[Any],
+    reason: str,
+    *,
+    path: Optional[str] = None,
+    log: Optional[logging.Logger] = None,
+) -> None:
+    """Dead-letter a deferred stash that will never get its ordinary turn.
+
+    Reuses the verification dead-letter file: these messages were acked, so
+    without a record they are simply gone. The synthetic verdict carries the
+    stash reason with ``kind="deferred"`` (no key involved). Best-effort — the
+    sink must never break the tick."""
+    if not messages:
+        return
+    verdict = SimpleNamespace(reason=reason, kind="deferred", key_id=None)
+    try:
+        append_dead_letters([(m, verdict) for m in messages], path=path)
+    except Exception as exc:  # noqa: BLE001 — the sink must never break the tick
+        (log or logger).warning(
+            "[ekho-autoreply] deferred dead-letter write failed (%s): %s", reason, exc
+        )
+
+
 # --- Prompt + command construction -----------------------------------------
 
 
@@ -987,6 +1057,17 @@ def _deferred_banner(deferred: Dict[str, Any]) -> str:
     the prompt: by the time the agent reaches its trigger message it must already
     know the message is old and the thread has moved."""
     mins = max(1, round(float(deferred.get("held_ms") or 0) / 60_000))
+    # An OVERRUN turn never got the floor at all: it waited out the whole retry
+    # window and is being delivered late rather than dropped (#78). Say so
+    # plainly — the agent is about to answer without the turn-taking lock, so a
+    # short reply, or none, is usually the right call.
+    overrun = (
+        "This message waited past the floor window, so it is being delivered "
+        "late and WITHOUT the floor — another agent may be replying right now. "
+        "Reply only if it is still needed, and keep it short.\n\n"
+        if deferred.get("overrun")
+        else ""
+    )
     return (
         f"⏳ THIS TURN WAS HELD BACK for about {mins} min — a teammate held this "
         "conversation's floor when the message(s) below arrived, so you are seeing them "
@@ -994,6 +1075,7 @@ def _deferred_banner(deferred: Dict[str, Any]) -> str:
         "already be answered, corrected or retracted. Read the \"WHILE YOUR TURN WAS "
         "HELD BACK\" tail below BEFORE composing, and if it has overtaken your reply, do "
         "NOT send it. Do not repeat a claim the thread has since withdrawn.\n\n"
+        + overrun
     )
 
 
@@ -1661,7 +1743,22 @@ def process_inbox_once(
                 )
                 spawned_retry = 1
             except Exception as exc:  # noqa: BLE001
-                log.warning("[ekho-autoreply] deferred-retry turn failed: %s", exc)
+                # The stash is already out of the map and the messages were
+                # acked: a turn that never started must leave a record, not a
+                # gap (#78).
+                log.warning(
+                    "[ekho-autoreply] deferred-retry turn for %s failed to spawn "
+                    "(%s) — dead-lettering %d msg(s)",
+                    conv,
+                    exc,
+                    len(stash["messages"]),
+                )
+                append_deferred_dead_letters(
+                    stash["messages"],
+                    DEFERRED_RETRY_SPAWN_FAILED_REASON,
+                    path=dead_letter_path,
+                    log=log,
+                )
                 spawned_retry = 0
             finally:
                 state.in_flight = False
@@ -1669,10 +1766,90 @@ def process_inbox_once(
             return spawned_retry  # at most one retry-turn per tick
         return 0
 
+    def _expired_deferred_turn() -> int:
+        """Overrun delivery (#78): a stash that outlived the retry window runs
+        LATE, WITHOUT the floor, instead of being binned. Past the TTL the relay
+        has auto-released the floor we deferred to, so a floor still held now
+        belongs to someone else and waiting buys nothing — while the messages
+        were acked, so dropping them loses the work outright. At most ONE per
+        tick, oldest first. Returns the number of turns spawned (0 or 1)."""
+        if state.in_flight:
+            # Busy, not free to drop: the stash stays put for the next tick.
+            return 0
+        taken = take_expired_deferred(state, now, limit=1)
+        if not taken:
+            return 0
+        conv, stash = taken[0]
+        waited_s = max(0.0, now - stash["first_deferred_at"])
+        log.warning(
+            "[ekho-autoreply] deferred conversation %s exceeded retry window "
+            "(%.0fs) — delivering late without the floor (%d msg(s))",
+            conv,
+            waited_s,
+            len(stash["messages"]),
+        )
+        used = state.peer_turns_by_conversation.get(conv, 0)
+        conv_budget = effective_conversation_budget(inbox, conv, eff_budget, peer_turn_budget)
+        state.in_flight = True
+        try:
+            trigger_turn(
+                stash["messages"],
+                operator_trusted,
+                roster=getattr(inbox, "roster", None),
+                spawn=spawn,
+                log=log,
+                verifications=stash["verifications"],
+                self_agent_id=self_agent_id,
+                # No acquire, so no fresh catch-up tail — whatever the inbox
+                # already carries for this conversation is the best we have.
+                conversation_history=getattr(inbox, "conversation_history", None) or {},
+                peer_turn_budget=eff_budget,
+                # No limit -> no countdown line in the prompt.
+                peer_budget_remaining=(
+                    {conv: max(0, conv_budget - used)} if conv_budget > 0 else {}
+                ),
+                rooms=getattr(inbox, "rooms", None),
+                conversation_budgets=room_budgets,
+                deferred={
+                    "conversation_id": conv,
+                    "held_ms": waited_s * 1000.0,
+                    # Tells the prompt this turn never got the floor at all.
+                    "overrun": True,
+                },
+                snapshot_verifier=snapshot_verifier,
+            )
+            # Nothing to release: an overrun turn never took a floor.
+            return 1
+        except Exception as exc:  # noqa: BLE001 — acked work: record it, never lose it
+            log.warning(
+                "[ekho-autoreply] deferred conversation %s overrun turn failed to "
+                "spawn (%s) — dead-lettering %d msg(s)",
+                conv,
+                exc,
+                len(stash["messages"]),
+            )
+            append_deferred_dead_letters(
+                stash["messages"],
+                DEFERRED_SPAWN_FAILED_REASON,
+                path=dead_letter_path,
+                log=log,
+            )
+            return 0
+        finally:
+            state.in_flight = False
+
+    def _service_deferred() -> int:
+        """At most ONE deferred turn per tick, TOTAL across both paths. Overrun
+        stashes go first: they have waited longest and have no other path left,
+        while a live stash still gets its ordinary floor retry next tick."""
+        if state.in_flight:
+            return 0
+        return _expired_deferred_turn() or _retry_deferred_turn()
+
     if not real:
         acked = _ack()
         # Quiet tick — the moment a busy floor frees up, the held-back turn runs.
-        retried = _retry_deferred_turn()
+        retried = _service_deferred()
         return {
             "polled": len(messages),
             "real": 0,
@@ -1787,7 +1964,22 @@ def process_inbox_once(
         kept, lambda c: client.acquire_floor(c, FLOOR_TTL_SECONDS), log
     ) if kept else ([], [], {}, {})
     for conv, msgs in deferred.items():
-        stash_deferred(state, conv, msgs, verifications, now)
+        # Eviction is never silent (#78): a stash the cap pushes out was acked,
+        # so it leaves a dead-letter record and a WARNING behind it.
+        for ev_conv, ev_stash in stash_deferred(state, conv, msgs, verifications, now):
+            log.warning(
+                "[ekho-autoreply] deferred conversation %s evicted at the "
+                "%d-conversation cap — dead-lettering %d msg(s); it will get no turn",
+                ev_conv,
+                DEFERRED_CONVERSATION_CAP,
+                len(ev_stash["messages"]),
+            )
+            append_deferred_dead_letters(
+                ev_stash["messages"],
+                DEFERRED_EVICTED_REASON,
+                path=dead_letter_path,
+                log=log,
+            )
     # A conversation that got a turn now supersedes any stale stash for it.
     for m in floored:
         clear_deferred(state, getattr(m, "conversation_id", ""))
@@ -1833,7 +2025,7 @@ def process_inbox_once(
                 except Exception as exc:  # noqa: BLE001
                     log.debug("[ekho-autoreply] floor release failed for %s: %s", conv, exc)
 
-    spawned += _retry_deferred_turn()
+    spawned += _service_deferred()
 
     return {
         "polled": len(messages),

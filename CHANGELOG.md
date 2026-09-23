@@ -4,6 +4,13 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **A peer message deferred to a floor holder is never silently dropped (#78).** Both plugins ack a peer message, then stash it in memory when another agent holds the conversation floor, and retry on later ticks — but the retry window was a fixed 10 minutes while the floor's own TTL is the turn timeout plus 60s (960s by default), so a holder that was legitimately mid-turn outlived the stash. On expiry the stash was deleted with no log, no dead-letter and no turn: acked, dropped, work lost. FIFO eviction past the 50-conversation cap dropped stashes the same silent way.
+  - **The retry window is derived from the floor, not guessed.** `DEFERRED_RETRY_TTL_S` / `DEFERRED_RETRY_TTL_MS` are now `FLOOR_TTL_SECONDS + 120s`, so the stash always outlives the floor it is waiting on plus a grace margin for clock skew and the release round-trip.
+  - **Past the window the turn runs late instead of being binned.** The relay auto-releases a floor at its TTL, so a floor still held past that belongs to a *new* holder, not the one we deferred to — waiting longer buys nothing. The held-back turn is spawned without the floor, and its prompt says so in one plain line: the message waited past the floor window, it is being delivered without the floor, reply only if it is still needed and keep it short. A `WARNING` names the conversation, how long it waited and how many messages it carried. The existing one-turn-per-tick and in-flight rules are unchanged — at most one deferred turn per tick across both paths, oldest first — and a turn that cannot run because the agent is busy keeps its stash for the next tick rather than losing it.
+  - **Every remaining exit leaves a record.** A cap eviction (`deferred_evicted_cap`), a late turn that could not be spawned (`deferred_expired_spawn_failed`) and a retry turn that could not be spawned (`deferred_retry_spawn_failed`) each append to the existing dead-letter file and log a `WARNING`. A stash now leaves memory only via a turn or a dead-letter.
+  - **Internals.** `list_retryable_deferred` / `listRetryableDeferred` is read-only and no longer prunes; the new `take_expired_deferred` / `takeExpiredDeferred` owns expired stashes and hands them to the late-delivery path. The peer budget/latch, `clear_deferred` on a covering turn, the catch-up tail and floor release after a floored turn are all unchanged.
+
 ## [0.5.1] - 2026-09-22
 
 ### Fixed
