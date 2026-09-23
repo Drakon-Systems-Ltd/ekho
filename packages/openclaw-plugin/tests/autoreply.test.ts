@@ -17,9 +17,14 @@ import {
   recordBatch,
   recordVerifications,
   stashDeferred,
+  stashVerdicts,
+  heldKey,
   listRetryableDeferred,
+  takeExpiredDeferred,
+  serviceDeferredTurn,
   clearDeferred,
   DEFERRED_RETRY_TTL_MS,
+  DEFERRED_SPAWN_FAILED_REASON,
   PROGRESS_REFRESH_MAX_PER_WINDOW,
   DEFAULT_PEER_TURN_BUDGET,
   NO_PEER_TURN_LIMIT,
@@ -716,25 +721,33 @@ describe("deferred-retry (a deferred floor must not drop messages)", () => {
     expect(plan.deferred["c2"].map((m: any) => m.message_id)).toEqual(["m2", "m3"]);
   });
 
-  it("stash merges repeat deferrals, dedupes by id, and keeps the first-deferred clock", () => {
+  it("stash merges repeat deferrals, dedupes by held_key, and keeps the first-deferred clock", () => {
     const s = createAutoReplyState();
     stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: null }, 1_000);
     stashDeferred(s, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m2: null }, 5_000);
     const stash = s.deferredByConversation.get("c1")!;
     expect(stash.messages.map((m: any) => m.message_id)).toEqual(["m1", "m2"]);
     expect(stash.firstDeferredAtMs).toBe(1_000); // TTL runs from the FIRST deferral
-    expect(Object.keys(stash.verifications).sort()).toEqual(["m1", "m2"]);
+    // Every entry carries its own verdict, keyed by heldKey (#78 r4).
+    expect(stash.entries.map((e) => e.message.message_id)).toEqual(["m1", "m2"]);
+    expect(Object.keys(stashVerdicts(stash)).sort()).toEqual(
+      [heldKey(amsg("c1", "m1")), heldKey(amsg("c1", "m2"))].sort()
+    );
   });
 
-  it("retryable list is oldest-first and prunes expired stashes", () => {
+  // #78: listing is read-only. It used to PRUNE an expired stash — acked
+  // messages binned with no log and no dead-letter. Expired stashes now stay
+  // put for takeExpiredDeferred, which delivers them late.
+  it("retryable list is oldest-first and leaves expired stashes in place", () => {
     const s = createAutoReplyState();
     stashDeferred(s, "old", [amsg("old", "m1")], {}, 0);
     stashDeferred(s, "newer", [amsg("newer", "m2")], {}, 10_000);
     expect(listRetryableDeferred(s, 20_000)).toEqual(["old", "newer"]);
-    // beyond the TTL the old stash is dropped, not retried forever
+    // beyond the TTL the old stash is no longer RETRYABLE, but it is still owed
+    // a turn — the overrun path runs it late rather than dropping it.
     const past = DEFERRED_RETRY_TTL_MS + 5_000;
     expect(listRetryableDeferred(s, past)).toEqual(["newer"]);
-    expect(s.deferredByConversation.has("old")).toBe(false);
+    expect(s.deferredByConversation.has("old")).toBe(true);
   });
 
   // #78: default TURN_TIMEOUT 900s -> floor TTL 960s -> retry TTL 1080s.
@@ -742,42 +755,84 @@ describe("deferred-retry (a deferred floor must not drop messages)", () => {
     expect(DEFERRED_RETRY_TTL_MS).toBe((900 + 60 + 120) * 1000);
   });
 
+  // Adapted from #79: listRetryableDeferred no longer takes a dead-letter sink
+  // (it is read-only now), so "no trace written" is asserted as "nothing has
+  // expired yet, so takeExpiredDeferred has nothing to hand over".
   it("a stash survives past the old 600s TTL while the floor can still be held (#78)", () => {
     const s = createAutoReplyState();
-    const warns: string[] = [];
-    const dead: any[] = [];
-    const opts = { log: { warn: (m: unknown) => warns.push(String(m)) }, onDeadLetter: (r: any[]) => dead.push(...r) };
     stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: null }, 0);
-    expect(listRetryableDeferred(s, 700_000, opts)).toEqual(["c1"]);
-    expect(listRetryableDeferred(s, 960_000, opts)).toEqual(["c1"]); // floor TTL
+    expect(listRetryableDeferred(s, 700_000)).toEqual(["c1"]);
+    expect(listRetryableDeferred(s, 960_000)).toEqual(["c1"]); // floor TTL
     expect(s.deferredByConversation.has("c1")).toBe(true);
-    expect(warns).toEqual([]);
-    expect(dead).toEqual([]);
+    expect(takeExpiredDeferred(s, 960_000)).toEqual([]);
+    expect(s.deferredByConversation.has("c1")).toBe(true);
   });
 
-  it("an expired stash is warned and dead-lettered, not silently dropped (#78)", () => {
-    const s = createAutoReplyState();
+  // Adapted from #79's "an expired stash is warned and dead-lettered": expiry
+  // is now a WARNING plus ONE late turn carrying the whole stash. The
+  // dead-letter half of #79's assertion survives as the spawn-failure case,
+  // which is the only way a stash can now end without a turn.
+  it("an expired stash is warned and delivered late, not dead-lettered (#78)", async () => {
     const warns: string[] = [];
-    const dead: any[] = [];
+    const dead: Array<{ reason: string; messageIds: string[] }> = [];
+    const turns: Array<{ conversationId: string; overrun: boolean; messageIds: string[] }> = [];
+    const s = createAutoReplyState();
     stashDeferred(s, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m1: null, m2: null }, 0);
     const past = DEFERRED_RETRY_TTL_MS + 30_000;
-    const out = listRetryableDeferred(s, past, {
-      log: { warn: (m: unknown) => warns.push(String(m)) },
-      onDeadLetter: (r) => dead.push(...r)
+    const acquires: string[] = [];
+    const base = {
+      state: s,
+      nowMs: past,
+      acquireFloor: async (conv: string) => {
+        acquires.push(conv);
+        return { granted: false, holder_agent_id: "agent_holder" };
+      },
+      releaseFloor: async () => {},
+      deadLetter: (messages: any[], reason: string) => {
+        dead.push({ reason, messageIds: messages.map((m) => m.message_id) });
+      },
+      log: { warn: (...a: unknown[]) => warns.push(a.join(" ")), debug: () => {}, info: () => {} }
+    };
+
+    const spawned = await serviceDeferredTurn({
+      ...base,
+      runTurn: async ({ conversationId, stash, deferred }) => {
+        turns.push({
+          conversationId,
+          overrun: Boolean(deferred.overrun),
+          messageIds: stash.messages.map((m) => m.message_id)
+        });
+        return true;
+      }
     });
-    expect(out).toEqual([]);
+
+    // ONE late turn, carrying every held-back message, marked overrun.
+    expect(spawned).toBe(1);
+    expect(turns).toEqual([
+      { conversationId: "c1", overrun: true, messageIds: ["m1", "m2"] }
+    ]);
     expect(s.deferredByConversation.has("c1")).toBe(false);
-    expect(warns).toHaveLength(1);
-    expect(warns[0]).toContain("c1");
-    expect(warns[0]).toContain(`${past / 1000}s`);
-    expect(warns[0]).toContain("2 held-back msg(s)");
-    expect(dead.map((r) => r.message.message_id)).toEqual(["m1", "m2"]);
-    for (const r of dead) {
-      expect(r.kind).toBe("deferred_expired");
-      expect(r.key_id).toBeNull();
-      expect(r.reason).toBe(`deferred retry TTL exceeded (${past / 1000}s > ${DEFERRED_RETRY_TTL_MS / 1000}s)`);
-      expect(typeof r.rejected_at).toBe("string");
-    }
+    expect(acquires).toEqual([]); // an overrun turn takes no floor
+    // Warned on the operator's timeline, naming the conversation and the count.
+    expect(warns.some((w) => w.includes("c1") && w.includes("exceeded retry window"))).toBe(true);
+    expect(warns.some((w) => w.includes("2 msg(s)"))).toBe(true);
+    // Delivered, so nothing is dead-lettered.
+    expect(dead).toEqual([]);
+
+    // ...but if the late turn cannot start, #79's dead-letter is exactly what
+    // happens — one record per held-back message.
+    const s2 = createAutoReplyState();
+    stashDeferred(s2, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m1: null, m2: null }, 0);
+    const spawned2 = await serviceDeferredTurn({
+      ...base,
+      state: s2,
+      runTurn: async () => false
+    });
+    expect(spawned2).toBe(0);
+    expect(s2.deferredByConversation.has("c1")).toBe(false);
+    expect(dead).toEqual([
+      { reason: DEFERRED_SPAWN_FAILED_REASON, messageIds: ["m1", "m2"] }
+    ]);
   });
 
   it("a turn that covers the conversation clears its stash", () => {

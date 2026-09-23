@@ -439,8 +439,12 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
         }))
       );
     },
+    // #78: a deferred stash that will never get its ordinary turn (cap-evicted,
+    // or a late turn that could not be spawned) goes to the SAME file. Those
+    // messages were acked, so a record here is all that is left of them.
     onDeadLetter: (records) => {
-      if (identityConfigDir) appendDeadLetters(identityConfigDir, records);
+      if (!identityConfigDir) return;
+      appendDeadLetters(identityConfigDir, records);
     }
   });
 }
