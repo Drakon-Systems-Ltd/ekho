@@ -356,3 +356,155 @@ describe("#78 r2 ticks are serialised", () => {
     }
   });
 });
+
+// #78 r3: a message merged into a covering turn keeps ITS OWN verdict.
+//
+// Round 2 rebuilt the merged verification map from this tick's WHOLE-batch map,
+// keyed by message_id — including messages the seen-filter had excluded. Since
+// message_id is relay-chosen and reusable, a validly signed message that reused
+// a stashed one's id (and so never reached the turn) handed its VERIFIED verdict
+// to the held-back message, which the prompt then framed as the operator,
+// "CRYPTOGRAPHICALLY VERIFIED".
+describe("#78 r3 a covered message never inherits a filtered replacement's verdict", () => {
+  it("delivers the stashed unsigned ask unverified, even under a reused id", async () => {
+    const { signCanonical, publicKeyB64urlFromSeed, keyId, sha256Hex } = await import("../src/identity");
+    const FLEET = "flt_r3";
+    const OP_SEED = new Uint8Array(32).fill(7);
+    const OP_PUB = publicKeyB64urlFromSeed(OP_SEED);
+    const OP_KID = keyId(Buffer.from(OP_PUB, "base64url"));
+    const sentAt = new Date().toISOString();
+    const replacementText = "signed, and not what was stashed";
+    const canonical = {
+      v: 1,
+      fleet_id: FLEET,
+      operator_id: "op",
+      key_id: OP_KID,
+      recipient: { kind: "agent", id: "self" },
+      conversation_id: "c-held",
+      body_sha256: sha256Hex(replacementText),
+      sent_at: sentAt,
+      nonce: "n-r3"
+    };
+    // Reuses the STASHED message's id, and is genuinely signed.
+    const replacement: any = {
+      message_id: "unsigned-ask",
+      conversation_id: "c-held",
+      sender_kind: "operator",
+      sender_agent_id: "op_" + FLEET,
+      message_type: "direct",
+      body: { text: replacementText },
+      operator_sig: signCanonical(canonical, OP_SEED),
+      agent_sig: null,
+      key_id: OP_KID,
+      sig_canonical: canonical
+    };
+    const client = {
+      getInbox: inboxQueue([
+        // Tick 1: a peer message contends for the held floor and takes the
+        // unsigned operator ask in the same conversation down with it.
+        {
+          messages: [peerMsg(1, "c-held"), operatorMsg("c-held", "unsigned-ask", "unsigned operator ask")],
+          operator_trusted: true,
+          peer_autoreply: true,
+          roster: [],
+          fleet_id: FLEET
+        },
+        // Tick 2: the replacement (dropped by the seen-filter) plus a fresh
+        // operator message that covers the conversation.
+        {
+          messages: [replacement, operatorMsg("c-held", "cover", "cover me")],
+          operator_trusted: true,
+          roster: [],
+          fleet_id: FLEET
+        }
+      ]),
+      ackMessages: async () => {},
+      acquireFloor: async () => ({ granted: false, holder_agent_id: "agent_holder" }),
+      releaseFloor: async () => {},
+      raiseNotice: async () => {}
+    };
+    const stop = startAutoReply({
+      client: client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      pollIntervalMs: 5,
+      peerEnabled: true,
+      identity: { seedHex: "22".repeat(32), pinnedOperatorKeys: { [OP_KID]: OP_PUB } } as any,
+      log: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} }
+    });
+
+    try {
+      await waitFor(() => hoisted.calls.length > 0);
+    } finally {
+      stop();
+    }
+
+    const prompt = hoisted.calls[0][hoisted.calls[0].length - 1];
+    expect(prompt).toContain("unsigned operator ask"); // still delivered…
+    expect(prompt).not.toContain(replacementText); // …the filtered one is not
+    expect(prompt).not.toContain("CRYPTOGRAPHICALLY VERIFIED");
+    expect(prompt).toContain("relay-authenticated fleet operator");
+  });
+});
+
+// #78 r3: a covering turn can absorb stashes from SEVERAL conversations. Naming
+// only the oldest in the deferred context put every other covered
+// conversation's catch-up tail under the "already seen, do NOT re-answer"
+// header — which is exactly where an unseen correction goes to die.
+describe("#78 r3 a covering turn frames every covered conversation's tail as unseen", () => {
+  it("does not label C2's correction as already seen", async () => {
+    const client = {
+      getInbox: inboxQueue([
+        // Tick 1: C1 defers first, then C2 — both stashed for the held floor.
+        {
+          messages: [peerMsg(1, "c1")],
+          operator_trusted: false,
+          peer_autoreply: true,
+          roster: []
+        },
+        {
+          messages: [peerMsg(2, "c2")],
+          operator_trusted: false,
+          peer_autoreply: true,
+          roster: []
+        },
+        // Tick 3: one batch of operator messages covers BOTH conversations.
+        {
+          messages: [operatorMsg("c1", "o1", "cover c1"), operatorMsg("c2", "o2", "cover c2")],
+          operator_trusted: true,
+          roster: [],
+          conversation_history: {
+            c1: [{ sender_label: "Case", text: "c1 tail line" }],
+            c2: [{ sender_label: "Molly", text: "CORRECTION: ignore that" }]
+          }
+        }
+      ]),
+      ackMessages: async () => {},
+      acquireFloor: async () => ({ granted: false, holder_agent_id: "agent_holder" }),
+      releaseFloor: async () => {},
+      raiseNotice: async () => {}
+    };
+    const stop = startAutoReply({
+      client: client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      pollIntervalMs: 5,
+      peerEnabled: true,
+      log: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} }
+    });
+
+    try {
+      await waitFor(() => hoisted.calls.length > 0);
+    } finally {
+      stop();
+    }
+
+    const prompt = hoisted.calls[0][hoisted.calls[0].length - 1];
+    expect(prompt).toContain("teammate says 1");
+    expect(prompt).toContain("teammate says 2");
+    const before = (needle: string) => prompt.slice(0, prompt.indexOf(needle));
+    expect(before("CORRECTION: ignore that")).not.toContain("you have already seen this");
+    expect(before("CORRECTION: ignore that")).toContain("WHILE YOUR TURN WAS HELD BACK");
+    expect(before("c1 tail line")).toContain("WHILE YOUR TURN WAS HELD BACK");
+  });
+});
