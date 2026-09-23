@@ -1267,14 +1267,71 @@ def test_stash_deferred_merges_dedupes_and_keeps_first_clock():
     assert sorted(stash["verifications"].keys()) == ["p0", "p1"]
 
 
-def test_list_retryable_deferred_oldest_first_and_prunes_expired():
+def test_list_retryable_deferred_oldest_first_and_prunes_expired(tmp_path):
     state = _state()
+    dl = str(tmp_path / "dl.jsonl")
     stash_deferred(state, "old", [_peer(0, conversation_id="old")], {}, 0.0)
     stash_deferred(state, "newer", [_peer(1, conversation_id="newer")], {}, 10.0)
-    assert list_retryable_deferred(state, 20.0) == ["old", "newer"]
+    assert list_retryable_deferred(state, 20.0, dead_letter_path=dl) == ["old", "newer"]
     past = DEFERRED_RETRY_TTL_S + 5.0
-    assert list_retryable_deferred(state, past) == ["newer"]
+    assert list_retryable_deferred(state, past, dead_letter_path=dl) == ["newer"]
     assert "old" not in state.deferred_by_conversation
+
+
+def test_deferred_retry_ttl_outlives_the_floor_ttl():
+    # #78: a legitimate floor holder keeps the floor up to FLOOR_TTL_SECONDS;
+    # the retry window must outlast it or the stash dies mid-hold.
+    assert DEFERRED_RETRY_TTL_S == autoreply.FLOOR_TTL_SECONDS + 120
+    assert DEFERRED_RETRY_TTL_S > autoreply.FLOOR_TTL_SECONDS
+
+
+def test_deferred_stash_survives_past_old_600s_ttl_while_floor_can_still_be_held(tmp_path):
+    # #78 regression: the old 600s TTL dropped this stash while a holder's
+    # 960s floor could still be live. It must stay retryable, with no trace written.
+    state = _state()
+    dl = tmp_path / "dl.jsonl"
+    stash_deferred(state, "c1", [_peer(0, conversation_id="c1")], {"p0": None}, 0.0)
+    assert 600.0 < autoreply.FLOOR_TTL_SECONDS < DEFERRED_RETRY_TTL_S
+    assert list_retryable_deferred(state, 700.0, dead_letter_path=str(dl)) == ["c1"]
+    assert list_retryable_deferred(
+        state, float(autoreply.FLOOR_TTL_SECONDS), dead_letter_path=str(dl)
+    ) == ["c1"]
+    assert "c1" in state.deferred_by_conversation
+    assert not dl.exists()
+
+
+def test_expired_deferred_stash_is_warned_and_dead_lettered(tmp_path, caplog):
+    # #78: expiry used to be a silent pop() — the stash is the consumed+acked
+    # messages' only trace, so it must be logged and dead-lettered.
+    import json
+    import logging
+
+    state = _state()
+    dl = tmp_path / "dl.jsonl"
+    stash_deferred(
+        state, "c1",
+        [_peer(0, conversation_id="c1"), _peer(1, conversation_id="c1")],
+        {"p0": None, "p1": None}, 0.0,
+    )
+    past = DEFERRED_RETRY_TTL_S + 30.0
+    with caplog.at_level(logging.WARNING, logger="ekho_hermes.autoreply"):
+        assert list_retryable_deferred(state, past, dead_letter_path=str(dl)) == []
+    assert "c1" not in state.deferred_by_conversation
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    text = warnings[0].getMessage()
+    assert "c1" in text and f"{past:.0f}s" in text and "2 held-back msg(s)" in text
+
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert [r["message"]["message_id"] for r in records] == ["p0", "p1"]
+    for r in records:
+        assert r["kind"] == "deferred_expired"
+        assert r["key_id"] is None
+        assert r["reason"] == (
+            f"deferred retry TTL exceeded ({past:.0f}s > {DEFERRED_RETRY_TTL_S:.0f}s)"
+        )
+        assert r["rejected_at"]
 
 
 def test_tick_deferred_message_is_retried_when_floor_frees():
@@ -1319,18 +1376,23 @@ def test_tick_retry_prompt_carries_original_text_and_fresh_tail():
     assert "holder said things meanwhile" in prompts[0]  # fresh catch-up tail
 
 
-def test_tick_deferred_stash_expires_after_ttl():
+def test_tick_deferred_stash_expires_after_ttl(tmp_path):
     events = []
     state = _state()
+    dl = tmp_path / "dl.jsonl"
     c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
     process_inbox_once(c1, "self", state, spawn=_spawn_recorder(events),
-                       now=0.0, peer_enabled=True, peer_turn_budget=25)
+                       now=0.0, peer_enabled=True, peer_turn_budget=25,
+                       dead_letter_path=str(dl))
     c2 = FloorClient(InboxResponse([], [], False, []), granted=True)
     s2 = process_inbox_once(c2, "self", state, spawn=_spawn_recorder(events),
                             now=DEFERRED_RETRY_TTL_S + 60.0,
-                            peer_enabled=True, peer_turn_budget=25)
+                            peer_enabled=True, peer_turn_budget=25,
+                            dead_letter_path=str(dl))
     assert s2["spawned"] == 0
     assert "proj-1" not in state.deferred_by_conversation  # dropped, not retried
+    # ...but not silently: the tick threads its dead-letter path through (#78).
+    assert '"deferred_expired"' in dl.read_text()
 
 
 def test_tick_new_granted_turn_supersedes_the_stash():

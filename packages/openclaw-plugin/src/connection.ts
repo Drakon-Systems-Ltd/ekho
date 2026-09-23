@@ -438,6 +438,9 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
           message: r.message
         }))
       );
+    },
+    onDeadLetter: (records) => {
+      if (identityConfigDir) appendDeadLetters(identityConfigDir, records);
     }
   });
 }
