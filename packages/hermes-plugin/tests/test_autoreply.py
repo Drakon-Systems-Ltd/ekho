@@ -9,6 +9,7 @@ process spawn are injected.
 """
 
 import hashlib
+import logging
 import os
 import sys
 import threading
@@ -1283,6 +1284,101 @@ def test_list_retryable_deferred_oldest_first_and_leaves_expired_in_place():
     assert "old" in state.deferred_by_conversation  # still owed a turn
 
 
+def test_deferred_retry_ttl_outlives_the_floor_ttl():
+    # #78: a legitimate floor holder keeps the floor up to FLOOR_TTL_SECONDS;
+    # the retry window must outlast it or the stash dies mid-hold.
+    assert DEFERRED_RETRY_TTL_S == autoreply.FLOOR_TTL_SECONDS + 120
+    assert DEFERRED_RETRY_TTL_S > autoreply.FLOOR_TTL_SECONDS
+
+
+def test_deferred_stash_survives_past_old_600s_ttl_while_floor_can_still_be_held():
+    # #78 regression (from #79, kept): the old 600s TTL dropped this stash while
+    # a holder's 960s floor could still be live. It must stay retryable.
+    # Adapted only in plumbing — list_retryable_deferred no longer takes a
+    # dead-letter path, so "no trace written" is asserted as "nothing expired
+    # yet, so take_expired_deferred has nothing to hand over".
+    state = _state()
+    stash_deferred(state, "c1", [_peer(0, conversation_id="c1")], {"p0": None}, 0.0)
+    assert 600.0 < autoreply.FLOOR_TTL_SECONDS < DEFERRED_RETRY_TTL_S
+    assert list_retryable_deferred(state, 700.0) == ["c1"]
+    assert list_retryable_deferred(state, float(autoreply.FLOOR_TTL_SECONDS)) == ["c1"]
+    assert "c1" in state.deferred_by_conversation
+    assert take_expired_deferred(state, float(autoreply.FLOOR_TTL_SECONDS)) == []
+    assert "c1" in state.deferred_by_conversation
+
+
+def test_expired_deferred_stash_is_warned_and_delivered_late(tmp_path, caplog):
+    """Adapted from #79's test_expired_deferred_stash_is_warned_and_dead_lettered.
+
+    #79 asserted expiry -> WARNING + dead-letter. Expiry is now a WARNING + one
+    LATE turn carrying the whole stash (both messages, oldest first, marked
+    overrun); the dead-letter file stays empty because nothing was lost. The
+    dead-letter half of #79's assertion moves to the spawn-failure case below,
+    which is the only way a stash can now end without a turn.
+    """
+    import json
+
+    prompts = []
+
+    def spawn(cmd, env):
+        prompts.append(" ".join(cmd))
+
+    state = _state()
+    dl = tmp_path / "dl.jsonl"
+    stash_deferred(
+        state, "proj-1",
+        [_peer(0), _peer(1)],
+        {"p0": None, "p1": None}, 0.0,
+    )
+    past = DEFERRED_RETRY_TTL_S + 30.0
+    client = FloorClient(InboxResponse([], [], False, []), granted=False)
+    with caplog.at_level(logging.WARNING, logger="ekho_hermes.autoreply"):
+        summary = process_inbox_once(
+            client, "self", state, spawn=spawn, now=past, peer_enabled=True,
+            peer_turn_budget=25, dead_letter_path=str(dl),
+        )
+
+    # ONE late turn, carrying every held-back message, marked overrun.
+    assert summary["spawned"] == 1
+    assert len(prompts) == 1
+    assert "teammate message 0" in prompts[0] and "teammate message 1" in prompts[0]
+    assert "WITHOUT the floor" in prompts[0]
+    assert "proj-1" not in state.deferred_by_conversation
+    assert client.acquires == [] and client.releases == []
+
+    # Warned on the operator's timeline, naming the conversation (as #79 asked).
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "proj-1" in r.getMessage()
+        and "exceeded retry window" in r.getMessage()
+        and "delivering late without the floor" in r.getMessage()
+        for r in warnings
+    )
+    # Delivered, so nothing is dead-lettered.
+    assert not dl.exists()
+
+    # ...but if that late turn cannot start, #79's dead-letter is exactly what
+    # happens, with one record per held-back message.
+    def boom(cmd, env):
+        raise RuntimeError("no interpreter")
+
+    state2 = _state()
+    stash_deferred(state2, "proj-1", [_peer(0), _peer(1)], {"p0": None, "p1": None}, 0.0)
+    client2 = FloorClient(InboxResponse([], [], False, []), granted=False)
+    with caplog.at_level(logging.WARNING, logger="ekho_hermes.autoreply"):
+        summary2 = process_inbox_once(
+            client2, "self", state2, spawn=boom, now=past, peer_enabled=True,
+            peer_turn_budget=25, dead_letter_path=str(dl),
+        )
+    assert summary2["spawned"] == 0
+    assert "proj-1" not in state2.deferred_by_conversation
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert [r["message"]["message_id"] for r in records] == ["p0", "p1"]
+    for r in records:
+        assert r["reason"] == autoreply.DEFERRED_SPAWN_FAILED_REASON
+        assert r["rejected_at"]
+
+
 def test_tick_deferred_message_is_retried_when_floor_frees():
     events = []
     state = _state()
@@ -1349,21 +1445,34 @@ def test_tick_retry_held_ms_uses_the_tick_clock_not_wall_time(monkeypatch):
                        peer_enabled=True, peer_turn_budget=25)
     assert seen["deferred"]["held_ms"] == 180_000.0
 
-def test_tick_deferred_stash_past_the_ttl_is_delivered_late_not_dropped():
+
+def test_tick_deferred_stash_past_the_ttl_is_delivered_late_not_dropped(tmp_path, caplog):
     """#78: this used to assert the stash was DROPPED at the TTL — acked
-    messages, no turn, no trace. Past the window the turn now runs late."""
+    messages, no turn, no trace. Past the window the turn now runs late.
+
+    Adapted from #79's test_tick_deferred_stash_expires_after_ttl, which
+    asserted expiry -> dead-letter. Expiry is a late turn now, so the tick's
+    threaded dead-letter path (#79's plumbing, kept) must stay EMPTY: nothing
+    was lost, so nothing is dead-lettered."""
     events = []
     state = _state()
+    dl = tmp_path / "dl.jsonl"
     c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
     process_inbox_once(c1, "self", state, spawn=_spawn_recorder(events),
-                       now=0.0, peer_enabled=True, peer_turn_budget=25)
+                       now=0.0, peer_enabled=True, peer_turn_budget=25,
+                       dead_letter_path=str(dl))
     c2 = FloorClient(InboxResponse([], [], False, []), granted=True)
-    s2 = process_inbox_once(c2, "self", state, spawn=_spawn_recorder(events),
-                            now=DEFERRED_RETRY_TTL_S + 60.0,
-                            peer_enabled=True, peer_turn_budget=25)
+    with caplog.at_level("WARNING", logger="ekho_hermes.autoreply"):
+        s2 = process_inbox_once(c2, "self", state, spawn=_spawn_recorder(events),
+                                now=DEFERRED_RETRY_TTL_S + 60.0,
+                                peer_enabled=True, peer_turn_budget=25,
+                                dead_letter_path=str(dl))
     assert s2["spawned"] == 1
     assert events.count("spawn") == 1
     assert "proj-1" not in state.deferred_by_conversation  # delivered, not dropped
+    assert any("exceeded retry window" in r.message
+               for r in caplog.records if r.levelname == "WARNING")
+    assert not dl.exists()
 
 
 def test_tick_new_granted_turn_absorbs_the_stash():
