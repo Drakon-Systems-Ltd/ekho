@@ -18,7 +18,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.5.1` — the retention sweep now prunes `events` and `heartbeats` (audit-safe allowlist, newest heartbeat per agent always kept), and the Hermes plugin's advisory-revocation warning is throttled to match the OpenClaw plugin. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.5.2` — deferred peer messages no longer silently drop when a legitimate floor holder outlasts the retry window; a genuine expiry now logs a warning and writes a dead-letter entry instead. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 

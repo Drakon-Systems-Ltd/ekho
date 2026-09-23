@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-23
+
+### Fixed
+- **Deferred peer messages no longer silently dropped when a legitimate floor holder outlasts the retry window (#78).** A message deferred because another agent held the conversation floor was stashed and retried on later polling ticks, but the retry TTL (600s) was shorter than the floor TTL (`FLOOR_TTL_SECONDS`, 960s by default), so a holder mid-turn for 10–16 minutes could outlive the retry window and have its stash popped with no log line and no record. Both the Hermes plugin (`autoreply.py`) and the OpenClaw plugin (`autoreply.ts`) now derive the retry TTL from the floor TTL (`FLOOR_TTL_SECONDS + 120`), so a legitimate holder can no longer outlast it, and a genuine expiry (a crashed holder not yet reclaimed, repeated floor-acquire failures) now logs a WARNING and writes a dead-letter entry through the existing sink instead of dropping silently.
+
 ## [0.5.1] - 2026-09-22
 
 ### Fixed
