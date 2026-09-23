@@ -37,7 +37,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from datetime import datetime, timezone
 
@@ -153,9 +153,11 @@ DEFERRED_GRACE_S = 120  # margin for relay clock skew + the release round-trip
 DEFERRED_RETRY_TTL_S = float(FLOOR_TTL_SECONDS + DEFERRED_GRACE_S)
 DEFERRED_CONVERSATION_CAP = 50   # FIFO-evicted map of stashes
 DEFERRED_MESSAGES_PER_CONV = 10  # keep the newest N messages per stash
-# Dead-letter reasons for a stash that will never get its ordinary turn. Both
-# are acked work, so both leave a record on disk and a WARNING in the log.
+# Dead-letter reasons for a stash (or part of one) that will never get its
+# ordinary turn. All of it is acked work, so each leaves a record on disk and a
+# WARNING in the log.
 DEFERRED_EVICTED_REASON = "deferred_evicted_cap"
+DEFERRED_OVERFLOW_REASON = "deferred_overflow_per_conv"
 DEFERRED_SPAWN_FAILED_REASON = "deferred_expired_spawn_failed"
 DEFERRED_RETRY_SPAWN_FAILED_REASON = "deferred_retry_spawn_failed"
 
@@ -424,20 +426,33 @@ def effective_conversation_budget(
     return normalize_turn_budget(fallback)
 
 
+class DeferredDrop(NamedTuple):
+    """Messages a stash could not keep. Acked work with no turn ahead of it, so
+    the caller MUST dead-letter every drop under its ``reason`` —
+    ``stash_deferred`` has no sink of its own (#78)."""
+
+    conversation_id: str
+    messages: List[Any]
+    reason: str
+
+
 def stash_deferred(
     state: AutoReplyState,
     conversation_id: str,
     messages: List[Any],
     verifications: Optional[Dict[str, Any]],
     now: float,
-) -> List[tuple]:
+) -> List[DeferredDrop]:
     """Stash (or merge into) a conversation's deferred messages so a later tick
     can retry the floor. Dedupes by message id, keeps the newest slice, and
     preserves the FIRST deferral time (the TTL clock).
 
-    Returns the ``(conversation_id, stash)`` pairs the FIFO cap evicted. An
-    evicted stash was already acked, so the caller MUST dead-letter it — this
-    function has no sink of its own (#78)."""
+    Returns every message this stash could NOT keep, tagged with why: the
+    oldest messages past ``DEFERRED_MESSAGES_PER_CONV`` within this
+    conversation (``deferred_overflow_per_conv``) and whole stashes the FIFO
+    conversation cap pushed out (``deferred_evicted_cap``). Both used to vanish
+    without a turn, a log or a record — the per-conversation one silently, in
+    the slice below."""
     existing = state.deferred_by_conversation.pop(conversation_id, None) or {}
     previous_by_id: Dict[Any, Any] = {}
     for m in existing.get("messages", []):
@@ -445,7 +460,16 @@ def stash_deferred(
     by_id: Dict[Any, Any] = dict(previous_by_id)
     for m in messages:
         by_id[getattr(m, "message_id", None)] = m
-    merged = list(by_id.values())[-DEFERRED_MESSAGES_PER_CONV:]
+    ordered = list(by_id.values())
+    merged = ordered[-DEFERRED_MESSAGES_PER_CONV:]
+    drops: List[DeferredDrop] = []
+    # The per-conversation cap keeps the NEWEST slice, so the overflow is the
+    # oldest end of the queue. It is still acked work: it leaves a record.
+    overflowed = ordered[: len(ordered) - len(merged)]
+    if overflowed:
+        drops.append(
+            DeferredDrop(conversation_id, overflowed, DEFERRED_OVERFLOW_REASON)
+        )
     kept_verifications: Dict[str, Any] = {}
     previous_verdicts = existing.get("verifications", {}) or {}
     for m in merged:
@@ -470,11 +494,13 @@ def stash_deferred(
         "verifications": kept_verifications,
         "first_deferred_at": existing.get("first_deferred_at", now),
     }
-    evicted: List[tuple] = []
     while len(state.deferred_by_conversation) > DEFERRED_CONVERSATION_CAP:
         victim = next(iter(state.deferred_by_conversation))
-        evicted.append((victim, state.deferred_by_conversation.pop(victim)))
-    return evicted
+        victim_stash = state.deferred_by_conversation.pop(victim)
+        drops.append(
+            DeferredDrop(victim, victim_stash["messages"], DEFERRED_EVICTED_REASON)
+        )
+    return drops
 
 
 def list_retryable_deferred(state: AutoReplyState, now: float) -> List[str]:
@@ -514,8 +540,81 @@ def take_expired_deferred(
 
 
 def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
-    """Drop a conversation's stash — a turn that covered it supersedes the retry."""
+    """Drop a conversation's stash. Only ever called once the stash has actually
+    been DELIVERED — by the turn that carried it (see ``merge_covered_stashes``)
+    or by the retry path that spawned it."""
     state.deferred_by_conversation.pop(conversation_id, None)
+
+
+def merge_covered_stashes(
+    state: AutoReplyState,
+    floored: Sequence[Any],
+    verifications: Optional[Dict[str, Any]],
+    now: float,
+) -> Tuple[List[Any], Dict[str, Any], List[str], Optional[Dict[str, Any]]]:
+    """Fold the stashes of the conversations this turn covers INTO the turn.
+
+    A turn in conversation C used to just ``clear_deferred(C)`` and spawn with
+    the FRESH messages only. Anything stashed for C was then dropped having had
+    no turn and no dead-letter — an operator message (which bypasses the floor
+    entirely) was enough to bin a peer message that was still waiting for it —
+    and if that spawn failed the cleared stash was unrecoverable (#78). The
+    held-back messages now ride along in the same turn, oldest first, deduped
+    by message id, and the stash is cleared only after the spawn returns.
+
+    Returns ``(messages, verifications, covered_conversation_ids, deferred)``.
+    ``deferred`` is the prompt marker — the wait of the longest-held covered
+    stash plus the ids of every message that was held back, so the banner and
+    the per-message framing can say which of them are late. ``None`` (and the
+    untouched message list) when this turn covers no stash at all."""
+    covered: List[Tuple[str, Dict[str, Any]]] = []
+    for conv in dict.fromkeys(getattr(m, "conversation_id", "") for m in floored):
+        stash = state.deferred_by_conversation.get(conv)
+        if stash and stash.get("messages"):
+            covered.append((conv, stash))
+    if not covered:
+        return list(floored), dict(verifications or {}), [], None
+    covered.sort(key=lambda cs: cs[1]["first_deferred_at"])  # longest wait first
+    fresh_by_id = {getattr(m, "message_id", None): m for m in floored}
+    ordered: List[Any] = []
+    held_ids: List[Any] = []
+    seen_ids: Set[Any] = set()
+    merged_verifications: Dict[str, Any] = {}
+    for _conv, stash in covered:
+        for m in stash["messages"]:
+            mid = getattr(m, "message_id", None)
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            # Held-back messages lead: they are the oldest thing in the batch.
+            # An id in BOTH takes the fresh object (same id, newest relay state)
+            # at the stash's older position.
+            ordered.append(fresh_by_id.get(mid, m))
+            held_ids.append(mid)
+            merged_verifications[mid] = (stash.get("verifications") or {}).get(mid)
+    for m in floored:
+        mid = getattr(m, "message_id", None)
+        if mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+        ordered.append(m)
+    # This tick's verdict always wins over the copy the stash carried.
+    merged_verifications.update(verifications or {})
+    conv, oldest = covered[0]
+    return (
+        ordered,
+        merged_verifications,
+        [c for c, _ in covered],
+        {
+            "conversation_id": conv,
+            # Same clock as first_deferred_at (the tick's monotonic ``now``).
+            "held_ms": max(0.0, (now - oldest["first_deferred_at"]) * 1000),
+            # A COVERING turn, not a wholly held-back one: the batch carries
+            # fresh messages too, so the banner frames it differently.
+            "merged": True,
+            "held_message_ids": held_ids,
+        },
+    )
 
 
 def consume_peer_latch(state: AutoReplyState, conversation_id: str) -> None:
@@ -1057,6 +1156,22 @@ def _deferred_banner(deferred: Dict[str, Any]) -> str:
     the prompt: by the time the agent reaches its trigger message it must already
     know the message is old and the thread has moved."""
     mins = max(1, round(float(deferred.get("held_ms") or 0) / 60_000))
+    if deferred.get("merged"):
+        # A COVERING turn (#78): a turn in this conversation came up before the
+        # stash's own retry did, so the held-back messages are delivered here
+        # rather than cleared unread. Only SOME of the batch is late, and the
+        # late ones carry their own marker, so say that instead of framing the
+        # whole turn as held back.
+        return (
+            f"⏳ SOME OF THE MESSAGE(S) BELOW WERE HELD BACK for about {mins} min — a "
+            "teammate held this conversation's floor when they arrived, so they reach "
+            "you late, in the same turn as newer message(s). Each late one is marked "
+            "[HELD BACK] on its \"• From …\" line. Answer the thread as it stands NOW: "
+            "a marked message may already have been answered, corrected or retracted "
+            "by a newer message here or by the \"WHILE YOUR TURN WAS HELD BACK\" tail "
+            "below. Read that tail BEFORE composing, and never re-assert something it "
+            "has withdrawn.\n\n"
+        )
     # An OVERRUN turn never got the floor at all: it waited out the whole retry
     # window and is being delivered late rather than dropped (#78). Say so
     # plainly — the agent is about to answer without the turn-taking lock, so a
@@ -1155,6 +1270,9 @@ def build_prompt(
         if getattr(m, "sender_kind", None) == "operator"
     }
     annotated_convs: set = set()
+    # Message ids this turn is delivering LATE. Only a covering turn sets them
+    # (a wholly held-back turn says so once, in the banner).
+    held_ids: Set[Any] = set((deferred or {}).get("held_message_ids") or ())
     # Per-turn unguessable fence around each message's raw body. A peer cannot
     # predict this token, so it cannot close the fence early and forge a sibling
     # "• From your operator …" framing line that reads as plugin-generated
@@ -1191,6 +1309,13 @@ def build_prompt(
         atts = _attachments_note(m, local_for_msg)
         addr = _addressing_note(m, self_agent_id, names)
         quote = _reply_quote(m, names, is_verified)
+        # A COVERING turn carries both fresh and held-back messages (#78), so
+        # the banner alone cannot say which is which. Mark the late ones here.
+        held = (
+            " [HELD BACK — delivered late]"
+            if getattr(m, "message_id", None) in held_ids
+            else ""
+        )
         # Budget-awareness line: only for peer (non-operator) messages whose
         # conversation has a remaining count, and only once per conversation.
         budget = ""
@@ -1229,7 +1354,7 @@ def build_prompt(
         # nested inside the fence, as data.
         fenced_text = "\n".join("      " + ln for ln in text.split("\n"))
         lines.append(
-            f'• From {who}{addr} — {reply_via}:'
+            f'• From {who}{held}{addr} — {reply_via}:'
             f'{quote}\n'
             f'    «{fence}\n{fenced_text}\n    {fence}»{atts}{budget}'
         )
@@ -1966,26 +2091,42 @@ def process_inbox_once(
         kept, lambda c: client.acquire_floor(c, FLOOR_TTL_SECONDS), log
     ) if kept else ([], [], {}, {})
     for conv, msgs in deferred.items():
-        # Eviction is never silent (#78): a stash the cap pushes out was acked,
-        # so it leaves a dead-letter record and a WARNING behind it.
-        for ev_conv, ev_stash in stash_deferred(state, conv, msgs, verifications, now):
-            log.warning(
-                "[ekho-autoreply] deferred conversation %s evicted at the "
-                "%d-conversation cap — dead-lettering %d msg(s); it will get no turn",
-                ev_conv,
-                DEFERRED_CONVERSATION_CAP,
-                len(ev_stash["messages"]),
-            )
+        # Neither cap drops anything silently (#78): whatever a stash cannot
+        # keep was acked, so it leaves a dead-letter record and a WARNING.
+        for drop in stash_deferred(state, conv, msgs, verifications, now):
+            if drop.reason == DEFERRED_OVERFLOW_REASON:
+                log.warning(
+                    "[ekho-autoreply] deferred conversation %s overflowed the "
+                    "%d-message cap — dead-lettering the %d oldest msg(s); "
+                    "they will get no turn",
+                    drop.conversation_id,
+                    DEFERRED_MESSAGES_PER_CONV,
+                    len(drop.messages),
+                )
+            else:
+                log.warning(
+                    "[ekho-autoreply] deferred conversation %s evicted at the "
+                    "%d-conversation cap — dead-lettering %d msg(s); it will get no turn",
+                    drop.conversation_id,
+                    DEFERRED_CONVERSATION_CAP,
+                    len(drop.messages),
+                )
             append_deferred_dead_letters(
-                ev_stash["messages"],
-                DEFERRED_EVICTED_REASON,
-                path=dead_letter_path,
-                log=log,
+                drop.messages, drop.reason, path=dead_letter_path, log=log
             )
-    # A conversation that got a turn now supersedes any stale stash for it.
-    for m in floored:
-        clear_deferred(state, getattr(m, "conversation_id", ""))
+    # A conversation that gets a turn ABSORBS its stash: the held-back messages
+    # are delivered BY this turn rather than cleared unread (#78).
+    turn_messages, turn_verifications, covered_convs, cover_deferred = (
+        merge_covered_stashes(state, floored, verifications, now)
+    )
     if floored:
+        if covered_convs:
+            log.info(
+                "[ekho-autoreply] turn covers %d held-back message(s) from %d "
+                "stashed conversation(s) — delivering them in this turn",
+                len(cover_deferred["held_message_ids"]),
+                len(covered_convs),
+            )
         base_hist = getattr(inbox, "conversation_history", None) or {}
         fresh_hist = {**base_hist, **tails}
         # Pre-download any operator attachments HERE (the daemon has the relay
@@ -1993,32 +2134,48 @@ def process_inbox_once(
         # spawned one-shot child has an empty inbox cache and couldn't fetch
         # them itself. Best-effort: a failed download just drops the paths.
         local_attachments = None
-        if any(getattr(m, "attachments", None) for m in floored):
+        if any(getattr(m, "attachments", None) for m in turn_messages):
             try:
-                local_attachments = download_inbox_attachments(client, floored)
+                local_attachments = download_inbox_attachments(client, turn_messages)
             except Exception as exc:  # noqa: BLE001
                 log.debug("[ekho-autoreply] attachment pre-download failed: %s", exc)
         state.in_flight = True
         try:
             trigger_turn(
-                floored,
+                turn_messages,
                 operator_trusted,
                 local_attachments=local_attachments,
                 roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
-                verifications=verifications,
+                verifications=turn_verifications,
                 self_agent_id=self_agent_id,
                 conversation_history=fresh_hist,
                 peer_turn_budget=eff_budget,
                 peer_budget_remaining=peer_budget_remaining,
                 rooms=getattr(inbox, "rooms", None),
                 conversation_budgets=room_budgets,
+                deferred=cover_deferred,
                 snapshot_verifier=snapshot_verifier,
             )
             spawned = 1
+            # The stash left memory via a TURN — the only safe moment to clear
+            # it. Before the spawn, a failure here binned it for good.
+            for conv in covered_convs:
+                clear_deferred(state, conv)
         except Exception as exc:  # noqa: BLE001
             log.warning("[ekho-autoreply] turn trigger failed: %s", exc)
+            if covered_convs:
+                # KEPT, not dead-lettered: the stash still has live paths to a
+                # turn (the floor retry, then the overrun delivery the TTL
+                # guarantees), so a transient spawn failure must not end them.
+                # The failure handling for the fresh messages is unchanged —
+                # they have no stash to fall back on.
+                log.warning(
+                    "[ekho-autoreply] covering turn failed to spawn — keeping "
+                    "the held-back stash(es) for %s",
+                    ", ".join(covered_convs),
+                )
         finally:
             state.in_flight = False
             for conv in to_release:

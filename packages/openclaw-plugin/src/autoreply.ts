@@ -231,7 +231,10 @@ const TURN_TIMEOUT_SECONDS = (() => {
   return Number.isFinite(raw) && raw >= 60 ? raw : 900;
 })();
 // The floor must outlive the longest turn or a teammate barges in mid-reply.
-const FLOOR_TTL_SECONDS = TURN_TIMEOUT_SECONDS + 60; // relay auto-releases on expiry
+// Exported so the deferred-window tests assert against the PRODUCTION constant
+// instead of re-deriving it — a re-derived copy agrees with itself no matter
+// how far the real one drifts.
+export const FLOOR_TTL_SECONDS = TURN_TIMEOUT_SECONDS + 60; // relay auto-releases on expiry
 const PEER_LATCH_CONVERSATION_CAP = 500; // FIFO-evicted per-conversation counter map
 // #11: how many times a peer's progress signals may re-energise ONE conversation's
 // budget within a rolling window. Generous enough for real handoff-heavy work,
@@ -251,12 +254,15 @@ const PROGRESS_REFRESH_WINDOW_MS = 60 * 60_000; // 1h
 // holder, not the one we waited for. That is where waiting stops being useful —
 // and where the turn runs late instead (see takeExpiredDeferred). Nothing is
 // ever dropped for being late.
-export const DEFERRED_RETRY_TTL_MS = (FLOOR_TTL_SECONDS + 120) * 1000; // 120s grace
-const DEFERRED_CONVERSATION_CAP = 50;   // FIFO-evicted map of stashes
-const DEFERRED_MESSAGES_PER_CONV = 10;  // keep the newest N messages per stash
-// Dead-letter reasons for a stash that will never get its ordinary turn. Both
-// are acked work, so both leave a record on disk and a WARNING in the log.
+export const DEFERRED_GRACE_SECONDS = 120; // relay clock skew + the release round-trip
+export const DEFERRED_RETRY_TTL_MS = (FLOOR_TTL_SECONDS + DEFERRED_GRACE_SECONDS) * 1000;
+export const DEFERRED_CONVERSATION_CAP = 50;   // FIFO-evicted map of stashes
+export const DEFERRED_MESSAGES_PER_CONV = 10;  // keep the newest N messages per stash
+// Dead-letter reasons for a stash (or part of one) that will never get its
+// ordinary turn. All of it is acked work, so each leaves a record on disk and a
+// WARNING in the log.
 export const DEFERRED_EVICTED_REASON = "deferred_evicted_cap";
+export const DEFERRED_OVERFLOW_REASON = "deferred_overflow_per_conv";
 export const DEFERRED_SPAWN_FAILED_REASON = "deferred_expired_spawn_failed";
 export const DEFERRED_RETRY_SPAWN_FAILED_REASON = "deferred_retry_spawn_failed";
 
@@ -582,29 +588,51 @@ export function createAutoReplyState(): AutoReplyState {
   };
 }
 
-/** A stash the FIFO cap pushed out. It was already acked, so the caller MUST
- *  dead-letter it — `stashDeferred` has no sink of its own (#78). */
+/** A stash the deferred-retry path removed whole: the FIFO conversation cap
+ *  pushed it out, or the TTL expired and it is being delivered late. */
 export interface EvictedStash {
   conversationId: string;
   stash: DeferredStash;
 }
 
+/** Messages a stash could not keep. Acked work with no turn ahead of it, so the
+ *  caller MUST dead-letter every drop under its `reason` — `stashDeferred` has
+ *  no sink of its own (#78). */
+export interface DeferredDrop {
+  conversationId: string;
+  messages: InboxMessage[];
+  reason: string;
+}
+
 /** Stash (or merge into) a conversation's deferred messages so a later tick can
  *  retry the floor. Dedupes by message id, keeps the newest per-conversation
- *  slice, and preserves the FIRST deferral time (the TTL clock). Returns
- *  whatever the FIFO cap evicted, for the caller to dead-letter. */
+ *  slice, and preserves the FIRST deferral time (the TTL clock).
+ *
+ *  Returns every message this stash could NOT keep, tagged with why: the oldest
+ *  messages past `DEFERRED_MESSAGES_PER_CONV` within this conversation
+ *  (`deferred_overflow_per_conv`) and whole stashes the FIFO conversation cap
+ *  pushed out (`deferred_evicted_cap`). Both used to vanish without a turn, a
+ *  log or a record — the per-conversation one silently, in the slice below. */
 export function stashDeferred(
   state: AutoReplyState,
   conversationId: string,
   messages: InboxMessage[],
   verifications: Record<string, VerifyResult | null>,
   nowMs: number
-): EvictedStash[] {
+): DeferredDrop[] {
   const existing = state.deferredByConversation.get(conversationId);
   const byId = new Map<string, InboxMessage>();
   for (const m of existing?.messages ?? []) byId.set(m.message_id, m);
   for (const m of messages) byId.set(m.message_id, m);
-  const merged = Array.from(byId.values()).slice(-DEFERRED_MESSAGES_PER_CONV);
+  const ordered = Array.from(byId.values());
+  const merged = ordered.slice(-DEFERRED_MESSAGES_PER_CONV);
+  const drops: DeferredDrop[] = [];
+  // The per-conversation cap keeps the NEWEST slice, so the overflow is the
+  // oldest end of the queue. It is still acked work: it leaves a record.
+  const overflowed = ordered.slice(0, ordered.length - merged.length);
+  if (overflowed.length > 0) {
+    drops.push({ conversationId, messages: overflowed, reason: DEFERRED_OVERFLOW_REASON });
+  }
   const keptVerifications: Record<string, VerifyResult | null> = {};
   for (const m of merged) {
     const v = verifications[m.message_id] ?? existing?.verifications[m.message_id] ?? null;
@@ -617,15 +645,16 @@ export function stashDeferred(
     verifications: keptVerifications,
     firstDeferredAtMs: existing?.firstDeferredAtMs ?? nowMs
   });
-  const evicted: EvictedStash[] = [];
   while (state.deferredByConversation.size > DEFERRED_CONVERSATION_CAP) {
     const oldest = state.deferredByConversation.keys().next().value as string | undefined;
     if (oldest === undefined) break;
     const stash = state.deferredByConversation.get(oldest);
     state.deferredByConversation.delete(oldest);
-    if (stash) evicted.push({ conversationId: oldest, stash });
+    if (stash) {
+      drops.push({ conversationId: oldest, messages: stash.messages, reason: DEFERRED_EVICTED_REASON });
+    }
   }
-  return evicted;
+  return drops;
 }
 
 /** Conversations whose stash is still within the retry TTL, oldest deferral
@@ -672,9 +701,90 @@ export function takeExpiredDeferred(
   return out;
 }
 
-/** Drop a conversation's stash — a turn that covered it supersedes the retry. */
+/** Drop a conversation's stash. Only ever called once the stash has actually
+ *  been DELIVERED — by the turn that carried it (see `mergeCoveredStashes`) or
+ *  by the retry path that spawned it. */
 export function clearDeferred(state: AutoReplyState, conversationId: string): void {
   state.deferredByConversation.delete(conversationId);
+}
+
+/** The result of folding this turn's covered stashes into it. */
+export interface CoveredStashes {
+  messages: InboxMessage[];
+  verifications: Record<string, VerifyResult | null>;
+  /** Conversations whose stash is riding along — the caller clears these, and
+   *  ONLY these, once the spawn has returned. */
+  coveredConversationIds: string[];
+  /** Prompt marker for the covering turn, or undefined when nothing was covered. */
+  deferred?: DeferredTurnContext;
+}
+
+/** Fold the stashes of the conversations this turn covers INTO the turn.
+ *
+ *  A turn in conversation C used to just `clearDeferred(C)` and spawn with the
+ *  FRESH messages only. Anything stashed for C was then dropped having had no
+ *  turn and no dead-letter — an operator message (which bypasses the floor
+ *  entirely) was enough to bin a peer message that was still waiting for it —
+ *  and if that spawn failed the cleared stash was unrecoverable (#78). The
+ *  held-back messages now ride along in the same turn, oldest first, deduped by
+ *  message id, and the stash is cleared only after the spawn returns.
+ *
+ *  `deferred` carries the wait of the longest-held covered stash plus the ids
+ *  of every message that was held back, so the banner and the per-message
+ *  framing can say which of them are late. */
+export function mergeCoveredStashes(
+  state: AutoReplyState,
+  floored: InboxMessage[],
+  verifications: Record<string, VerifyResult | null>,
+  nowMs: number
+): CoveredStashes {
+  const covered: Array<{ conv: string; stash: DeferredStash }> = [];
+  for (const conv of new Set(floored.map((m) => m.conversation_id))) {
+    const stash = state.deferredByConversation.get(conv);
+    if (stash && stash.messages.length > 0) covered.push({ conv, stash });
+  }
+  if (covered.length === 0) {
+    return { messages: floored, verifications, coveredConversationIds: [] };
+  }
+  covered.sort((a, b) => a.stash.firstDeferredAtMs - b.stash.firstDeferredAtMs);
+  const freshById = new Map(floored.map((m) => [m.message_id, m]));
+  const ordered: InboxMessage[] = [];
+  const heldMessageIds: string[] = [];
+  const seen = new Set<string>();
+  const merged: Record<string, VerifyResult | null> = {};
+  for (const { stash } of covered) {
+    for (const m of stash.messages) {
+      if (seen.has(m.message_id)) continue;
+      seen.add(m.message_id);
+      // Held-back messages lead: they are the oldest thing in the batch. An id
+      // in BOTH takes the fresh object (same id, newest relay state) at the
+      // stash's older position.
+      ordered.push(freshById.get(m.message_id) ?? m);
+      heldMessageIds.push(m.message_id);
+      merged[m.message_id] = stash.verifications[m.message_id] ?? null;
+    }
+  }
+  for (const m of floored) {
+    if (seen.has(m.message_id)) continue;
+    seen.add(m.message_id);
+    ordered.push(m);
+  }
+  // This tick's verdict always wins over the copy the stash carried.
+  Object.assign(merged, verifications);
+  const oldest = covered[0];
+  return {
+    messages: ordered,
+    verifications: merged,
+    coveredConversationIds: covered.map((c) => c.conv),
+    deferred: {
+      conversationId: oldest.conv,
+      heldMs: Math.max(0, nowMs - oldest.stash.firstDeferredAtMs),
+      // A COVERING turn, not a wholly held-back one: the batch carries fresh
+      // messages too, so the banner frames it differently.
+      merged: true,
+      heldMessageIds
+    }
+  };
 }
 
 function markSeen(state: AutoReplyState, messageId: string) {
@@ -1168,6 +1278,12 @@ export interface DeferredTurnContext {
   /** True when the stash outlived the whole retry window and is being delivered
    *  late WITHOUT the floor (#78) — nobody serialized this turn. */
   overrun?: boolean;
+  /** True on a COVERING turn: a turn in this conversation came up before the
+   *  stash's own retry did, so only SOME of the batch is late (#78). */
+  merged?: boolean;
+  /** The ids of the messages that were held back. Set on a covering turn, where
+   *  the banner alone cannot say which of the batch is late. */
+  heldMessageIds?: string[];
 }
 
 /** The banner a held-back turn opens with. Deliberately the first thing in the
@@ -1175,6 +1291,21 @@ export interface DeferredTurnContext {
  *  know the message is old and the thread has moved. */
 function deferredBanner(ctx: DeferredTurnContext): string {
   const mins = Math.max(1, Math.round(ctx.heldMs / 60_000));
+  // A COVERING turn (#78): a turn in this conversation came up before the
+  // stash's own retry did, so the held-back messages are delivered here rather
+  // than cleared unread. Only SOME of the batch is late, and the late ones
+  // carry their own marker, so say that instead of framing the whole turn as
+  // held back.
+  if (ctx.merged) {
+    return (
+      `⏳ SOME OF THE MESSAGE(S) BELOW WERE HELD BACK for about ${mins} min — a teammate held ` +
+      `this conversation's floor when they arrived, so they reach you late, in the same turn as ` +
+      `newer message(s). Each late one is marked [HELD BACK] on its "• From …" line. Answer the ` +
+      `thread as it stands NOW: a marked message may already have been answered, corrected or ` +
+      `retracted by a newer message here or by the "WHILE YOUR TURN WAS HELD BACK" tail below. ` +
+      `Read that tail BEFORE composing, and never re-assert something it has withdrawn.\n\n`
+    );
+  }
   return (
     `⏳ THIS TURN WAS HELD BACK for about ${mins} min — a teammate held this conversation's floor when ` +
     `the message(s) below arrived, so you are seeing them late and the thread has moved on since. ` +
@@ -1263,6 +1394,9 @@ export function buildPrompt(
     messages.filter((m) => m.sender_kind === "operator").map((m) => m.conversation_id)
   );
   const annotatedConvs = new Set<string>();
+  // Message ids this turn is delivering LATE. Only a covering turn sets them (a
+  // wholly held-back turn says so once, in the banner).
+  const heldIds = new Set(deferredCtx?.heldMessageIds ?? []);
   const lines = messages.map((m) => {
     let who: string;
     const verdict = verifications?.[m.message_id];
@@ -1289,6 +1423,9 @@ export function buildPrompt(
       : "";
     const addr = addressingNote(m, selfAgentId, names);
     const quote = replyQuote(m, names, snapshotVerifier);
+    // A COVERING turn carries both fresh and held-back messages (#78), so the
+    // banner alone cannot say which is which. Mark the late ones here.
+    const held = heldIds.has(m.message_id) ? " [HELD BACK — delivered late]" : "";
     // Budget-awareness line: only for peer (non-operator) messages whose
     // conversation has a remaining count, and only once per conversation.
     let budget = "";
@@ -1316,7 +1453,7 @@ export function buildPrompt(
     // "• From …" framing lives — a forged framing line stays visibly nested
     // inside the fence, as data.
     const fencedText = text.split("\n").map((l) => `      ${l}`).join("\n");
-    return `• From ${who}${addr} — ${replyVia}:${quote}\n    «${fence}\n${fencedText}\n    ${fence}»${atts}${budget}`;
+    return `• From ${who}${held}${addr} — ${replyVia}:${quote}\n    «${fence}\n${fencedText}\n    ${fence}»${atts}${budget}`;
   });
   const teammateRule = hasPeer
     ? ` When a message is from a TEAMMATE, reply with ekho_send ONLY if it materially advances the work — answer a question, complete a handoff, unblock them, or share something they need. Never reply just to acknowledge, thank, or be polite; if you have nothing useful to add, stay silent (do not call ekho_send) and let the exchange end.` +
@@ -1498,6 +1635,15 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
       continue; // relay hiccup — keep the stash, try again next tick
     }
     if (!res?.granted) continue; // still held — keep waiting
+    if (state.inFlight) {
+      // A turn started while we were awaiting the acquire (#78 r2). Spawning
+      // now would run two turns at once and let the first to finish clear
+      // `inFlight` out from under the other. Hand the floor straight back and
+      // leave the stash where it is — the next tick retries it.
+      log?.debug?.(`[ekho-autoreply] deferred-retry for ${conv} stood down: a turn is already in flight`);
+      try { await opts.releaseFloor(conv); } catch { /* best-effort */ }
+      return 0;
+    }
     const stash = state.deferredByConversation.get(conv);
     clearDeferred(state, conv);
     if (!stash) {
@@ -1683,7 +1829,19 @@ export function startAutoReply(opts: {
     }
   };
 
-  const tick = async () => {
+  // Tick-level re-entrancy guard (#78 r2). `inFlight` only covers a running
+  // TURN, and the tick awaits long before it starts one — the inbox poll, the
+  // floor acquires, the deferred retry's own acquire. The interval could
+  // therefore start tick B while tick A sat on one of those awaits: B would
+  // start a turn, A's acquire would then return and start a second, and
+  // whichever finished first cleared `inFlight` while the other still ran.
+  // One tick at a time; a tick that finds this set returns immediately, and
+  // the next interval fires soon enough.
+  let tickRunning = false;
+
+  const runTick = async () => {
+    // With `tickRunning` held, only this tick can set `inFlight` — so this is
+    // an invariant check, not a race guard.
     if (state.inFlight) return; // serialize turns (Part C, rule 6)
     let batch: InboxBatch;
     try {
@@ -1953,41 +2111,55 @@ export function startAutoReply(opts: {
     const plan = await planFloorTurn(kept, (conv) => client.acquireFloor(conv, FLOOR_TTL_SECONDS), log);
     const nowMs = Date.now();
     for (const [conv, msgs] of Object.entries(plan.deferred)) {
-      // Eviction is never silent (#78): a stash the cap pushes out was acked, so
-      // it leaves a dead-letter record and a WARNING behind it.
-      for (const { conversationId, stash } of stashDeferred(state, conv, msgs, verifications, nowMs)) {
+      // Neither cap drops anything silently (#78): whatever a stash cannot keep
+      // was acked, so it leaves a dead-letter record and a WARNING behind it.
+      for (const drop of stashDeferred(state, conv, msgs, verifications, nowMs)) {
         log?.warn?.(
-          `[ekho-autoreply] deferred conversation ${conversationId} evicted at the ` +
-            `${DEFERRED_CONVERSATION_CAP}-conversation cap — dead-lettering ` +
-            `${stash.messages.length} msg(s); it will get no turn`
+          drop.reason === DEFERRED_OVERFLOW_REASON
+            ? `[ekho-autoreply] deferred conversation ${drop.conversationId} overflowed the ` +
+                `${DEFERRED_MESSAGES_PER_CONV}-message cap — dead-lettering the ` +
+                `${drop.messages.length} oldest msg(s); they will get no turn`
+            : `[ekho-autoreply] deferred conversation ${drop.conversationId} evicted at the ` +
+                `${DEFERRED_CONVERSATION_CAP}-conversation cap — dead-lettering ` +
+                `${drop.messages.length} msg(s); it will get no turn`
         );
-        deadLetterDeferred(stash.messages, DEFERRED_EVICTED_REASON);
+        deadLetterDeferred(drop.messages, drop.reason);
       }
     }
-    // A conversation that got a turn now supersedes any stale stash for it.
-    for (const m of plan.floored) clearDeferred(state, m.conversation_id);
+    // A conversation that gets a turn ABSORBS its stash: the held-back messages
+    // are delivered BY this turn rather than cleared unread (#78).
+    const cover = mergeCoveredStashes(state, plan.floored, verifications, nowMs);
 
     if (plan.floored.length > 0) {
+      if (cover.coveredConversationIds.length > 0) {
+        log?.info?.(
+          `[ekho-autoreply] turn covers ${cover.deferred?.heldMessageIds?.length ?? 0} held-back ` +
+            `message(s) from ${cover.coveredConversationIds.length} stashed conversation(s) — ` +
+            `delivering them in this turn`
+        );
+      }
+      let started = false;
       state.inFlight = true;
       try {
         const flooredBatch: InboxBatch = {
           ...batch,
           conversation_history: { ...(batch.conversation_history ?? {}), ...plan.tails }
         };
-        await triggerTurn(
-          plan.floored,
+        started = await triggerTurn(
+          cover.messages,
           flooredBatch,
           api,
           log,
-          verifications,
+          cover.verifications,
           selfAgentId,
           eff.peerTurnBudget,
           peerBudgetRemaining,
-          undefined,
+          cover.deferred,
           snapshotVerifier
         );
       } catch (err) {
         log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
+        started = false;
       } finally {
         state.inFlight = false;
         for (const conv of plan.toRelease) {
@@ -1998,9 +2170,33 @@ export function startAutoReply(opts: {
           }
         }
       }
+      if (started) {
+        // The stash left memory via a TURN — the only safe moment to clear it.
+        // Before the spawn, a failure here binned it for good.
+        for (const conv of cover.coveredConversationIds) clearDeferred(state, conv);
+      } else if (cover.coveredConversationIds.length > 0) {
+        // KEPT, not dead-lettered: the stash still has live paths to a turn (the
+        // floor retry, then the overrun delivery the TTL guarantees), so a
+        // transient spawn failure must not end them. The failure handling for
+        // the fresh messages is unchanged — they have no stash to fall back on.
+        log?.warn?.(
+          `[ekho-autoreply] covering turn failed to spawn — keeping the held-back ` +
+            `stash(es) for ${cover.coveredConversationIds.join(", ")}`
+        );
+      }
     }
 
     await serviceDeferred();
+  };
+
+  const tick = async () => {
+    if (tickRunning) return; // a tick is still mid-await — never overlap them
+    tickRunning = true;
+    try {
+      await runTick();
+    } finally {
+      tickRunning = false;
+    }
   };
 
   const timer = setInterval(() => {

@@ -1364,7 +1364,11 @@ def test_tick_deferred_stash_past_the_ttl_is_delivered_late_not_dropped():
     assert "proj-1" not in state.deferred_by_conversation  # delivered, not dropped
 
 
-def test_tick_new_granted_turn_supersedes_the_stash():
+def test_tick_new_granted_turn_absorbs_the_stash():
+    """#78 r2: this used to assert the stash was SUPERSEDED — cleared by the
+    covering turn without being delivered. The covering turn now carries it
+    (see test_tick_covering_turn_also_absorbs_a_stash_when_the_floor_is_granted);
+    what is asserted here is that it still costs exactly ONE turn."""
     events = []
     state = _state()
     c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
@@ -1551,14 +1555,35 @@ def test_tick_retry_spawn_failure_is_dead_lettered(tmp_path):
 def test_stash_deferred_returns_what_the_cap_evicted():
     state = _state()
     for i in range(autoreply.DEFERRED_CONVERSATION_CAP):
-        evicted = stash_deferred(
+        drops = stash_deferred(
             state, f"c{i}", [_peer(i, conversation_id=f"c{i}")], {}, float(i)
         )
-        assert evicted == []
-    evicted = stash_deferred(state, "c-new", [_peer(999, conversation_id="c-new")], {}, 1.0)
-    assert [conv for conv, _ in evicted] == ["c0"]  # FIFO: oldest stash out
-    assert [m.message_id for m in evicted[0][1]["messages"]] == ["p0"]
+        assert drops == []
+    drops = stash_deferred(state, "c-new", [_peer(999, conversation_id="c-new")], {}, 1.0)
+    assert [d.conversation_id for d in drops] == ["c0"]  # FIFO: oldest stash out
+    assert [d.reason for d in drops] == [autoreply.DEFERRED_EVICTED_REASON]
+    assert [m.message_id for m in drops[0].messages] == ["p0"]
     assert "c0" not in state.deferred_by_conversation
+
+
+def test_stash_deferred_returns_what_the_per_conversation_cap_overflowed():
+    """#78 r2: the per-conversation cap keeps the newest N and used to bin the
+    rest in a slice — no turn, no log, no dead-letter. The overflow is now
+    reported so the caller can record it."""
+    state = _state()
+    cap = autoreply.DEFERRED_MESSAGES_PER_CONV
+    drops = stash_deferred(
+        state, "c1", [_peer(i) for i in range(cap)], {}, 0.0
+    )
+    assert drops == []
+    # One message past the cap pushes the OLDEST out of the stash.
+    drops = stash_deferred(state, "c1", [_peer(cap)], {}, 1.0)
+    assert [d.reason for d in drops] == [autoreply.DEFERRED_OVERFLOW_REASON]
+    assert [m.message_id for m in drops[0].messages] == ["p0"]
+    assert drops[0].conversation_id == "c1"
+    stash = state.deferred_by_conversation["c1"]
+    assert len(stash["messages"]) == cap
+    assert [m.message_id for m in stash["messages"]][-1] == f"p{cap}"
 
 
 def test_tick_cap_eviction_dead_letters_and_warns(tmp_path, caplog):
@@ -1587,6 +1612,162 @@ def test_tick_cap_eviction_dead_letters_and_warns(tmp_path, caplog):
     assert records[0]["kind"] == "deferred"
     assert records[0]["message"]["message_id"] == "p0"
     assert any("evicted at the" in r.message for r in caplog.records)
+
+
+def test_tick_per_conversation_overflow_dead_letters_and_warns(tmp_path, caplog):
+    """#78 r2: past DEFERRED_MESSAGES_PER_CONV the oldest messages fell out of
+    the stash in a slice — acked, no turn, no log, no record. They are now
+    dead-lettered like any other stash that will never get its turn."""
+    import json
+
+    state = _state()
+    cap = autoreply.DEFERRED_MESSAGES_PER_CONV
+    # One more than the per-conversation cap, all in ONE conversation. Each
+    # comes from a distinct peer so the per-peer rate gate doesn't thin them.
+    msgs = [_peer(i, sender=f"peer{i}") for i in range(cap + 1)]
+    dl = tmp_path / "dead-letter.jsonl"
+    client = FloorClient(InboxResponse(msgs, [], False, []), granted=False)
+    with caplog.at_level("WARNING", logger="ekho_hermes.autoreply"):
+        summary = process_inbox_once(
+            client, "self", state, spawn=_spawn_recorder([]), now=1.0,
+            peer_enabled=True, peer_turn_budget=25, dead_letter_path=str(dl),
+        )
+    assert summary["spawned"] == 0
+    stash = state.deferred_by_conversation["proj-1"]
+    assert [m.message_id for m in stash["messages"]] == [f"p{i}" for i in range(1, cap + 1)]
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert [r["reason"] for r in records] == [autoreply.DEFERRED_OVERFLOW_REASON]
+    assert records[0]["kind"] == "deferred"
+    assert records[0]["message"]["message_id"] == "p0"  # the oldest falls out
+    assert any("overflowed the" in r.message for r in caplog.records)
+
+
+# --- #78 r2: a covering turn DELIVERS the stash it used to clear -------------
+
+
+def _operator(text="operator ping", conversation_id="proj-1", message_id="op1"):
+    return _msg(message_id=message_id, conversation_id=conversation_id,
+                body={"text": text})
+
+
+def test_merge_covered_stashes_puts_held_back_messages_first_and_dedupes():
+    state = _state()
+    stash_deferred(state, "proj-1", [_peer(0), _peer(1)], {"p0": None}, 10.0)
+    fresh = [_operator(), _peer(1)]  # p1 is in BOTH the stash and this batch
+    messages, verdicts, covered, deferred = autoreply.merge_covered_stashes(
+        state, fresh, {"op1": None}, 70.0
+    )
+    assert [m.message_id for m in messages] == ["p0", "p1", "op1"]  # oldest first
+    assert covered == ["proj-1"]
+    assert deferred["conversation_id"] == "proj-1"
+    assert deferred["merged"] is True
+    assert deferred["held_ms"] == 60_000.0
+    assert deferred["held_message_ids"] == ["p0", "p1"]
+    assert sorted(verdicts) == ["op1", "p0", "p1"]
+    # The stash is NOT cleared here — only the caller's successful spawn may.
+    assert "proj-1" in state.deferred_by_conversation
+
+
+def test_merge_covered_stashes_is_a_passthrough_without_a_stash():
+    state = _state()
+    fresh = [_operator()]
+    messages, verdicts, covered, deferred = autoreply.merge_covered_stashes(
+        state, fresh, {"op1": None}, 5.0
+    )
+    assert messages == fresh and covered == [] and deferred is None
+    assert verdicts == {"op1": None}
+
+
+def test_tick_covering_turn_delivers_the_stash_instead_of_clearing_it():
+    """The blocker: an operator message bypasses the floor, so it triggered a
+    turn in a conversation whose peer message was still stashed for that same
+    floor. The turn cleared the stash and spawned WITHOUT it — the held-back
+    message got no turn and no dead-letter. It now rides along."""
+    prompts = []
+
+    def spawn(cmd, env):
+        prompts.append(" ".join(cmd))
+
+    state = _state()
+    # Tick 1: peer message, floor held -> deferred + stashed, no turn.
+    c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
+    process_inbox_once(c1, "self", state, spawn=spawn, now=0.0,
+                       peer_enabled=True, peer_turn_budget=25)
+    assert prompts == [] and "proj-1" in state.deferred_by_conversation
+    # Tick 2: an operator message in the SAME conversation. The floor is still
+    # held, but the operator never contends for it.
+    c2 = FloorClient(InboxResponse([_operator()], [], True, []), granted=False)
+    s2 = process_inbox_once(c2, "self", state, spawn=spawn, now=60.0,
+                            peer_enabled=True, peer_turn_budget=25)
+    assert s2["spawned"] == 1
+    assert len(prompts) == 1
+    assert "teammate message 0" in prompts[0]  # the held-back message
+    assert "operator ping" in prompts[0]       # and the one that covered it
+    assert "HELD BACK" in prompts[0]           # marked as late
+    assert c2.acquires == []                   # operator-only: no floor contended for
+    # Cleared only because the spawn returned.
+    assert "proj-1" not in state.deferred_by_conversation
+
+
+def test_tick_covering_turn_spawn_failure_keeps_the_stash(tmp_path, caplog):
+    """If the covering turn never starts, the stash must survive it. Clearing
+    first made a failed spawn unrecoverable."""
+    def boom(cmd, env):
+        raise RuntimeError("no interpreter")
+
+    state = _state()
+    stash_deferred(state, "proj-1", [_peer(0)], {"p0": None}, 0.0)
+    dl = tmp_path / "dead-letter.jsonl"
+    client = FloorClient(InboxResponse([_operator()], [], True, []), granted=False)
+    with caplog.at_level("WARNING", logger="ekho_hermes.autoreply"):
+        summary = process_inbox_once(
+            client, "self", state, spawn=boom, now=5.0, peer_enabled=True,
+            peer_turn_budget=25, dead_letter_path=str(dl),
+        )
+    assert summary["spawned"] == 0
+    # Retained, not binned: the floor retry and then the overrun delivery are
+    # still ahead of it, so it keeps a live path to a turn.
+    assert "proj-1" in state.deferred_by_conversation
+    assert not dl.exists()
+    assert any("keeping the held-back stash" in r.message for r in caplog.records)
+
+
+def test_tick_covering_turn_also_absorbs_a_stash_when_the_floor_is_granted():
+    """Same hole on the floored path: a granted turn cleared the stash without
+    delivering it."""
+    prompts = []
+
+    def spawn(cmd, env):
+        prompts.append(" ".join(cmd))
+
+    state = _state()
+    stash_deferred(state, "proj-1", [_peer(0)], {"p0": None}, 0.0)
+    client = FloorClient(InboxResponse([_peer(1)], [], False, []), granted=True)
+    summary = process_inbox_once(client, "self", state, spawn=spawn, now=5.0,
+                                 peer_enabled=True, peer_turn_budget=25)
+    assert summary["spawned"] == 1
+    assert len(prompts) == 1
+    assert "teammate message 0" in prompts[0] and "teammate message 1" in prompts[0]
+    assert "proj-1" not in state.deferred_by_conversation
+
+
+def test_build_prompt_merged_banner_marks_only_the_held_back_messages():
+    p = build_prompt(
+        [_peer(0, conversation_id="room_1"),
+         _operator(text="fresh operator line", conversation_id="room_1")],
+        True,
+        self_agent_id="self",
+        deferred={
+            "conversation_id": "room_1",
+            "held_ms": 7 * 60_000,
+            "merged": True,
+            "held_message_ids": ["p0"],
+        },
+    )
+    assert "SOME OF THE MESSAGE(S) BELOW WERE HELD BACK" in p
+    assert "THIS TURN WAS HELD BACK" not in p  # only part of this batch is late
+    assert p.count("[HELD BACK — delivered late]") == 1
+    assert "teammate message 0" in p and "fresh operator line" in p
 
 
 def test_build_prompt_overrun_banner_says_the_floor_was_never_taken():

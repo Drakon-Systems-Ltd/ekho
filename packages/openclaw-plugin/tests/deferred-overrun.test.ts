@@ -10,27 +10,29 @@ import { describe, it, expect } from "vitest";
 
 import {
   buildPrompt,
+  clearDeferred,
   createAutoReplyState,
   listRetryableDeferred,
+  mergeCoveredStashes,
   serviceDeferredTurn,
   stashDeferred,
   takeExpiredDeferred,
   DEFERRED_EVICTED_REASON,
+  DEFERRED_GRACE_SECONDS,
+  DEFERRED_MESSAGES_PER_CONV,
+  DEFERRED_OVERFLOW_REASON,
   DEFERRED_RETRY_SPAWN_FAILED_REASON,
   DEFERRED_RETRY_TTL_MS,
   DEFERRED_SPAWN_FAILED_REASON,
+  FLOOR_TTL_SECONDS,
   type AutoReplyState,
   type DeferredTurnRunner,
   type ServiceDeferredOptions
 } from "../src/autoreply";
 
-// The floor TTL is module-private (it is derived from the turn timeout), so
-// re-derive it here the same way. If either side drifts, the first test fails.
-const TURN_TIMEOUT_SECONDS = (() => {
-  const raw = Number(process.env.EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS);
-  return Number.isFinite(raw) && raw >= 60 ? raw : 900;
-})();
-const FLOOR_TTL_MS = (TURN_TIMEOUT_SECONDS + 60) * 1000;
+// Asserted against the PRODUCTION floor constant, not a copy re-derived here: a
+// re-derived copy agrees with itself no matter how far the real one drifts.
+const FLOOR_TTL_MS = FLOOR_TTL_SECONDS * 1000;
 
 function amsg(conv: string, id: string): any {
   return {
@@ -97,7 +99,7 @@ describe("#78 deferred retry window", () => {
     // If it is ever shorter again, a holder that is legitimately mid-turn
     // outlives the stash and the acked work is lost.
     expect(DEFERRED_RETRY_TTL_MS).toBeGreaterThan(FLOOR_TTL_MS);
-    expect(DEFERRED_RETRY_TTL_MS).toBe(FLOOR_TTL_MS + 120_000);
+    expect(DEFERRED_RETRY_TTL_MS).toBe(FLOOR_TTL_MS + DEFERRED_GRACE_SECONDS * 1000);
   });
 });
 
@@ -234,11 +236,122 @@ describe("#78 stashDeferred cap eviction", () => {
     for (let i = 0; i < 50; i++) {
       expect(stashDeferred(s, `c${i}`, [amsg(`c${i}`, `m${i}`)], {}, i)).toEqual([]);
     }
-    const evicted = stashDeferred(s, "c-new", [amsg("c-new", "m-new")], {}, 1);
-    expect(evicted.map((e) => e.conversationId)).toEqual(["c0"]); // FIFO: oldest out
-    expect(evicted[0].stash.messages.map((m) => m.message_id)).toEqual(["m0"]);
+    const drops = stashDeferred(s, "c-new", [amsg("c-new", "m-new")], {}, 1);
+    expect(drops.map((d) => d.conversationId)).toEqual(["c0"]); // FIFO: oldest out
+    expect(drops.map((d) => d.reason)).toEqual([DEFERRED_EVICTED_REASON]);
+    expect(drops[0].messages.map((m) => m.message_id)).toEqual(["m0"]);
     expect(s.deferredByConversation.has("c0")).toBe(false);
     expect(DEFERRED_EVICTED_REASON).toBe("deferred_evicted_cap");
+  });
+});
+
+describe("#78 r2 stashDeferred per-conversation overflow", () => {
+  it("returns the oldest messages the per-conversation cap pushed out", () => {
+    // These used to fall out in a slice: acked, no turn, no log, no record.
+    const s = createAutoReplyState();
+    const cap = DEFERRED_MESSAGES_PER_CONV;
+    const first = Array.from({ length: cap }, (_, i) => amsg("c1", `m${i}`));
+    expect(stashDeferred(s, "c1", first, {}, 0)).toEqual([]);
+
+    const drops = stashDeferred(s, "c1", [amsg("c1", `m${cap}`)], {}, 1);
+
+    expect(drops.map((d) => d.reason)).toEqual([DEFERRED_OVERFLOW_REASON]);
+    expect(drops[0].conversationId).toBe("c1");
+    expect(drops[0].messages.map((m) => m.message_id)).toEqual(["m0"]);
+    expect(s.deferredByConversation.get("c1")!.messages).toHaveLength(cap);
+    expect(DEFERRED_OVERFLOW_REASON).toBe("deferred_overflow_per_conv");
+  });
+});
+
+describe("#78 r2 mergeCoveredStashes", () => {
+  it("puts the held-back messages first, dedupes by id, and leaves the stash in place", () => {
+    const s = createAutoReplyState();
+    stashDeferred(s, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m1: null }, 10_000);
+    const fresh = [amsg("c1", "op1"), amsg("c1", "m2")]; // m2 is in BOTH
+
+    const cover = mergeCoveredStashes(s, fresh, { op1: null }, 70_000);
+
+    expect(cover.messages.map((m) => m.message_id)).toEqual(["m1", "m2", "op1"]);
+    expect(cover.coveredConversationIds).toEqual(["c1"]);
+    expect(cover.deferred).toMatchObject({
+      conversationId: "c1",
+      heldMs: 60_000,
+      merged: true,
+      heldMessageIds: ["m1", "m2"]
+    });
+    expect(Object.keys(cover.verifications).sort()).toEqual(["m1", "m2", "op1"]);
+    // Clearing is the CALLER's job, and only once its spawn has returned.
+    expect(s.deferredByConversation.has("c1")).toBe(true);
+  });
+
+  it("is a passthrough when the turn covers no stash", () => {
+    const s = createAutoReplyState();
+    const fresh = [amsg("c1", "op1")];
+    const cover = mergeCoveredStashes(s, fresh, { op1: null }, 5_000);
+    expect(cover.messages).toBe(fresh);
+    expect(cover.coveredConversationIds).toEqual([]);
+    expect(cover.deferred).toBeUndefined();
+  });
+
+  it("ignores a conversation whose stash was already cleared", () => {
+    const s = createAutoReplyState();
+    stashDeferred(s, "c1", [amsg("c1", "m1")], {}, 0);
+    clearDeferred(s, "c1");
+    expect(mergeCoveredStashes(s, [amsg("c1", "op1")], {}, 1_000).deferred).toBeUndefined();
+  });
+});
+
+describe("#78 r2 serviceDeferredTurn never starts a second concurrent turn", () => {
+  it("stands down when a turn began while it awaited the floor acquire", async () => {
+    // Tick A sits on acquireFloor for a LIVE stash while tick B starts an
+    // overrun turn for an expired one. Without the re-check A would spawn on
+    // top of B, and whichever finished first would clear inFlight under the
+    // other.
+    const nowMs = DEFERRED_RETRY_TTL_MS + 30_000;
+    const state = createAutoReplyState();
+    stashDeferred(state, "c-live", [amsg("c-live", "m-live")], {}, nowMs - 1_000);
+
+    const turns: string[] = [];
+    const releases: string[] = [];
+    let openAcquire!: () => void;
+    const acquireGate = new Promise<void>((r) => { openAcquire = r; });
+    let finishTurnB!: () => void;
+    const turnBGate = new Promise<void>((r) => { finishTurnB = r; });
+    const base = {
+      state,
+      nowMs,
+      releaseFloor: async (conv: string) => { releases.push(conv); },
+      deadLetter: () => { throw new Error("nothing should be dead-lettered here"); },
+      log: { warn: () => {}, info: () => {}, debug: () => {} }
+    };
+    const tickA: ServiceDeferredOptions = {
+      ...base,
+      acquireFloor: async () => { await acquireGate; return { granted: true }; },
+      runTurn: async ({ conversationId }) => { turns.push(conversationId); return true; }
+    };
+    const tickB: ServiceDeferredOptions = {
+      ...base,
+      acquireFloor: async () => ({ granted: false }),
+      runTurn: async ({ conversationId }) => { turns.push(conversationId); await turnBGate; return true; }
+    };
+
+    const pA = serviceDeferredTurn(tickA); // -> sits on the acquire
+    await new Promise((r) => setTimeout(r, 0));
+    stashDeferred(state, "c-exp", [amsg("c-exp", "m-exp")], {}, 0); // expired
+    const pB = serviceDeferredTurn(tickB); // -> overrun turn, still running
+    await new Promise((r) => setTimeout(r, 0));
+    expect(state.inFlight).toBe(true);
+
+    openAcquire();
+    expect(await pA).toBe(0); // stood down instead of spawning
+    expect(turns).toEqual(["c-exp"]); // exactly ONE turn
+    expect(releases).toEqual(["c-live"]); // floor handed straight back
+    expect(state.deferredByConversation.has("c-live")).toBe(true); // stash kept
+    expect(state.inFlight).toBe(true); // B is still running; A did not clear it
+
+    finishTurnB();
+    expect(await pB).toBe(1);
+    expect(state.inFlight).toBe(false);
   });
 });
 
@@ -255,6 +368,23 @@ describe("#78 overrun prompt", () => {
     expect(p).toContain("waited past the floor window");
     expect(p).toContain("WITHOUT the floor");
     expect(p).toContain("keep it short");
+  });
+
+  it("marks only the held-back messages on a covering turn", () => {
+    const p = buildPrompt(
+      [amsg("room_1", "m-late"), amsg("room_1", "m-fresh")],
+      batch,
+      undefined,
+      "self",
+      undefined,
+      undefined,
+      { conversationId: "room_1", heldMs: 7 * 60_000, merged: true, heldMessageIds: ["m-late"] }
+    );
+    expect(p).toContain("SOME OF THE MESSAGE(S) BELOW WERE HELD BACK");
+    expect(p).not.toContain("THIS TURN WAS HELD BACK"); // only part of this batch is late
+    expect(p.match(/\[HELD BACK — delivered late\]/g)).toHaveLength(1);
+    expect(p).toContain("teammate says m-late");
+    expect(p).toContain("teammate says m-fresh");
   });
 
   it("says nothing about an overrun on an ordinary held-back turn", () => {
