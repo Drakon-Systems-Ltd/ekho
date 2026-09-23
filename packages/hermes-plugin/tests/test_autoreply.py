@@ -2302,6 +2302,74 @@ def test_the_reject_list_wins_over_a_stale_passing_verdict():
     assert _verdict_for("m").verified is False
 
 
+# --- ring attachment is material-bound, not id-only (#82) -------------------
+# The ring is id-keyed newest-wins, so on a message_id collision the entry can
+# hold a DIFFERENT message than the one a verdict was computed for.
+
+_UNSIGNED_REJECT = VerificationResult(False, "peer", "unsigned-require-signed", None)
+_OPERATOR_OK = VerificationResult(True, "operator", None, "k1")
+
+
+def _peer_unsigned(mid):
+    return _msg(
+        message_id=mid, sender_kind="agent", sender_agent_id="peer1",
+        body={"text": "peer ask"},
+    )
+
+
+def _operator_signed(mid):
+    return _msg(
+        message_id=mid, sender_kind="operator", sender_agent_id="op",
+        operator_sig="S", key_id="k1", body={"text": "operator ask"},
+    )
+
+
+def _cached_body(mid):
+    for entry in get_cached_inbox()["entries"]:
+        if getattr(entry["message"], "message_id", None) == mid:
+            return entry["message"].body
+    return None
+
+
+def test_a_reject_for_a_is_not_stamped_onto_b_holding_the_same_id():
+    a, b = _peer_unsigned("x"), _operator_signed("x")
+    record_batch(_batch([a, b]))
+    assert _cached_body("x") == {"text": "operator ask"}  # ring kept B
+    record_verifications({}, [(a, _UNSIGNED_REJECT)], [a, b])
+    assert _verdict_for("x") is None
+
+
+def test_bs_own_held_verdict_is_unaffected_by_as_reject():
+    a, b = _peer_unsigned("y"), _operator_signed("y")
+    record_batch(_batch([a, b]))
+    record_verifications({"y": _OPERATOR_OK}, [], [b])  # B's verdict, held
+    record_verifications({}, [(a, _UNSIGNED_REJECT)], [a, b])
+    v = _verdict_for("y")
+    assert v is not None and v.verified is True and v.kind == "operator"
+
+
+def test_an_id_keyed_verdict_does_not_attach_to_an_entry_whose_material_differs():
+    # verify_batch keys by id, so one verdict for an id two messages claim
+    # describes neither; with the batch passed it must not land on B.
+    a, b = _peer_unsigned("z"), _operator_signed("z")
+    record_batch(_batch([a, b]))
+    record_verifications({"z": _UNSIGNED_REJECT}, [], [a, b])
+    assert _verdict_for("z") is None
+
+
+def test_a_genuine_redelivery_still_gets_its_reject_attached():
+    record_batch(_batch([_peer_unsigned("r")]))
+    # A distinct object with identical material — what a redelivery looks like.
+    record_verifications({}, [(_peer_unsigned("r"), _UNSIGNED_REJECT)], [_peer_unsigned("r")])
+    assert _verdict_for("r").reason == "unsigned-require-signed"
+
+
+def test_a_genuine_redelivery_still_gets_its_id_keyed_verdict_attached():
+    record_batch(_batch([_operator_signed("v")]))
+    record_verifications({"v": _OPERATOR_OK}, [], [_operator_signed("v")])
+    assert _verdict_for("v").verified is True
+
+
 def test_tick_require_mode_labels_the_withheld_peer_in_the_inbox_view(tmp_path):
     """End to end: under require mode a withheld peer must not read `unchecked`
     in ekho_inbox — that is the #20 defect in the mode operators enable to be

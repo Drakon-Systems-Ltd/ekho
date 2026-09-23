@@ -333,6 +333,7 @@ def same_signed_material(a: Any, b: Any) -> bool:
 def record_verifications(
     verifications: Dict[str, Any],
     rejects: Optional[Sequence[Any]] = None,
+    messages: Optional[Sequence[Any]] = None,
 ) -> None:
     """Attach this tick's verdicts to the cached messages they describe.
 
@@ -340,14 +341,30 @@ def record_verifications(
     and what gets labelled must be the same set; collectors synthesise verdicts
     into the reject list and never write them into ``verifications``.
     Never write None over a verdict already held.
+
+    A verdict attaches only to a ring entry holding the SAME signed material it
+    was computed for (ekho#82): the ring is id-keyed newest-wins, so on an id
+    collision the entry may hold a different message, which must not inherit
+    another message's label. ``messages`` is the tick's batch, used to bind the
+    id-keyed ``verifications`` to objects; without it that loop stays id-only.
     """
     with _cache_lock:
+        bound = (
+            batch_verdicts_by_held_key(messages, verifications)
+            if messages is not None
+            else None
+        )
         for message_id, verdict in (verifications or {}).items():
             if not verdict or not message_id:
                 continue
             entry = _last_batch.get(message_id)
-            if entry is not None:
-                entry["verification"] = verdict
+            if entry is None:
+                continue
+            if bound is not None:
+                verdict = bound.get(held_key(entry["message"]))
+                if not verdict:
+                    continue
+            entry["verification"] = verdict
         for item in rejects or []:
             if isinstance(item, (tuple, list)) and len(item) >= 2:
                 message, verdict = item[0], item[1]
@@ -361,7 +378,10 @@ def record_verifications(
             if not isinstance(message_id, str):
                 continue
             entry = _last_batch.get(message_id)
-            if entry is not None:
+            if entry is not None and (
+                entry["message"] is message
+                or same_signed_material(entry["message"], message)
+            ):
                 entry["verification"] = verdict
 
 
@@ -1924,7 +1944,7 @@ def process_inbox_once(
     # which never enter ``verifications``. Outside the identity gate on
     # purpose: bootstrap-failed ticks have no verdicts but DO have withheld
     # peers, and those must not read as ordinary (ekho#20 / #23 H6).
-    record_verifications(verifications, rejects)
+    record_verifications(verifications, rejects, messages)
     # The wording is deliberate. This used to end "dead-lettered, not acted
     # on", which was FALSE: the message wakes no turn, but it stays in the
     # ekho_inbox ring. Say only what is true.

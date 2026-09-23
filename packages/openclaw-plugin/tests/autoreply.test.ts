@@ -1226,8 +1226,10 @@ describe("progress-signal budget refresh is bounded (#11)", () => {
 // ekho#20, round 2 (found by Case against fdd5d95). Two ways the per-message
 // verdict could still go missing on a message the loop DID dead-letter.
 describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
-  const batchOf = (ids: string[]) =>
-    ({ messages: ids.map((id) => ({ message_id: id, conversation_id: "c1", message_type: "direct" })) }) as never;
+  // The reject list carries the batch message itself (ekho#82: attachment is
+  // bound to signed material), so tests pass the same shape the batch holds.
+  const msgOf = (id: string) => ({ message_id: id, conversation_id: "c1", message_type: "direct" }) as never;
+  const batchOf = (ids: string[]) => ({ messages: ids.map(msgOf) }) as never;
   const verdictFor = (id: string) =>
     getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
 
@@ -1242,7 +1244,7 @@ describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
     // synthesised verdict present only in `rejects`.
     recordVerifications(
       {},
-      [{ message: { message_id: "withheld" }, verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
+      [{ message: msgOf("withheld"), verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
     );
     const v = verdictFor("withheld");
     expect(v).not.toBeNull();
@@ -1255,7 +1257,7 @@ describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
     // opts.identity falsy -> verifications is {} and verifyBatch never ran.
     recordVerifications(
       {},
-      [{ message: { message_id: "no-identity" }, verdict: { verified: false, kind: "peer", reason: "unverifiable-require-signed", keyId: "k" } }]
+      [{ message: msgOf("no-identity"), verdict: { verified: false, kind: "peer", reason: "unverifiable-require-signed", keyId: "k" } }]
     );
     expect(verdictFor("no-identity")?.verified).toBe(false);
   });
@@ -1264,7 +1266,7 @@ describe("verdict cannot diverge from the dead-letter set (ekho#20)", () => {
     recordBatch(batchOf(["m"]));
     recordVerifications(
       { m: { verified: true, kind: "peer", reason: null, keyId: "k" } },
-      [{ message: { message_id: "m" }, verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
+      [{ message: msgOf("m"), verdict: { verified: false, kind: "peer", reason: "unsigned-require-signed", keyId: null } }]
     );
     expect(verdictFor("m")?.verified).toBe(false);
   });
@@ -1348,6 +1350,64 @@ describe("a carried verdict cannot decay or transfer (ekho#20)", () => {
     recordVerifications({ w: failed });
     recordBatch(batchOf([signed("w")]));
     expect(verdictFor("w")?.reason).toBe("endorser-not-pinned");
+  });
+});
+
+// ekho#82: the ring is id-keyed newest-wins, so on a message_id collision the
+// entry can hold a DIFFERENT message than the one a verdict was computed for.
+// Attachment is bound to signed material, never to the id alone.
+describe("ring verdict attachment is material-bound, not id-only (ekho#82)", () => {
+  const peerUnsigned = (id: string) =>
+    ({ message_id: id, conversation_id: "c1", message_type: "direct", sender_kind: "agent", sender_agent_id: "peer1", body: { text: "peer ask" } }) as never;
+  const operatorSigned = (id: string) =>
+    ({ message_id: id, conversation_id: "c1", message_type: "direct", sender_kind: "operator", operator_sig: "S", key_id: "k1", body: { text: "operator ask" } }) as never;
+  const verdictFor = (id: string) =>
+    getCachedInbox().entries.find((e) => e.message.message_id === id)?.verification ?? null;
+  const cachedBody = (id: string) =>
+    (getCachedInbox().entries.find((e) => e.message.message_id === id)?.message as { body?: unknown })?.body;
+  const unsignedReject = { verified: false, kind: "peer" as const, reason: "unsigned-require-signed", keyId: null };
+  const operatorOk = { verified: true, kind: "operator" as const, reason: null, keyId: "k1" };
+
+  it("a reject computed for A is not stamped onto B holding the same id", () => {
+    const a = peerUnsigned("c82-x");
+    const b = operatorSigned("c82-x");
+    recordBatch({ messages: [a, b] } as never);
+    expect(cachedBody("c82-x")).toEqual({ text: "operator ask" }); // ring kept B
+    recordVerifications({}, [{ message: a, verdict: unsignedReject }], [a, b]);
+    expect(verdictFor("c82-x")).toBeNull();
+  });
+
+  it("B's own held verdict is unaffected by A's reject", () => {
+    const a = peerUnsigned("c82-y");
+    const b = operatorSigned("c82-y");
+    recordBatch({ messages: [a, b] } as never);
+    recordVerifications({ "c82-y": operatorOk }, [], [b]); // B's verdict, held
+    recordVerifications({}, [{ message: a, verdict: unsignedReject }], [a, b]);
+    expect(verdictFor("c82-y")?.verified).toBe(true);
+    expect(verdictFor("c82-y")?.kind).toBe("operator");
+  });
+
+  it("an id-keyed verdict does not attach to a ring entry whose material differs", () => {
+    // verifyBatch keys by id, so one verdict for an id two messages claim
+    // describes neither; with the batch passed it must not land on B.
+    const a = peerUnsigned("c82-z");
+    const b = operatorSigned("c82-z");
+    recordBatch({ messages: [a, b] } as never);
+    recordVerifications({ "c82-z": unsignedReject }, [], [a, b]);
+    expect(verdictFor("c82-z")).toBeNull();
+  });
+
+  it("a genuine redelivery of the SAME message still gets its reject attached", () => {
+    recordBatch({ messages: [peerUnsigned("c82-r")] } as never);
+    // A distinct object with identical material — what a redelivery looks like.
+    recordVerifications({}, [{ message: peerUnsigned("c82-r"), verdict: unsignedReject }], [peerUnsigned("c82-r")]);
+    expect(verdictFor("c82-r")?.reason).toBe("unsigned-require-signed");
+  });
+
+  it("a genuine redelivery of the SAME message still gets its id-keyed verdict attached", () => {
+    recordBatch({ messages: [operatorSigned("c82-v")] } as never);
+    recordVerifications({ "c82-v": operatorOk }, [], [operatorSigned("c82-v")]);
+    expect(verdictFor("c82-v")?.verified).toBe(true);
   });
 });
 
