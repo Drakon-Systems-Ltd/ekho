@@ -552,11 +552,19 @@ export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number 
  * `requireSigned: "require"` — the mode an operator turns on to be safer.
  * Passing the reject list makes the two sets identical by construction rather
  * than by the call sites staying in the right order.
+ *
+ * A verdict attaches only to a ring entry holding the SAME signed material it
+ * was computed for (ekho#82): the ring is id-keyed newest-wins, so on an id
+ * collision the entry may hold a different message, which must not inherit
+ * another message's label. `messages` is the tick's batch, used to bind the
+ * id-keyed `verifications` to objects; without it that loop stays id-only.
  */
 export function recordVerifications(
   verifications: Record<string, VerifyResult | null>,
-  rejects: Array<{ message: { message_id?: unknown }; verdict: VerifyResult }> = []
+  rejects: Array<{ message: InboxMessage; verdict: VerifyResult }> = [],
+  messages?: InboxMessage[]
 ): void {
+  const bound = messages ? batchVerdictsByHeldKey(messages, verifications) : null;
   for (const [messageId, verdict] of Object.entries(verifications)) {
     // NEVER write a null over a verdict we already hold. verifyBatch
     // early-returns a null for EVERY message in the batch when the pin set is
@@ -570,12 +578,16 @@ export function recordVerifications(
     // filtered nulls (`if (v) nonNull[mid] = v`) and that filter has to survive.
     if (!verdict) continue;
     const entry = lastBatch.get(messageId);
-    if (entry) entry.verification = verdict;
+    if (!entry) continue;
+    const bindable = bound ? bound[heldKey(entry.message)] : verdict;
+    if (bindable) entry.verification = bindable;
   }
   for (const { message, verdict } of rejects) {
     if (typeof message?.message_id !== "string") continue;
     const entry = lastBatch.get(message.message_id);
-    if (entry) entry.verification = verdict;
+    if (entry && (entry.message === message || sameSignedMaterial(entry.message, message))) {
+      entry.verification = verdict;
+    }
   }
 }
 
@@ -2166,7 +2178,7 @@ export function startAutoReply(opts: {
     // never enter `verifications`. Deliberately outside the identity gate: when
     // bootstrap failed there are no verdicts but there ARE withheld messages,
     // and those are exactly the ones that must not read as ordinary (ekho#20).
-    recordVerifications(verifications, rejects);
+    recordVerifications(verifications, rejects, batch.messages);
     // The wording is deliberate. This used to end "dead-lettered, not acted on",
     // which was FALSE and is exactly the string an incident responder greps for
     // under time pressure: the message wakes no turn, but it stays in the
