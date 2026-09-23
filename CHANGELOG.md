@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-23
+
 ### Fixed
 - **The inbox view no longer shows a valid message carrying another message's failed verification label on a `message_id` collision (#82).** `record_verifications` / `recordVerifications` attached verdicts to the cached inbox ring by id alone; a verdict (from the verdict map or the require-mode reject list) now attaches only when the cached message has the same signed material it was computed for (`same_signed_material` / `sameSignedMaterial`), and the tick passes its batch so id-keyed verdicts are bound to the message they describe.
 - **A peer message deferred to a floor holder is delivered late rather than dead-lettered, and is never silently dropped (#78).** This extends the #78 fix released in 0.5.2 (#79). That release derived the retry window from the floor TTL (`FLOOR_TTL_SECONDS + 120`) and turned a silent expiry into a WARNING plus a dead-letter entry. The derived window is kept exactly as released — one definition, now written as `FLOOR_TTL_SECONDS + DEFERRED_GRACE_S` / `DEFERRED_GRACE_SECONDS` so the grace margin is named where it is used — and the invariant is tightened from "never silent" to "delivered, or dead-lettered; never silent". Expiry was not the only silent path, either: FIFO eviction past the 50-conversation cap, the 10-message-per-conversation cap, a covering turn clearing a stash it never carried, and a relay-chosen `message_id` colliding all dropped acked work the same way.
