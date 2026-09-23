@@ -17,6 +17,8 @@ import {
   recordBatch,
   recordVerifications,
   stashDeferred,
+  stashVerdicts,
+  heldKey,
   listRetryableDeferred,
   clearDeferred,
   DEFERRED_RETRY_TTL_MS,
@@ -716,14 +718,18 @@ describe("deferred-retry (a deferred floor must not drop messages)", () => {
     expect(plan.deferred["c2"].map((m: any) => m.message_id)).toEqual(["m2", "m3"]);
   });
 
-  it("stash merges repeat deferrals, dedupes by id, and keeps the first-deferred clock", () => {
+  it("stash merges repeat deferrals, dedupes by held_key, and keeps the first-deferred clock", () => {
     const s = createAutoReplyState();
     stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: null }, 1_000);
     stashDeferred(s, "c1", [amsg("c1", "m1"), amsg("c1", "m2")], { m2: null }, 5_000);
     const stash = s.deferredByConversation.get("c1")!;
     expect(stash.messages.map((m: any) => m.message_id)).toEqual(["m1", "m2"]);
     expect(stash.firstDeferredAtMs).toBe(1_000); // TTL runs from the FIRST deferral
-    expect(Object.keys(stash.verifications).sort()).toEqual(["m1", "m2"]);
+    // Every entry carries its own verdict, keyed by heldKey (#78 r4).
+    expect(stash.entries.map((e) => e.message.message_id)).toEqual(["m1", "m2"]);
+    expect(Object.keys(stashVerdicts(stash)).sort()).toEqual(
+      [heldKey(amsg("c1", "m1")), heldKey(amsg("c1", "m2"))].sort()
+    );
   });
 
   // #78: listing is read-only. It used to PRUNE an expired stash — acked

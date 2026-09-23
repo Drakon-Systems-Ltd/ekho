@@ -25,6 +25,7 @@ without Hermes or a real relay present.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -223,18 +224,110 @@ def _plain_for_canonicalize(message: Any) -> Any:
     raise TypeError("uncomparable inbox message")
 
 
+_UNCOMPARABLE_PREFIX = "uncomparable:"
+
+
+def _material_digest(message: Any) -> str:
+    """Stable digest of the canonical signed material.
+
+    Computed from exactly the bytes ``same_signed_material`` compares
+    (``_plain_for_canonicalize`` → ``canonicalize``), and that function is
+    defined in terms of THIS one below, so "same digest" and "same signed
+    material" cannot drift apart.
+
+    An uncomparable message gets a per-OBJECT token instead. That mirrors
+    ``same_signed_material`` refusing to call an uncomparable pair equal: two
+    uncomparable messages are never treated as one message, and neither can
+    inherit the other's verdict.
+
+    ``id()`` is reused after garbage collection, which would be the same defect
+    this whole change is about — except that every structure holding one of these
+    keys also holds the message itself (a stash entry, the merged verdict map
+    beside its message list, the batch map beside its batch), so an object whose
+    key is live cannot have been freed. It is also unreachable in practice:
+    ``canonicalize`` is ``json.dumps`` and inbox messages are built from parsed
+    JSON. ``InboxMessage`` is an unhashable dataclass, so a weak-keyed registry
+    is not available as an alternative.
+    """
+    try:
+        return hashlib.sha256(
+            canonicalize(_plain_for_canonicalize(message)).encode("utf-8")
+        ).hexdigest()
+    except Exception:  # noqa: BLE001 — uncomparable must not inherit a verdict
+        return f"{_UNCOMPARABLE_PREFIX}{id(message):x}"
+
+
+def held_key(message: Any) -> Tuple[Any, str]:
+    """The identity of a deferred/held message: ``(message_id, material_digest)``.
+
+    A message_id ALONE is not an identity (#78 r4). The relay chooses it and may
+    reuse one, so two messages carrying the same id and different signed material
+    are two distinct messages. Keying a stash, a dedupe set or a verdict map on
+    the id alone let one of them silently replace, skip or relabel the other:
+    an unsigned operator ask rendered "CRYPTOGRAPHICALLY VERIFIED" because a
+    signed message reusing its id had a verdict in the same batch.
+
+    Every dedupe, merge, replacement and verdict binding in the deferred path
+    keys on this instead. The OpenClaw counterpart is ``heldKey``, which encodes
+    the same pair as a single string because JS Map/Record keys must be
+    primitives.
+    """
+    return (getattr(message, "message_id", None), _material_digest(message))
+
+
+def verdict_for(verifications: Optional[Dict[Any, Any]], message: Any) -> Any:
+    """The verdict describing THIS message object.
+
+    Prefers an exact ``held_key`` entry — a verdict bound to an object. Falls
+    back to the ``message_id`` key for a caller still passing a whole-batch,
+    id-keyed map (``verify_batch``'s shape). The fallback is deliberately last:
+    where two messages share an id, only the ``held_key`` entry can tell them
+    apart.
+    """
+    if not verifications:
+        return None
+    key = held_key(message)
+    if key in verifications:
+        return verifications[key]
+    return verifications.get(key[0])
+
+
+def batch_verdicts_by_held_key(
+    messages: Sequence[Any], verifications: Optional[Dict[Any, Any]]
+) -> Dict[Tuple[Any, str], Any]:
+    """Re-key one tick's id-keyed verdict map onto ``held_key``.
+
+    ``verify_batch`` keys its results by message_id, so an id claimed by two
+    DIFFERENT messages in the same batch has ONE computed verdict that can
+    honestly describe neither. Both of those objects get ``None`` here —
+    unverified is the safe reading, and the only truthful one. Everything else
+    keeps the verdict computed for it, now bound to the object rather than to a
+    string the relay picked.
+    """
+    verds = verifications or {}
+    digests_by_id: Dict[Any, Set[str]] = {}
+    for m in messages:
+        mid, digest = held_key(m)
+        digests_by_id.setdefault(mid, set()).add(digest)
+    out: Dict[Tuple[Any, str], Any] = {}
+    for m in messages:
+        key = held_key(m)
+        out[key] = None if len(digests_by_id[key[0]]) > 1 else verds.get(key[0])
+    return out
+
+
 def same_signed_material(a: Any, b: Any) -> bool:
     """Is a redelivery the SAME message? Governs verdict reuse (ekho#20/#23).
 
     Whole-message equality via ``ekho.identity.canonicalize`` — the serializer
-    signatures are computed over. Uncomparable → False (re-verify, never assume).
+    signatures are computed over — expressed as a digest comparison so this and
+    ``held_key`` are the SAME definition of "same message" by construction.
+    Uncomparable → False (re-verify, never assume), including against itself.
     """
-    try:
-        return canonicalize(_plain_for_canonicalize(a)) == canonicalize(
-            _plain_for_canonicalize(b)
-        )
-    except Exception:  # noqa: BLE001 — uncomparable must not inherit a verdict
+    digest = _material_digest(a)
+    if digest.startswith(_UNCOMPARABLE_PREFIX):
         return False
+    return digest == _material_digest(b)
 
 
 def record_verifications(
@@ -366,9 +459,11 @@ class AutoReplyState:
     in_flight: bool = False
     # conversation_id -> count of times a peer has woken this agent in it.
     peer_turns_by_conversation: Dict[str, int] = field(default_factory=dict)
-    # conversation_id -> {"messages": [...], "verifications": {...},
-    # "first_deferred_at": float} for messages held back because another agent
-    # had the floor. Retried on later ticks until DEFERRED_RETRY_TTL_S, then
+    # conversation_id -> {"entries": [{"message": …, "verification": …}, …],
+    # "messages": [...derived...], "first_deferred_at": float} for messages held
+    # back because another agent had the floor. Each entry carries its OWN
+    # verdict, so no id-keyed side map can relabel it (#78 r4) — see
+    # build_stash. Retried on later ticks until DEFERRED_RETRY_TTL_S, then
     # delivered late without the floor; without this a deferred message
     # (already consumed + acked) silently never reaches the agent. An entry
     # leaves this map only via a turn or a dead-letter (#78).
@@ -436,16 +531,63 @@ class DeferredDrop(NamedTuple):
     reason: str
 
 
+def build_stash(
+    entries: Sequence[Dict[str, Any]], first_deferred_at: float
+) -> Dict[str, Any]:
+    """Assemble a stash from its entries.
+
+    ``entries`` is the AUTHORITY: each is ``{"message": …, "verification": …}``,
+    so every verdict sits next to the object it was computed for. ``messages``
+    is a derived, read-only view for the logs and the dead-letter sink.
+
+    There is deliberately no id-keyed verdict map in a stash any more (#78 r4).
+    Two entries may legitimately share a message_id, and such a map could only
+    misrepresent one of them — which is exactly how a retained unsigned operator
+    message came to wear a signed replacement's verdict. Read verdicts with
+    ``stash_verdicts``."""
+    listed = [
+        {"message": e["message"], "verification": e.get("verification")}
+        for e in entries
+    ]
+    return {
+        "entries": listed,
+        "messages": [e["message"] for e in listed],
+        "first_deferred_at": first_deferred_at,
+    }
+
+
+def stash_verdicts(stash: Dict[str, Any]) -> Dict[Tuple[Any, str], Any]:
+    """A stash's verdicts keyed by ``held_key`` — the shape ``build_prompt``
+    reads, and the only one that stays correct when two entries share an id."""
+    return {
+        held_key(e["message"]): e.get("verification")
+        for e in stash.get("entries", []) or ()
+    }
+
+
 def stash_deferred(
     state: AutoReplyState,
     conversation_id: str,
     messages: List[Any],
-    verifications: Optional[Dict[str, Any]],
+    verifications: Optional[Dict[Any, Any]],
     now: float,
 ) -> List[DeferredDrop]:
     """Stash (or merge into) a conversation's deferred messages so a later tick
-    can retry the floor. Dedupes by message id, keeps the newest slice, and
+    can retry the floor. Dedupes by ``held_key``, keeps the newest slice, and
     preserves the FIRST deferral time (the TTL clock).
+
+    Dedupe is by message_id AND signed material (#78 r4). A reused id carrying a
+    different body is a SECOND message: it is kept ALONGSIDE the first, never
+    silently replacing it. Replacing it lost acked work with no turn, no log and
+    no dead-letter — the one outcome this whole path exists to prevent. (If the
+    pair then overflows the per-conversation cap, the oldest is dead-lettered
+    below, which is a record rather than a gap.)
+
+    Verdicts bind to objects, not ids. A verdict from ``verifications`` may
+    attach only to an INCOMING message — the object it was computed for. A
+    RETAINED entry keeps the verdict stored beside it and never consults this
+    map, so passing a whole batch's id-keyed verdicts here can no longer
+    relabel something already in the stash.
 
     Returns every message this stash could NOT keep, tagged with why: the
     oldest messages past ``DEFERRED_MESSAGES_PER_CONV`` within this
@@ -454,46 +596,38 @@ def stash_deferred(
     without a turn, a log or a record — the per-conversation one silently, in
     the slice below."""
     existing = state.deferred_by_conversation.pop(conversation_id, None) or {}
-    previous_by_id: Dict[Any, Any] = {}
-    for m in existing.get("messages", []):
-        previous_by_id[getattr(m, "message_id", None)] = m
-    by_id: Dict[Any, Any] = dict(previous_by_id)
+    by_key: Dict[Tuple[Any, str], Dict[str, Any]] = {}
+    for e in existing.get("entries", []) or ():
+        by_key[held_key(e["message"])] = {
+            "message": e["message"],
+            "verification": e.get("verification"),
+        }
     for m in messages:
-        by_id[getattr(m, "message_id", None)] = m
-    ordered = list(by_id.values())
+        key = held_key(m)
+        prior = by_key.get(key)
+        v = verdict_for(verifications, m)
+        if v is None and prior is not None:
+            # The key matched, so the signed material is unchanged BY
+            # CONSTRUCTION (held_key carries its digest) — the stored verdict
+            # still describes this object, exactly as record_batch allows.
+            v = prior.get("verification")
+        # Plain assignment: an existing key keeps its insertion position, so the
+        # newest object lands in the stash's older slot and the oldest-first
+        # delivery order is preserved.
+        by_key[key] = {"message": m, "verification": v}
+    ordered = list(by_key.values())
     merged = ordered[-DEFERRED_MESSAGES_PER_CONV:]
     drops: List[DeferredDrop] = []
     # The per-conversation cap keeps the NEWEST slice, so the overflow is the
     # oldest end of the queue. It is still acked work: it leaves a record.
-    overflowed = ordered[: len(ordered) - len(merged)]
+    overflowed = [e["message"] for e in ordered[: len(ordered) - len(merged)]]
     if overflowed:
         drops.append(
             DeferredDrop(conversation_id, overflowed, DEFERRED_OVERFLOW_REASON)
         )
-    kept_verifications: Dict[str, Any] = {}
-    previous_verdicts = existing.get("verifications", {}) or {}
-    for m in merged:
-        mid = getattr(m, "message_id", None)
-        v = (verifications or {}).get(mid)
-        if v is None:
-            # H7: the stash replaces the message object. An old verdict may
-            # travel only when the WHOLE signed material is unchanged — the
-            # same rule as record_batch. message_id is relay-chosen.
-            old = previous_by_id.get(mid)
-            old_v = previous_verdicts.get(mid)
-            v = (
-                old_v
-                if old_v is not None
-                and old is not None
-                and same_signed_material(old, m)
-                else None
-            )
-        kept_verifications[mid] = v
-    state.deferred_by_conversation[conversation_id] = {
-        "messages": merged,
-        "verifications": kept_verifications,
-        "first_deferred_at": existing.get("first_deferred_at", now),
-    }
+    state.deferred_by_conversation[conversation_id] = build_stash(
+        merged, existing.get("first_deferred_at", now)
+    )
     while len(state.deferred_by_conversation) > DEFERRED_CONVERSATION_CAP:
         victim = next(iter(state.deferred_by_conversation))
         victim_stash = state.deferred_by_conversation.pop(victim)
@@ -560,7 +694,7 @@ def merge_covered_stashes(
     entirely) was enough to bin a peer message that was still waiting for it —
     and if that spawn failed the cleared stash was unrecoverable (#78). The
     held-back messages now ride along in the same turn, oldest first, deduped
-    by message id, and the stash is cleared only after the spawn returns.
+    by ``held_key``, and the stash is cleared only after the spawn returns.
 
     Returns ``(messages, verifications, covered_conversation_ids, deferred)``.
     ``deferred`` is the prompt marker — the wait of the longest-held covered
@@ -569,15 +703,23 @@ def merge_covered_stashes(
     renderer can each say which of them are late. ``None`` (and the untouched
     message list) when this turn covers no stash at all.
 
-    Every message travels with ITS OWN verdict. The merged map used to be
-    finished with ``update(verifications)`` — this tick's whole-batch map,
-    keyed by message_id, including messages the seen-filter had excluded from
-    the turn. message_id is relay-chosen and reusable, so that let a verdict
-    computed for a message nobody would read land on a held-back message of a
-    different body (or a different sender kind): an unsigned operator ask
-    rendered "CRYPTOGRAPHICALLY VERIFIED". A batch verdict may reach an object
-    only when the batch actually carries that object's signed material — the
-    rule ``stash_deferred`` and ``record_batch`` already use."""
+    Every message travels with ITS OWN verdict, and the returned map is keyed by
+    ``held_key`` so it can say so even when two of them share a message_id. The
+    merged map used to be finished with ``update(verifications)`` — this tick's
+    whole-batch map, keyed by message_id, including messages the seen-filter had
+    excluded from the turn. message_id is relay-chosen and reusable, so that let
+    a verdict computed for a message nobody would read land on a held-back
+    message of a different body (or a different sender kind): an unsigned
+    operator ask rendered "CRYPTOGRAPHICALLY VERIFIED". A batch verdict may reach
+    an object only when the batch actually carries that object's signed
+    material — the rule ``stash_deferred`` and ``record_batch`` already use.
+
+    Held-back dedupe is by ``held_key`` too (#78 r4). Keyed by id alone, the
+    FIRST stash to claim an id silenced every other held message reusing it —
+    and because the covering turn clears every stash it covers, the skipped one
+    was then dropped for good. A fresh batch message reusing a held id is simply
+    a different ``held_key``: it is delivered as itself, with its own verdict and
+    without the ``[HELD BACK]`` marker."""
     covered: List[Tuple[str, Dict[str, Any]]] = []
     for conv in dict.fromkeys(getattr(m, "conversation_id", "") for m in floored):
         stash = state.deferred_by_conversation.get(conv)
@@ -587,54 +729,46 @@ def merge_covered_stashes(
         return list(floored), dict(verifications or {}), [], None
     covered.sort(key=lambda cs: cs[1]["first_deferred_at"])  # longest wait first
     batch_verdicts = verifications or {}
-    fresh_by_id = {getattr(m, "message_id", None): m for m in floored}
+    # Keyed by held_key, NOT by id: a fresh message that merely reuses a held
+    # id is a different message and must not be mistaken for a redelivery.
+    fresh_by_key = {held_key(m): m for m in floored}
     ordered: List[Any] = []
     held_ids: List[Any] = []
-    held_seen: Set[Any] = set()
-    # Ids a held-back message and a DIFFERENT batch message both claim. One
-    # verdict slot, two messages: neither may wear the other's.
-    contested: Set[Any] = set()
-    merged_verifications: Dict[str, Any] = {}
+    held_keys: List[Tuple[Any, str]] = []
+    held_seen: Set[Tuple[Any, str]] = set()
+    merged_verifications: Dict[Any, Any] = {}
     for _conv, stash in covered:
-        stash_verdicts = stash.get("verifications") or {}
-        for m in stash["messages"]:
-            mid = getattr(m, "message_id", None)
-            if mid in held_seen:
-                continue
-            held_seen.add(mid)
-            held_ids.append(mid)
+        for entry in stash.get("entries", []) or ():
+            m = entry["message"]
+            key = held_key(m)
+            if key in held_seen:
+                continue  # the same message, stashed under two conversations
+            held_seen.add(key)
+            held_keys.append(key)
+            held_ids.append(key[0])
             # Held-back messages lead: they are the oldest thing in the batch.
-            fresh = fresh_by_id.get(mid)
-            if fresh is not None and same_signed_material(fresh, m):
-                # The SAME message, redelivered under its own id: take the
-                # fresh object (newest relay state) at the stash's older
-                # position, with this tick's verdict — that verdict was
-                # computed over exactly this signed material.
-                ordered.append(fresh)
-                merged_verifications[mid] = batch_verdicts.get(mid)
-                continue
-            # Otherwise nothing in this batch speaks for the stashed message:
-            # it keeps the verdict stored alongside it in the stash.
-            ordered.append(m)
-            merged_verifications[mid] = stash_verdicts.get(mid)
+            fresh = fresh_by_key.get(key)
             if fresh is not None:
-                # Same id, different signed material: two different messages,
-                # both real, both delivered (#78 drops nothing acked). The one
-                # verdict slot can honestly describe neither, so the id renders
-                # unverified — including the fresh twin, which also inherits
-                # this id's [HELD BACK] marker. A cosmetic cost, paid only on a
-                # reused id, to keep a verdict from crossing messages.
-                contested.add(mid)
-                merged_verifications[mid] = None
-    fresh_seen: Set[Any] = set()
+                # Same id AND same signed material: the SAME message, redelivered.
+                # Take the fresh object (newest relay state) at the stash's older
+                # position, with this tick's verdict — that verdict was computed
+                # over exactly this signed material.
+                ordered.append(fresh)
+                merged_verifications[key] = verdict_for(batch_verdicts, fresh)
+                continue
+            # Otherwise nothing in this batch is this message: it keeps the
+            # verdict stored beside it in the stash. A batch message reusing its
+            # id is handled below, as the separate message it is.
+            ordered.append(m)
+            merged_verifications[key] = entry.get("verification")
+    fresh_seen: Set[Tuple[Any, str]] = set()
     for m in floored:
-        mid = getattr(m, "message_id", None)
-        if mid in fresh_seen or (mid in held_seen and mid not in contested):
+        key = held_key(m)
+        if key in fresh_seen or key in held_seen:
             continue
-        fresh_seen.add(mid)
+        fresh_seen.add(key)
         ordered.append(m)
-        if mid not in contested:
-            merged_verifications[mid] = batch_verdicts.get(mid)
+        merged_verifications[key] = verdict_for(batch_verdicts, m)
     conv, oldest = covered[0]
     return (
         ordered,
@@ -647,6 +781,11 @@ def merge_covered_stashes(
             # A COVERING turn, not a wholly held-back one: the batch carries
             # fresh messages too, so the banner frames it differently.
             "merged": True,
+            # held_keys is what the renderer marks [HELD BACK] from: ids alone
+            # marked a fresh message that merely reused a held id (#78 r4).
+            # held_message_ids stays for the logs and for callers that only
+            # have ids.
+            "held_keys": held_keys,
             "held_message_ids": held_ids,
             # EVERY conversation this turn covers, longest wait first. Naming
             # only the oldest left the others' catch-up tails under the "you
@@ -1354,8 +1493,12 @@ def build_prompt(
         if getattr(m, "sender_kind", None) == "operator"
     }
     annotated_convs: set = set()
-    # Message ids this turn is delivering LATE. Only a covering turn sets them
-    # (a wholly held-back turn says so once, in the banner).
+    # Which messages this turn is delivering LATE. Only a covering turn sets
+    # them (a wholly held-back turn says so once, in the banner). Bound to the
+    # OBJECT via held_key: two held messages can share a message_id, and so can
+    # a held one and a fresh one, and the id alone marked the wrong one (#78 r4).
+    # ``held_message_ids`` remains the fallback for a caller that has only ids.
+    held_keys: Set[Any] = set((deferred or {}).get("held_keys") or ())
     held_ids: Set[Any] = set((deferred or {}).get("held_message_ids") or ())
     # Per-turn unguessable fence around each message's raw body. A peer cannot
     # predict this token, so it cannot close the fence early and forge a sibling
@@ -1364,7 +1507,9 @@ def build_prompt(
     fence = secrets.token_urlsafe(9)
     lines: List[str] = []
     for i, m in enumerate(messages):
-        verdict = (verifications or {}).get(getattr(m, "message_id", None))
+        # Bound to the object, so two messages sharing an id each get their own
+        # label instead of one wearing the other's (#78 r4).
+        verdict = verdict_for(verifications, m)
         if getattr(m, "sender_kind", None) == "operator":
             if verdict is not None and getattr(verdict, "verified", False):
                 kid = getattr(verdict, "key_id", None) or "?"
@@ -1395,11 +1540,12 @@ def build_prompt(
         quote = _reply_quote(m, names, is_verified)
         # A COVERING turn carries both fresh and held-back messages (#78), so
         # the banner alone cannot say which is which. Mark the late ones here.
-        held = (
-            " [HELD BACK — delivered late]"
-            if getattr(m, "message_id", None) in held_ids
-            else ""
+        is_late = (
+            held_key(m) in held_keys
+            if held_keys
+            else getattr(m, "message_id", None) in held_ids
         )
+        held = " [HELD BACK — delivered late]" if is_late else ""
         # Budget-awareness line: only for peer (non-operator) messages whose
         # conversation has a remaining count, and only once per conversation.
         budget = ""
@@ -1932,7 +2078,9 @@ def process_inbox_once(
                     roster=getattr(inbox, "roster", None),
                     spawn=spawn,
                     log=log,
-                    verifications=stash["verifications"],
+                    # held_key-keyed, so a stash holding two messages under
+                    # one id labels each of them correctly (#78 r4).
+                    verifications=stash_verdicts(stash),
                     self_agent_id=self_agent_id,
                     conversation_history=hist,
                     peer_turn_budget=eff_budget,
@@ -2009,7 +2157,7 @@ def process_inbox_once(
                 roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
-                verifications=stash["verifications"],
+                verifications=stash_verdicts(stash),
                 self_agent_id=self_agent_id,
                 # No acquire, so no fresh catch-up tail — whatever the inbox
                 # already carries for this conversation is the best we have.
@@ -2174,10 +2322,14 @@ def process_inbox_once(
     floored, to_release, tails, deferred = plan_floor_turn(
         kept, lambda c: client.acquire_floor(c, FLOOR_TTL_SECONDS), log
     ) if kept else ([], [], {}, {})
+    # The deferred path binds verdicts to objects, so re-key this tick's
+    # id-keyed map once, here, at its boundary (#78 r4). Anything the relay let
+    # two different messages in this batch claim resolves to "unverified".
+    batch_verdicts = batch_verdicts_by_held_key(messages, verifications)
     for conv, msgs in deferred.items():
         # Neither cap drops anything silently (#78): whatever a stash cannot
         # keep was acked, so it leaves a dead-letter record and a WARNING.
-        for drop in stash_deferred(state, conv, msgs, verifications, now):
+        for drop in stash_deferred(state, conv, msgs, batch_verdicts, now):
             if drop.reason == DEFERRED_OVERFLOW_REASON:
                 log.warning(
                     "[ekho-autoreply] deferred conversation %s overflowed the "
@@ -2201,7 +2353,7 @@ def process_inbox_once(
     # A conversation that gets a turn ABSORBS its stash: the held-back messages
     # are delivered BY this turn rather than cleared unread (#78).
     turn_messages, turn_verifications, covered_convs, cover_deferred = (
-        merge_covered_stashes(state, floored, verifications, now)
+        merge_covered_stashes(state, floored, batch_verdicts, now)
     )
     if floored:
         if covered_convs:

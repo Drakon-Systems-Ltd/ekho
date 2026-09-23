@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import { noteModelCallEnded } from "./connection.js";
@@ -370,13 +370,124 @@ let lastBatchMeta: {
  * is attacker-supplied but also `JSON.parse`'d. If a caller is ever added that
  * passes a non-`JSON.parse` object, that guarantee is gone and this is the line
  * to revisit.
+ *
+ * Since #78 r4 `canonicalize` is called in exactly ONE place — `materialDigest`
+ * below — and both `sameSignedMaterial` and `heldKey` are defined from that
+ * digest. So everything above describes the definition of "the same signed
+ * material" used by both of them, and neither can drift from the other.
  */
-function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
+const UNCOMPARABLE_PREFIX = "uncomparable:";
+/** Per-object tokens for messages `canonicalize` cannot serialize. Weak, so a
+ *  token dies with its message. */
+const uncomparableTokens = new WeakMap<object, string>();
+
+/** Stable digest of the canonical signed material.
+ *
+ *  Computed from exactly the bytes `sameSignedMaterial` compares, and that
+ *  function is defined in terms of THIS one below, so "same digest" and "same
+ *  signed material" cannot drift apart.
+ *
+ *  An uncomparable message gets a per-OBJECT token instead, mirroring
+ *  `sameSignedMaterial` refusing to call an uncomparable pair equal: two
+ *  uncomparable messages are never treated as one message, and neither can
+ *  inherit the other's verdict. */
+function materialDigest(msg: InboxMessage): string {
   try {
-    return canonicalize(a) === canonicalize(b);
+    return createHash("sha256").update(canonicalize(msg), "utf8").digest("hex");
   } catch {
-    return false; // uncomparable -> re-verify rather than assume
+    const obj = msg as unknown as object;
+    let token = uncomparableTokens.get(obj);
+    if (token === undefined) {
+      token = UNCOMPARABLE_PREFIX + randomBytes(8).toString("hex");
+      uncomparableTokens.set(obj, token);
+    }
+    return token;
   }
+}
+
+/** The identity of a deferred/held message: its `message_id` AND a digest of
+ *  its canonical signed material.
+ *
+ *  A message_id ALONE is not an identity (#78 r4). The relay chooses it and may
+ *  reuse one, so two messages carrying the same id and different signed material
+ *  are two distinct messages. Keying a stash, a dedupe set or a verdict map on
+ *  the id alone let one of them silently replace, skip or relabel the other: an
+ *  unsigned operator ask rendered "CRYPTOGRAPHICALLY VERIFIED" because a signed
+ *  message reusing its id had a verdict in the same batch.
+ *
+ *  Every dedupe, merge, replacement and verdict binding in the deferred path
+ *  keys on this instead. The Hermes counterpart, `held_key`, returns the same
+ *  pair as a tuple; here it is one string because Map/Record keys must be
+ *  primitives. The digest comes FIRST and is NUL-separated: it is either 64 hex
+ *  chars or the fixed-width uncomparable token, so the split point is
+ *  unambiguous whatever a relay puts in a message_id. */
+export type HeldKey = string;
+
+export function heldKey(msg: InboxMessage): HeldKey {
+  return `${materialDigest(msg)}\u0000${msg.message_id ?? ""}`;
+}
+
+/** The message_id half of a `heldKey` — for logs and for the prompt marker's
+ *  id-only fallback. */
+function heldKeyId(key: HeldKey): string {
+  return key.slice(key.indexOf("\u0000") + 1);
+}
+
+/** The verdict describing THIS message object.
+ *
+ *  Prefers an exact `heldKey` entry — a verdict bound to an object. Falls back
+ *  to the `message_id` key for a caller still passing a whole-batch, id-keyed
+ *  map (`verifyBatch`'s shape). The fallback is deliberately last: where two
+ *  messages share an id, only the `heldKey` entry can tell them apart. */
+export function verdictFor(
+  verifications: Record<string, VerifyResult | null> | undefined,
+  msg: InboxMessage
+): VerifyResult | null {
+  if (!verifications) return null;
+  const key = heldKey(msg);
+  if (key in verifications) return verifications[key] ?? null;
+  return verifications[msg.message_id] ?? null;
+}
+
+/** Re-key one tick's id-keyed verdict map onto `heldKey`.
+ *
+ *  `verifyBatch` keys its results by message_id, so an id claimed by two
+ *  DIFFERENT messages in the same batch has ONE computed verdict that can
+ *  honestly describe neither. Both of those objects get `null` here — unverified
+ *  is the safe reading, and the only truthful one. Everything else keeps the
+ *  verdict computed for it, now bound to the object rather than to a string the
+ *  relay picked. */
+export function batchVerdictsByHeldKey(
+  messages: InboxMessage[],
+  verifications: Record<string, VerifyResult | null> | undefined
+): Record<HeldKey, VerifyResult | null> {
+  const digestsById = new Map<string, Set<string>>();
+  for (const m of messages) {
+    const key = heldKey(m);
+    const id = heldKeyId(key);
+    const set = digestsById.get(id) ?? new Set<string>();
+    set.add(key);
+    digestsById.set(id, set);
+  }
+  const out: Record<HeldKey, VerifyResult | null> = {};
+  for (const m of messages) {
+    const key = heldKey(m);
+    out[key] =
+      (digestsById.get(heldKeyId(key))?.size ?? 0) > 1
+        ? null
+        : verifications?.[m.message_id] ?? null;
+  }
+  return out;
+}
+
+/** Is a redelivery the SAME message? Expressed as a digest comparison so this
+ *  and `heldKey` are the SAME definition of "same message" by construction.
+ *  Uncomparable -> false (re-verify rather than assume), including against
+ *  itself. */
+function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
+  const digest = materialDigest(a);
+  if (digest.startsWith(UNCOMPARABLE_PREFIX)) return false;
+  return digest === materialDigest(b);
 }
 
 export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number } = {}) {
@@ -558,19 +669,48 @@ export interface AutoReplyState {
   // once per close). Cleared per conversation by resetPeerLatch, so the next
   // operator engagement / progress signal re-arms a future escalation.
   escalatedClosedConvs: Set<string>;
-  // conversation_id -> messages held back because another agent had the floor.
-  // Retried on later ticks until DEFERRED_RETRY_TTL_MS; without this a deferred
-  // message (already consumed + acked) would silently never reach the agent.
+  // conversation_id -> messages held back because another agent had the floor,
+  // each carrying its OWN verdict (#78 r4 — see `buildStash`). Retried on later
+  // ticks until DEFERRED_RETRY_TTL_MS; without this a deferred message (already
+  // consumed + acked) would silently never reach the agent.
   deferredByConversation: Map<string, DeferredStash>;
   // conversation_id -> timestamps of peer progress-signal budget refreshes,
   // rolling-window capped so `complete` spam can't defeat the peer budget (#11).
   progressRefreshesByConversation: Map<string, number[]>;
 }
 
+/** One held-back message together with the verdict computed for THAT object. */
+export interface DeferredStashEntry {
+  message: InboxMessage;
+  verification: VerifyResult | null;
+}
+
 export interface DeferredStash {
+  /** The AUTHORITY: every verdict sits next to the object it describes. */
+  entries: DeferredStashEntry[];
+  /** Derived, read-only view for the logs and the dead-letter sink. */
   messages: InboxMessage[];
-  verifications: Record<string, VerifyResult | null>;
   firstDeferredAtMs: number;
+}
+
+/** Assemble a stash from its entries.
+ *
+ *  There is deliberately no id-keyed verdict map in a stash any more (#78 r4).
+ *  Two entries may legitimately share a message_id, and such a map could only
+ *  misrepresent one of them — which is exactly how a retained unsigned operator
+ *  message came to wear a signed replacement's verdict. Read verdicts with
+ *  `stashVerdicts`. */
+export function buildStash(entries: DeferredStashEntry[], firstDeferredAtMs: number): DeferredStash {
+  const listed = entries.map((e) => ({ message: e.message, verification: e.verification ?? null }));
+  return { entries: listed, messages: listed.map((e) => e.message), firstDeferredAtMs };
+}
+
+/** A stash's verdicts keyed by `heldKey` — the shape `buildPrompt` reads, and
+ *  the only one that stays correct when two entries share an id. */
+export function stashVerdicts(stash: DeferredStash): Record<HeldKey, VerifyResult | null> {
+  const out: Record<HeldKey, VerifyResult | null> = {};
+  for (const e of stash.entries) out[heldKey(e.message)] = e.verification ?? null;
+  return out;
 }
 
 export function createAutoReplyState(): AutoReplyState {
@@ -605,8 +745,21 @@ export interface DeferredDrop {
 }
 
 /** Stash (or merge into) a conversation's deferred messages so a later tick can
- *  retry the floor. Dedupes by message id, keeps the newest per-conversation
+ *  retry the floor. Dedupes by `heldKey`, keeps the newest per-conversation
  *  slice, and preserves the FIRST deferral time (the TTL clock).
+ *
+ *  Dedupe is by message_id AND signed material (#78 r4). A reused id carrying a
+ *  different body is a SECOND message: it is kept ALONGSIDE the first, never
+ *  silently replacing it. Replacing it lost acked work with no turn, no log and
+ *  no dead-letter — the one outcome this whole path exists to prevent. (If the
+ *  pair then overflows the per-conversation cap, the oldest is dead-lettered
+ *  below, which is a record rather than a gap.)
+ *
+ *  Verdicts bind to objects, not ids. A verdict from `verifications` may attach
+ *  only to an INCOMING message — the object it was computed for. A RETAINED
+ *  entry keeps the verdict stored beside it and never consults this map, so
+ *  passing a whole batch's id-keyed verdicts here can no longer relabel
+ *  something already in the stash.
  *
  *  Returns every message this stash could NOT keep, tagged with why: the oldest
  *  messages past `DEFERRED_MESSAGES_PER_CONV` within this conversation
@@ -621,43 +774,39 @@ export function stashDeferred(
   nowMs: number
 ): DeferredDrop[] {
   const existing = state.deferredByConversation.get(conversationId);
-  const byId = new Map<string, InboxMessage>();
-  const previousById = new Map<string, InboxMessage>();
-  for (const m of existing?.messages ?? []) {
-    previousById.set(m.message_id, m);
-    byId.set(m.message_id, m);
+  const byKey = new Map<HeldKey, DeferredStashEntry>();
+  for (const e of existing?.entries ?? []) {
+    byKey.set(heldKey(e.message), { message: e.message, verification: e.verification ?? null });
   }
-  for (const m of messages) byId.set(m.message_id, m);
-  const ordered = Array.from(byId.values());
+  for (const m of messages) {
+    const key = heldKey(m);
+    const prior = byKey.get(key);
+    let v = verdictFor(verifications, m);
+    if (v === null && prior !== undefined) {
+      // The key matched, so the signed material is unchanged BY CONSTRUCTION
+      // (heldKey carries its digest) — the stored verdict still describes this
+      // object, exactly as `recordBatch` allows.
+      v = prior.verification;
+    }
+    // Map.set on an existing key keeps its insertion position, so the newest
+    // object lands in the stash's older slot and oldest-first order is kept.
+    byKey.set(key, { message: m, verification: v });
+  }
+  const ordered = Array.from(byKey.values());
   const merged = ordered.slice(-DEFERRED_MESSAGES_PER_CONV);
   const drops: DeferredDrop[] = [];
   // The per-conversation cap keeps the NEWEST slice, so the overflow is the
   // oldest end of the queue. It is still acked work: it leaves a record.
-  const overflowed = ordered.slice(0, ordered.length - merged.length);
+  const overflowed = ordered.slice(0, ordered.length - merged.length).map((e) => e.message);
   if (overflowed.length > 0) {
     drops.push({ conversationId, messages: overflowed, reason: DEFERRED_OVERFLOW_REASON });
   }
-  const keptVerifications: Record<string, VerifyResult | null> = {};
-  for (const m of merged) {
-    let v = verifications[m.message_id] ?? null;
-    if (v === null) {
-      // The stash REPLACES the message object held under an id. An old verdict
-      // may travel only when the WHOLE signed material is unchanged — the same
-      // rule as `recordBatch`, and the reason `mergeCoveredStashes` can trust
-      // what it finds here. message_id is relay-chosen and reusable.
-      const old = previousById.get(m.message_id);
-      const oldV = existing?.verifications[m.message_id] ?? null;
-      v = oldV !== null && old !== undefined && sameSignedMaterial(old, m) ? oldV : null;
-    }
-    keptVerifications[m.message_id] = v;
-  }
   // Re-insert so keys() stays oldest-first for the FIFO cap below.
   state.deferredByConversation.delete(conversationId);
-  state.deferredByConversation.set(conversationId, {
-    messages: merged,
-    verifications: keptVerifications,
-    firstDeferredAtMs: existing?.firstDeferredAtMs ?? nowMs
-  });
+  state.deferredByConversation.set(
+    conversationId,
+    buildStash(merged, existing?.firstDeferredAtMs ?? nowMs)
+  );
   while (state.deferredByConversation.size > DEFERRED_CONVERSATION_CAP) {
     const oldest = state.deferredByConversation.keys().next().value as string | undefined;
     if (oldest === undefined) break;
@@ -724,6 +873,9 @@ export function clearDeferred(state: AutoReplyState, conversationId: string): vo
 /** The result of folding this turn's covered stashes into it. */
 export interface CoveredStashes {
   messages: InboxMessage[];
+  /** Keyed by `heldKey` when anything was covered, so two messages sharing a
+   *  message_id each carry their own verdict. A pure passthrough (nothing
+   *  covered) returns the caller's map untouched. */
   verifications: Record<string, VerifyResult | null>;
   /** Conversations whose stash is riding along — the caller clears these, and
    *  ONLY these, once the spawn has returned. */
@@ -740,22 +892,30 @@ export interface CoveredStashes {
  *  entirely) was enough to bin a peer message that was still waiting for it —
  *  and if that spawn failed the cleared stash was unrecoverable (#78). The
  *  held-back messages now ride along in the same turn, oldest first, deduped by
- *  message id, and the stash is cleared only after the spawn returns.
+ *  `heldKey`, and the stash is cleared only after the spawn returns.
  *
  *  `deferred` carries the wait of the longest-held covered stash, every
- *  conversation this turn covers, and the ids of every message that was held
- *  back, so the banner, the per-message framing and the history renderer can
- *  each say which of them are late.
+ *  conversation this turn covers, and the identity of every message that was
+ *  held back, so the banner, the per-message framing and the history renderer
+ *  can each say which of them are late.
  *
- *  Every message travels with ITS OWN verdict. The merged map used to be
- *  finished with `Object.assign(merged, verifications)` — this tick's
- *  whole-batch map, keyed by message_id, including messages the seen-filter had
- *  excluded from the turn. message_id is relay-chosen and reusable, so that let
- *  a verdict computed for a message nobody would read land on a held-back
- *  message of a different body (or a different sender kind): an unsigned
- *  operator ask rendered "CRYPTOGRAPHICALLY VERIFIED". A batch verdict may reach
- *  an object only when the batch actually carries that object's signed
- *  material — the rule `stashDeferred` and `recordBatch` already use. */
+ *  Every message travels with ITS OWN verdict, and the returned map is keyed by
+ *  `heldKey` so it can say so even when two of them share a message_id. The
+ *  merged map used to be finished with `Object.assign(merged, verifications)` —
+ *  this tick's whole-batch map, keyed by message_id, including messages the
+ *  seen-filter had excluded from the turn. message_id is relay-chosen and
+ *  reusable, so that let a verdict computed for a message nobody would read land
+ *  on a held-back message of a different body (or a different sender kind): an
+ *  unsigned operator ask rendered "CRYPTOGRAPHICALLY VERIFIED". A batch verdict
+ *  may reach an object only when the batch actually carries that object's signed
+ *  material — the rule `stashDeferred` and `recordBatch` already use.
+ *
+ *  Held-back dedupe is by `heldKey` too (#78 r4). Keyed by id alone, the FIRST
+ *  stash to claim an id silenced every other held message reusing it — and
+ *  because the covering turn clears every stash it covers, the skipped one was
+ *  then dropped for good. A fresh batch message reusing a held id is simply a
+ *  different `heldKey`: it is delivered as itself, with its own verdict and
+ *  without the `[HELD BACK]` marker. */
 export function mergeCoveredStashes(
   state: AutoReplyState,
   floored: InboxMessage[],
@@ -771,52 +931,46 @@ export function mergeCoveredStashes(
     return { messages: floored, verifications, coveredConversationIds: [] };
   }
   covered.sort((a, b) => a.stash.firstDeferredAtMs - b.stash.firstDeferredAtMs);
-  const freshById = new Map(floored.map((m) => [m.message_id, m]));
+  // Keyed by heldKey, NOT by id: a fresh message that merely reuses a held id is
+  // a different message and must not be mistaken for a redelivery.
+  const freshByKey = new Map(floored.map((m) => [heldKey(m), m]));
   const ordered: InboxMessage[] = [];
   const heldMessageIds: string[] = [];
-  const heldSeen = new Set<string>();
-  // Ids a held-back message and a DIFFERENT batch message both claim. One
-  // verdict slot, two messages: neither may wear the other's.
-  const contested = new Set<string>();
-  const merged: Record<string, VerifyResult | null> = {};
+  const heldKeys: HeldKey[] = [];
+  const heldSeen = new Set<HeldKey>();
+  const merged: Record<HeldKey, VerifyResult | null> = {};
   for (const { stash } of covered) {
-    for (const m of stash.messages) {
-      if (heldSeen.has(m.message_id)) continue;
-      heldSeen.add(m.message_id);
+    for (const entry of stash.entries) {
+      const m = entry.message;
+      const key = heldKey(m);
+      if (heldSeen.has(key)) continue; // the same message, stashed under two conversations
+      heldSeen.add(key);
+      heldKeys.push(key);
       heldMessageIds.push(m.message_id);
       // Held-back messages lead: they are the oldest thing in the batch.
-      const fresh = freshById.get(m.message_id);
-      if (fresh && sameSignedMaterial(fresh, m)) {
-        // The SAME message, redelivered under its own id: take the fresh object
-        // (newest relay state) at the stash's older position, with this tick's
-        // verdict — it was computed over exactly this signed material.
+      const fresh = freshByKey.get(key);
+      if (fresh) {
+        // Same id AND same signed material: the SAME message, redelivered. Take
+        // the fresh object (newest relay state) at the stash's older position,
+        // with this tick's verdict — it was computed over exactly this material.
         ordered.push(fresh);
-        merged[m.message_id] = verifications[m.message_id] ?? null;
+        merged[key] = verdictFor(verifications, fresh);
         continue;
       }
-      // Otherwise nothing in this batch speaks for the stashed message: it keeps
-      // the verdict stored alongside it in the stash.
+      // Otherwise nothing in this batch is this message: it keeps the verdict
+      // stored beside it in the stash. A batch message reusing its id is handled
+      // below, as the separate message it is.
       ordered.push(m);
-      merged[m.message_id] = stash.verifications[m.message_id] ?? null;
-      if (fresh) {
-        // Same id, different signed material: two different messages, both real,
-        // both delivered (#78 drops nothing acked). The one verdict slot can
-        // honestly describe neither, so the id renders unverified — including
-        // the fresh twin, which also inherits this id's [HELD BACK] marker. A
-        // cosmetic cost, paid only on a reused id, to keep a verdict from
-        // crossing messages.
-        contested.add(m.message_id);
-        merged[m.message_id] = null;
-      }
+      merged[key] = entry.verification ?? null;
     }
   }
-  const freshSeen = new Set<string>();
+  const freshSeen = new Set<HeldKey>();
   for (const m of floored) {
-    if (freshSeen.has(m.message_id)) continue;
-    if (heldSeen.has(m.message_id) && !contested.has(m.message_id)) continue;
-    freshSeen.add(m.message_id);
+    const key = heldKey(m);
+    if (freshSeen.has(key) || heldSeen.has(key)) continue;
+    freshSeen.add(key);
     ordered.push(m);
-    if (!contested.has(m.message_id)) merged[m.message_id] = verifications[m.message_id] ?? null;
+    merged[key] = verdictFor(verifications, m);
   }
   const oldest = covered[0];
   return {
@@ -829,6 +983,10 @@ export function mergeCoveredStashes(
       // A COVERING turn, not a wholly held-back one: the batch carries fresh
       // messages too, so the banner frames it differently.
       merged: true,
+      // heldKeys is what the renderer marks [HELD BACK] from: ids alone marked a
+      // fresh message that merely reused a held id (#78 r4). heldMessageIds
+      // stays for the logs and for callers that only have ids.
+      heldKeys,
       heldMessageIds,
       // EVERY conversation this turn covers, longest wait first. Naming only the
       // oldest left the others' catch-up tails under the "you have already seen
@@ -1351,8 +1509,13 @@ export interface DeferredTurnContext {
    *  stash's own retry did, so only SOME of the batch is late (#78). */
   merged?: boolean;
   /** The ids of the messages that were held back. Set on a covering turn, where
-   *  the banner alone cannot say which of the batch is late. */
+   *  the banner alone cannot say which of the batch is late. Lossy on a reused
+   *  id — the renderer prefers `heldKeys` and keeps this as the fallback. */
   heldMessageIds?: string[];
+  /** The `heldKey` of each held-back message: which OBJECTS are late. Two held
+   *  messages can share a message_id, and so can a held one and a fresh one, and
+   *  marking by id alone marked the wrong message [HELD BACK] (#78 r4). */
+  heldKeys?: HeldKey[];
   /** EVERY conversation this turn covers, longest wait first. A covering turn can
    *  absorb stashes from several conversations, and each one's catch-up tail is
    *  unseen — `conversationId` alone named only the oldest. The retry and overrun
@@ -1480,12 +1643,18 @@ export function buildPrompt(
     messages.filter((m) => m.sender_kind === "operator").map((m) => m.conversation_id)
   );
   const annotatedConvs = new Set<string>();
-  // Message ids this turn is delivering LATE. Only a covering turn sets them (a
-  // wholly held-back turn says so once, in the banner).
+  // Which messages this turn is delivering LATE. Only a covering turn sets them
+  // (a wholly held-back turn says so once, in the banner). Bound to the OBJECT
+  // via heldKey: two held messages can share a message_id, and so can a held one
+  // and a fresh one, and the id alone marked the wrong one (#78 r4).
+  // `heldMessageIds` remains the fallback for a caller that has only ids.
+  const heldKeys = new Set(deferredCtx?.heldKeys ?? []);
   const heldIds = new Set(deferredCtx?.heldMessageIds ?? []);
   const lines = messages.map((m) => {
     let who: string;
-    const verdict = verifications?.[m.message_id];
+    // Bound to the object, so two messages sharing an id each get their own
+    // label instead of one wearing the other's (#78 r4).
+    const verdict = verdictFor(verifications, m);
     if (m.sender_kind === "operator") {
       if (verdict?.verified) {
         who =
@@ -1511,7 +1680,8 @@ export function buildPrompt(
     const quote = replyQuote(m, names, snapshotVerifier);
     // A COVERING turn carries both fresh and held-back messages (#78), so the
     // banner alone cannot say which is which. Mark the late ones here.
-    const held = heldIds.has(m.message_id) ? " [HELD BACK — delivered late]" : "";
+    const isLate = heldKeys.size > 0 ? heldKeys.has(heldKey(m)) : heldIds.has(m.message_id);
+    const held = isLate ? " [HELD BACK — delivered late]" : "";
     // Budget-awareness line: only for peer (non-operator) messages whose
     // conversation has a remaining count, and only once per conversation.
     let budget = "";
@@ -2095,7 +2265,9 @@ export function startAutoReply(opts: {
         turnBatch,
         api,
         log,
-        stash.verifications,
+        // heldKey-keyed, so a stash holding two messages under one id labels
+        // each of them correctly (#78 r4).
+        stashVerdicts(stash),
         selfAgentId,
         eff.peerTurnBudget,
         // No limit -> no countdown: the prompt only carries a budget line for a cap.
@@ -2196,10 +2368,14 @@ export function startAutoReply(opts: {
     // silently vanish; the floor holder gets a fresh tail.
     const plan = await planFloorTurn(kept, (conv) => client.acquireFloor(conv, FLOOR_TTL_SECONDS), log);
     const nowMs = Date.now();
+    // The deferred path binds verdicts to objects, so re-key this tick's
+    // id-keyed map once, here, at its boundary (#78 r4). Anything the relay let
+    // two different messages in this batch claim resolves to "unverified".
+    const batchVerdicts = batchVerdictsByHeldKey(batch.messages, verifications);
     for (const [conv, msgs] of Object.entries(plan.deferred)) {
       // Neither cap drops anything silently (#78): whatever a stash cannot keep
       // was acked, so it leaves a dead-letter record and a WARNING behind it.
-      for (const drop of stashDeferred(state, conv, msgs, verifications, nowMs)) {
+      for (const drop of stashDeferred(state, conv, msgs, batchVerdicts, nowMs)) {
         log?.warn?.(
           drop.reason === DEFERRED_OVERFLOW_REASON
             ? `[ekho-autoreply] deferred conversation ${drop.conversationId} overflowed the ` +
@@ -2214,7 +2390,7 @@ export function startAutoReply(opts: {
     }
     // A conversation that gets a turn ABSORBS its stash: the held-back messages
     // are delivered BY this turn rather than cleared unread (#78).
-    const cover = mergeCoveredStashes(state, plan.floored, verifications, nowMs);
+    const cover = mergeCoveredStashes(state, plan.floored, batchVerdicts, nowMs);
 
     if (plan.floored.length > 0) {
       if (cover.coveredConversationIds.length > 0) {

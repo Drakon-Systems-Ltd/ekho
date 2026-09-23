@@ -508,3 +508,174 @@ describe("#78 r3 a covering turn frames every covered conversation's tail as uns
     expect(before("c1 tail line")).toContain("WHILE YOUR TURN WAS HELD BACK");
   });
 });
+
+// #78 r4: message_id is not an identity.
+//
+// Round 3 bound a verdict to the object inside the covering merge, but the
+// RE-STASH path was still id-keyed: a stash re-stashed on a later tick looked
+// every message's verdict up in that tick's whole-batch, id-keyed map. A
+// validly signed message reusing a stashed message's id therefore handed its
+// VERIFIED verdict to the retained one, which the eventual turn framed as the
+// operator, "CRYPTOGRAPHICALLY VERIFIED".
+describe("#78 r4 a re-stashed message never inherits a filtered replacement's verdict", () => {
+  it("stays unverified across three ticks: stash, re-stash, deliver", async () => {
+    const { signCanonical, publicKeyB64urlFromSeed, keyId, sha256Hex } = await import("../src/identity");
+    const FLEET = "flt_r4";
+    const OP_SEED = new Uint8Array(32).fill(9);
+    const OP_PUB = publicKeyB64urlFromSeed(OP_SEED);
+    const OP_KID = keyId(Buffer.from(OP_PUB, "base64url"));
+    const replacementText = "signed, and not what was stashed";
+    const canonical = {
+      v: 1,
+      fleet_id: FLEET,
+      operator_id: "op",
+      key_id: OP_KID,
+      recipient: { kind: "agent", id: "self" },
+      conversation_id: "c-held",
+      body_sha256: sha256Hex(replacementText),
+      sent_at: new Date().toISOString(),
+      nonce: "n-r4"
+    };
+    // Reuses the STASHED message's id, and is genuinely signed.
+    const replacement: any = {
+      message_id: "reused",
+      conversation_id: "c-held",
+      sender_kind: "operator",
+      sender_agent_id: "op_" + FLEET,
+      message_type: "direct",
+      body: { text: replacementText },
+      operator_sig: signCanonical(canonical, OP_SEED),
+      agent_sig: null,
+      key_id: OP_KID,
+      sig_canonical: canonical
+    };
+    const batches = [
+      // Tick 1: a peer message contends for the held floor and takes the
+      // unsigned operator ask in the same conversation down with it.
+      {
+        messages: [peerMsg(1, "c-held"), operatorMsg("c-held", "reused", "unsigned operator ask")],
+        operator_trusted: true,
+        peer_autoreply: true,
+        roster: [],
+        fleet_id: FLEET
+      },
+      // Tick 2: the replacement (dropped by the seen-filter) plus a FRESH peer
+      // message. The floor is still held, so the stash is RE-STASHED with this
+      // batch's verdict map in hand.
+      {
+        messages: [replacement, peerMsg(2, "c-held")],
+        operator_trusted: true,
+        peer_autoreply: true,
+        roster: [],
+        fleet_id: FLEET
+      }
+    ];
+    let served = 0;
+    const client = {
+      getInbox: async () => {
+        served += 1;
+        return (
+          batches[served - 1] ?? {
+            messages: [],
+            operator_trusted: true,
+            peer_autoreply: true,
+            roster: [],
+            fleet_id: FLEET
+          }
+        );
+      },
+      ackMessages: async () => {},
+      // Held through ticks 1 and 2; free from tick 3, which delivers the stash.
+      acquireFloor: async () => ({ granted: served >= 3, holder_agent_id: "agent_holder" }),
+      releaseFloor: async () => {},
+      raiseNotice: async () => {}
+    };
+    const stop = startAutoReply({
+      client: client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      pollIntervalMs: 5,
+      peerEnabled: true,
+      identity: { seedHex: "33".repeat(32), pinnedOperatorKeys: { [OP_KID]: OP_PUB } } as any,
+      log: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} }
+    });
+
+    try {
+      await waitFor(() => hoisted.calls.length > 0);
+    } finally {
+      stop();
+    }
+
+    const prompt = hoisted.calls[0][hoisted.calls[0].length - 1];
+    expect(prompt).toContain("unsigned operator ask"); // delivered…
+    expect(prompt).toContain("teammate says 2"); // …with the later peer message
+    expect(prompt).not.toContain(replacementText); // the filtered one is not
+    expect(prompt).not.toContain("CRYPTOGRAPHICALLY VERIFIED");
+    expect(prompt).toContain("relay-authenticated fleet operator");
+  });
+});
+
+// #78 r4: two DIFFERENT messages in DIFFERENT conversations sharing a
+// message_id, both deferred. The covering merge's id-keyed heldSeen let the
+// first stash claim the id and skipped the second — which the covering turn
+// then cleared, unread and undead-lettered.
+describe("#78 r4 two conversations sharing a message_id are both delivered", () => {
+  it("carries both held-back messages into the covering turn", async () => {
+    const dup = (conv: string, sender: string, text: string): any => ({
+      message_id: "dup",
+      conversation_id: conv,
+      sender_agent_id: sender,
+      sender_kind: "agent",
+      message_type: "direct",
+      body: { text }
+    });
+    const client = {
+      getInbox: inboxQueue([
+        // Tick 1: both floors are held -> A stashes under c1, B under c2.
+        {
+          messages: [
+            dup("c1", "peer1", "A: the migration is blocked"),
+            dup("c2", "peer2", "B: the numbers are wrong")
+          ],
+          operator_trusted: true,
+          peer_autoreply: true,
+          roster: []
+        },
+        // Tick 2: one operator batch covers BOTH conversations (operator
+        // messages bypass the floor), so both stashes ride along in the one turn.
+        {
+          messages: [operatorMsg("c1", "o1", "cover c1"), operatorMsg("c2", "o2", "cover c2")],
+          operator_trusted: true,
+          roster: []
+        }
+      ]),
+      ackMessages: async () => {},
+      acquireFloor: async () => ({ granted: false, holder_agent_id: "agent_holder" }),
+      releaseFloor: async () => {},
+      raiseNotice: async () => {}
+    };
+    const records: unknown[] = [];
+    const stop = startAutoReply({
+      client: client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      pollIntervalMs: 5,
+      peerEnabled: true,
+      log: { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} },
+      onDeadLetter: (r) => records.push(...(r as unknown[]))
+    });
+
+    try {
+      await waitFor(() => hoisted.calls.length > 0);
+    } finally {
+      stop();
+    }
+
+    const prompt = hoisted.calls[0][hoisted.calls[0].length - 1];
+    expect(prompt).toContain("A: the migration is blocked");
+    expect(prompt).toContain("B: the numbers are wrong");
+    // Both are marked late, and neither was dropped.
+    expect(prompt.match(/\[HELD BACK — delivered late\]/g)).toHaveLength(2);
+    expect(records).toEqual([]);
+  });
+});
