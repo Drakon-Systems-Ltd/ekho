@@ -1323,6 +1323,30 @@ def test_tick_retry_prompt_carries_original_text_and_fresh_tail():
     assert "holder said things meanwhile" in prompts[0]  # fresh catch-up tail
 
 
+def test_tick_retry_held_ms_uses_the_tick_clock_not_wall_time(monkeypatch):
+    # first_deferred_at is stamped from the tick's (monotonic) ``now``; the
+    # retry must measure against the same clock. Wall time here would make a
+    # 3-minute wait render as tens of millions of minutes.
+    import ekho_hermes.autoreply as ar
+
+    seen = {}
+    real_trigger = ar.trigger_turn
+
+    def spy(messages, operator_trusted, **kw):
+        seen["deferred"] = kw.get("deferred")
+        return real_trigger(messages, operator_trusted, **kw)
+
+    monkeypatch.setattr(ar, "trigger_turn", spy)
+    monkeypatch.setattr(ar.time, "time", lambda: 1_790_000_000.0)
+    state = _state()
+    c1 = FloorClient(InboxResponse([_peer(0)], [], False, []), granted=False)
+    process_inbox_once(c1, "self", state, spawn=lambda c, e: None, now=100.0,
+                       peer_enabled=True, peer_turn_budget=25)
+    c2 = FloorClient(InboxResponse([], [], False, []), granted=True)
+    process_inbox_once(c2, "self", state, spawn=lambda c, e: None, now=280.0,
+                       peer_enabled=True, peer_turn_budget=25)
+    assert seen["deferred"]["held_ms"] == 180_000.0
+
 def test_tick_deferred_stash_past_the_ttl_is_delivered_late_not_dropped():
     """#78: this used to assert the stash was DROPPED at the TTL — acked
     messages, no turn, no trace. Past the window the turn now runs late."""

@@ -1737,7 +1737,9 @@ def process_inbox_once(
                     # answers a 10-minute-old message as if it were the thread head.
                     deferred={
                         "conversation_id": conv,
-                        "held_ms": max(0.0, (time.time() - stash["first_deferred_at"]) * 1000),
+                        # Same clock as first_deferred_at (the tick's monotonic
+                        # ``now``); mixing wall time in rendered ~29M minutes.
+                        "held_ms": max(0.0, (now - stash["first_deferred_at"]) * 1000),
                     },
                     snapshot_verifier=snapshot_verifier,
                 )
