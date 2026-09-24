@@ -668,8 +668,10 @@ export function getCachedInbox(): {
 }
 
 export interface AutoReplyState {
-  seen: Set<string>;
-  seenOrder: string[];
+  // Keyed by `heldKey`, not message_id (#83): an id the relay reuses for a
+  // different message must not be dropped as already seen.
+  seen: Set<HeldKey>;
+  seenOrder: HeldKey[];
   // Nonces of signatures we've accepted — blocks replay of a captured valid message.
   seenNonces: Set<string>;
   seenNonceOrder: string[];
@@ -1012,10 +1014,11 @@ export function mergeCoveredStashes(
   };
 }
 
-function markSeen(state: AutoReplyState, messageId: string) {
-  if (state.seen.has(messageId)) return;
-  state.seen.add(messageId);
-  state.seenOrder.push(messageId);
+function markSeen(state: AutoReplyState, msg: InboxMessage) {
+  const key = heldKey(msg);
+  if (state.seen.has(key)) return;
+  state.seen.add(key);
+  state.seenOrder.push(key);
   while (state.seenOrder.length > SEEN_CAP) {
     const evicted = state.seenOrder.shift();
     if (evicted !== undefined) state.seen.delete(evicted);
@@ -1183,7 +1186,9 @@ export function refreshBudgetForProgressSignals(
       //     ABSENT verdict still does — unsigned fleets must keep working.)
       //  2. Refreshes are capped per conversation per rolling window, so the
       //     worst case is a bounded multiple of the budget, not unbounded.
-      const verdict = m.message_id ? verifications?.[m.message_id] : undefined;
+      // Bound to THIS signal via `verdictFor` (#83), not to its id: a forged
+      // signal reusing a verified message's id must not borrow its verdict.
+      const verdict = m.message_id ? verdictFor(verifications, m as InboxMessage) : undefined;
       if (verdict && verdict.verified === false) continue;
       if (!noteProgressRefresh(state, m.conversation_id, nowMs)) continue;
       resetPeerLatch(state, m.conversation_id);
@@ -1243,7 +1248,7 @@ export function whyNotRealInbound(
   if (!TRIGGER_TYPES.has(msg.message_type)) return `type=${String(msg.message_type)}`;
   const text = typeof msg.body?.text === "string" ? msg.body.text.trim() : "";
   if (!text) return "empty";
-  if (state.seen.has(msg.message_id)) return "seen";
+  if (state.seen.has(heldKey(msg))) return "seen";
   if (!shouldAutowake(msg, verification, operatorTrusted, peerEnabled, requireSigned)) {
     return verification && verification.verified === false
       ? `authority=${verification.reason ?? "failed"}`
@@ -2357,7 +2362,7 @@ export function startAutoReply(opts: {
     recordPeerUsage(state.peerTurnsByConversation);
 
     // Mark every real message handled (dedupe defence — Part C, rule 3).
-    for (const m of real) markSeen(state, m.message_id);
+    for (const m of real) markSeen(state, m);
 
     // ACK BEFORE the turn (Part C, rule 2 — at-most-once auto-reply). A slow or
     // crashed turn can never cause a redelivery that re-triggers us.
