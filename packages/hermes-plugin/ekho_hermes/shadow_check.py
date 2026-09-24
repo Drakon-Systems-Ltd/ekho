@@ -417,7 +417,10 @@ def hermes_roots() -> HermesRoots:
     base = normalised(root)
     ancestors: list[Path] = []
     for candidate in roots:
-        for component in ancestors_above(base, normalised(candidate)):
+        # The addressed plugins dir itself is included: de-duplication below
+        # drops a ``profiles/work/plugins -> ../../plugins`` link as "the same
+        # directory", and a dropped root is never lstat-ed as a scan root.
+        for component in (*ancestors_above(base, normalised(candidate)), normalised(candidate)):
             if component not in ancestors:
                 ancestors.append(component)
     kept, problem = _dedupe_roots(roots)

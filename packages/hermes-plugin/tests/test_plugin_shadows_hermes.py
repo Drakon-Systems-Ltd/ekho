@@ -642,6 +642,26 @@ def test_a_symlinked_profile_dir_refuses_the_repair(home):
 
 
 @needs_discovery
+@needs_roots
+def test_a_profile_plugins_dir_linked_to_the_default_root_refuses_the_repair(home):
+    """``profiles/work/plugins -> ~/.hermes/plugins`` shares the default root's
+    identity, so de-duplication keeps one root. The link must still be seen:
+    it is checked before the duplicate is dropped, not after."""
+    default = home / ".hermes" / "plugins"
+    plugin(default, "ekho")
+    backup = plugin(default, "ekho.bak-pre050")
+    work = home / ".hermes" / "profiles" / "work"
+    work.mkdir(parents=True)
+    (work / "plugins").symlink_to(default, target_is_directory=True)
+
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved is False, detail
+    assert str(work / "plugins") in detail and "symlink" in detail
+    assert backup.is_dir()
+    assert not (home / ".hermes" / "backups").exists()
+
+
+@needs_discovery
 def test_a_symlinked_explicit_root_is_refused_not_resolved(tmp_path):
     """``--plugins-dir`` names a path; resolving it hides the layout to refuse.
 
