@@ -176,3 +176,87 @@ def test_healthcheck_reports_interpreter():
     with redirect_stdout(buf):
         healthcheck._run_checks()
     assert sys.executable in buf.getvalue()
+
+
+# --- #85: shadowing plugin copies under the Hermes plugins root -------------
+
+
+def _fake_plugin(plugins_root, dirname, name="ekho"):
+    d = plugins_root / dirname
+    d.mkdir(parents=True)
+    (d / "plugin.yaml").write_text(
+        f"name: {name}\nversion: 0.1.0\nrequires_env:\n  - name: EKHO_RELAY_URL\n",
+        encoding="utf-8",
+    )
+    (d / "__init__.py").write_text(f"# {dirname}\n", encoding="utf-8")
+    return d
+
+
+def test_check_plugin_shadows_passes_with_single_canonical(tmp_path):
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    _fake_plugin(plugins, "ekho")
+    _fake_plugin(plugins, "other", name="other")
+    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert passed, detail
+
+
+def test_check_plugin_shadows_reports_every_duplicate(tmp_path):
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    live = _fake_plugin(plugins, "ekho")
+    backup = _fake_plugin(plugins, "ekho.bak-pre050-20260101")
+    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert not passed
+    assert str(live) in detail
+    assert str(backup) in detail
+
+
+def test_main_exits_nonzero_on_shadowing_copy(tmp_path, monkeypatch, capsys):
+    from ekho_hermes import healthcheck
+
+    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
+    plugins = tmp_path / ".hermes" / "plugins"
+    _fake_plugin(plugins, "ekho")
+    backup = _fake_plugin(plugins, "ekho.bak-pre050-20260101")
+    assert healthcheck.main(["--plugins-dir", str(plugins)]) == 1
+    assert "[FAIL] plugin-shadows:" in capsys.readouterr().out
+    assert backup.is_dir()  # verify-only never moves anything
+
+
+def test_repair_moves_shadowing_copies_to_backups(tmp_path, monkeypatch, capsys):
+    from ekho_hermes import healthcheck
+
+    monkeypatch.setattr(healthcheck, "repair", lambda: (True, "sdk ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
+    plugins = tmp_path / ".hermes" / "plugins"
+    live = _fake_plugin(plugins, "ekho")
+    backup = _fake_plugin(plugins, "ekho.bak-pre050-20260101")
+    unrelated = _fake_plugin(plugins, "other", name="other")
+
+    assert healthcheck.main(["--repair", "--plugins-dir", str(plugins)]) == 0
+    out = capsys.readouterr().out
+    assert "[PASS] repair-shadows:" in out
+    assert "[PASS] plugin-shadows:" in out
+    # moved, not deleted — contents intact under <hermes>/backups/
+    moved = tmp_path / ".hermes" / "backups" / backup.name
+    assert not backup.exists()
+    assert (moved / "__init__.py").read_text() == f"# {backup.name}\n"
+    assert live.is_dir() and unrelated.is_dir()
+
+
+def test_repair_refuses_without_canonical_dir(tmp_path):
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    a = _fake_plugin(plugins, "ekho.bak-1")
+    b = _fake_plugin(plugins, "ekho.bak-2")
+    passed, detail = healthcheck.repair_plugin_shadows(str(plugins))
+    assert not passed
+    assert a.is_dir() and b.is_dir()

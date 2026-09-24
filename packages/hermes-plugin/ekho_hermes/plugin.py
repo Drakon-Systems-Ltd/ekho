@@ -389,9 +389,27 @@ def register(ctx) -> None:
     try:
         from .bundle_identity import describe as _describe_bundle
 
-        logger.info("%s", _describe_bundle().log_line())
+        bundle = _describe_bundle()
+        logger.info("%s", bundle.log_line())
     except (OSError, UnicodeError) as exc:
         logger.warning("[ekho] bundle identity unavailable: %s", exc)
+        bundle = None
+
+    # #85: Hermes keys plugins on plugin.yaml `name`, not the folder, so a
+    # backup copy left under plugins/ silently replaces the live one.
+    from .bundle_identity import dirs_declaring, package_dir
+
+    here = package_dir()
+    shadows = [p for p in dirs_declaring(here.parent) if p != here]
+    if here.name != "ekho" or shadows:
+        logger.error(
+            "[ekho] plugin shadowing: loaded from %s (observed=%s); other dirs "
+            "declaring name: ekho: %s — move non-canonical copies out of "
+            "plugins/ (healthcheck --repair)",
+            here,
+            bundle.observed if bundle is not None else "unknown",
+            ", ".join(str(p) for p in shadows) or "none",
+        )
 
     config = EkhoConfig.from_env()
     if not config.has_relay:

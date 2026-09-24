@@ -152,3 +152,70 @@ def test_autoreply_listening_line_includes_bundle(caplog):
     assert "listening for inbound" in joined
     assert f"bundle={live.short_observed()}" in joined
     assert f"match={live.match}" in joined
+
+
+# --- #85: shadowing plugin copies ------------------------------------------
+
+
+class _NoRelayCtx:
+    def register_tool(self, **_kw):
+        return None
+
+
+def _shadow_errors(caplog):
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "plugin shadowing" in r.getMessage()
+    ]
+
+
+def _declare(dirpath: Path, name: str = "ekho") -> Path:
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "plugin.yaml").write_text(f"name: {name}\n", encoding="utf-8")
+    return dirpath
+
+
+def test_register_errors_on_sibling_declaring_ekho(tmp_path, caplog, monkeypatch):
+    from ekho_hermes import bundle_identity, plugin
+
+    live = _declare(tmp_path / "plugins" / "ekho")
+    backup = _declare(tmp_path / "plugins" / "ekho.bak-pre050-20260101")
+    _declare(tmp_path / "plugins" / "other", name="other")
+    monkeypatch.setattr(bundle_identity, "package_dir", lambda: live)
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    errors = _shadow_errors(caplog)
+    assert len(errors) == 1
+    assert str(live) in errors[0]
+    assert str(backup) in errors[0]
+    assert f"observed={describe(live).observed}" in errors[0]
+
+
+def test_register_errors_when_loaded_from_non_canonical_dir(
+    tmp_path, caplog, monkeypatch
+):
+    from ekho_hermes import bundle_identity, plugin
+
+    backup = _declare(tmp_path / "plugins" / "ekho.bak-pre050-20260101")
+    monkeypatch.setattr(bundle_identity, "package_dir", lambda: backup)
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    errors = _shadow_errors(caplog)
+    assert len(errors) == 1
+    assert str(backup) in errors[0]
+    assert f"observed={describe(backup).observed}" in errors[0]
+
+
+def test_register_quiet_for_single_canonical_dir(tmp_path, caplog, monkeypatch):
+    from ekho_hermes import bundle_identity, plugin
+
+    live = _declare(tmp_path / "plugins" / "ekho")
+    _declare(tmp_path / "plugins" / "other", name="other")
+    monkeypatch.setattr(bundle_identity, "package_dir", lambda: live)
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    assert _shadow_errors(caplog) == []

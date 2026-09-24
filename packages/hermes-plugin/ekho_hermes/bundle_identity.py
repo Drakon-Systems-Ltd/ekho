@@ -67,6 +67,33 @@ def plugin_version(root: Path | None = None) -> str:
     return "unknown"
 
 
+def plugin_name(root: Path) -> str | None:
+    """Top-level ``name:`` from ``root/plugin.yaml`` — the key Hermes loads on.
+
+    Hermes keys plugins on this field, not the folder name, so two dirs that
+    both declare ``name: ekho`` collide and the one that sorts last wins (#85).
+    Indented ``name:`` lines (env entries) are not the manifest name.
+    """
+    yaml_path = root / "plugin.yaml"
+    try:
+        text = yaml_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    for line in text.splitlines():
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip().strip("\"'")
+    return None
+
+
+def dirs_declaring(plugins_root: Path, name: str = "ekho") -> list[Path]:
+    """Every direct child of ``plugins_root`` whose plugin.yaml declares ``name``."""
+    try:
+        children = sorted(p for p in plugins_root.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    return [p for p in children if plugin_name(p) == name]
+
+
 def claimed_sha256(root: Path | None = None) -> str | None:
     root = package_dir() if root is None else root
     stamp = root / CLAIMED_STAMP_NAME
