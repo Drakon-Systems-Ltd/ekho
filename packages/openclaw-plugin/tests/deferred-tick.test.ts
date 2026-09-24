@@ -67,6 +67,12 @@ function inboxQueue(batches: any[]): () => Promise<any> {
   return async () => batches[i++] ?? { messages: [] };
 }
 
+/** The "• From …" line that introduces the message whose body holds `text`. */
+function fromLine(prompt: string, text: string): string {
+  const head = prompt.slice(0, prompt.indexOf(text));
+  return head.slice(head.lastIndexOf("• From"));
+}
+
 afterEach(() => {
   hoisted.calls.length = 0;
   hoisted.spawnFails = false;
@@ -409,8 +415,9 @@ describe("#78 r3 a covered message never inherits a filtered replacement's verdi
           roster: [],
           fleet_id: FLEET
         },
-        // Tick 2: the replacement (dropped by the seen-filter) plus a fresh
-        // operator message that covers the conversation.
+        // Tick 2: the replacement (a different message, so NOT dropped by the
+        // seen-filter since #83) plus a fresh operator message that covers the
+        // conversation.
         {
           messages: [replacement, operatorMsg("c-held", "cover", "cover me")],
           operator_trusted: true,
@@ -441,9 +448,10 @@ describe("#78 r3 a covered message never inherits a filtered replacement's verdi
 
     const prompt = hoisted.calls[0][hoisted.calls[0].length - 1];
     expect(prompt).toContain("unsigned operator ask"); // still delivered…
-    expect(prompt).not.toContain(replacementText); // …the filtered one is not
-    expect(prompt).not.toContain("CRYPTOGRAPHICALLY VERIFIED");
-    expect(prompt).toContain("relay-authenticated fleet operator");
+    expect(fromLine(prompt, "unsigned operator ask")).toContain("relay-authenticated fleet operator");
+    expect(fromLine(prompt, "unsigned operator ask")).not.toContain("CRYPTOGRAPHICALLY VERIFIED");
+    // …and the replacement is delivered as itself, with its own verdict (#83).
+    expect(fromLine(prompt, replacementText)).toContain("CRYPTOGRAPHICALLY VERIFIED");
   });
 });
 
@@ -559,8 +567,8 @@ describe("#78 r4 a re-stashed message never inherits a filtered replacement's ve
         roster: [],
         fleet_id: FLEET
       },
-      // Tick 2: the replacement (dropped by the seen-filter) plus a FRESH peer
-      // message. The floor is still held, so the stash is RE-STASHED with this
+      // Tick 2: the replacement (a different message, so NOT dropped by the
+      // seen-filter since #83) plus a FRESH peer message. The floor is still held, so the stash is RE-STASHED with this
       // batch's verdict map in hand.
       {
         messages: [replacement, peerMsg(2, "c-held")],
@@ -609,9 +617,10 @@ describe("#78 r4 a re-stashed message never inherits a filtered replacement's ve
     const prompt = hoisted.calls[0][hoisted.calls[0].length - 1];
     expect(prompt).toContain("unsigned operator ask"); // delivered…
     expect(prompt).toContain("teammate says 2"); // …with the later peer message
-    expect(prompt).not.toContain(replacementText); // the filtered one is not
-    expect(prompt).not.toContain("CRYPTOGRAPHICALLY VERIFIED");
-    expect(prompt).toContain("relay-authenticated fleet operator");
+    expect(fromLine(prompt, "unsigned operator ask")).toContain("relay-authenticated fleet operator");
+    expect(fromLine(prompt, "unsigned operator ask")).not.toContain("CRYPTOGRAPHICALLY VERIFIED");
+    // …and the replacement is delivered as itself, with its own verdict (#83).
+    expect(fromLine(prompt, replacementText)).toContain("CRYPTOGRAPHICALLY VERIFIED");
   });
 });
 
@@ -677,5 +686,47 @@ describe("#78 r4 two conversations sharing a message_id are both delivered", () 
     // Both are marked late, and neither was dropped.
     expect(prompt.match(/\[HELD BACK — delivered late\]/g)).toHaveLength(2);
     expect(records).toEqual([]);
+  });
+});
+
+describe("#83 the seen-filter keys on heldKey, not message_id", () => {
+  it("a reused id carrying a different message is not dropped as seen; a true redelivery still is", async () => {
+    let getInboxCalls = 0;
+    const batches = [
+      operatorMsg("c1", "dup", "first: ship it"),
+      // The relay hands the same id back attached to a different message.
+      operatorMsg("c1", "dup", "second: roll it back"),
+      // A genuine redelivery of that second message: same id, same material.
+      operatorMsg("c1", "dup", "second: roll it back")
+    ].map((m) => ({ messages: [m], operator_trusted: true, peer_autoreply: true, roster: [] }));
+    const next = inboxQueue(batches);
+    const client = {
+      getInbox: async () => {
+        getInboxCalls++;
+        return next();
+      },
+      ackMessages: async () => {},
+      acquireFloor: async () => ({ granted: true }),
+      releaseFloor: async () => {},
+      raiseNotice: async () => {}
+    };
+    const stop = startAutoReply({
+      client: client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      pollIntervalMs: 5,
+      peerEnabled: true
+    });
+    try {
+      // Well past all three batches.
+      await waitFor(() => getInboxCalls > batches.length + 2);
+    } finally {
+      stop();
+    }
+
+    const prompts = hoisted.calls.map((args) => args[args.length - 1]);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("first: ship it");
+    expect(prompts[1]).toContain("second: roll it back");
   });
 });

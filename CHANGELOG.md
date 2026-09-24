@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **The seen-filter no longer drops a different message that reuses a seen `message_id` (#83).** Both plugins deduped already-handled messages by id alone, so a relay reusing an id for a genuinely different message had it acked and dropped before it reached a turn or the deferred stash. The seen set is now keyed on `held_key` / `heldKey` (id **and** signed-material digest), the identity the deferred path uses since #78; a genuine redelivery of the same message is still deduped. `refreshBudgetForProgressSignals` (OpenClaw) now reads its verdict through `verdictFor`, so a verdict bound to a signal's `heldKey` wins over one stored under a reused id; with the tick's id-keyed map it resolves exactly as before.
+
 ## [0.5.3] - 2026-09-23
 
 ### Fixed

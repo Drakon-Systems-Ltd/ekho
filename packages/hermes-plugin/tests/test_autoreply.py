@@ -38,6 +38,7 @@ from ekho_hermes.autoreply import (
     consume_peer_latch,
     effective_conversation_budget,
     get_cached_inbox,
+    held_key,
     is_real_inbound,
     mark_seen,
     peer_latch_open,
@@ -117,8 +118,21 @@ def test_real_inbound_dedupes_seen_message():
     state = _state()
     msg = _msg()
     assert is_real_inbound(msg, "self", state, operator_trusted=True) is True
-    mark_seen(state, msg.message_id)
+    mark_seen(state, msg)
     assert is_real_inbound(msg, "self", state, operator_trusted=True) is False
+
+
+def test_real_inbound_reused_id_with_different_material_is_not_seen():
+    # #83: the relay chooses message_id and may reuse one. A different message
+    # under a seen id is a different message — it must not be dropped as seen.
+    state = _state()
+    first = _msg(message_id="dup", body={"text": "first: ship it"})
+    mark_seen(state, first)
+    second = _msg(message_id="dup", body={"text": "second: roll it back"})
+    assert is_real_inbound(second, "self", state, operator_trusted=True) is True
+    # A genuine redelivery (same id, same material) is still deduped.
+    redelivery = _msg(message_id="dup", body={"text": "first: ship it"})
+    assert is_real_inbound(redelivery, "self", state, operator_trusted=True) is False
 
 
 # --- mark_seen FIFO cap ----------------------------------------------------
@@ -126,11 +140,12 @@ def test_real_inbound_dedupes_seen_message():
 
 def test_mark_seen_evicts_oldest_beyond_cap():
     state = _state()
-    for i in range(autoreply.SEEN_CAP + 10):
-        mark_seen(state, f"id-{i}")
+    msgs = [_msg(message_id=f"id-{i}") for i in range(autoreply.SEEN_CAP + 10)]
+    for m in msgs:
+        mark_seen(state, m)
     assert len(state.seen) == autoreply.SEEN_CAP
-    assert "id-0" not in state.seen  # oldest evicted
-    assert f"id-{autoreply.SEEN_CAP + 9}" in state.seen  # newest kept
+    assert held_key(msgs[0]) not in state.seen  # oldest evicted
+    assert held_key(msgs[-1]) in state.seen  # newest kept
 
 
 # --- peer rate gate (operator exempt) --------------------------------------
@@ -3125,11 +3140,17 @@ def _signed_operator(message_id, text, *, self_id, seed, nonce, sent_at, convers
     )
 
 
+def _from_line(prompt, text):
+    """The "• From …" line that introduces the message whose body holds ``text``."""
+    head = prompt[: prompt.index(text)]
+    return head[head.rindex("• From"):]
+
+
 def test_tick_covered_message_never_inherits_a_filtered_replacements_verdict(tmp_path):
     """End-to-end: an unsigned operator ask is stashed; a later batch reuses its
-    message_id for a VALIDLY SIGNED message (excluded by the seen-filter) and
-    carries a fresh operator message that covers the conversation. The stashed
-    ask must not be framed as cryptographically verified."""
+    message_id for a VALIDLY SIGNED message and carries a fresh operator message
+    that covers the conversation. The stashed ask must not be framed as
+    cryptographically verified; the replacement is delivered as itself (#83)."""
     op_seed = bytes([7]) * 32
     op_pub = identity.public_key_b64url_from_seed(op_seed)
     op_kid = identity.key_id(op_pub)
@@ -3151,8 +3172,8 @@ def test_tick_covered_message_never_inherits_a_filtered_replacements_verdict(tmp
                        peer_enabled=True, peer_turn_budget=25, identity_obj=ident)
     assert prompts == [] and "proj-1" in state.deferred_by_conversation
 
-    # Tick 2: a DIFFERENT, validly signed message reuses "reused" (the
-    # seen-filter drops it), and a fresh operator message covers proj-1.
+    # Tick 2: a DIFFERENT, validly signed message reuses "reused" (not dropped
+    # by the seen-filter since #83), and a fresh operator message covers proj-1.
     replacement = _signed_operator(
         "reused", "signed, and not what was stashed", self_id="self",
         seed=op_seed, nonce="nz-r3", sent_at="2026-06-07T12:00:00Z",
@@ -3170,9 +3191,11 @@ def test_tick_covered_message_never_inherits_a_filtered_replacements_verdict(tmp
     assert s2["spawned"] == 1
     prompt = prompts[0]
     assert "unsigned operator ask" in prompt          # still delivered…
-    assert "signed, and not what was stashed" not in prompt  # …the filtered one is not
-    assert "CRYPTOGRAPHICALLY VERIFIED" not in prompt
-    assert "relay-authenticated fleet operator" in prompt
+    ask = _from_line(prompt, "unsigned operator ask")
+    assert "relay-authenticated fleet operator" in ask
+    assert "CRYPTOGRAPHICALLY VERIFIED" not in ask
+    # …and the replacement is delivered as itself, with its own verdict (#83).
+    assert "CRYPTOGRAPHICALLY VERIFIED" in _from_line(prompt, "signed, and not what was stashed")
 
 
 NOW_R3 = datetime(2026, 6, 7, 12, 0, 0, tzinfo=timezone.utc)
@@ -3320,9 +3343,9 @@ def test_tick_restashed_message_never_inherits_a_filtered_replacements_verdict(t
                        dead_letter_path=str(tmp_path / "dl.jsonl"))
     assert prompts == [] and "proj-1" in state.deferred_by_conversation
 
-    # Tick 2: a DIFFERENT, validly signed message reuses the id "reused" (the
-    # seen-filter drops it before floor planning) and a FRESH peer message
-    # arrives in the same conversation. The floor is still held, so the stash is
+    # Tick 2: a DIFFERENT, validly signed message reuses the id "reused" (not
+    # dropped by the seen-filter since #83, so it is stashed as itself) and a
+    # FRESH peer message arrives in the same conversation. The floor is still held, so the stash is
     # RE-STASHED with this batch's verdict map in hand.
     replacement = _signed_operator(
         "reused", "signed, and not what was stashed", self_id="self",
@@ -3340,7 +3363,7 @@ def test_tick_restashed_message_never_inherits_a_filtered_replacements_verdict(t
                             dead_letter_path=str(tmp_path / "dl.jsonl"))
     assert s2["spawned"] == 0
     stash = state.deferred_by_conversation["proj-1"]
-    assert [m.message_id for m in stash["messages"]] == ["p0", "reused", "p1"]
+    assert [m.message_id for m in stash["messages"]] == ["p0", "reused", "reused", "p1"]
 
     # Tick 3: the floor frees up and the stash is delivered.
     c3 = FloorClient(InboxResponse([], [], True, [], fleet_id="flt"), granted=True)
@@ -3351,11 +3374,11 @@ def test_tick_restashed_message_never_inherits_a_filtered_replacements_verdict(t
     prompt = prompts[0]
     assert "unsigned operator ask" in prompt          # delivered…
     assert "teammate message 1" in prompt             # …with the later peer message
-    assert "signed, and not what was stashed" not in prompt  # the filtered one is not
-    assert "CRYPTOGRAPHICALLY VERIFIED" not in prompt
-    assert "relay-authenticated fleet operator" in prompt
-    # The peer message that arrived in tick 2 is late too, and the replacement's
-    # id is not marked at all — only the two genuinely held messages are.
+    ask = _from_line(prompt, "unsigned operator ask")
+    assert "relay-authenticated fleet operator" in ask
+    assert "CRYPTOGRAPHICALLY VERIFIED" not in ask
+    # …and the replacement is delivered as itself, with its own verdict (#83).
+    assert "CRYPTOGRAPHICALLY VERIFIED" in _from_line(prompt, "signed, and not what was stashed")
     assert prompt.count("[HELD BACK") == 0  # a wholly held-back turn: banner only
 
 
