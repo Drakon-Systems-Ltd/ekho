@@ -30,17 +30,25 @@ still shows enabled — the exact failure that silenced Tars and Vision):
   3. the plugin's ``register`` wires all three tools — captured on a stub
      runtime with the startup connect stubbed out, so it is safe offline and
      never touches the relay,
-  4. exactly one dir under the Hermes plugins root (``~/.hermes/plugins``,
-     override with ``--plugins-dir``) declares ``name: ekho`` — Hermes keys
-     plugins on the manifest name, so a backup copy left there silently
-     replaces the live plugin (#85).
+  4. exactly one dir under each Hermes plugins root takes the ``ekho`` key —
+     Hermes keys plugins on the manifest name, not the folder, so a backup copy
+     left there silently replaces the live plugin (#85).
 
-``--repair`` moves every non-canonical dir declaring ``name: ekho`` (anything
-not named ``ekho``, and never whatever ``plugins/ekho`` resolves to) to
-``~/.hermes/backups/`` (a move, never a delete), then
-pip-installs the first discoverable SDK source tree (editable) into THIS
-interpreter's environment and re-verifies. Exit code 0 = healthy, 1 = broken,
-2 = invoked unsafely.
+Which copy wins that key comes from Hermes' own discovery, and which roots are
+in scope comes from ``hermes_constants``: the default root's ``plugins/``, the
+``HERMES_HOME`` profile's, and every ``profiles/*/plugins`` beside it.
+``--plugins-dir`` overrides the set with one directory. When Hermes cannot be
+imported, or a directory the verdict rests on will not be read, the check says
+so and WARNs — it never reports PASS on a question it could not ask
+(``ekho_hermes.shadow_check``).
+
+``--repair`` moves every non-canonical dir taking the ``ekho`` key to
+``<hermes>/backups/`` (a move, never a delete), then pip-installs the first
+discoverable SDK source tree (editable) into THIS interpreter's environment and
+re-verifies. It preflights every root first and is all-or-nothing: one
+undetermined root, one root whose copies leave no ``ekho/`` to keep, or one
+symlink anywhere in anything Hermes discovered, and nothing is moved in any
+root. Exit code 0 = healthy, 1 = broken, 2 = invoked unsafely.
 """
 
 from __future__ import annotations
@@ -83,10 +91,10 @@ if _STANDALONE:
         return mod
 
     _shim = _load_sibling("_ekho_hermes_sdk_path", "_sdk_path.py")
-    _bundle = _load_sibling("_ekho_hermes_bundle_identity", "bundle_identity.py")
+    _shadow = _load_sibling("_ekho_hermes_shadow_check", "shadow_check.py")
 else:
     from . import _sdk_path as _shim
-    from . import bundle_identity as _bundle
+    from . import shadow_check as _shadow
 
 ensure_sdk_importable = _shim.ensure_sdk_importable
 _candidate_roots = _shim._candidate_roots
@@ -94,10 +102,6 @@ _looks_like_sdk_root = _shim._looks_like_sdk_root
 
 EXPECTED_TOOLS = ("ekho_send", "ekho_open_room", "ekho_inbox")
 PLUGIN_NAME = "ekho"
-
-
-def default_plugins_root() -> str:
-    return os.path.join(os.path.expanduser("~"), ".hermes", "plugins")
 
 
 def _import_plugin_module():
@@ -199,35 +203,111 @@ def check_registration() -> tuple[bool, str]:
     return True, "register() wired all tools: " + ", ".join(EXPECTED_TOOLS)
 
 
-def _plugins_root(plugins_root: str | None) -> Path:
-    # Resolve so `--plugins-dir .` still has a real parent for backups/.
-    return Path(plugins_root or default_plugins_root()).resolve()
+_GATEWAY_PYTHON_REMEDY = (
+    "Run this check with the python of the venv the Hermes service uses, where "
+    "hermes_cli and hermes_constants import."
+)
+
+
+def _roots_to_scan(plugins_root: str | None) -> tuple[list[Path], str | None]:
+    """The plugins dirs to look at, or why we cannot name them.
+
+    An explicit ``--plugins-dir`` is the operator's own answer and is taken as
+    given (resolved, so ``--plugins-dir .`` still has a real parent for
+    ``backups/``). Otherwise the set is Hermes' — the default root, this
+    profile, and every sibling profile — and when Hermes cannot be asked there
+    is no set, which is not the same as an empty one.
+    """
+    if plugins_root is not None:
+        return [Path(plugins_root).resolve()], None
+    found = _shadow.hermes_roots()
+    if found.undetermined:
+        detail = found.reason or "reason not reported"
+        return [], (
+            f"cannot tell where Hermes looks for plugins: {detail} — "
+            f"{found.remedy or _GATEWAY_PYTHON_REMEDY} "
+            "(or name the root with --plugins-dir)"
+        )
+    return list(found.roots), None
+
+
+def _root_verdict(scan_result) -> tuple[str, str]:  # noqa: ANN001
+    """``('pass' | 'fail' | 'unknown' | 'absent', one sentence)`` for one root.
+
+    ``unknown`` is never folded into either of the others. A root whose
+    discovery did not answer, or that holds one directory this process could
+    not read, may hold the copy that is doing the shadowing — so it is reported
+    as a gap, with the path and the errno the operator has to act on.
+    """
+    root = scan_result.root
+    if scan_result.undetermined:
+        return "unknown", (
+            f"cannot tell what Hermes loads under {root}: {scan_result.reason} "
+            f"({scan_result.remedy or _GATEWAY_PYTHON_REMEDY})"
+        )
+    gap = ""
+    if scan_result.unreadable:
+        first = scan_result.unreadable[0]
+        more = len(scan_result.unreadable) - 1
+        gap = (
+            f"cannot tell what Hermes loads under {root}: {first.reason}"
+            + (f" (and {more} more under {root})" if more else "")
+        )
+    if scan_result.shadowed:
+        # A finding outranks the gap beside it — both are non-PASS, and only
+        # one of them tells the operator what to move.
+        return "fail", (
+            f"{len(scan_result.installs)} dirs under {root} take the "
+            f"'{PLUGIN_NAME}' key — Hermes loads only "
+            f"{scan_result.winner or 'the last'}, the rest are shadowed: "
+            + ", ".join(str(p) for p in scan_result.installs)
+            + (f" ({gap})" if gap else "")
+        )
+    if gap:
+        return "unknown", f"{gap} ({_shadow.FS_REMEDY})"
+    dangling, problem = _shadow.dangling_canonical(root, PLUGIN_NAME)
+    if problem:
+        return "unknown", f"cannot tell what {root / PLUGIN_NAME} is: {problem}"
+    if dangling:
+        return "fail", (
+            f"{root / PLUGIN_NAME} is a dangling symlink — the live plugin is gone"
+        )
+    if not scan_result.installs:
+        return "absent", f"nothing under {root} takes the '{PLUGIN_NAME}' key"
+    return "pass", (
+        f"1 dir under {root} takes the '{PLUGIN_NAME}' key: {scan_result.installs[0]}"
+    )
 
 
 def check_plugin_shadows(plugins_root: str | None = None) -> tuple[bool | None, str]:
-    """``None`` = warn: nothing declares the name, so nothing can shadow it."""
-    root = _plugins_root(plugins_root)
-    if not root.is_dir():
+    """``None`` = warn: either nothing declares the name, or we could not tell.
+
+    Every root gets its own sentence and the worst one decides. Uncertainty
+    outranks a clean root and never outranks a finding: a box where one root is
+    shadowed and another could not be read is broken either way, and the
+    operator needs both lines.
+    """
+    roots, problem = _roots_to_scan(plugins_root)
+    if problem:
+        return None, problem
+    if plugins_root is not None and not roots[0].is_dir():
         return None, (
-            f"{root} does not exist — plugin not installed there "
+            f"{roots[0]} does not exist — plugin not installed there "
             "(pass --plugins-dir if Hermes uses another root)"
         )
-    found = _bundle.dirs_declaring(root, PLUGIN_NAME)
-    if len(found) > 1:
-        return False, (
-            f"{len(found)} dirs under {root} declare name: {PLUGIN_NAME} — "
-            "Hermes loads only the last, the others are shadowed: "
-            + ", ".join(str(p) for p in found)
-        )
-    canonical = root / PLUGIN_NAME
-    if canonical.is_symlink() and not canonical.is_dir():
-        return False, f"{canonical} is a dangling symlink — the live plugin is gone"
-    if not found:
+    verdicts = [_root_verdict(s) for s in _shadow.scan(roots)]
+    detail = "; ".join(line for _status, line in verdicts)
+    seen = {status for status, _line in verdicts}
+    if "fail" in seen:
+        return False, detail
+    if "unknown" in seen:
+        return None, detail
+    if "pass" not in seen:
         return None, (
-            f"no dir under {root} declares name: {PLUGIN_NAME} — plugin not "
-            "installed there (pass --plugins-dir if Hermes uses another root)"
+            f"{detail} — plugin not installed in any Hermes plugins root "
+            "(pass --plugins-dir if Hermes uses another root)"
         )
-    return True, f"1 dir under {root} declares name: {PLUGIN_NAME}: {found[0]}"
+    return True, detail
 
 
 def _unique_dest(backups: Path, name: str) -> Path:
@@ -244,39 +324,34 @@ def _unique_dest(backups: Path, name: str) -> Path:
 
 
 def repair_plugin_shadows(plugins_root: str | None = None) -> tuple[bool, str]:
-    """Move every non-canonical ``name: ekho`` dir to <hermes>/backups/."""
-    root = _plugins_root(plugins_root)
-    found = _bundle.dirs_declaring(root, PLUGIN_NAME)
-    if len(found) <= 1:
+    """Move every non-canonical ``ekho``-keyed dir to ``<root>/../backups/``.
+
+    All-or-nothing across every root, preflighted before anything moves. A root
+    that could not be read, a shadowed root with no ``ekho/`` to keep, or a
+    symlink anywhere in anything Hermes discovered refuses the WHOLE plan —
+    including, for the first two, when the plan is empty, because "nothing to
+    move" is the same false all-clear as a PASS.
+    """
+    roots, problem = _roots_to_scan(plugins_root)
+    if problem:
+        return False, problem
+    scans = _shadow.scan(roots)
+    plan = [(s, shadow) for s in scans for shadow in s.shadows]
+    refusal = _shadow.plan_refusal(scans, moving=bool(plan))
+    if refusal:
+        return False, refusal
+    if not plan:
         return True, "no shadowing plugin copies to move"
-    canonical = root / PLUGIN_NAME
-    if canonical not in found:
-        # Moving every copy out would leave no plugin at all; let a human pick.
-        return False, (
-            f"no canonical {canonical} among "
-            + ", ".join(str(p) for p in found)
-            + " — rename the copy you want to keep to 'ekho', then re-run"
-        )
-    # plugins/ekho may be a symlink (ekho -> ekho-0.5.4): never move what it
-    # points at, or anything containing it.
-    live = canonical.resolve()
-    backups = root.parent / "backups"
-    backups.mkdir(parents=True, exist_ok=True)
-    moved, kept = [], []
-    for src in found:
-        if src == canonical:
-            continue
-        real = src.resolve()
-        if live == real or live.is_relative_to(real):
-            kept.append(str(src))
-            continue
+    # Each copy is parked beside the root it came from, so a profile's backups
+    # stay in that profile and the move stays on one filesystem.
+    moved = []
+    for scan_result, src in plan:
+        backups = Path(scan_result.root).parent / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
         dest = _unique_dest(backups, src.name)
         shutil.move(str(src), str(dest))
         moved.append(f"{src} -> {dest}")
-    detail = "moved shadowing copies: " + ("; ".join(moved) or "none")
-    if kept:
-        detail += f" (kept {', '.join(kept)}: live {canonical} resolves into it)"
-    return True, detail
+    return True, "moved shadowing copies: " + "; ".join(moved)
 
 
 def repair() -> tuple[bool, str]:
@@ -327,14 +402,17 @@ def main(argv=None) -> int:  # noqa: ANN001
         "--repair",
         action="store_true",
         help=(
-            "move shadowing plugin copies to ~/.hermes/backups/ and pip-install "
-            "the SDK source tree into this interpreter, then verify"
+            "move shadowing plugin copies to each root's ../backups/ and "
+            "pip-install the SDK source tree into this interpreter, then verify"
         ),
     )
     parser.add_argument(
         "--plugins-dir",
         default=None,
-        help="Hermes plugins root to scan (default: ~/.hermes/plugins)",
+        help=(
+            "scan this one plugins root instead of the set Hermes reads "
+            "(default root, HERMES_HOME, every profiles/*/plugins)"
+        ),
     )
     args = parser.parse_args(argv)
 

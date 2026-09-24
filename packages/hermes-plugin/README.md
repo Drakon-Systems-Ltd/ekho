@@ -149,16 +149,46 @@ python -c "from pathlib import Path; import runpy; \
   print(bi['observed_sha256'](Path.home() / '.hermes/plugins/ekho'))"
 ```
 
-The health check fails (`plugin-shadows`) when more than one dir under
-`~/.hermes/plugins` declares `name: ekho` (override the root with
-`--plugins-dir`), and `--repair` moves every one not named `ekho` into
-`~/.hermes/backups/` — a move, never a delete. A versioned symlink
+The health check fails (`plugin-shadows`) when more than one dir in a plugins
+root takes the `ekho` key, and `--repair` moves every one not named `ekho` into
+that root's `../backups/` — a move, never a delete. A versioned symlink
 (`plugins/ekho -> plugins/ekho-0.5.4`) counts as one install: its target is
 never flagged or moved. A dangling `plugins/ekho` symlink fails the check; a
-plugins root with no `name: ekho` dir at all only warns. The plugin also logs
-an ERROR at load, with the loaded path and its `observed=` hash, when it runs
-from a dir under `plugins/` not named `ekho` or a sibling dir declares the same
-name (repo checkouts are not scanned).
+plugins root with nothing taking the key only warns. The plugin also logs an
+ERROR at load, with the loaded path and its `observed=` hash, when it runs from
+a dir under `plugins/` not named `ekho` or a sibling dir declares the same name
+(repo checkouts are not scanned).
+
+Two questions the check does not answer itself (#85):
+
+- **Which copy wins** comes from Hermes' own discovery
+  (`hermes_cli.plugins_discovery` + `resolve_manifest_winners`). A manifest
+  reader of our own diverges from the loader on block scalars, escaped or
+  typed scalars and portable `plugin.json` packages — each of which is a real
+  shadow read as a clean install.
+- **Which roots are in scope** comes from `hermes_constants`: the default
+  root's `plugins/`, `HERMES_HOME`'s (expanded as Hermes expands it, so
+  `HERMES_HOME=$HOME/.hermes` is a directory and not a literal), and every
+  `profiles/*/plugins`. Run from inside a profile the check still covers the
+  default root. `--plugins-dir` replaces the set with one directory.
+
+When either import is unavailable, or a directory the answer rests on will not
+be read, the check **warns and says which path and which errno** — it never
+reports PASS on a question it could not ask — and `--repair` refuses and moves
+nothing anywhere, including when it had nothing to move. The repair is
+all-or-nothing across every root: one undetermined root, one shadowed root with
+no `ekho/` to keep, or one symlink anywhere in anything Hermes discovered (under
+any key, not just ours), and nothing moves in any root.
+
+### Known limitations
+
+- **Project plugins are not covered.** A gateway started with
+  `HERMES_ENABLE_PROJECT_PLUGINS=1` also discovers `<cwd>/.hermes/plugins` as
+  source `project`, which wins the key over every plugins root; the check
+  neither scans nor reports it.
+- **Cross-filesystem repair is not preflighted.** If a root's `../backups/` is
+  on a different filesystem from the copy being moved, the move is attempted
+  and `shutil.move` falls back to a copy-then-delete rather than refusing.
 
 ## Develop
 
