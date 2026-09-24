@@ -152,3 +152,176 @@ def test_autoreply_listening_line_includes_bundle(caplog):
     assert "listening for inbound" in joined
     assert f"bundle={live.short_observed()}" in joined
     assert f"match={live.match}" in joined
+
+
+# --- #85: shadowing plugin copies ------------------------------------------
+
+
+class _NoRelayCtx:
+    def register_tool(self, **_kw):
+        return None
+
+
+def _shadow_errors(caplog):
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "plugin shadowing" in r.getMessage()
+    ]
+
+
+def _declare(dirpath: Path, name: str = "ekho") -> Path:
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "plugin.yaml").write_text(f"name: {name}\n", encoding="utf-8")
+    return dirpath
+
+
+def _load_from(monkeypatch, d: Path) -> None:
+    from ekho_hermes import bundle_identity
+
+    monkeypatch.setattr(bundle_identity, "package_dir", lambda: d.resolve())
+    monkeypatch.setattr(bundle_identity, "loaded_dir", lambda: d)
+
+
+def _register(caplog, monkeypatch):
+    from ekho_hermes import plugin
+
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    return _shadow_errors(caplog)
+
+
+def test_register_errors_on_sibling_declaring_ekho(tmp_path, caplog, monkeypatch):
+    from ekho_hermes import bundle_identity, plugin
+
+    live = _declare(tmp_path / "plugins" / "ekho")
+    backup = _declare(tmp_path / "plugins" / "ekho.bak-pre050-20260101")
+    _declare(tmp_path / "plugins" / "other", name="other")
+    _load_from(monkeypatch, live)
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    errors = _shadow_errors(caplog)
+    assert len(errors) == 1
+    assert str(live) in errors[0]
+    assert str(backup) in errors[0]
+    assert f"observed={describe(live).observed}" in errors[0]
+
+
+def test_register_errors_when_loaded_from_non_canonical_dir(
+    tmp_path, caplog, monkeypatch
+):
+    from ekho_hermes import bundle_identity, plugin
+
+    backup = _declare(tmp_path / "plugins" / "ekho.bak-pre050-20260101")
+    _load_from(monkeypatch, backup)
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    errors = _shadow_errors(caplog)
+    assert len(errors) == 1
+    assert str(backup) in errors[0]
+    assert f"observed={describe(backup).observed}" in errors[0]
+
+
+def test_register_quiet_for_single_canonical_dir(tmp_path, caplog, monkeypatch):
+    from ekho_hermes import bundle_identity, plugin
+
+    live = _declare(tmp_path / "plugins" / "ekho")
+    _declare(tmp_path / "plugins" / "other", name="other")
+    _load_from(monkeypatch, live)
+    monkeypatch.delenv("EKHO_RELAY_URL", raising=False)
+    with caplog.at_level(logging.INFO, logger="ekho_hermes.plugin"):
+        plugin.register(_NoRelayCtx())
+    assert _shadow_errors(caplog) == []
+
+
+def test_register_quiet_in_repo_checkout(tmp_path, caplog, monkeypatch):
+    # A dev checkout lives in a folder literally named ekho_hermes, next to
+    # tests/ — not a plugins root, so no startup ERROR.
+    repo = tmp_path / "packages" / "hermes-plugin"
+    live = _declare(repo / "ekho_hermes")
+    _declare(repo / "ekho_hermes_old")
+    _load_from(monkeypatch, live)
+    assert _register(caplog, monkeypatch) == []
+
+
+def test_register_quiet_for_symlinked_install(tmp_path, caplog, monkeypatch):
+    # plugins/ekho -> <checkout>/ekho_hermes: judged by the unresolved path,
+    # so the checkout's parent is never scanned as if it were plugins/.
+    checkout = _declare(tmp_path / "src" / "hermes-plugin" / "ekho_hermes")
+    _declare(tmp_path / "src" / "hermes-plugin" / "stale-copy")
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    (plugins / "ekho").symlink_to(checkout, target_is_directory=True)
+    _load_from(monkeypatch, plugins / "ekho")
+    assert _register(caplog, monkeypatch) == []
+
+
+def test_register_quiet_for_versioned_symlink(tmp_path, caplog, monkeypatch):
+    # plugins/ekho -> plugins/ekho-0.5.4 is one install, loaded via either name.
+    plugins = tmp_path / "plugins"
+    target = _declare(plugins / "ekho-0.5.4")
+    (plugins / "ekho").symlink_to(target, target_is_directory=True)
+    for loaded in (plugins / "ekho", target):
+        caplog.clear()
+        _load_from(monkeypatch, loaded)
+        assert _register(caplog, monkeypatch) == [], loaded
+
+
+def test_register_symlinked_install_still_flags_real_shadow(
+    tmp_path, caplog, monkeypatch
+):
+    plugins = tmp_path / "plugins"
+    target = _declare(plugins / "ekho-0.5.4")
+    (plugins / "ekho").symlink_to(target, target_is_directory=True)
+    stale = _declare(plugins / "ekho.bak")
+    _load_from(monkeypatch, plugins / "ekho")
+    errors = _register(caplog, monkeypatch)
+    assert len(errors) == 1 and str(stale) in errors[0]
+    assert str(target) not in errors[0]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        "name: ekho  # live\n",
+        "\ufeffname: ekho\n",
+        "\ufeffname: 'ekho' # quoted\n",
+        'name: "ekho"\n',
+    ],
+)
+def test_plugin_name_ignores_comment_and_bom(tmp_path, manifest):
+    from ekho_hermes.bundle_identity import dirs_declaring, plugin_name
+
+    d = tmp_path / "plugins" / "ekho.bak"
+    d.mkdir(parents=True)
+    (d / "plugin.yaml").write_text(manifest + "version: 0.1.0\n", encoding="utf-8")
+    assert plugin_name(d) == "ekho"
+    assert dirs_declaring(tmp_path / "plugins") == [d]
+
+
+def test_plugin_name_keeps_hash_inside_value(tmp_path):
+    from ekho_hermes.bundle_identity import plugin_name
+
+    (tmp_path / "plugin.yaml").write_text("name: ek#ho\n", encoding="utf-8")
+    assert plugin_name(tmp_path) == "ek#ho"
+
+
+def test_loaded_dir_does_not_follow_symlinks(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    link = plugins / "ekho"
+    link.symlink_to(PLUGIN_PKG, target_is_directory=True)
+    spec = importlib.util.spec_from_file_location(
+        "_ekho_bi_via_symlink", link / "bundle_identity.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, mod)  # dataclasses needs it
+    spec.loader.exec_module(mod)
+    assert mod.loaded_dir() == link
+    assert mod.package_dir() == PLUGIN_PKG

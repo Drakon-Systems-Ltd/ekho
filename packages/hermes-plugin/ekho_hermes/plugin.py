@@ -389,9 +389,40 @@ def register(ctx) -> None:
     try:
         from .bundle_identity import describe as _describe_bundle
 
-        logger.info("%s", _describe_bundle().log_line())
+        bundle = _describe_bundle()
+        logger.info("%s", bundle.log_line())
     except (OSError, UnicodeError) as exc:
         logger.warning("[ekho] bundle identity unavailable: %s", exc)
+        bundle = None
+
+    # #85: Hermes keys plugins on plugin.yaml `name`, not the folder, so a
+    # backup copy left under plugins/ silently replaces the live one. Only an
+    # installed layout (<root>/plugins/<dir>, symlinks unresolved) is checked:
+    # a repo checkout (.../hermes-plugin/ekho_hermes) is not a plugins root.
+    try:
+        from .bundle_identity import dirs_declaring, loaded_dir
+
+        here = loaded_dir()
+        if here.parent.name == "plugins":
+            real = here.resolve()
+            shadows = [
+                p for p in dirs_declaring(here.parent) if p.resolve() != real
+            ]
+            # plugins/ekho -> plugins/ekho-0.5.4 may load via either name.
+            misnamed = (
+                here.name != "ekho" and (here.parent / "ekho").resolve() != real
+            )
+            if misnamed or shadows:
+                logger.error(
+                    "[ekho] plugin shadowing: loaded from %s (observed=%s); "
+                    "other dirs declaring name: ekho: %s — move non-canonical "
+                    "copies out of plugins/ (healthcheck --repair)",
+                    here,
+                    bundle.observed if bundle is not None else "unknown",
+                    ", ".join(str(p) for p in shadows) or "none",
+                )
+    except (OSError, UnicodeError, RuntimeError) as exc:
+        logger.warning("[ekho] plugin shadow check unavailable: %s", exc)
 
     config = EkhoConfig.from_env()
     if not config.has_relay:

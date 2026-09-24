@@ -107,7 +107,7 @@ or venv rebuild, with the **Hermes venv's** python:
 ```bash
 # from a repo checkout / editable install:
 python -m ekho_hermes.healthcheck            # verify: SDK real, surface imports, 3 tools register
-python -m ekho_hermes.healthcheck --repair   # pip-install the SDK into this venv, then verify
+python -m ekho_hermes.healthcheck --repair   # move shadowing copies out, pip-install the SDK, then verify
 
 # from an installed plugin dir (the copy to ~/.hermes/plugins/ekho renames the
 # package, so the -m form can't resolve — run it as a file instead):
@@ -125,6 +125,40 @@ Exit 0 = healthy. The check is offline-safe (startup connect is stubbed). The
 plugin also self-heals where it can: every successful SDK resolution records
 the source tree to `~/.hermes/ekho-state/sdk-path`, which is tried on the next
 load if the venv-installed SDK vanishes; `EKHO_SDK_PATH` overrides everything.
+
+### Upgrading: no copies inside `plugins/`
+
+Hermes loads every `~/.hermes/plugins/*/` that has a `plugin.yaml` and keys it
+on the manifest `name`, not the folder name. A backup such as
+`plugins/ekho.bak-<timestamp>/` also declares `name: ekho`, and whichever sorts
+last silently replaces the live plugin at every gateway start.
+
+```bash
+# 1. back up OUTSIDE plugins/ — never inside it
+mkdir -p ~/.hermes/backups
+mv ~/.hermes/plugins/ekho ~/.hermes/backups/ekho.bak-$(date +%Y%m%d%H%M%S)
+
+# 2. install the new tree and clear stale bytecode
+cp -R packages/hermes-plugin/ekho_hermes ~/.hermes/plugins/ekho
+find ~/.hermes/plugins/ekho -name __pycache__ -type d -prune -exec rm -r {} +
+
+# 3. after restarting the gateway, the `[ekho] bundle version=... observed=<sha>`
+#    log line must match the hash of the installed directory:
+python -c "from pathlib import Path; import runpy; \
+  bi = runpy.run_path(str(Path.home() / '.hermes/plugins/ekho/bundle_identity.py')); \
+  print(bi['observed_sha256'](Path.home() / '.hermes/plugins/ekho'))"
+```
+
+The health check fails (`plugin-shadows`) when more than one dir under
+`~/.hermes/plugins` declares `name: ekho` (override the root with
+`--plugins-dir`), and `--repair` moves every one not named `ekho` into
+`~/.hermes/backups/` — a move, never a delete. A versioned symlink
+(`plugins/ekho -> plugins/ekho-0.5.4`) counts as one install: its target is
+never flagged or moved. A dangling `plugins/ekho` symlink fails the check; a
+plugins root with no `name: ekho` dir at all only warns. The plugin also logs
+an ERROR at load, with the loaded path and its `observed=` hash, when it runs
+from a dir under `plugins/` not named `ekho` or a sibling dir declares the same
+name (repo checkouts are not scanned).
 
 ## Develop
 
