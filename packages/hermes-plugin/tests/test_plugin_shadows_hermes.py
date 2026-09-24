@@ -287,6 +287,26 @@ def test_unreadable_plugin_json_is_undetermined(tmp_path):
         assert backup.is_dir()
 
 
+@needs_unprivileged
+def test_explicit_root_under_an_unsearchable_parent_is_undetermined(tmp_path):
+    """``Path.is_dir()`` on a path whose parent denies search RAISES.
+
+    EACCES is not one of the errnos ``pathlib`` swallows, so the check died
+    with a traceback before any error-aware stat ran; on the versions that do
+    swallow it the answer is False, which prints as "plugin not installed
+    there" — the sentence that sends the operator to the wrong box. Both are
+    the same bug: a filesystem non-answer read as an answer.
+    """
+    parent = tmp_path / ".hermes"
+    plugins = parent / "plugins"
+    plugin(plugins, "ekho")
+
+    with denied(parent, 0o000):
+        passed, detail = healthcheck.check_plugin_shadows(str(plugins))
+        assert passed is None, detail
+        assert str(plugins) in detail and "Permission" in detail
+
+
 def test_permission_error_wrapped_by_hermes_is_still_a_permission_error():
     """The ``raise AgentPluginError(...) from exc`` shape, on its own.
 
@@ -352,27 +372,38 @@ def test_one_root_without_a_canonical_copy_refuses_every_root(home):
 
 
 @needs_discovery
-def test_the_only_install_is_never_moved_just_because_it_is_not_called_ekho(tmp_path):
+@needs_roots
+def test_the_only_install_is_never_moved_just_because_it_is_not_called_ekho(home):
     """``plugins/ekho-0.5.4`` alone is what Hermes loads, not a shadow of anything.
 
     "Move everything but the canonical copy" reads as "move the lot" when there
-    is no canonical copy, which would take the plugin off the box — so an empty
-    plan is the answer, and nothing is moved.
-    """
-    plugins = tmp_path / ".hermes" / "plugins"
-    only = plugin(plugins, "ekho-0.5.4")
+    is no canonical copy, which would take the plugin off the box — so that
+    root contributes nothing to move and the install stays exactly where it is.
 
-    scan = shadow_check.scan_root(plugins)
+    And no other root moves either. Which directory is the live install is a
+    human's guess on this box until they rename one, and a box in that state is
+    not one to shuffle the rest of around: the operator told to choose should
+    find everything else as they left it.
+    """
+    profile_plugins = home / ".hermes" / "profiles" / "work" / "plugins"
+    only = plugin(profile_plugins, "ekho-0.5.4")
+    default_plugins = home / ".hermes" / "plugins"
+    plugin(default_plugins, "ekho")
+    elsewhere = plugin(default_plugins, "ekho.bak-pre050")
+
+    scan = shadow_check.scan_root(profile_plugins)
     assert scan.installs == (only,) and scan.canonical is None
     assert scan.shadows == ()
 
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
+    passed, detail = healthcheck.check_plugin_shadows(str(profile_plugins))
     assert passed is True, detail
 
-    moved, detail = healthcheck.repair_plugin_shadows(str(plugins))
-    assert moved is True, detail
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved is False, detail
+    assert str(profile_plugins) in detail
     assert only.is_dir()
-    assert not (tmp_path / ".hermes" / "backups").exists()
+    assert elsewhere.is_dir()  # the other root did not move either
+    assert not (home / ".hermes" / "backups").exists()
 
 
 @needs_discovery
@@ -524,3 +555,111 @@ def test_repair_parks_each_copy_beside_the_root_it_came_from(home):
 
     passed, detail = healthcheck.check_plugin_shadows()
     assert passed is True, detail
+
+
+# --- one directory is one root, however it is spelled ------------------------
+
+
+@needs_discovery
+@needs_roots
+def test_a_relative_hermes_home_is_one_root_not_two(home, monkeypatch):
+    """``HERMES_HOME=.hermes`` run from ``$HOME`` names the dir the default root is.
+
+    Hermes hands the two answers back in two shapes: the home exactly as
+    spelled (``.hermes``) and the containing root resolved
+    (``/home/x/.hermes``). Compared as text they are different roots, so the
+    one plugins dir is scanned twice and the one backup is planned for twice.
+    The first move succeeds; the second moves a directory that is no longer
+    there, and the FileNotFoundError escapes ``--repair`` before the SDK is
+    repaired and before anything is verified. #86 scanned the absolute default
+    root once and got this layout right.
+    """
+    plugins = home / ".hermes" / "plugins"
+    live = plugin(plugins, "ekho")
+    backup = plugin(plugins, "ekho.bak-pre050")
+    monkeypatch.chdir(home)
+    monkeypatch.setenv("HERMES_HOME", ".hermes")
+
+    roots = shadow_check.hermes_roots()
+    assert not roots.undetermined, roots.reason
+    assert tree(roots.roots) == {str(plugins)}
+
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved, detail
+    assert detail.count("->") == 1, detail
+    assert not backup.exists() and live.is_dir()
+    assert (home / ".hermes" / "backups" / backup.name / "plugin.yaml").is_file()
+
+    passed, detail = healthcheck.check_plugin_shadows()
+    assert passed is True, detail
+
+
+def test_a_source_that_vanished_is_reported_not_raised(tmp_path):
+    """A plan item whose directory has gone stops the run and is reported.
+
+    Every move is a filesystem call on a box that can change under it. Uncaught,
+    the failure escapes ``--repair`` after other copies have already moved: no
+    report of which ones, no SDK repair, no verification. The executor is fed a
+    plan whose second source is not there, and has to answer.
+    """
+    plugins = tmp_path / ".hermes" / "plugins"
+    real = plugin(plugins, "ekho.bak-moved")
+    gone = plugins / "ekho.bak-vanished"
+
+    ok, detail = healthcheck._apply_plan([(plugins, real), (plugins, gone)])
+    assert ok is False, detail
+    assert str(gone) in detail and "FileNotFoundError" in detail
+    assert str(real) in detail  # what DID move is named
+    assert (tmp_path / ".hermes" / "backups" / real.name / "plugin.yaml").is_file()
+
+
+# --- symlinks above the plugins dir ------------------------------------------
+
+
+@needs_discovery
+@needs_roots
+def test_a_symlinked_profile_dir_refuses_the_repair(home):
+    """The link is ABOVE ``plugins/``, where no copy comparison ever looks.
+
+    ``profiles/work -> <somewhere else>`` makes ``profiles/work/plugins`` a
+    root in a tree nobody named, and both ends of every path inside it agree
+    with themselves. Only walking the components from the Hermes home down
+    finds it.
+    """
+    elsewhere = home / "elsewhere" / "work"
+    plugin(elsewhere / "plugins", "ekho")
+    profiles = home / ".hermes" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "work").symlink_to(elsewhere, target_is_directory=True)
+    plugin(home / ".hermes" / "plugins", "ekho")
+    backup = plugin(home / ".hermes" / "plugins", "ekho.bak-pre050")
+
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved is False, detail
+    assert str(profiles / "work") in detail and "symlink" in detail
+    assert backup.is_dir()
+    assert not (home / ".hermes" / "backups").exists()
+
+
+@needs_discovery
+def test_a_symlinked_explicit_root_is_refused_not_resolved(tmp_path):
+    """``--plugins-dir`` names a path; resolving it hides the layout to refuse.
+
+    ``.resolve()`` turned ``<home>/plugins -> <elsewhere>`` into its target
+    before any preflight ran, so the root the operator addressed was never
+    tested for being a link and the backups were parked under a home they never
+    named.
+    """
+    real = tmp_path / "srv" / "plugins"
+    plugin(real, "ekho")
+    backup = plugin(real, "ekho.bak-pre050")
+    linked = tmp_path / ".hermes" / "plugins"
+    linked.parent.mkdir(parents=True)
+    linked.symlink_to(real, target_is_directory=True)
+
+    moved, detail = healthcheck.repair_plugin_shadows(str(linked))
+    assert moved is False, detail
+    assert str(linked) in detail and "symlink" in detail
+    assert backup.is_dir()
+    assert not (tmp_path / ".hermes" / "backups").exists()
+    assert not (tmp_path / "srv" / "backups").exists()

@@ -170,15 +170,23 @@ Two questions the check does not answer itself (#85):
   root's `plugins/`, `HERMES_HOME`'s (expanded as Hermes expands it, so
   `HERMES_HOME=$HOME/.hermes` is a directory and not a literal), and every
   `profiles/*/plugins`. Run from inside a profile the check still covers the
-  default root. `--plugins-dir` replaces the set with one directory.
+  default root. Hermes answers with the home as spelled and the containing root
+  resolved, so the set is made absolute and de-duplicated by path and by
+  `(st_dev, st_ino)` before anything is planned: `HERMES_HOME=.hermes` read
+  from `$HOME` names one directory, not two. `--plugins-dir` replaces the set
+  with one directory, taken as addressed rather than resolved.
 
 When either import is unavailable, or a directory the answer rests on will not
 be read, the check **warns and says which path and which errno** — it never
 reports PASS on a question it could not ask — and `--repair` refuses and moves
 nothing anywhere, including when it had nothing to move. The repair is
-all-or-nothing across every root: one undetermined root, one shadowed root with
-no `ekho/` to keep, or one symlink anywhere in anything Hermes discovered (under
-any key, not just ours), and nothing moves in any root.
+all-or-nothing across every root: one undetermined root, one root with installs
+but no `ekho/` to keep (a sole `plugins/ekho-0.5.4` is never moved *and* stops
+the other roots), or one symlink either above a root — the Hermes home,
+`profiles/<name>`, an explicit root's parent — or anywhere in anything Hermes
+discovered (under any key, not just ours), and nothing moves in any root. A move
+that fails part-way through a plan is reported as a partial repair, naming what
+moved; it is never an uncaught exception.
 
 ### Known limitations
 

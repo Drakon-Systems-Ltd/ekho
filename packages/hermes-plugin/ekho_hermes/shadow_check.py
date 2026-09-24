@@ -126,6 +126,45 @@ def _is_symlink(path) -> tuple[bool, str | None]:
     return stat.S_ISLNK(mode), None
 
 
+def path_kind(path) -> tuple[str | None, str | None]:
+    """``('dir' | 'other' | 'absent', why we cannot be sure)`` — for callers outside.
+
+    ``Path.is_dir()`` is what this replaces: EACCES is not one of the errnos
+    ``pathlib`` swallows, so under an unsearchable parent it RAISES instead of
+    reporting a gap — and where it is swallowed it answers False, which prints
+    as "plugin not installed there" and sends the operator to the wrong box.
+    """
+    return _dir_kind(path)
+
+
+def _dir_identity(path) -> tuple[tuple[int, int] | None, str | None]:
+    """``((st_dev, st_ino) | None, why we cannot be sure)`` for one directory.
+
+    None with no problem means there is nothing there to identify, which is an
+    ordinary answer: ``<root>/plugins`` is in scope before it exists. Anything
+    else that will not stat leaves the question open, and two roots that cannot
+    be compared may be one.
+    """
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, _fs_reason(path, exc)
+    return (info.st_dev, info.st_ino), None
+
+
+def normalised(path) -> Path:
+    """*path* made absolute against the cwd: ``abspath``, deliberately not ``realpath``.
+
+    The spelling is the only thing normalised. ``realpath`` would collapse a
+    symlinked root into its target as well, and that is the layout this check
+    must REFUSE rather than quietly repair somewhere else — so links stay
+    exactly where they are and :func:`symlink_refusal` still sees them.
+    """
+    return Path(os.path.abspath(path))
+
+
 def _real_path(path) -> tuple[str, str | None]:
     """``(the path with every symlink resolved, why we cannot be sure)``.
 
@@ -252,6 +291,10 @@ class HermesRoots:
     active: Path | None = None  # ``<home>/plugins`` for the home we run from
     home: Path | None = None  # $HERMES_HOME, as Hermes expands it
     root: Path | None = None  # the containing root, when home is a profile
+    # Every component from the Hermes root down to (not including) a plugins
+    # dir: ``profiles``, ``profiles/work``, the root itself. The repair refuses
+    # if any of them is a symlink — see :func:`ancestors_above`.
+    ancestors: tuple[Path, ...] = ()
     undetermined: bool = False
     reason: str | None = None
     remedy: str | None = None
@@ -300,6 +343,36 @@ def hermes_homes() -> tuple[Path | None, Path | None, str | None]:
         return None, None, f"hermes_constants raised {type(exc).__name__}: {exc}"
 
 
+def _dedupe_roots(roots) -> tuple[tuple[Path, ...], str | None]:
+    """*roots* normalised, one entry per DIRECTORY, first spelling kept.
+
+    Two tests, because one directory arrives under two spellings that differ
+    lexically (``.hermes/plugins`` beside ``/home/x/.hermes/plugins``) and under
+    two paths that stay different once normalised (a bind mount of the default
+    root into a profile). ``(st_dev, st_ino)`` answers the second. A root that
+    will not stat leaves it unanswered, and an unanswered question here makes
+    the whole set undetermined: a set that may be naming one directory twice is
+    a plan that may move one directory twice.
+    """
+    kept: list[Path] = []
+    spellings: set[str] = set()
+    identities: set[tuple[int, int]] = set()
+    for root in roots:
+        candidate = normalised(root)
+        if str(candidate) in spellings:
+            continue
+        identity, problem = _dir_identity(candidate)
+        if problem:
+            return (), problem
+        if identity is not None:
+            if identity in identities:
+                continue
+            identities.add(identity)
+        spellings.add(str(candidate))
+        kept.append(candidate)
+    return tuple(kept), None
+
+
 def hermes_roots() -> HermesRoots:
     """Every plugins dir this check covers, from the containing Hermes root.
 
@@ -313,6 +386,12 @@ def hermes_roots() -> HermesRoots:
     answer. A genuinely absent ``profiles/`` contributes nothing and is no
     reason to doubt the rest; anything else makes the WHOLE set undetermined,
     because a protective set missing an unknown number of roots is not one.
+
+    What comes back is normalised and de-duplicated: Hermes answers with the
+    home as spelled and the containing root resolved, so a relative
+    ``HERMES_HOME`` names one directory twice (:func:`normalised`). The
+    ancestors are gathered from the set BEFORE it is de-duplicated — a dropped
+    spelling is the same directory, but the layout above it is its own.
     """
     home, root, reason = hermes_homes()
     if home is None or root is None:
@@ -334,9 +413,23 @@ def hermes_roots() -> HermesRoots:
         if kind == "dir":
             roots.append(candidate)
     active = home / "plugins"
-    if active not in roots:
-        roots.append(active)
-    return HermesRoots(roots=tuple(roots), active=active, home=home, root=root)
+    roots.append(active)
+    base = normalised(root)
+    ancestors: list[Path] = []
+    for candidate in roots:
+        for component in ancestors_above(base, normalised(candidate)):
+            if component not in ancestors:
+                ancestors.append(component)
+    kept, problem = _dedupe_roots(roots)
+    if problem:
+        return HermesRoots(undetermined=True, reason=problem, remedy=FS_REMEDY)
+    return HermesRoots(
+        roots=kept,
+        active=normalised(active),
+        home=normalised(home),
+        root=base,
+        ancestors=tuple(ancestors),
+    )
 
 
 # --- discovery: ask Hermes, or say nothing ---------------------------------
@@ -616,8 +709,8 @@ class RootScan:
         Empty without a canonical copy, whatever else is here. With one install
         that is simply not called ``ekho``, "everything but the canonical one"
         is the live install itself, and moving it takes the plugin off the box;
-        with several, which one to keep is a human's call and
-        :func:`no_canonical_refusal` says so.
+        with several, which one to keep is a human's call. Either way nothing
+        here moves, and :func:`no_canonical_refusal` stops the other roots too.
         """
         if self.canonical is None:
             return ()
@@ -739,18 +832,22 @@ def no_canonical_refusal(scans) -> str | None:
     empty plan — an unchoosable root contributes nothing to move, and reporting
     "nothing to move" for it is the false all-clear.
 
-    A root with exactly ONE install that is not called ``ekho`` is not this: a
-    bare ``plugins/ekho-0.5.4`` is what Hermes loads and there is nothing to
-    choose between.
+    A root with exactly ONE install that is not called ``ekho`` is refused on
+    the same terms, and is still never MOVED: a bare ``plugins/ekho-0.5.4`` is
+    what Hermes loads, so :attr:`RootScan.shadows` leaves it alone and that
+    root contributes nothing to the plan. The refusal is not about its own
+    copies — it is that which directory is the live install is a guess on this
+    box until a human renames one, and a box in that state is not one to
+    shuffle the other roots around on.
     """
     for scan_result in tuple(scans):
-        if scan_result.undetermined or not scan_result.shadowed:
+        if scan_result.undetermined or not scan_result.installs:
             continue
         if scan_result.canonical is None:
             listed = ", ".join(str(p) for p in scan_result.installs)
             return (
-                f"{scan_result.root} has no dir named '{PLUGIN_NAME}' — a human must "
-                f"say which of {listed} is the real install; rename it to "
+                f"{scan_result.root} has no dir named '{PLUGIN_NAME}': which of "
+                f"{listed} is the real install is a human's call — rename it to "
                 f"'{PLUGIN_NAME}' and re-run. Nothing was moved in any root"
             )
     return None
@@ -773,6 +870,33 @@ def _components_beneath(root: Path, path: Path) -> list[Path]:
         current = current / part
         walked.append(current)
     return walked
+
+
+def ancestors_above(base: Path, path: Path) -> tuple[Path, ...]:
+    """*base*, and every component between it and *path* — *path* itself excluded.
+
+    The plugins dir is lstat-ed wherever roots are; the layout ABOVE it is what
+    no comparison reaches. ``profiles/work -> /srv/other-tree`` makes
+    ``profiles/work/plugins`` a root in a tree nobody named, and every path
+    inside it agrees with itself at both ends.
+    """
+    return (
+        Path(base),
+        *(p for p in _components_beneath(base, path) if p != Path(path)),
+    )
+
+
+def _ancestor_symlink_reason(link: Path) -> str:
+    try:
+        points_at = os.readlink(link)
+    except OSError:
+        points_at = "(unreadable)"
+    return (
+        f"{link} is a symlink -> {points_at}: a plugins root reached through a "
+        "link is not the directory it is spelled as — the tree it really sits "
+        "in, and the 'backups' dir beside it, belong to a home nobody named. "
+        "Resolve the layout by hand. Nothing was moved in any root"
+    )
 
 
 def _symlink_reason(link: Path) -> str:
@@ -821,10 +945,15 @@ def _walk_for_symlink(top: Path, budget: int) -> tuple[Path | None, int, str | N
     return None, left, (f"{problems[0]}. {FS_REMEDY}" if problems else None)
 
 
-def symlink_refusal(scans) -> str | None:
+def symlink_refusal(scans, ancestors=()) -> str | None:
     """Why NO copy in ANY root may be moved — or None when no symlink is in play.
 
-    Endpoint comparisons lose to a link in the MIDDLE:
+    *ancestors* is the layout ABOVE the roots — the Hermes home, ``profiles``,
+    ``profiles/work``, the parent of an explicit ``--plugins-dir`` — which no
+    scan of what is INSIDE a root can reach. It goes first because it is a
+    handful of lstats and it decides the whole plan.
+
+    Below that, endpoint comparisons lose to a link in the MIDDLE:
     ``profiles/work/plugins/ekho -> plugins/ekho.bak-x/forward -> /srv/...``
     shares no realpath with anything and every comparison passes. So this stops
     comparing. Every root, every directory Hermes discovered in it — under ANY
@@ -837,6 +966,12 @@ def symlink_refusal(scans) -> str | None:
     ``os.path.islink`` says False to a PermissionError, and False is the answer
     that lets the move happen.
     """
+    for component in tuple(ancestors):
+        linked, problem = _is_symlink(component)
+        if problem:
+            return f"{problem}. {FS_REMEDY}"
+        if linked:
+            return _ancestor_symlink_reason(component)
     budget = MAX_SYMLINK_WALK_ENTRIES
     for scan_result in tuple(scans):
         if scan_result.undetermined:
@@ -863,20 +998,22 @@ def symlink_refusal(scans) -> str | None:
     return None
 
 
-def plan_refusal(scans, moving: bool = True) -> str | None:
+def plan_refusal(scans, moving: bool = True, ancestors=()) -> str | None:
     """Why the WHOLE plan is refused — or None when every item of it is safe.
 
     One preflight over one consistent set of scans: Hermes answered for every
-    root, every directory it reads there could be read here, every root with
-    copies has a canonical one, and no symlink is in play anywhere in anything
-    Hermes discovered. First reason wins and refuses the lot.
+    root, every directory it reads there could be read here, every root with an
+    install has a canonical one, and no symlink is in play anywhere above a
+    root or inside anything Hermes discovered. First reason wins and refuses
+    the lot.
 
     *moving* false is an empty plan, and only the refusals that outlive one
-    apply: with nothing going anywhere, walking every discovered tree for a
-    symlink decides nothing, while "I could not tell" still has to be said.
+    apply: with nothing going anywhere, a link in the layout decides nothing,
+    while "I could not tell" and "which copy is the install?" still have to be
+    said.
     """
     scans = tuple(scans)
     refusal = undetermined_refusal(scans) or no_canonical_refusal(scans)
     if refusal or not moving:
         return refusal
-    return symlink_refusal(scans)
+    return symlink_refusal(scans, ancestors)

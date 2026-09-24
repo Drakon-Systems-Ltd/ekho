@@ -46,9 +46,9 @@ so and WARNs — it never reports PASS on a question it could not ask
 ``<hermes>/backups/`` (a move, never a delete), then pip-installs the first
 discoverable SDK source tree (editable) into THIS interpreter's environment and
 re-verifies. It preflights every root first and is all-or-nothing: one
-undetermined root, one root whose copies leave no ``ekho/`` to keep, or one
-symlink anywhere in anything Hermes discovered, and nothing is moved in any
-root. Exit code 0 = healthy, 1 = broken, 2 = invoked unsafely.
+undetermined root, one root whose installs leave no ``ekho/`` to keep, or one
+symlink above a root or anywhere in anything Hermes discovered, and nothing is
+moved in any root. Exit code 0 = healthy, 1 = broken, 2 = invoked unsafely.
 """
 
 from __future__ import annotations
@@ -209,26 +209,34 @@ _GATEWAY_PYTHON_REMEDY = (
 )
 
 
-def _roots_to_scan(plugins_root: str | None) -> tuple[list[Path], str | None]:
-    """The plugins dirs to look at, or why we cannot name them.
+def _roots_to_scan(
+    plugins_root: str | None,
+) -> tuple[list[Path], tuple[Path, ...], str | None]:
+    """``(the plugins dirs, the ancestors that must not be links, why not)``.
 
     An explicit ``--plugins-dir`` is the operator's own answer and is taken as
-    given (resolved, so ``--plugins-dir .`` still has a real parent for
-    ``backups/``). Otherwise the set is Hermes' — the default root, this
-    profile, and every sibling profile — and when Hermes cannot be asked there
-    is no set, which is not the same as an empty one.
+    given — made absolute, so ``--plugins-dir .`` still has a real parent for
+    ``backups/``, and NOT resolved: ``.resolve()`` turned a symlinked root into
+    its target before any preflight ran, so the path the operator addressed was
+    never tested for being a link. Its parent is the Hermes home it hangs off
+    and is checked with it.
+
+    Otherwise the set is Hermes' — the default root, this profile, and every
+    sibling profile — and when Hermes cannot be asked there is no set, which is
+    not the same as an empty one.
     """
     if plugins_root is not None:
-        return [Path(plugins_root).resolve()], None
+        root = _shadow.normalised(plugins_root)
+        return [root], (root.parent,), None
     found = _shadow.hermes_roots()
     if found.undetermined:
         detail = found.reason or "reason not reported"
-        return [], (
+        return [], (), (
             f"cannot tell where Hermes looks for plugins: {detail} — "
             f"{found.remedy or _GATEWAY_PYTHON_REMEDY} "
             "(or name the root with --plugins-dir)"
         )
-    return list(found.roots), None
+    return list(found.roots), found.ancestors, None
 
 
 def _root_verdict(scan_result) -> tuple[str, str]:  # noqa: ANN001
@@ -287,14 +295,22 @@ def check_plugin_shadows(plugins_root: str | None = None) -> tuple[bool | None, 
     shadowed and another could not be read is broken either way, and the
     operator needs both lines.
     """
-    roots, problem = _roots_to_scan(plugins_root)
+    roots, _ancestors, problem = _roots_to_scan(plugins_root)
     if problem:
         return None, problem
-    if plugins_root is not None and not roots[0].is_dir():
-        return None, (
-            f"{roots[0]} does not exist — plugin not installed there "
-            "(pass --plugins-dir if Hermes uses another root)"
-        )
+    if plugins_root is not None:
+        # Through the error-aware stat, never ``Path.is_dir()``: that raises
+        # under an unsearchable parent and answers False where it does not.
+        kind, unsure = _shadow.path_kind(roots[0])
+        if unsure:
+            return None, (
+                f"cannot tell what is at {roots[0]}: {unsure} ({_shadow.FS_REMEDY})"
+            )
+        if kind != "dir":
+            return None, (
+                f"{roots[0]} does not exist — plugin not installed there "
+                "(pass --plugins-dir if Hermes uses another root)"
+            )
     verdicts = [_root_verdict(s) for s in _shadow.scan(roots)]
     detail = "; ".join(line for _status, line in verdicts)
     seen = {status for status, _line in verdicts}
@@ -323,35 +339,80 @@ def _unique_dest(backups: Path, name: str) -> Path:
         n += 1
 
 
+def _dedupe_plan(items) -> list[tuple[Path, Path]]:
+    """One move per source directory, first spelling kept.
+
+    Belt and braces behind :func:`shadow_check.hermes_roots`, which normalises
+    and de-duplicates the roots before they are scanned. The cost of being
+    wrong about that is not a duplicate line in a report: it is a second
+    ``shutil.move`` of a directory the first one already took away.
+    """
+    plan: list[tuple[Path, Path]] = []
+    seen: set[str] = set()
+    for root, src in items:
+        key = str(_shadow.normalised(src))
+        if key in seen:
+            continue
+        seen.add(key)
+        plan.append((root, src))
+    return plan
+
+
+def _apply_plan(plan) -> tuple[bool, str]:
+    """Move each ``(root, copy)`` to that root's ``../backups/``, stopping at a failure.
+
+    Each copy is parked beside the root it came from, so a profile's backups
+    stay in that profile and the move stays on one filesystem.
+
+    Every move is a filesystem call on a box that can change under it — a copy
+    renamed by hand between the scan and the move is simply gone. Uncaught,
+    that failure escapes ``--repair`` after other copies have already moved: no
+    report of which ones, no SDK repair, no verification. So it is caught and
+    returned with what DID move named, and the rest of the plan is not
+    attempted: the plan was built from a scan that no longer describes the box.
+    """
+    moved: list[str] = []
+    for root, src in plan:
+        backups = Path(root).parent / "backups"
+        dest = None
+        try:
+            backups.mkdir(parents=True, exist_ok=True)
+            dest = _unique_dest(backups, src.name)
+            shutil.move(str(src), str(dest))
+        except (OSError, shutil.Error) as exc:
+            done = "; ".join(moved) if moved else "nothing"
+            return False, (
+                f"moving {src} -> {dest or backups} failed ({type(exc).__name__}: "
+                f"{exc}); stopped there with {len(plan) - len(moved) - 1} copies "
+                f"not attempted. Moved before that: {done}. Re-run to plan "
+                "against the box as it is now"
+            )
+        moved.append(f"{src} -> {dest}")
+    return True, "moved shadowing copies: " + "; ".join(moved)
+
+
 def repair_plugin_shadows(plugins_root: str | None = None) -> tuple[bool, str]:
     """Move every non-canonical ``ekho``-keyed dir to ``<root>/../backups/``.
 
     All-or-nothing across every root, preflighted before anything moves. A root
-    that could not be read, a shadowed root with no ``ekho/`` to keep, or a
-    symlink anywhere in anything Hermes discovered refuses the WHOLE plan —
-    including, for the first two, when the plan is empty, because "nothing to
-    move" is the same false all-clear as a PASS.
+    that could not be read, a root with installs but no ``ekho/`` to keep, or a
+    symlink above a root or anywhere in anything Hermes discovered refuses the
+    WHOLE plan — including, for the first two, when the plan is empty, because
+    "nothing to move" is the same false all-clear as a PASS.
     """
-    roots, problem = _roots_to_scan(plugins_root)
+    roots, ancestors, problem = _roots_to_scan(plugins_root)
     if problem:
         return False, problem
     scans = _shadow.scan(roots)
-    plan = [(s, shadow) for s in scans for shadow in s.shadows]
-    refusal = _shadow.plan_refusal(scans, moving=bool(plan))
+    plan = _dedupe_plan(
+        (Path(s.root), shadow) for s in scans for shadow in s.shadows
+    )
+    refusal = _shadow.plan_refusal(scans, moving=bool(plan), ancestors=ancestors)
     if refusal:
         return False, refusal
     if not plan:
         return True, "no shadowing plugin copies to move"
-    # Each copy is parked beside the root it came from, so a profile's backups
-    # stay in that profile and the move stays on one filesystem.
-    moved = []
-    for scan_result, src in plan:
-        backups = Path(scan_result.root).parent / "backups"
-        backups.mkdir(parents=True, exist_ok=True)
-        dest = _unique_dest(backups, src.name)
-        shutil.move(str(src), str(dest))
-        moved.append(f"{src} -> {dest}")
-    return True, "moved shadowing copies: " + "; ".join(moved)
+    return _apply_plan(plan)
 
 
 def repair() -> tuple[bool, str]:
