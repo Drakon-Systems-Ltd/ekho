@@ -152,9 +152,13 @@ python -c "from pathlib import Path; import runpy; \
 The health check fails (`plugin-shadows`) when more than one dir under
 `~/.hermes/plugins` declares `name: ekho` (override the root with
 `--plugins-dir`), and `--repair` moves every one not named `ekho` into
-`~/.hermes/backups/` — a move, never a delete. The plugin also logs an ERROR at
-load, with the loaded path and its `observed=` hash, when it runs from a dir
-not named `ekho` or a sibling dir declares the same name.
+`~/.hermes/backups/` — a move, never a delete. A versioned symlink
+(`plugins/ekho -> plugins/ekho-0.5.4`) counts as one install: its target is
+never flagged or moved. A dangling `plugins/ekho` symlink fails the check; a
+plugins root with no `name: ekho` dir at all only warns. The plugin also logs
+an ERROR at load, with the loaded path and its `observed=` hash, when it runs
+from a dir under `plugins/` not named `ekho` or a sibling dir declares the same
+name (repo checkouts are not scanned).
 
 ## Develop
 

@@ -260,3 +260,91 @@ def test_repair_refuses_without_canonical_dir(tmp_path):
     passed, detail = healthcheck.repair_plugin_shadows(str(plugins))
     assert not passed
     assert a.is_dir() and b.is_dir()
+
+
+def _stub_checks(monkeypatch, healthcheck):
+    monkeypatch.setattr(healthcheck, "repair", lambda: (True, "sdk ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
+
+
+def test_versioned_symlink_is_not_a_shadow(tmp_path):
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    target = _fake_plugin(plugins, "ekho-0.5.4")
+    (plugins / "ekho").symlink_to(target, target_is_directory=True)
+    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert passed is True, detail
+
+
+def test_repair_never_moves_symlinked_live_install(tmp_path, monkeypatch, capsys):
+    from ekho_hermes import healthcheck
+
+    _stub_checks(monkeypatch, healthcheck)
+    plugins = tmp_path / ".hermes" / "plugins"
+    target = _fake_plugin(plugins, "ekho-0.5.4")
+    live = plugins / "ekho"
+    live.symlink_to(target, target_is_directory=True)
+    stale = _fake_plugin(plugins, "ekho.bak-pre050")
+
+    assert healthcheck.main(["--repair", "--plugins-dir", str(plugins)]) == 0
+    out = capsys.readouterr().out
+    assert "[PASS] plugin-shadows:" in out
+    assert target.is_dir()
+    assert (live / "plugin.yaml").is_file()  # symlink still resolves
+    assert not stale.exists()
+    assert (tmp_path / ".hermes" / "backups" / stale.name).is_dir()
+
+
+def test_plugins_dir_dot_puts_backups_beside_it(tmp_path, monkeypatch):
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    _fake_plugin(plugins, "ekho")
+    stale = _fake_plugin(plugins, "ekho.bak")
+    monkeypatch.chdir(plugins)
+    passed, detail = healthcheck.repair_plugin_shadows(".")
+    assert passed, detail
+    assert not (plugins / "backups").exists()
+    assert (tmp_path / ".hermes" / "backups" / stale.name).is_dir()
+
+
+def test_repair_backup_dest_never_nests(tmp_path, monkeypatch):
+    from ekho_hermes import healthcheck
+
+    monkeypatch.setattr(healthcheck.time, "strftime", lambda _fmt: "20260101000000")
+    backups = tmp_path / ".hermes" / "backups"
+    plugins = tmp_path / ".hermes" / "plugins"
+    _fake_plugin(plugins, "ekho")
+    # Both the plain name and the timestamped name are already taken.
+    (backups / "ekho.bak").mkdir(parents=True)
+    (backups / "ekho.bak.20260101000000").mkdir()
+    _fake_plugin(plugins, "ekho.bak")
+    passed, detail = healthcheck.repair_plugin_shadows(str(plugins))
+    assert passed, detail
+    dest = backups / "ekho.bak.20260101000000.1"
+    assert (dest / "plugin.yaml").is_file()
+    assert not any((backups / "ekho.bak.20260101000000").iterdir())
+    assert not any((backups / "ekho.bak").iterdir())
+
+
+def test_missing_plugins_dir_warns_but_does_not_fail(tmp_path, monkeypatch, capsys):
+    from ekho_hermes import healthcheck
+
+    _stub_checks(monkeypatch, healthcheck)
+    missing = tmp_path / ".hermes" / "plugins"
+    assert healthcheck.main(["--plugins-dir", str(missing)]) == 0
+    assert "[WARN] plugin-shadows:" in capsys.readouterr().out
+
+
+def test_dangling_live_symlink_fails(tmp_path):
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    plugins.mkdir(parents=True)
+    (plugins / "ekho").symlink_to(plugins / "ekho-0.5.4", target_is_directory=True)
+    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert passed is False
+    assert "dangling" in detail

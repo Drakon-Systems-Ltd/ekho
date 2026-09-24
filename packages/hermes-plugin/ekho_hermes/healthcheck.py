@@ -36,7 +36,8 @@ still shows enabled — the exact failure that silenced Tars and Vision):
      replaces the live plugin (#85).
 
 ``--repair`` moves every non-canonical dir declaring ``name: ekho`` (anything
-not named ``ekho``) to ``~/.hermes/backups/`` (a move, never a delete), then
+not named ``ekho``, and never whatever ``plugins/ekho`` resolves to) to
+``~/.hermes/backups/`` (a move, never a delete), then
 pip-installs the first discoverable SDK source tree (editable) into THIS
 interpreter's environment and re-verifies. Exit code 0 = healthy, 1 = broken,
 2 = invoked unsafely.
@@ -198,8 +199,19 @@ def check_registration() -> tuple[bool, str]:
     return True, "register() wired all tools: " + ", ".join(EXPECTED_TOOLS)
 
 
-def check_plugin_shadows(plugins_root: str | None = None) -> tuple[bool, str]:
-    root = Path(plugins_root or default_plugins_root())
+def _plugins_root(plugins_root: str | None) -> Path:
+    # Resolve so `--plugins-dir .` still has a real parent for backups/.
+    return Path(plugins_root or default_plugins_root()).resolve()
+
+
+def check_plugin_shadows(plugins_root: str | None = None) -> tuple[bool | None, str]:
+    """``None`` = warn: nothing declares the name, so nothing can shadow it."""
+    root = _plugins_root(plugins_root)
+    if not root.is_dir():
+        return None, (
+            f"{root} does not exist — plugin not installed there "
+            "(pass --plugins-dir if Hermes uses another root)"
+        )
     found = _bundle.dirs_declaring(root, PLUGIN_NAME)
     if len(found) > 1:
         return False, (
@@ -207,34 +219,64 @@ def check_plugin_shadows(plugins_root: str | None = None) -> tuple[bool, str]:
             "Hermes loads only the last, the others are shadowed: "
             + ", ".join(str(p) for p in found)
         )
-    return True, f"{len(found)} dir(s) under {root} declare name: {PLUGIN_NAME}"
+    canonical = root / PLUGIN_NAME
+    if canonical.is_symlink() and not canonical.is_dir():
+        return False, f"{canonical} is a dangling symlink — the live plugin is gone"
+    if not found:
+        return None, (
+            f"no dir under {root} declares name: {PLUGIN_NAME} — plugin not "
+            "installed there (pass --plugins-dir if Hermes uses another root)"
+        )
+    return True, f"1 dir under {root} declares name: {PLUGIN_NAME}: {found[0]}"
+
+
+def _unique_dest(backups: Path, name: str) -> Path:
+    dest = backups / name
+    if not (dest.exists() or dest.is_symlink()):
+        return dest
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    n = 0
+    while True:
+        dest = backups / (f"{name}.{stamp}" if n == 0 else f"{name}.{stamp}.{n}")
+        if not (dest.exists() or dest.is_symlink()):
+            return dest
+        n += 1
 
 
 def repair_plugin_shadows(plugins_root: str | None = None) -> tuple[bool, str]:
     """Move every non-canonical ``name: ekho`` dir to <hermes>/backups/."""
-    root = Path(plugins_root or default_plugins_root())
+    root = _plugins_root(plugins_root)
     found = _bundle.dirs_declaring(root, PLUGIN_NAME)
     if len(found) <= 1:
         return True, "no shadowing plugin copies to move"
-    if root / PLUGIN_NAME not in found:
+    canonical = root / PLUGIN_NAME
+    if canonical not in found:
         # Moving every copy out would leave no plugin at all; let a human pick.
         return False, (
-            f"no canonical {root / PLUGIN_NAME} among "
+            f"no canonical {canonical} among "
             + ", ".join(str(p) for p in found)
             + " — rename the copy you want to keep to 'ekho', then re-run"
         )
+    # plugins/ekho may be a symlink (ekho -> ekho-0.5.4): never move what it
+    # points at, or anything containing it.
+    live = canonical.resolve()
     backups = root.parent / "backups"
     backups.mkdir(parents=True, exist_ok=True)
-    moved = []
+    moved, kept = [], []
     for src in found:
-        if src.name == PLUGIN_NAME:
+        if src == canonical:
             continue
-        dest = backups / src.name
-        if dest.exists():
-            dest = backups / f"{src.name}.{time.strftime('%Y%m%d%H%M%S')}"
+        real = src.resolve()
+        if live == real or live.is_relative_to(real):
+            kept.append(str(src))
+            continue
+        dest = _unique_dest(backups, src.name)
         shutil.move(str(src), str(dest))
         moved.append(f"{src} -> {dest}")
-    return True, "moved shadowing copies: " + "; ".join(moved)
+    detail = "moved shadowing copies: " + ("; ".join(moved) or "none")
+    if kept:
+        detail += f" (kept {', '.join(kept)}: live {canonical} resolves into it)"
+    return True, detail
 
 
 def repair() -> tuple[bool, str]:
@@ -271,8 +313,9 @@ def _run_checks(plugins_root: str | None = None) -> bool:
         ("plugin-shadows", lambda: check_plugin_shadows(plugins_root)),
     ):
         passed, detail = fn()
-        print(f"[{'PASS' if passed else 'FAIL'}] {label}: {detail}")
-        ok = ok and passed
+        status = "WARN" if passed is None else "PASS" if passed else "FAIL"
+        print(f"[{status}] {label}: {detail}")
+        ok = ok and passed is not False
     return ok
 
 

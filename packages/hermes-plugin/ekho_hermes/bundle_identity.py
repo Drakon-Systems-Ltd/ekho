@@ -12,6 +12,7 @@ The claimed file is optional. Inventory works from ``observed`` alone.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,15 @@ _CLAIMED_RE = re.compile(
 
 def package_dir() -> Path:
     return Path(__file__).resolve().parent
+
+
+def loaded_dir() -> Path:
+    """The package dir as Hermes addressed it — symlinks NOT followed.
+
+    ``package_dir()`` resolves, so a ``plugins/ekho`` symlink into a repo
+    checkout reports the checkout, not the plugins root it was loaded from.
+    """
+    return Path(os.path.abspath(__file__)).parent
 
 
 def _hashed_files(root: Path) -> list[Path]:
@@ -72,26 +82,49 @@ def plugin_name(root: Path) -> str | None:
 
     Hermes keys plugins on this field, not the folder name, so two dirs that
     both declare ``name: ekho`` collide and the one that sorts last wins (#85).
-    Indented ``name:`` lines (env entries) are not the manifest name.
+    Indented ``name:`` lines (env entries) are not the manifest name. A BOM
+    or a trailing ``# comment`` must not hide a real shadow.
     """
     yaml_path = root / "plugin.yaml"
     try:
-        text = yaml_path.read_text(encoding="utf-8")
+        text = yaml_path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError):
         return None
     for line in text.splitlines():
         if line.startswith("name:"):
-            return line.split(":", 1)[1].strip().strip("\"'")
+            value = line.split(":", 1)[1].strip()
+            if value[:1] in ("'", '"'):
+                end = value.find(value[0], 1)
+                return value[1:end] if end > 0 else value[1:]
+            return re.split(r"(?:^|\s)#", value, maxsplit=1)[0].strip()
     return None
 
 
+def _real(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):  # symlink loop
+        return path
+
+
 def dirs_declaring(plugins_root: Path, name: str = "ekho") -> list[Path]:
-    """Every direct child of ``plugins_root`` whose plugin.yaml declares ``name``."""
+    """Every direct child of ``plugins_root`` whose plugin.yaml declares ``name``.
+
+    Paths resolving to the same real dir (``ekho -> ekho-0.5.4``) are one
+    install, not a duplicate; the entry literally named ``name`` represents it.
+    """
     try:
         children = sorted(p for p in plugins_root.iterdir() if p.is_dir())
     except OSError:
         return []
-    return [p for p in children if plugin_name(p) == name]
+    by_real: dict[Path, Path] = {}
+    for p in children:
+        if plugin_name(p) != name:
+            continue
+        real = _real(p)
+        if real not in by_real or p.name == name:
+            by_real[real] = p
+    return sorted(by_real.values())
 
 
 def claimed_sha256(root: Path | None = None) -> str | None:
