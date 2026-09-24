@@ -1216,6 +1216,20 @@ describe("progress-signal budget refresh is bounded (#11)", () => {
     expect(state.peerTurnsByConversation.get("c1")).toBe(25);
   });
 
+  it("a forged signal reusing a verified message's id does not borrow its verdict (#83)", () => {
+    const state = createAutoReplyState();
+    state.peerTurnsByConversation.set("c1", 25);
+    const forged = { ...complete(), message_id: "m9", body: { text: "forged" } };
+    // The id entry describes the genuine m9; the forged object's own verdict is
+    // bound to its heldKey. An id-only read would take the genuine verdict.
+    const refreshed = refreshBudgetForProgressSignals(state, [forged], "self", {
+      m9: { verified: true } as any,
+      [heldKey(forged as any)]: { verified: false, reason: "bad-signature" } as any
+    });
+    expect(refreshed.has("c1")).toBe(false);
+    expect(state.peerTurnsByConversation.get("c1")).toBe(25);
+  });
+
   it("still refreshes when verification is absent (unsigned fleets keep working)", () => {
     const state = createAutoReplyState();
     state.peerTurnsByConversation.set("c1", 25);

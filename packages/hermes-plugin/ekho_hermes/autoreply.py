@@ -469,8 +469,10 @@ def get_cached_inbox() -> Dict[str, Any]:
 
 @dataclass
 class AutoReplyState:
+    # Keyed by ``held_key``, not message_id (#83): an id the relay reuses for a
+    # different message must not be dropped as already seen.
     seen: set = field(default_factory=set)
-    seen_order: List[str] = field(default_factory=list)
+    seen_order: List[Tuple[Any, str]] = field(default_factory=list)
     # Nonces of signatures we've already accepted — blocks replay of a captured
     # valid message (bounded like ``seen``).
     seen_nonces: set = field(default_factory=set)
@@ -507,11 +509,12 @@ def mark_nonce_seen(state: AutoReplyState, nonce: str) -> None:
         state.seen_nonces.discard(state.seen_nonce_order.pop(0))
 
 
-def mark_seen(state: AutoReplyState, message_id: str) -> None:
-    if message_id in state.seen:
+def mark_seen(state: AutoReplyState, msg: Any) -> None:
+    key = held_key(msg)
+    if key in state.seen:
         return
-    state.seen.add(message_id)
-    state.seen_order.append(message_id)
+    state.seen.add(key)
+    state.seen_order.append(key)
     while len(state.seen_order) > SEEN_CAP:
         evicted = state.seen_order.pop(0)
         state.seen.discard(evicted)
@@ -933,8 +936,8 @@ def is_real_inbound(
     # 3. Non-empty text body.
     if not _body_text(msg):
         return False
-    # 4. Dedupe.
-    if message_id in state.seen:
+    # 4. Dedupe, by held_key (#83).
+    if held_key(msg) in state.seen:
         return False
     # 5. Principal gate + execution authority (graceful crypto verification).
     return should_autowake(
@@ -2328,7 +2331,7 @@ def process_inbox_once(
 
     # Mark every real message handled (dedupe defence).
     for m in real:
-        mark_seen(state, m.message_id)
+        mark_seen(state, m)
 
     # ACK BEFORE the turn — a slow/crashed turn can never cause a redelivery
     # that re-triggers us.
