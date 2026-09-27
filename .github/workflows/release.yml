@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write   # npm Trusted Publishing (OIDC) for publish-npm
 
 # Release shape (0.4.9+)
 #
@@ -75,6 +74,12 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # OIDC minting power only where it is used (review on #90): the id-token is
+    # the npm credential for this job alone. Job-level permissions replace the
+    # top-level set for this job, so contents: read is stated explicitly.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
 
@@ -85,8 +90,11 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest && npm --version
+      # Pinned, not @latest: npm 12.x requires Node ^22.22.2 || ^24.15.0 || >=26
+      # and would break before publishing once the runner's Node 22 lags. 11.20.0
+      # declares engines ^20.17.0 || >=22.9.0. Bump deliberately.
+      - name: Upgrade npm for trusted publishing (pinned)
+        run: npm install -g npm@11.20.0 && npm --version
 
       - run: npm ci
       - run: npm run build -w @drakon-systems/ekho-sdk
