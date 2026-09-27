@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write   # npm Trusted Publishing (OIDC) for publish-npm
 
 # Release shape (0.4.9+)
 #
@@ -83,13 +84,17 @@ jobs:
           cache: npm
           registry-url: "https://registry.npmjs.org"
 
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1; Node 22 ships npm 10.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest && npm --version
+
       - run: npm ci
       - run: npm run build -w @drakon-systems/ekho-sdk
       - run: npm run build -w @drakon-systems/ekho-openclaw-plugin
 
       - name: Publish to npm (skip versions already on the registry)
+        # Trusted Publishing: the job's OIDC id-token is the credential; no NPM_TOKEN.
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
@@ -98,7 +103,7 @@ jobs:
               echo "${ws}@${VERSION} is already on npm — skipping"
               continue
             fi
-            npm publish -w "$ws" --access public
+            npm publish -w "$ws" --access public --provenance
           done
 
   # Through 0.3.1 the image was built only for the runner's own architecture,
