@@ -179,6 +179,18 @@ def test_healthcheck_reports_interpreter():
 
 
 # --- #85: shadowing plugin copies under the Hermes plugins root -------------
+#
+# The verdict comes from Hermes' own discovery now, not from a manifest parser
+# here, so every case below needs the real ``hermes_cli``. Without it the check
+# answers "cannot tell" for any root, which is its own contract and is covered
+# in test_plugin_shadows_hermes.py rather than asserted nine times over.
+
+from ekho_hermes import shadow_check  # noqa: E402
+
+_needs_hermes = pytest.mark.skipif(
+    shadow_check.hermes_discovery() is None,
+    reason="hermes_cli not importable: the shadow verdict is Hermes' own",
+)
 
 
 def _fake_plugin(plugins_root, dirname, name="ekho"):
@@ -192,6 +204,7 @@ def _fake_plugin(plugins_root, dirname, name="ekho"):
     return d
 
 
+@_needs_hermes
 def test_check_plugin_shadows_passes_with_single_canonical(tmp_path):
     from ekho_hermes import healthcheck
 
@@ -202,6 +215,7 @@ def test_check_plugin_shadows_passes_with_single_canonical(tmp_path):
     assert passed, detail
 
 
+@_needs_hermes
 def test_check_plugin_shadows_reports_every_duplicate(tmp_path):
     from ekho_hermes import healthcheck
 
@@ -214,6 +228,7 @@ def test_check_plugin_shadows_reports_every_duplicate(tmp_path):
     assert str(backup) in detail
 
 
+@_needs_hermes
 def test_main_exits_nonzero_on_shadowing_copy(tmp_path, monkeypatch, capsys):
     from ekho_hermes import healthcheck
 
@@ -228,6 +243,7 @@ def test_main_exits_nonzero_on_shadowing_copy(tmp_path, monkeypatch, capsys):
     assert backup.is_dir()  # verify-only never moves anything
 
 
+@_needs_hermes
 def test_repair_moves_shadowing_copies_to_backups(tmp_path, monkeypatch, capsys):
     from ekho_hermes import healthcheck
 
@@ -269,6 +285,7 @@ def _stub_checks(monkeypatch, healthcheck):
     monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
 
 
+@_needs_hermes
 def test_versioned_symlink_is_not_a_shadow(tmp_path):
     from ekho_hermes import healthcheck
 
@@ -279,7 +296,18 @@ def test_versioned_symlink_is_not_a_shadow(tmp_path):
     assert passed is True, detail
 
 
-def test_repair_never_moves_symlinked_live_install(tmp_path, monkeypatch, capsys):
+@_needs_hermes
+def test_repair_refuses_while_a_symlinked_live_install_is_in_play(
+    tmp_path, monkeypatch, capsys
+):
+    """#85 follow-up: this used to move the stale copy and report PASS.
+
+    Changed deliberately. ``plugins/ekho -> ekho-0.5.4`` is a symlink in a dir
+    Hermes discovers, and a link in one root is exactly what another root's
+    install can be reaching through: the endpoint comparison that let this pass
+    cannot see a link in the middle of a chain. The stale copy stays put, the
+    layout is named, and a human resolves it.
+    """
     from ekho_hermes import healthcheck
 
     _stub_checks(monkeypatch, healthcheck)
@@ -289,15 +317,17 @@ def test_repair_never_moves_symlinked_live_install(tmp_path, monkeypatch, capsys
     live.symlink_to(target, target_is_directory=True)
     stale = _fake_plugin(plugins, "ekho.bak-pre050")
 
-    assert healthcheck.main(["--repair", "--plugins-dir", str(plugins)]) == 0
+    assert healthcheck.main(["--repair", "--plugins-dir", str(plugins)]) == 1
     out = capsys.readouterr().out
-    assert "[PASS] plugin-shadows:" in out
+    assert "[FAIL] repair-shadows:" in out
+    assert "is a symlink" in out and str(live) in out
     assert target.is_dir()
     assert (live / "plugin.yaml").is_file()  # symlink still resolves
-    assert not stale.exists()
-    assert (tmp_path / ".hermes" / "backups" / stale.name).is_dir()
+    assert stale.is_dir()  # refused means refused: nothing moved
+    assert not (tmp_path / ".hermes" / "backups").exists()
 
 
+@_needs_hermes
 def test_plugins_dir_dot_puts_backups_beside_it(tmp_path, monkeypatch):
     from ekho_hermes import healthcheck
 
@@ -311,6 +341,7 @@ def test_plugins_dir_dot_puts_backups_beside_it(tmp_path, monkeypatch):
     assert (tmp_path / ".hermes" / "backups" / stale.name).is_dir()
 
 
+@_needs_hermes
 def test_repair_backup_dest_never_nests(tmp_path, monkeypatch):
     from ekho_hermes import healthcheck
 
@@ -339,6 +370,7 @@ def test_missing_plugins_dir_warns_but_does_not_fail(tmp_path, monkeypatch, caps
     assert "[WARN] plugin-shadows:" in capsys.readouterr().out
 
 
+@_needs_hermes
 def test_dangling_live_symlink_fails(tmp_path):
     from ekho_hermes import healthcheck
 
