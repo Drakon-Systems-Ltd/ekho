@@ -18,7 +18,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.5.4` — the seen-filter no longer drops a distinct message that reuses a seen `message_id`, and the Hermes plugin detects and repairs a shadowing backup copy that silently replaces the live plugin. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.5.5` — the OpenClaw plugin registers `model_call_started` / `model_call_ended` through the typed `api.on` hook API, so the operator board's live model and turn-health update again on current OpenClaw hosts (they were silently stale on 2026.9.x). See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -342,7 +342,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (**64 tests
 
 ## Project Status
 
-Ekho `v0.5.4` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.5.5` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 
