@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw plugin: the operator board's live model and turn-health now update on current OpenClaw hosts.** `model_call_started` / `model_call_ended` are typed plugin hooks, and OpenClaw's typed runner only invokes handlers registered with `api.on(...)`; the plugin registered them only through `api.registerHook(...)`, the internal hook bus, which the typed runner never calls (OpenClaw `docs/plugins/hooks.md`). On such hosts the board kept the configured seed model and showed turn-health `unknown`, so an agent whose every turn failed could not read red. The plugin now wires both hooks through `api.on` when the host exposes it, and falls back to `registerHook` only on hosts without `api.on` — never both, so no host can count a call twice. Relay connection and messaging were unaffected.
+
 ## [0.5.4] - 2026-09-24
 
 ### Fixed
