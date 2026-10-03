@@ -4,6 +4,7 @@ import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
+import { registerModelCallHooks } from "./model-call-hooks.js";
 import { effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
 import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
@@ -443,24 +444,16 @@ plugin.register = (api) => {
   } catch (err) {
     api.logger?.debug?.(`[ekho-adapter] model config seed unavailable: ${String(err)}`);
   }
+  // Model-call hooks are TYPED hooks: the host only runs them via api.on (see
+  // model-call-hooks.ts). Falls back to registerHook only on hosts without api.on.
   try {
-    api.registerHook?.("model_call_started", (event) => {
-      const e = event as { model?: string; provider?: string } | undefined;
-      noteObservedModel(e?.model, e?.provider);
+    const route = registerModelCallHooks(api, {
+      onStarted: (model, provider) => noteObservedModel(model, provider),
+      onEnded: (outcome, category) => noteModelCallEnded(outcome, category)
     });
+    api.logger?.debug?.(`[ekho-adapter] model_call hooks: ${route}`);
   } catch (err) {
-    api.logger?.debug?.(`[ekho-adapter] model_call hook unavailable: ${String(err)}`);
-  }
-  // Turn-outcome telemetry: fold each finished model call into the rolling
-  // health window so the heartbeat carries a truthful cognitive-health signal
-  // (an agent whose every turn 404s reads red on the board, not green).
-  try {
-    api.registerHook?.("model_call_ended", (event) => {
-      const e = event as { outcome?: string; errorCategory?: string; failureKind?: string } | undefined;
-      noteModelCallEnded(e?.outcome, e?.errorCategory ?? e?.failureKind);
-    });
-  } catch (err) {
-    api.logger?.debug?.(`[ekho-adapter] model_call_ended hook unavailable: ${String(err)}`);
+    api.logger?.debug?.(`[ekho-adapter] model_call hooks unavailable: ${String(err)}`);
   }
 
   const config = api.pluginConfig as EkhoPluginConfig | undefined;
