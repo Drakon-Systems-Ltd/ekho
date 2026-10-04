@@ -119,16 +119,23 @@ describe("registerAndBootstrapIdentity", () => {
 });
 
 describe("shouldAllowNewIdentity (the connect-site rule)", () => {
-  it("lets a fresh enrolment mint", () => {
-    expect(shouldAllowNewIdentity({}, {})).toBe(true);
-    expect(shouldAllowNewIdentity({ agentId: "agent_x" }, {})).toBe(true); // no secret yet
+  const fresh = { hasStoredCredentials: false };
+  const stored = { hasStoredCredentials: true };
+  it("lets a genuine first enrolment mint", () => {
+    expect(shouldAllowNewIdentity({}, {}, fresh)).toBe(true);
+    expect(shouldAllowNewIdentity({ agentId: "agent_x" }, {}, fresh)).toBe(true); // no secret yet
   });
-  it("refuses an enrolled agent by default", () => {
-    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, {})).toBe(false);
-    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, { EKHO_ALLOW_NEW_IDENTITY: "0" })).toBe(false);
+  it("refuses a config-enrolled agent by default", () => {
+    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, {}, fresh)).toBe(false);
+    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, { EKHO_ALLOW_NEW_IDENTITY: "0" }, fresh)).toBe(false);
+  });
+  it("refuses a token-enrolled agent too: its enrolment lives in the credentials file, not config", () => {
+    expect(shouldAllowNewIdentity({}, {}, stored)).toBe(false);
+    expect(shouldAllowNewIdentity({ enrollmentToken: "tok" } as never, {}, stored)).toBe(false);
   });
   it("allows an enrolled agent only on explicit say-so", () => {
-    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, { EKHO_ALLOW_NEW_IDENTITY: "1" })).toBe(true);
-    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s", allowNewIdentity: true }, {})).toBe(true);
+    expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, { EKHO_ALLOW_NEW_IDENTITY: "1" }, fresh)).toBe(true);
+    expect(shouldAllowNewIdentity({}, { EKHO_ALLOW_NEW_IDENTITY: "1" }, stored)).toBe(true);
+    expect(shouldAllowNewIdentity({ allowNewIdentity: true }, {}, stored)).toBe(true);
   });
 });

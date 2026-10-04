@@ -5,6 +5,7 @@ import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import {
   enrollOrLoad,
   loadOrCreateIdentity,
+  loadCredentials,
   saveIdentity,
   IdentityUnavailableError,
   ALLOW_NEW_IDENTITY_ENV,
@@ -73,9 +74,17 @@ let identityConfigDir = "";
  */
 export function shouldAllowNewIdentity(
   config: { agentId?: string; agentSecret?: string; allowNewIdentity?: boolean },
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  state: {
+    /**
+     * Whether a credentials file already existed BEFORE this connect. A
+     * token-enrolled agent carries no agentId/secret in config; its enrolment
+     * lives only in that file, and it is just as enrolled (review, Tars, 4 Oct).
+     */
+    hasStoredCredentials: boolean;
+  }
 ): boolean {
-  const enrolled = Boolean(config.agentId && config.agentSecret);
+  const enrolled = state.hasStoredCredentials || Boolean(config.agentId && config.agentSecret);
   return !enrolled || env[ALLOW_NEW_IDENTITY_ENV] === "1" || config.allowNewIdentity === true;
 }
 
@@ -344,6 +353,9 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
 
   connecting = (async () => {
     const configDir = path.join(os.homedir(), ".openclaw", "extensions", "ekho-adapter");
+    // Read BEFORE enrollOrLoad: a fresh enrolment writes this file, and the
+    // identity rule below must see the state as it was when we arrived.
+    const hasStoredCredentials = loadCredentials(configDir) !== null;
     const credentials = await enrollOrLoad({
       configDir,
       relayBaseUrl: config.relayBaseUrl,
@@ -367,7 +379,7 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
     // key for it needs the operator's explicit say-so (env or config), never a
     // silent default: that default is how seven phantom "Jarvis" keys came to
     // exist on the relay. A fresh enrolment (no agentId/secret yet) may mint.
-    const allowCreate = shouldAllowNewIdentity(config, process.env);
+    const allowCreate = shouldAllowNewIdentity(config, process.env, { hasStoredCredentials });
     try {
       identity = await registerAndBootstrapIdentity(client, {
         operatorPubkey: config.operatorPubkey,
