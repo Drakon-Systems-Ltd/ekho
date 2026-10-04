@@ -111,8 +111,8 @@ export function run(argv: string[], db: EkhoDb, out: (s: string) => void = conso
       out("  It cannot endorse agent keys. It is consumed by the endorsement. Cancel with:");
       out(`  npm run recovery-grant -- cancel --fleet ${fleetId} --grant ${g.id}`);
       out("Next (operator, in the console): from the browser holding the recovering key, press Endorse on the");
-      out("successor in panel 2. Then, from the successor's browser, re-endorse every agent. Revoke the lost");
-      out("root LAST, only once no agent is still endorsed by it.");
+      out("successor in panel 2. Then, from the successor's browser, press 'Consolidate all under this device'");
+      out("to re-endorse every agent. Revoke the lost root LAST, only once no agent is still endorsed by it.");
       return 0;
     }
     if (command === "cancel") {
