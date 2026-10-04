@@ -45,9 +45,10 @@ Keeping only the credentials file is not enough: the agent still reconnects, but
 ## Update
 
 How you update depends on how the plugin was installed. `openclaw plugins
-inspect ekho-adapter` prints the install record: `Source: npm` is an npm-managed
-install; `Source: path` is a local-folder install (copied, or linked with
-`--link`). A folder copied by hand has no install record.
+inspect ekho-adapter` prints the install record; read the `Source:` line under its
+**Install** section (a separate top-level `Source` line is the plugin's path):
+`npm` is an npm-managed install; `path` is a local-folder install (copied, or
+linked with `--link`). A folder copied by hand has no install record.
 
 Run these steps from an interactive shell. In a noninteractive one,
 `openclaw gateway stop` refuses unless you add `--force`. If the stop or the
