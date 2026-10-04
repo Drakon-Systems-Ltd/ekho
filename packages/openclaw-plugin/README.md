@@ -40,7 +40,8 @@ inspect ekho-adapter` prints the install record; read the `Source:` line under i
 linked with `--link`). A folder copied by hand has no install record.
 
 Since 0.5.6 the plugin's [state files](#state-files) live outside its install
-directory, so an update does not touch them. **Updating from 0.5.5 or earlier is
+directory by default, so an update does not touch them. Keep any custom state
+directory outside the install directory too. **Updating from 0.5.5 or earlier is
 the exception:** that one update needs a backup first; follow
 [Upgrading from 0.5.5 or earlier](#upgrading-from-055-or-earlier) instead.
 
@@ -201,7 +202,7 @@ Optional, read from the gateway's environment. None is needed for a normal insta
 
 ### State files
 
-The plugin keeps its durable state outside its install directory, so `openclaw plugins update` (which replaces the install directory) never deletes it:
+By default the plugin keeps its durable state outside its install directory, so a plugin update that replaces the install directory does not delete it:
 
 | File | Holds | If it is lost or unreadable |
 |---|---|---|
@@ -209,13 +210,21 @@ The plugin keeps its durable state outside its install directory, so `openclaw p
 | `.ekho-identity.json` | The agent's signing identity and trust state: its private Ed25519 signing seed, the operator keys it pins and why each was admitted, the first-contact (trust-on-first-use) latch, and the ledger of operator keys it has seen revoked. | An enrolled agent (credentials file present, or `agentId` + `agentSecret` in the config) does not mint a replacement key: it logs an error and runs unsigned until the file is restored. An unreadable file is kept as `.ekho-identity.json.unusable-<timestamp>` and refused the same way. |
 
 Both are written owner-only (`0600`). Back them up. To give an enrolled agent a
-new identity key on purpose, set `EKHO_ALLOW_NEW_IDENTITY=1` in the gateway's
-environment or `"allowNewIdentity": true` in the plugin config (moving an
-unreadable file aside first). The new key needs endorsing again, it pins no
-operator keys except any `operatorPubkey` you configured (re-applied on
-connect), an agent left with no pins trusts the relay's operator keys afresh on
-first contact, and it forgets which keys were revoked. Only a first enrollment
-mints a key without being told to.
+new identity key on purpose, move an unreadable file aside first, set
+`EKHO_ALLOW_NEW_IDENTITY=1` in the gateway's environment and restart the
+gateway. Once the new key is minted, remove the variable from the gateway's
+environment and restart again, so that a later lost file is refused rather than
+silently re-keyed. The new key needs endorsing again, it starts with no pinned
+operator keys, an agent left with no pins trusts the relay's operator keys
+afresh on first contact, and it forgets which keys were revoked. Only a first
+enrollment mints a key without being told to.
+
+The 0.5.6 code also reads `allowNewIdentity` and `operatorPubkey` from the
+plugin config, but neither key is declared in the plugin's config schema, so
+neither is a supported setting: do not set them. If an existing
+`operatorPubkey` seed does reach the plugin, it is re-pinned on connect (unless
+the relay has reported that key revoked), including onto a new identity key;
+do not rely on this.
 
 Location, first match wins:
 
