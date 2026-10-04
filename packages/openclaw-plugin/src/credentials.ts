@@ -220,9 +220,23 @@ export function loadCredentials(configDir: string): EkhoCredentials | null {
   return stored.state === "ok" ? stored.credentials : null;
 }
 
+/** Same atomic temp-then-rename, owner-only write as saveIdentity: the file
+ *  holds the agent secret. */
 export function saveCredentials(configDir: string, credentials: EkhoCredentials) {
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(path.join(configDir, CREDENTIALS_FILE), JSON.stringify(credentials, null, 2));
+  const filePath = path.join(configDir, CREDENTIALS_FILE);
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* nothing to clean */
+    }
+    throw err;
+  }
 }
 
 /** Operator keys the relay handed us at enrollment — the trust bootstrap the

@@ -23,7 +23,7 @@ Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds two agen
 - **`ekho_send`** — send a message to another agent in the fleet (delegate a task, ask a question, hand off work, or `broadcast` to everyone).
 - **`ekho_inbox`** — read and acknowledge messages other agents have sent this agent.
 
-On first use it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent appears healthy in the Ekho operator console. Credentials are cached at `~/.openclaw/extensions/ekho-adapter/.ekho-credentials.json`.
+On first use it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent appears healthy in the Ekho operator console. Credentials and the agent's identity key are kept in the plugin's state directory (see [State files](#state-files)).
 
 `dist/index.js` is a **single self-contained bundle** — runtime dependencies (the Ekho SDK, typebox) are inlined at build time, so the plugin runs with no `npm install` on the host. The only external is `openclaw` itself, which the host gateway resolves at load time.
 
@@ -59,6 +59,7 @@ Set the plugin config in your `~/.openclaw/openclaw.json` under `plugins.entries
 | `heartbeatIntervalMs` | optional | Heartbeat interval (default `30000`) |
 | `peerAutoreply` | optional | Bounded agent-to-agent delegation — let teammates wake this agent (default `true`; set `false` to opt out) |
 | `peerTurnBudget` | optional | Optional local turn limit: peer wakes per conversation before the latch closes. `0`/unset = **no limit** (default). A limit the operator sets on the relay console takes precedence |
+| `stateDir` | optional | Where the plugin keeps its state files. Overrides `EKHO_STATE_DIR` and the default (see [State files](#state-files)) |
 
 Restart the OpenClaw gateway after configuring. Verify with `/ekho_inbox` or by checking the agent appears healthy in the Ekho operator console.
 
@@ -71,6 +72,28 @@ Optional, read from the gateway's environment. None is needed for a normal insta
 | `EKHO_AUTOREPLY_DISABLE` | unset | `1` turns auto-reply off in this process. Messages are still delivered and visible through `ekho_inbox`; no turn is woken |
 | `EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS` | `900` | How long a woken reply turn may run before it is stopped. Values under `60` are ignored. The conversation floor is held for this long plus 60 seconds |
 | `EKHO_REPORT_MODEL` / `EKHO_REPORT_PROVIDER` | unset | Explicit model and provider to report in heartbeats when they cannot be read from the host |
+| `EKHO_STATE_DIR` | unset | Where the plugin keeps its state files, when `stateDir` is not set in config (see [State files](#state-files)) |
+
+### State files
+
+The plugin keeps its durable state outside its install directory, so `openclaw plugins update` (which replaces the install directory) never deletes it:
+
+| File | Holds |
+|---|---|
+| `.ekho-credentials.json` | The agent's id and secret for the relay |
+| `.ekho-identity.json` | The agent's private signing key and the operator keys it trusts |
+
+Both are written owner-only (`0600`). Back them up: if the identity file is lost, an already-enrolled agent refuses to mint a replacement key and runs unsigned until the file is restored.
+
+Location, first match wins:
+
+1. `stateDir` in the plugin config
+2. the `EKHO_STATE_DIR` environment variable
+3. `ekho-adapter/` under OpenClaw's state directory — `~/.openclaw/ekho-adapter/` by default, or `$OPENCLAW_STATE_DIR/ekho-adapter/` when that is set
+
+Downloaded attachments go to `attachments/` in the same directory.
+
+Earlier versions kept these files in the install directory, `~/.openclaw/extensions/ekho-adapter/`. On the first start after upgrading, any found there are copied (not moved) to the new location; a copy already present in the new location always wins. A legacy file that cannot be read is not copied, and the agent fails closed exactly as it would for an unreadable file in the new location.
 
 ### Agent-to-agent delegation
 

@@ -1,6 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { resolveEkhoStateDir } from "./state-dir.js";
 
 /**
  * Plugin-side attachment helpers. Mirrors the relay's allowlist, size cap, and
@@ -61,9 +62,10 @@ export function sanitizeFilename(raw: string): string {
   return cleaned || "file";
 }
 
-/** Absolute scoped dir where ekho_inbox writes downloaded attachment bytes. */
-export function attachmentsDownloadDir(): string {
-  return path.join(os.homedir(), ".openclaw", "extensions", "ekho-adapter", "attachments");
+/** Absolute scoped dir where ekho_inbox writes downloaded attachment bytes.
+ *  Under the plugin's state dir, not its install dir (#98). */
+export function attachmentsDownloadDir(config?: { stateDir?: string }): string {
+  return path.join(resolveEkhoStateDir(config), "attachments");
 }
 
 /**
@@ -71,10 +73,10 @@ export function attachmentsDownloadDir(): string {
  * id so two attachments with the same display name never collide, and so the
  * (sanitized) user filename can never traverse out of the scoped dir.
  */
-export function attachmentLocalPath(id: string, filename: string): string {
+export function attachmentLocalPath(id: string, filename: string, config?: { stateDir?: string }): string {
   const safeId = path.basename(String(id ?? "")) || "att";
   const safeName = sanitizeFilename(filename);
-  return path.join(attachmentsDownloadDir(), `${safeId}__${safeName}`);
+  return path.join(attachmentsDownloadDir(config), `${safeId}__${safeName}`);
 }
 
 /**

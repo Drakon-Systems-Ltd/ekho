@@ -1,5 +1,4 @@
 import os from "node:os";
-import path from "node:path";
 import { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import {
@@ -18,6 +17,7 @@ import { parseRequireSignedMode, syncPinnedOperatorKeys } from "./verification.j
 import { fromB64url, keyId as deriveKeyId } from "./identity.js";
 import { startAutoReply } from "./autoreply.js";
 import { appendDeadLetters } from "./dead-letter.js";
+import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./state-dir.js";
 
 export interface EkhoPluginConfig {
   relayBaseUrl: string;
@@ -45,6 +45,8 @@ export interface EkhoPluginConfig {
   // ONLY when it is signed and verifies; unsigned/unverifiable peers are
   // dead-lettered. EKHO_REQUIRE_SIGNED overrides per-process.
   requireSigned?: string;
+  /** Overrides where credentials/identity live (#98). Default: see resolveEkhoStateDir. */
+  stateDir?: string;
 }
 
 export interface EkhoConnection {
@@ -352,7 +354,22 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
   if (connecting) return connecting;
 
   connecting = (async () => {
-    const configDir = path.join(os.homedir(), ".openclaw", "extensions", "ekho-adapter");
+    // Not the install dir: `openclaw plugins update` replaces that wholesale,
+    // trust files and all (#98).
+    const configDir = resolveEkhoStateDir(config);
+    // Before anything reads configDir: carry pre-#98 state over from the old
+    // location. A credentials failure stops the connect, as an unusable file
+    // in configDir would. An identity failure is held and surfaced where the
+    // identity is loaded, so the agent runs unsigned exactly as it would for
+    // an unusable file here — it must not reach the loader as "absent", which
+    // on an apparently fresh box would mint.
+    let migrationIdentityError: IdentityUnavailableError | undefined;
+    try {
+      migrateLegacyEkhoState(configDir, LEGACY_EKHO_DIR, log);
+    } catch (err) {
+      if (!(err instanceof IdentityUnavailableError)) throw err;
+      migrationIdentityError = err;
+    }
     // Read BEFORE enrollOrLoad: a fresh enrolment writes this file, and the
     // identity rule below must see the state as it was when we arrived.
     const hasStoredCredentials = storedCredentialsState(configDir).state !== "absent";
@@ -381,6 +398,7 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
     // exist on the relay. A fresh enrolment (no agentId/secret yet) may mint.
     const allowCreate = shouldAllowNewIdentity(config, process.env, { hasStoredCredentials });
     try {
+      if (migrationIdentityError) throw migrationIdentityError;
       identity = await registerAndBootstrapIdentity(client, {
         operatorPubkey: config.operatorPubkey,
         configDir,
