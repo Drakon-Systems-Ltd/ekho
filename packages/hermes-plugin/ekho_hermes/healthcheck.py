@@ -40,7 +40,9 @@ in scope comes from ``hermes_constants``: the default root's ``plugins/``, the
 ``--plugins-dir`` overrides the set with one directory. When Hermes cannot be
 imported, or a directory the verdict rests on will not be read, the check says
 so and WARNs — it never reports PASS on a question it could not ask
-(``ekho_hermes.shadow_check``).
+(``ekho_hermes.shadow_check``) — and a run holding that WARN is UNDETERMINED:
+exit 3, no ``healthy`` line. The one WARN that is an answer, a root Hermes
+read to the bottom with nothing taking the key, still exits 0.
 
 ``--repair`` moves every non-canonical dir taking the ``ekho`` key to
 ``<hermes>/backups/`` (a move, never a delete), then pip-installs the first
@@ -48,7 +50,8 @@ discoverable SDK source tree (editable) into THIS interpreter's environment and
 re-verifies. It preflights every root first and is all-or-nothing: one
 undetermined root, one root whose installs leave no ``ekho/`` to keep, or one
 symlink above a root or anywhere in anything Hermes discovered, and nothing is
-moved in any root. Exit code 0 = healthy, 1 = broken, 2 = invoked unsafely.
+moved in any root. Exit code 0 = healthy, 1 = broken, 2 = bad arguments,
+3 = undetermined (the shadow check could not tell, so nothing is claimed).
 """
 
 from __future__ import annotations
@@ -102,6 +105,25 @@ _looks_like_sdk_root = _shim._looks_like_sdk_root
 
 EXPECTED_TOOLS = ("ekho_send", "ekho_open_room", "ekho_inbox")
 PLUGIN_NAME = "ekho"
+
+# What a check can say. The two WARNs are kept apart on purpose. ABSENT is an
+# answer: Hermes read the root to the bottom and nothing there takes the key.
+# UNDETERMINED is a question that was not answered: Hermes could not be asked,
+# or a directory the verdict rests on could not be read. The first leaves the
+# run healthy. The second does not — and it is not broken either, it is
+# unknown — so a run holding one exits EXIT_UNDETERMINED and never prints
+# "healthy". Folding it into "fine" was the false all-clear the #89 review
+# found: every WARN exited 0 with "healthy: ... verified".
+PASS = "pass"
+FAIL = "fail"
+ABSENT = "absent"
+UNDETERMINED = "undetermined"
+_WORST_LAST = (PASS, ABSENT, UNDETERMINED, FAIL)
+_LABEL = {PASS: "PASS", FAIL: "FAIL", ABSENT: "WARN", UNDETERMINED: "WARN"}
+
+EXIT_HEALTHY = 0
+EXIT_BROKEN = 1
+EXIT_UNDETERMINED = 3  # 2 is argparse's own: bad arguments
 
 
 def _import_plugin_module():
@@ -240,16 +262,16 @@ def _roots_to_scan(
 
 
 def _root_verdict(scan_result) -> tuple[str, str]:  # noqa: ANN001
-    """``('pass' | 'fail' | 'unknown' | 'absent', one sentence)`` for one root.
+    """``(PASS | FAIL | UNDETERMINED | ABSENT, one sentence)`` for one root.
 
-    ``unknown`` is never folded into either of the others. A root whose
+    UNDETERMINED is never folded into any of the others. A root whose
     discovery did not answer, or that holds one directory this process could
     not read, may hold the copy that is doing the shadowing — so it is reported
     as a gap, with the path and the errno the operator has to act on.
     """
     root = scan_result.root
     if scan_result.undetermined:
-        return "unknown", (
+        return UNDETERMINED, (
             f"cannot tell what Hermes loads under {root}: {scan_result.reason} "
             f"({scan_result.remedy or _GATEWAY_PYTHON_REMEDY})"
         )
@@ -264,7 +286,7 @@ def _root_verdict(scan_result) -> tuple[str, str]:  # noqa: ANN001
     if scan_result.shadowed:
         # A finding outranks the gap beside it — both are non-PASS, and only
         # one of them tells the operator what to move.
-        return "fail", (
+        return FAIL, (
             f"{len(scan_result.installs)} dirs under {root} take the "
             f"'{PLUGIN_NAME}' key — Hermes loads only "
             f"{scan_result.winner or 'the last'}, the rest are shadowed: "
@@ -272,58 +294,60 @@ def _root_verdict(scan_result) -> tuple[str, str]:  # noqa: ANN001
             + (f" ({gap})" if gap else "")
         )
     if gap:
-        return "unknown", f"{gap} ({_shadow.FS_REMEDY})"
+        return UNDETERMINED, f"{gap} ({_shadow.FS_REMEDY})"
     dangling, problem = _shadow.dangling_canonical(root, PLUGIN_NAME)
     if problem:
-        return "unknown", f"cannot tell what {root / PLUGIN_NAME} is: {problem}"
+        return UNDETERMINED, f"cannot tell what {root / PLUGIN_NAME} is: {problem}"
     if dangling:
-        return "fail", (
+        return FAIL, (
             f"{root / PLUGIN_NAME} is a dangling symlink — the live plugin is gone"
         )
     if not scan_result.installs:
-        return "absent", f"nothing under {root} takes the '{PLUGIN_NAME}' key"
-    return "pass", (
+        return ABSENT, f"nothing under {root} takes the '{PLUGIN_NAME}' key"
+    return PASS, (
         f"1 dir under {root} takes the '{PLUGIN_NAME}' key: {scan_result.installs[0]}"
     )
 
 
-def check_plugin_shadows(plugins_root: str | None = None) -> tuple[bool | None, str]:
-    """``None`` = warn: either nothing declares the name, or we could not tell.
+def check_plugin_shadows(plugins_root: str | None = None) -> tuple[str, str]:
+    """``(PASS | FAIL | ABSENT | UNDETERMINED, detail)`` across every root.
 
     Every root gets its own sentence and the worst one decides. Uncertainty
     outranks a clean root and never outranks a finding: a box where one root is
     shadowed and another could not be read is broken either way, and the
-    operator needs both lines.
+    operator needs both lines. ABSENT and UNDETERMINED both print as WARN and
+    are never the same answer: "nothing here takes the key" is a verdict,
+    "I could not look" is not, and only the first leaves the run healthy.
     """
     roots, _ancestors, problem = _roots_to_scan(plugins_root)
     if problem:
-        return None, problem
+        return UNDETERMINED, problem
     if plugins_root is not None:
         # Through the error-aware stat, never ``Path.is_dir()``: that raises
         # under an unsearchable parent and answers False where it does not.
         kind, unsure = _shadow.path_kind(roots[0])
         if unsure:
-            return None, (
+            return UNDETERMINED, (
                 f"cannot tell what is at {roots[0]}: {unsure} ({_shadow.FS_REMEDY})"
             )
         if kind != "dir":
-            return None, (
+            return ABSENT, (
                 f"{roots[0]} does not exist — plugin not installed there "
                 "(pass --plugins-dir if Hermes uses another root)"
             )
     verdicts = [_root_verdict(s) for s in _shadow.scan(roots)]
     detail = "; ".join(line for _status, line in verdicts)
     seen = {status for status, _line in verdicts}
-    if "fail" in seen:
-        return False, detail
-    if "unknown" in seen:
-        return None, detail
-    if "pass" not in seen:
-        return None, (
+    if FAIL in seen:
+        return FAIL, detail
+    if UNDETERMINED in seen:
+        return UNDETERMINED, detail
+    if PASS not in seen:
+        return ABSENT, (
             f"{detail} — plugin not installed in any Hermes plugins root "
             "(pass --plugins-dir if Hermes uses another root)"
         )
-    return True, detail
+    return PASS, detail
 
 
 def _unique_dest(backups: Path, name: str) -> Path:
@@ -435,24 +459,36 @@ def repair() -> tuple[bool, str]:
     return True, f"installed SDK editable from {root} into {sys.executable}"
 
 
-def _run_checks(plugins_root: str | None = None) -> bool:
+def _as_status(result) -> tuple[str, str]:  # noqa: ANN001
+    """A ``(bool, detail)`` check, in the four-way vocabulary."""
+    passed, detail = result
+    return (PASS if passed else FAIL), detail
+
+
+def _run_checks(plugins_root: str | None = None) -> str:
+    """Run every check, print its line, and answer with the WORST status seen.
+
+    FAIL outranks UNDETERMINED outranks ABSENT outranks PASS, so a run holding
+    one unanswered question is not healthy, and a run holding a finding is
+    broken whatever else it could not tell.
+    """
     # The interpreter IS part of the verdict: verifying a stale venv while the
     # service runs another proves nothing. Print it so the operator can match
     # it against the Hermes service unit / wrapper.
     print(f"[info] interpreter verified: {sys.executable}")
     print(f"[info] plugin dir: {_HERE}")
-    ok = True
+    worst = PASS
     for label, fn in (
-        ("sdk", check_sdk),
-        ("sdk-surface", check_sdk_surface),
-        ("registration", check_registration),
+        ("sdk", lambda: _as_status(check_sdk())),
+        ("sdk-surface", lambda: _as_status(check_sdk_surface())),
+        ("registration", lambda: _as_status(check_registration())),
         ("plugin-shadows", lambda: check_plugin_shadows(plugins_root)),
     ):
-        passed, detail = fn()
-        status = "WARN" if passed is None else "PASS" if passed else "FAIL"
-        print(f"[{status}] {label}: {detail}")
-        ok = ok and passed is not False
-    return ok
+        status, detail = fn()
+        print(f"[{_LABEL[status]}] {label}: {detail}")
+        if _WORST_LAST.index(status) > _WORST_LAST.index(worst):
+            worst = status
+    return worst
 
 
 def main(argv=None) -> int:  # noqa: ANN001
@@ -481,22 +517,33 @@ def main(argv=None) -> int:  # noqa: ANN001
         moved, detail = repair_plugin_shadows(args.plugins_dir)
         print(f"[{'PASS' if moved else 'FAIL'}] repair-shadows: {detail}")
         if not moved:
-            return 1
+            return EXIT_BROKEN
         repaired, detail = repair()
         print(f"[{'PASS' if repaired else 'FAIL'}] repair: {detail}")
         if not repaired:
-            return 1
+            return EXIT_BROKEN
 
-    if _run_checks(args.plugins_dir):
-        print("healthy: Hermes Ekho plugin dependency chain verified")
-        return 0
-    print(
-        "BROKEN: fix with '--repair' (run with the python of the venv the "
-        "Hermes service actually uses), or set EKHO_SDK_PATH to "
-        "<ekho-repo>/sdks/python",
-        file=sys.stderr,
-    )
-    return 1
+    outcome = _run_checks(args.plugins_dir)
+    if outcome == FAIL:
+        print(
+            "BROKEN: fix with '--repair' (run with the python of the venv the "
+            "Hermes service actually uses), or set EKHO_SDK_PATH to "
+            "<ekho-repo>/sdks/python",
+            file=sys.stderr,
+        )
+        return EXIT_BROKEN
+    if outcome == UNDETERMINED:
+        # Not healthy and not broken: unknown. Anything watching the exit code
+        # must not read this as either, so it is neither 0 nor 1.
+        print(
+            "UNDETERMINED: the plugin-shadows check could not tell which copy "
+            "Hermes loads, so nothing is verified — the [WARN] line above names "
+            "the import or path it needs. Fix that and re-run.",
+            file=sys.stderr,
+        )
+        return EXIT_UNDETERMINED
+    print("healthy: Hermes Ekho plugin dependency chain verified")
+    return EXIT_HEALTHY
 
 
 if __name__ == "__main__":

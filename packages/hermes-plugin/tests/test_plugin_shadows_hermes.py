@@ -116,8 +116,8 @@ def test_manifest_forms_only_hermes_reads_are_still_shadows(tmp_path, label, man
     live = plugin(plugins, "ekho")
     backup = yaml_plugin(plugins, f"ekho.bak-{label}", manifest)
 
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed is False, detail
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.FAIL, detail
     assert str(live) in detail and str(backup) in detail
 
 
@@ -133,8 +133,8 @@ def test_portable_plugin_json_backup_is_a_shadow(tmp_path):
     backup = json_plugin(plugins, "ekho.bak-portable")
     assert not (backup / "plugin.yaml").exists()
 
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed is False, detail
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.FAIL, detail
     assert str(backup) in detail
 
     moved, detail = healthcheck.repair_plugin_shadows(str(plugins))
@@ -167,8 +167,8 @@ def test_run_from_a_profile_still_sees_the_default_root(home, monkeypatch):
     assert not roots.undetermined, roots.reason
     assert tree(roots.roots) >= {str(default_plugins), str(profile_plugins)}
 
-    passed, detail = healthcheck.check_plugin_shadows()
-    assert passed is False, detail
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.FAIL, detail
     assert str(backup) in detail
 
 
@@ -197,8 +197,8 @@ def test_hermes_home_is_expanded_the_way_hermes_expands_it(home, monkeypatch):
     backup = plugin(plugins, "ekho.bak-pre050")
     assert str(plugins) in tree(shadow_check.hermes_roots().roots)
 
-    passed, detail = healthcheck.check_plugin_shadows()
-    assert passed is False, detail
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.FAIL, detail
     assert str(backup) in detail
 
 
@@ -227,8 +227,8 @@ def test_unlistable_profiles_dir_makes_the_whole_root_set_undetermined(home):
         roots = shadow_check.hermes_roots()
         assert roots.undetermined and str(profiles) in roots.reason
 
-        passed, detail = healthcheck.check_plugin_shadows()
-        assert passed is None, detail
+        status, detail = healthcheck.check_plugin_shadows()
+        assert status == healthcheck.UNDETERMINED, detail
         assert str(profiles) in detail and "Permission" in detail
 
         moved, detail = healthcheck.repair_plugin_shadows()
@@ -252,14 +252,50 @@ def test_unreadable_copy_is_undetermined_not_a_clean_root(tmp_path):
     backup = plugin(plugins, "ekho.bak-pre050")
 
     with denied(backup):
-        passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-        assert passed is None, detail
+        status, detail = healthcheck.check_plugin_shadows(str(plugins))
+        assert status == healthcheck.UNDETERMINED, detail
         assert str(backup) in detail and "Permission" in detail
 
         moved, detail = healthcheck.repair_plugin_shadows(str(plugins))
         assert moved is False, detail
         assert backup.is_dir()
         assert not (tmp_path / ".hermes" / "backups").exists()
+
+
+@needs_discovery
+@needs_unprivileged
+def test_unreadable_copy_is_undetermined_when_hermes_logs_nothing(tmp_path, caplog):
+    """:func:`shadow_check.unreadable_children`, proven on its own (#89 review).
+
+    Hermes WARNs about a child it cannot read and
+    :func:`shadow_check._unreadable_from_records` keeps that — so with Hermes'
+    loggers at their default level the case above passes with or without our
+    own pre-verdict check. A gateway that runs those loggers at ERROR drops the
+    record before any filter sees it, and then the only thing between a denied
+    ``plugins/ekho.bak`` and a PASS is the check this test removes everything
+    else from.
+    """
+    import logging
+
+    for name in shadow_check._DISCOVERY_LOGGERS:
+        caplog.set_level(logging.ERROR, logger=name)
+    plugins = tmp_path / ".hermes" / "plugins"
+    plugin(plugins, "ekho")
+    backup = plugin(plugins, "ekho.bak-pre050")
+
+    with denied(backup):
+        # Hermes alone, silenced: one copy, no gap — the false clean root.
+        hermes_only = shadow_check._discover_via_hermes(
+            plugins, "ekho", shadow_check.hermes_discovery(), ()
+        )
+        assert not hermes_only.undetermined, hermes_only.reason
+        assert hermes_only.unreadable == ()
+        assert tree(hermes_only.copies) == tree([plugins / "ekho"])
+
+        # The check as a whole: the denied dir costs the root its verdict.
+        status, detail = healthcheck.check_plugin_shadows(str(plugins))
+        assert status == healthcheck.UNDETERMINED, detail
+        assert str(backup) in detail and "Permission" in detail
 
 
 @needs_discovery
@@ -278,8 +314,8 @@ def test_unreadable_plugin_json_is_undetermined(tmp_path):
     backup = json_plugin(plugins, "ekho.bak-portable")
 
     with denied(backup / "plugin.json"):
-        passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-        assert passed is None, detail
+        status, detail = healthcheck.check_plugin_shadows(str(plugins))
+        assert status == healthcheck.UNDETERMINED, detail
         assert str(backup / "plugin.json") in detail
 
         moved, detail = healthcheck.repair_plugin_shadows(str(plugins))
@@ -302,8 +338,8 @@ def test_explicit_root_under_an_unsearchable_parent_is_undetermined(tmp_path):
     plugin(plugins, "ekho")
 
     with denied(parent, 0o000):
-        passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-        assert passed is None, detail
+        status, detail = healthcheck.check_plugin_shadows(str(plugins))
+        assert status == healthcheck.UNDETERMINED, detail
         assert str(plugins) in detail and "Permission" in detail
 
 
@@ -395,8 +431,8 @@ def test_the_only_install_is_never_moved_just_because_it_is_not_called_ekho(home
     assert scan.installs == (only,) and scan.canonical is None
     assert scan.shadows == ()
 
-    passed, detail = healthcheck.check_plugin_shadows(str(profile_plugins))
-    assert passed is True, detail
+    status, detail = healthcheck.check_plugin_shadows(str(profile_plugins))
+    assert status == healthcheck.PASS, detail
 
     moved, detail = healthcheck.repair_plugin_shadows()
     assert moved is False, detail
@@ -448,8 +484,8 @@ def test_without_hermes_discovery_the_check_cannot_tell(tmp_path, monkeypatch):
     plugin(plugins, "ekho")
     backup = plugin(plugins, "ekho.bak-pre050")
 
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed is None, detail
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.UNDETERMINED, detail
     assert "hermes_cli" in detail
 
     moved, detail = healthcheck.repair_plugin_shadows(str(plugins))
@@ -469,8 +505,8 @@ def test_without_hermes_constants_there_is_no_root_set(tmp_path, monkeypatch):
     plugin(plugins, "ekho")
     backup = plugin(plugins, "ekho.bak-pre050")
 
-    passed, detail = healthcheck.check_plugin_shadows()
-    assert passed is None, detail
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.UNDETERMINED, detail
     assert "hermes_constants" in detail
 
     moved, detail = healthcheck.repair_plugin_shadows()
@@ -481,7 +517,12 @@ def test_without_hermes_constants_there_is_no_root_set(tmp_path, monkeypatch):
 def test_main_warns_and_exits_nonzero_on_repair_it_cannot_justify(
     tmp_path, monkeypatch, capsys
 ):
-    """The two halves of "cannot tell" as an operator meets them."""
+    """The two halves of "cannot tell" as an operator meets them.
+
+    Verify: WARN, exit 3, and no ``healthy`` line — a run that could not ask
+    its question has not verified anything (#89 review). Repair: refused,
+    exit 1, nothing moved.
+    """
     monkeypatch.setattr(healthcheck, "repair", lambda: (True, "sdk ok"))
     monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
     monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
@@ -491,8 +532,11 @@ def test_main_warns_and_exits_nonzero_on_repair_it_cannot_justify(
     plugin(plugins, "ekho")
     backup = plugin(plugins, "ekho.bak-pre050")
 
-    assert healthcheck.main(["--plugins-dir", str(plugins)]) == 0
-    assert "[WARN] plugin-shadows:" in capsys.readouterr().out
+    assert healthcheck.main(["--plugins-dir", str(plugins)]) == healthcheck.EXIT_UNDETERMINED
+    captured = capsys.readouterr()
+    assert "[WARN] plugin-shadows:" in captured.out
+    assert "healthy" not in captured.out
+    assert "UNDETERMINED" in captured.err
 
     assert healthcheck.main(["--repair", "--plugins-dir", str(plugins)]) == 1
     assert "[FAIL] repair-shadows:" in capsys.readouterr().out
@@ -516,8 +560,8 @@ def test_versioned_install_discovered_under_two_names_is_one_install(tmp_path):
 
     scan = shadow_check.scan_root(plugins)
     assert len(scan.copies) == 2 and len(scan.installs) == 1
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed is True, detail
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.PASS, detail
 
 
 @needs_discovery
@@ -528,8 +572,8 @@ def test_a_clean_box_with_profiles_passes(home):
     plugin(home / ".hermes" / "profiles" / "work" / "plugins", "ekho")
     plugin(home / ".hermes" / "profiles" / "work" / "plugins", "other", name="other")
 
-    passed, detail = healthcheck.check_plugin_shadows()
-    assert passed is True, detail
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.PASS, detail
 
     moved, detail = healthcheck.repair_plugin_shadows()
     assert moved is True, detail
@@ -553,8 +597,8 @@ def test_repair_parks_each_copy_beside_the_root_it_came_from(home):
     assert (home / ".hermes" / "backups" / "ekho.bak-a" / "plugin.yaml").is_file()
     assert (profile / "backups" / "ekho.bak-b" / "plugin.yaml").is_file()
 
-    passed, detail = healthcheck.check_plugin_shadows()
-    assert passed is True, detail
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.PASS, detail
 
 
 # --- one directory is one root, however it is spelled ------------------------
@@ -590,8 +634,8 @@ def test_a_relative_hermes_home_is_one_root_not_two(home, monkeypatch):
     assert not backup.exists() and live.is_dir()
     assert (home / ".hermes" / "backups" / backup.name / "plugin.yaml").is_file()
 
-    passed, detail = healthcheck.check_plugin_shadows()
-    assert passed is True, detail
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.PASS, detail
 
 
 def test_a_source_that_vanished_is_reported_not_raised(tmp_path):

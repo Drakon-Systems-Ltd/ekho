@@ -14,9 +14,68 @@ from pathlib import Path
 
 import pytest
 
+from ekho_hermes import shadow_check
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 
+# The shadow verdict is Hermes' own: without ``hermes_cli`` the check answers
+# "cannot tell" for any root, the run is UNDETERMINED (exit 3), and no layout
+# can come out healthy. The cases that need a verdict skip with the reason.
+_needs_hermes = pytest.mark.skipif(
+    shadow_check.hermes_discovery() is None,
+    reason="hermes_cli not importable: the shadow verdict is Hermes' own",
+)
 
+# Prelude for a subprocess that must behave like a python without Hermes,
+# whatever the test runner's own interpreter can import: the two imports the
+# shadow check needs are refused the way an interpreter without them refuses
+# them. Raising (not returning None) ends the import right here.
+_NO_HERMES_PRELUDE = """
+import runpy
+import sys
+
+
+class _NoHermes:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in ("hermes_cli", "hermes_constants"):
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+        return None
+
+
+sys.meta_path.insert(0, _NoHermes())
+"""
+
+
+def _hermes_only_via_pythonpath() -> bool:
+    """True when this runner reaches ``hermes_cli`` through PYTHONPATH alone.
+
+    A subprocess that strips PYTHONPATH to look like an operator's shell then
+    has no Hermes, answers "cannot tell" and exits 3 — correctly, and not
+    about the thing under test. Callers skip with the fix rather than fail.
+    """
+    import hermes_cli
+
+    where = Path(hermes_cli.__file__).resolve()
+    return any(
+        where.is_relative_to(Path(entry).resolve())
+        for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if entry
+    )
+
+
+def _stub_checks(monkeypatch, healthcheck, shadows=None):
+    """Every check but the one under test answers PASS; *shadows* if given."""
+    monkeypatch.setattr(healthcheck, "repair", lambda: (True, "sdk ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
+    if shadows is not None:
+        monkeypatch.setattr(
+            healthcheck, "check_plugin_shadows", lambda plugins_root=None: shadows
+        )
+
+
+@_needs_hermes
 def test_healthcheck_module_passes_end_to_end(tmp_path):
     env = dict(os.environ)
     env["HOME"] = str(tmp_path)
@@ -34,6 +93,41 @@ def test_healthcheck_module_passes_end_to_end(tmp_path):
     assert "[PASS] sdk-surface:" in result.stdout
     assert "[PASS] registration:" in result.stdout
     assert "healthy" in result.stdout
+
+
+def test_module_run_without_hermes_is_undetermined_not_healthy(tmp_path):
+    """The #89 review's reproduction: a python where Hermes is not importable.
+
+    Through the first two cuts this run printed ``[WARN] plugin-shadows`` and
+    then ``healthy: ... verified`` with exit 0 — the false all-clear the shadow
+    check exists to remove, handed to anything watching the exit code. The
+    three SDK checks still PASS; the run as a whole is not verified.
+    """
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path)
+    env.pop("EKHO_RELAY_URL", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _NO_HERMES_PRELUDE
+            + "sys.argv = ['healthcheck']\n"
+            + "runpy.run_module('ekho_hermes.healthcheck', run_name='__main__', alter_sys=True)\n",
+        ],
+        cwd=PLUGIN_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "[PASS] sdk:" in result.stdout
+    assert "[PASS] registration:" in result.stdout
+    assert "[WARN] plugin-shadows:" in result.stdout
+    assert "hermes" in result.stdout.lower()  # the reason names the import
+    assert "healthy" not in result.stdout
+    assert "chain verified" not in result.stdout
+    assert "UNDETERMINED" in result.stderr
 
 
 def test_healthcheck_does_not_leak_dummy_relay_env(tmp_path, monkeypatch):
@@ -95,17 +189,73 @@ def test_repair_with_no_source_tree(monkeypatch, tmp_path):
 def test_main_exit_codes(monkeypatch, capsys):
     from ekho_hermes import healthcheck
 
-    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
-    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
-    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
+    _stub_checks(monkeypatch, healthcheck, shadows=(healthcheck.PASS, "one install"))
     assert healthcheck.main([]) == 0
+    assert "healthy" in capsys.readouterr().out
 
     monkeypatch.setattr(healthcheck, "check_sdk", lambda: (False, "broken"))
     assert healthcheck.main([]) == 1
     captured = capsys.readouterr()
     assert "--repair" in captured.err
+    assert "healthy" not in captured.out
 
 
+def test_undetermined_shadow_check_exits_3_and_is_not_healthy(monkeypatch, capsys):
+    """#89 review, must-fix: a WARN the check could not resolve is not healthy.
+
+    ``ok = ok and passed is not False`` folded "cannot tell" into "fine", so a
+    box where Hermes was not importable, or a copy could not be read, exited 0
+    and printed ``healthy: ... verified``. Now it is its own outcome, with its
+    own exit code, and the healthy line is never printed over it.
+    """
+    from ekho_hermes import healthcheck
+
+    _stub_checks(
+        monkeypatch,
+        healthcheck,
+        shadows=(
+            healthcheck.UNDETERMINED,
+            "cannot tell what Hermes loads under /x/plugins: /x/plugins/ekho.bak "
+            "could not be read (PermissionError: [Errno 13] Permission denied)",
+        ),
+    )
+    assert healthcheck.main([]) == healthcheck.EXIT_UNDETERMINED == 3
+    captured = capsys.readouterr()
+    assert "[WARN] plugin-shadows:" in captured.out
+    assert "healthy" not in captured.out
+    assert "chain verified" not in captured.out
+    assert "UNDETERMINED" in captured.err
+    assert "BROKEN" not in captured.err  # not broken either: not known
+
+
+def test_a_failure_outranks_an_undetermined_shadow_check(monkeypatch, capsys):
+    from ekho_hermes import healthcheck
+
+    _stub_checks(monkeypatch, healthcheck, shadows=(healthcheck.UNDETERMINED, "cannot tell"))
+    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (False, "broken"))
+    assert healthcheck.main([]) == 1
+    captured = capsys.readouterr()
+    assert "BROKEN" in captured.err
+    assert "UNDETERMINED" not in captured.err
+    assert "[WARN] plugin-shadows:" in captured.out  # the gap is still reported
+
+
+def test_absent_shadow_check_is_a_warn_that_stays_healthy(monkeypatch, capsys):
+    """The one WARN that IS an answer: nothing in any root takes the key."""
+    from ekho_hermes import healthcheck
+
+    _stub_checks(
+        monkeypatch,
+        healthcheck,
+        shadows=(healthcheck.ABSENT, "nothing under /x/plugins takes the 'ekho' key"),
+    )
+    assert healthcheck.main([]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] plugin-shadows:" in out
+    assert "healthy" in out
+
+
+@_needs_hermes
 def test_standalone_file_run_from_installed_dir_named_ekho(tmp_path):
     """The documented install copies the package to ~/.hermes/plugins/ekho —
     the package name changes, so `-m ekho_hermes...` dies. Running the module
@@ -122,6 +272,12 @@ def test_standalone_file_run_from_installed_dir_named_ekho(tmp_path):
     env["EKHO_SDK_PATH"] = str(PLUGIN_DIR.parents[1] / "sdks" / "python")
     env.pop("EKHO_RELAY_URL", None)
     env.pop("PYTHONPATH", None)
+    if _hermes_only_via_pythonpath():
+        pytest.skip(
+            "Hermes is importable only through PYTHONPATH, which this "
+            "operator-like subprocess strips; install it into the venv instead "
+            "(pip install --no-deps -e <hermes-agent checkout>)"
+        )
     result = subprocess.run(
         [sys.executable, str(install_dir / "healthcheck.py")],
         cwd=tmp_path,
@@ -137,6 +293,49 @@ def test_standalone_file_run_from_installed_dir_named_ekho(tmp_path):
     assert str(install_dir) not in [
         line for line in result.stdout.splitlines() if line.startswith("[PASS] sdk:")
     ][0]
+
+
+def test_standalone_file_without_hermes_exits_undetermined(tmp_path):
+    """Same layout, run as a FILE by a python without Hermes: exit 3, no healthy.
+
+    ``sys.path[0]`` is seeded with the install dir, as ``python <file>`` seeds
+    it, so the same SDK-shadowing trap is in play and must still be stripped.
+    """
+    import shutil
+
+    install_dir = tmp_path / ".hermes" / "plugins" / "ekho"
+    shutil.copytree(
+        PLUGIN_DIR / "ekho_hermes", install_dir, ignore=shutil.ignore_patterns("__pycache__")
+    )
+    env = dict(os.environ)
+    env["HOME"] = str(tmp_path)
+    env["EKHO_SDK_PATH"] = str(PLUGIN_DIR.parents[1] / "sdks" / "python")
+    env.pop("EKHO_RELAY_URL", None)
+    env.pop("PYTHONPATH", None)
+    script = str(install_dir / "healthcheck.py")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _NO_HERMES_PRELUDE
+            + f"sys.path.insert(0, {str(install_dir)!r})\n"
+            + f"sys.argv = [{script!r}]\n"
+            + f"runpy.run_path({script!r}, run_name='__main__')\n",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "[PASS] sdk:" in result.stdout
+    assert str(install_dir) not in [
+        line for line in result.stdout.splitlines() if line.startswith("[PASS] sdk:")
+    ][0]
+    assert "[WARN] plugin-shadows:" in result.stdout
+    assert "healthy" not in result.stdout
+    assert "UNDETERMINED" in result.stderr
 
 
 def test_dash_m_under_sdk_shadowing_name_fails_loudly(tmp_path):
@@ -185,13 +384,6 @@ def test_healthcheck_reports_interpreter():
 # answers "cannot tell" for any root, which is its own contract and is covered
 # in test_plugin_shadows_hermes.py rather than asserted nine times over.
 
-from ekho_hermes import shadow_check  # noqa: E402
-
-_needs_hermes = pytest.mark.skipif(
-    shadow_check.hermes_discovery() is None,
-    reason="hermes_cli not importable: the shadow verdict is Hermes' own",
-)
-
 
 def _fake_plugin(plugins_root, dirname, name="ekho"):
     d = plugins_root / dirname
@@ -211,8 +403,8 @@ def test_check_plugin_shadows_passes_with_single_canonical(tmp_path):
     plugins = tmp_path / ".hermes" / "plugins"
     _fake_plugin(plugins, "ekho")
     _fake_plugin(plugins, "other", name="other")
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed, detail
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.PASS, detail
 
 
 @_needs_hermes
@@ -222,8 +414,8 @@ def test_check_plugin_shadows_reports_every_duplicate(tmp_path):
     plugins = tmp_path / ".hermes" / "plugins"
     live = _fake_plugin(plugins, "ekho")
     backup = _fake_plugin(plugins, "ekho.bak-pre050-20260101")
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert not passed
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.FAIL, detail
     assert str(live) in detail
     assert str(backup) in detail
 
@@ -278,13 +470,6 @@ def test_repair_refuses_without_canonical_dir(tmp_path):
     assert a.is_dir() and b.is_dir()
 
 
-def _stub_checks(monkeypatch, healthcheck):
-    monkeypatch.setattr(healthcheck, "repair", lambda: (True, "sdk ok"))
-    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
-    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
-    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
-
-
 @_needs_hermes
 def test_versioned_symlink_is_not_a_shadow(tmp_path):
     from ekho_hermes import healthcheck
@@ -292,8 +477,8 @@ def test_versioned_symlink_is_not_a_shadow(tmp_path):
     plugins = tmp_path / ".hermes" / "plugins"
     target = _fake_plugin(plugins, "ekho-0.5.4")
     (plugins / "ekho").symlink_to(target, target_is_directory=True)
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed is True, detail
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.PASS, detail
 
 
 @_needs_hermes
@@ -367,7 +552,28 @@ def test_missing_plugins_dir_warns_but_does_not_fail(tmp_path, monkeypatch, caps
     _stub_checks(monkeypatch, healthcheck)
     missing = tmp_path / ".hermes" / "plugins"
     assert healthcheck.main(["--plugins-dir", str(missing)]) == 0
-    assert "[WARN] plugin-shadows:" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[WARN] plugin-shadows:" in out
+    assert "healthy" in out
+
+
+@_needs_hermes
+def test_root_where_nothing_takes_the_key_is_absent_not_undetermined(
+    tmp_path, monkeypatch, capsys
+):
+    """A root Hermes read to the bottom and found no ``ekho`` in is an answer."""
+    from ekho_hermes import healthcheck
+
+    plugins = tmp_path / ".hermes" / "plugins"
+    _fake_plugin(plugins, "other", name="other")
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.ABSENT, detail
+
+    _stub_checks(monkeypatch, healthcheck)
+    assert healthcheck.main(["--plugins-dir", str(plugins)]) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] plugin-shadows:" in out
+    assert "healthy" in out
 
 
 @_needs_hermes
@@ -377,6 +583,6 @@ def test_dangling_live_symlink_fails(tmp_path):
     plugins = tmp_path / ".hermes" / "plugins"
     plugins.mkdir(parents=True)
     (plugins / "ekho").symlink_to(plugins / "ekho-0.5.4", target_is_directory=True)
-    passed, detail = healthcheck.check_plugin_shadows(str(plugins))
-    assert passed is False
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.FAIL, detail
     assert "dangling" in detail
