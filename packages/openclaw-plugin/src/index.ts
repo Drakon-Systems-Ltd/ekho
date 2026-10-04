@@ -4,6 +4,7 @@ import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
+import { registerModelCallHooks } from "./model-call-hooks.js";
 import { effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
 import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
@@ -44,9 +45,10 @@ interface LocalAttachment {
  */
 async function resolveLocalAttachments(
   messages: Array<Record<string, unknown>>,
-  client: EkhoAgentClient
+  client: EkhoAgentClient,
+  config?: { stateDir?: string }
 ): Promise<LocalAttachment[][]> {
-  const dir = attachmentsDownloadDir();
+  const dir = attachmentsDownloadDir(config);
   let dirReady = false;
   const ensureDir = () => {
     if (!dirReady) {
@@ -66,7 +68,7 @@ async function resolveLocalAttachments(
           continue;
         }
         const filename = sanitizeFilename(typeof meta.filename === "string" ? meta.filename : meta.id);
-        const localPath = attachmentLocalPath(meta.id, filename);
+        const localPath = attachmentLocalPath(meta.id, filename, config);
         try {
           if (!fs.existsSync(localPath)) {
             const { bytes } = await client.downloadAttachment(meta.id);
@@ -245,7 +247,8 @@ const plugin = defineToolPlugin({
     displayName: Type.Optional(Type.String({ description: "Display name shown in the operator console" })),
     heartbeatIntervalMs: Type.Optional(Type.Number({ description: "Heartbeat interval in ms (default 30000)" })),
     peerAutoreply: Type.Optional(Type.Boolean({ description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)" })),
-    peerTurnBudget: Type.Optional(Type.Number({ description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence." }))
+    peerTurnBudget: Type.Optional(Type.Number({ description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence." })),
+    stateDir: Type.Optional(Type.String({ description: "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both." }))
   }),
   tools: (tool) => [
     tool({
@@ -352,7 +355,7 @@ const plugin = defineToolPlugin({
         // every poll. Each download is isolated: one bad attachment never fails
         // the whole inbox read. Bytes are written 0o600 under an id-prefixed,
         // sanitized filename (no collisions, no path traversal).
-        const localAttachments = await resolveLocalAttachments(messages, client);
+        const localAttachments = await resolveLocalAttachments(messages, client, config);
 
         return {
           count: messages.length,
@@ -443,24 +446,16 @@ plugin.register = (api) => {
   } catch (err) {
     api.logger?.debug?.(`[ekho-adapter] model config seed unavailable: ${String(err)}`);
   }
+  // Model-call hooks are TYPED hooks: the host only runs them via api.on (see
+  // model-call-hooks.ts). Falls back to registerHook only on hosts without api.on.
   try {
-    api.registerHook?.("model_call_started", (event) => {
-      const e = event as { model?: string; provider?: string } | undefined;
-      noteObservedModel(e?.model, e?.provider);
+    const route = registerModelCallHooks(api, {
+      onStarted: (model, provider) => noteObservedModel(model, provider),
+      onEnded: (outcome, category) => noteModelCallEnded(outcome, category)
     });
+    api.logger?.debug?.(`[ekho-adapter] model_call hooks: ${route}`);
   } catch (err) {
-    api.logger?.debug?.(`[ekho-adapter] model_call hook unavailable: ${String(err)}`);
-  }
-  // Turn-outcome telemetry: fold each finished model call into the rolling
-  // health window so the heartbeat carries a truthful cognitive-health signal
-  // (an agent whose every turn 404s reads red on the board, not green).
-  try {
-    api.registerHook?.("model_call_ended", (event) => {
-      const e = event as { outcome?: string; errorCategory?: string; failureKind?: string } | undefined;
-      noteModelCallEnded(e?.outcome, e?.errorCategory ?? e?.failureKind);
-    });
-  } catch (err) {
-    api.logger?.debug?.(`[ekho-adapter] model_call_ended hook unavailable: ${String(err)}`);
+    api.logger?.debug?.(`[ekho-adapter] model_call hooks unavailable: ${String(err)}`);
   }
 
   const config = api.pluginConfig as EkhoPluginConfig | undefined;

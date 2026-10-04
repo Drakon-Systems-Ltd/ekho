@@ -1,6 +1,6 @@
 {
   "name": "@ekho/relay",
-  "version": "0.5.4",
+  "version": "0.5.6",
   "description": "Ekho relay server — private communication and control layer for distributed AI agents.",
   "main": "src/server.ts",
   "scripts": {
@@ -8,6 +8,7 @@
     "start": "tsx src/server.ts",
     "setup": "tsx src/setup.ts",
     "doctor": "tsx src/setup.ts --doctor",
+    "recovery-grant": "tsx src/recovery-grant.ts",
     "typecheck": "tsc --noEmit",
     "agent:demo": "tsx src/demo-agent.ts",
     "ui:dev": "vite",

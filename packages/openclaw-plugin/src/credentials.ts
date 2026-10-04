@@ -46,11 +46,45 @@ export interface EkhoIdentity {
   operatorKeyAdmissions?: Record<string, OperatorKeyAdmission>;
 }
 
-export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
+/**
+ * Thrown instead of minting. Before 4 Oct 2026 an identity file that was
+ * present but unparseable, or absent on a box whose config already names an
+ * enrolled agent, silently produced a NEW random seed and registered it with
+ * the relay. Seven live "Jarvis" identity keys with no private half anywhere
+ * were found that way, each later endorsed by the operator in good faith. A
+ * key that exists only because a read failed is a forged identity, not a
+ * recovery; the caller must stop and say so.
+ */
+export class IdentityUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "unreadable" | "missing"
+  ) {
+    super(message);
+    this.name = "IdentityUnavailableError";
+  }
+}
+
+/** Set to "1" to let an already-enrolled agent mint a brand-new identity key. */
+export const ALLOW_NEW_IDENTITY_ENV = "EKHO_ALLOW_NEW_IDENTITY";
+
+export interface LoadIdentityOptions {
+  /**
+   * Whether an ABSENT file may be answered with a freshly minted identity.
+   * Default true (first enrolment). Pass false for an agent whose config already
+   * carries enrolled credentials: its identity must already exist somewhere,
+   * so an absent file is a lost/moved file, not a new agent.
+   */
+  allowCreate?: boolean;
+}
+
+export function loadOrCreateIdentity(configDir: string, opts: LoadIdentityOptions = {}): EkhoIdentity {
   const filePath = path.join(configDir, IDENTITY_FILE);
   if (fs.existsSync(filePath)) {
+    let raw: Buffer | undefined;
     try {
-      const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<EkhoIdentity>;
+      raw = fs.readFileSync(filePath);
+      const data = JSON.parse(raw.toString("utf-8")) as Partial<EkhoIdentity>;
       if (data?.seedHex) {
         // Spread the file FIRST: a field this build doesn't know about (written
         // by a newer plugin, or by the other runtime sharing the config dir)
@@ -69,8 +103,26 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
         };
       }
     } catch {
-      /* fall through and regenerate */
+      /* present but unusable: handled below, never regenerated over */
     }
+    // The file is there but this build cannot use it (unreadable, not JSON,
+    // or no seed). Keep the bytes for forensics and refuse. Overwriting them
+    // with a new seed would both destroy the evidence and mint a second live
+    // identity for this agent on the relay.
+    const preserved = preserveUnusableFile(filePath, raw);
+    throw new IdentityUnavailableError(
+      `[ekho] identity file ${filePath} is present but unusable; refusing to mint a replacement key` +
+        (preserved ? ` (bytes preserved at ${preserved})` : "") +
+        `. Restore the file from a backup, or remove it and set ${ALLOW_NEW_IDENTITY_ENV}=1 to enrol a new key on purpose.`,
+      "unreadable"
+    );
+  }
+  if (opts.allowCreate === false) {
+    throw new IdentityUnavailableError(
+      `[ekho] no identity file at ${filePath} but this agent is already enrolled; refusing to mint a new key. ` +
+        `Restore the file from a backup (the relay already holds this agent's key), or set ${ALLOW_NEW_IDENTITY_ENV}=1 to re-key on purpose.`,
+      "missing"
+    );
   }
   const identity: EkhoIdentity = {
     seedHex: crypto.randomBytes(32).toString("hex"),
@@ -80,30 +132,111 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
   return identity;
 }
 
+/** Byte-for-byte copy of an unusable state file, for forensics. Bytes, not a
+ *  decoded string: invalid UTF-8 must survive exactly (review, Case, 4 Oct). */
+function preserveUnusableFile(filePath: string, raw: Buffer | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const target = `${filePath}.unusable-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  try {
+    fs.writeFileSync(target, raw, { mode: 0o600 });
+    return target;
+  } catch {
+    return undefined; // best effort; the refusal is what matters
+  }
+}
+
+/**
+ * Thrown by enrollOrLoad instead of enrolling a NEW agent over an existing
+ * enrolment whose credentials file is present but unusable. Before 4 Oct 2026
+ * that file read as "nothing saved" and, with an enrollment token in config,
+ * the plugin quietly became a brand-new agent with a brand-new identity.
+ */
+export class CredentialsUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CredentialsUnavailableError";
+  }
+}
+
+export type StoredCredentialsState =
+  | { state: "absent" }
+  | { state: "ok"; credentials: EkhoCredentials }
+  | { state: "unusable"; preservedAt?: string };
+
+/**
+ * Three-way read of the saved credentials. "unusable" is a present file this
+ * build cannot use — it still proves an enrolment happened here, so callers
+ * must treat it as enrolled and fail closed, never as a first enrolment.
+ */
+export function storedCredentialsState(
+  configDir: string,
+  opts: { preserve?: boolean } = {}
+): StoredCredentialsState {
+  const filePath = path.join(configDir, CREDENTIALS_FILE);
+  if (!fs.existsSync(filePath)) return { state: "absent" };
+  let raw: Buffer | undefined;
+  try {
+    raw = fs.readFileSync(filePath);
+    const parsed = JSON.parse(raw.toString("utf-8")) as Partial<EkhoCredentials> | null;
+    if (parsed && typeof parsed.agentId === "string" && typeof parsed.secret === "string") {
+      return { state: "ok", credentials: parsed as EkhoCredentials };
+    }
+  } catch {
+    /* unusable */
+  }
+  return { state: "unusable", ...(opts.preserve ? { preservedAt: preserveUnusableFile(filePath, raw) } : {}) };
+}
+
+/**
+ * Atomic: write a sibling temp file and rename it over the real one, so no
+ * reader (another plugin instance, a CLI run, the other runtime sharing this
+ * dir) can ever observe a truncated identity file mid-write.
+ */
 export function saveIdentity(configDir: string, identity: EkhoIdentity) {
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(path.join(configDir, IDENTITY_FILE), JSON.stringify(identity, null, 2), {
-    mode: 0o600
-  });
+  const filePath = path.join(configDir, IDENTITY_FILE);
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(identity, null, 2), { mode: 0o600 });
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* nothing to clean */
+    }
+    throw err;
+  }
 }
 
 export function identityPublicKey(identity: EkhoIdentity): string {
   return publicKeyB64urlFromSeed(new Uint8Array(Buffer.from(identity.seedHex, "hex")));
 }
 
+/** Null for absent OR unusable. Prefer storedCredentialsState where the
+ *  difference matters (it always does before enrolling or minting). */
 export function loadCredentials(configDir: string): EkhoCredentials | null {
-  const filePath = path.join(configDir, CREDENTIALS_FILE);
-  if (!fs.existsSync(filePath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as EkhoCredentials;
-  } catch {
-    return null;
-  }
+  const stored = storedCredentialsState(configDir);
+  return stored.state === "ok" ? stored.credentials : null;
 }
 
+/** Same atomic temp-then-rename, owner-only write as saveIdentity: the file
+ *  holds the agent secret. */
 export function saveCredentials(configDir: string, credentials: EkhoCredentials) {
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(path.join(configDir, CREDENTIALS_FILE), JSON.stringify(credentials, null, 2));
+  const filePath = path.join(configDir, CREDENTIALS_FILE);
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* nothing to clean */
+    }
+    throw err;
+  }
 }
 
 /** Operator keys the relay handed us at enrollment — the trust bootstrap the
@@ -143,9 +276,19 @@ export async function enrollOrLoad(config: {
     return creds;
   }
 
-  // 2. Saved credentials from previous enrollment
-  const saved = loadCredentials(config.configDir);
-  if (saved) return saved;
+  // 2. Saved credentials from previous enrollment. A present-but-unusable
+  //    file is still an enrolment: refuse, keep the bytes, and never fall
+  //    through to the token path — that path mints a NEW agent and identity.
+  const stored = storedCredentialsState(config.configDir, { preserve: true });
+  if (stored.state === "ok") return stored.credentials;
+  if (stored.state === "unusable") {
+    throw new CredentialsUnavailableError(
+      `[ekho-adapter] saved credentials at ${path.join(config.configDir, CREDENTIALS_FILE)} are present but unusable; ` +
+        `refusing to enrol a new agent over them` +
+        (stored.preservedAt ? ` (bytes preserved at ${stored.preservedAt})` : "") +
+        `. Restore the file from a backup, or remove it to enrol again on purpose.`
+    );
+  }
 
   // 3. Enroll with token
   if (!config.enrollmentToken || !config.fleetId) {

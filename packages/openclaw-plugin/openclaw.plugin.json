@@ -1,6 +1,6 @@
 {
   "id": "ekho-adapter",
-  "version": "0.5.4",
+  "version": "0.5.6",
   "name": "Ekho Relay Adapter",
   "description": "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
   "configSchema": {
@@ -39,11 +39,15 @@
       },
       "peerAutoreply": {
         "type": "boolean",
-        "description": "Enable bounded agent-to-agent delegation \u2014 let teammates wake this agent (default true)"
+        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true)"
       },
       "peerTurnBudget": {
         "type": "number",
         "description": "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence."
+      },
+      "stateDir": {
+        "type": "string",
+        "description": "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both."
       }
     }
   },

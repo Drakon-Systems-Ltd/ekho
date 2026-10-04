@@ -11,7 +11,7 @@ RUN npm ci
 COPY tsconfig.base.json ./
 COPY packages/ packages/
 RUN npm run build -w @drakon-systems/ekho-sdk
-RUN npm run ui:build -w @ekho/relay 2>/dev/null || true
+RUN npm run ui:build -w @ekho/relay
 
 # Stage 2: Runtime
 FROM node:22-alpine

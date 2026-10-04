@@ -86,8 +86,11 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
     logger?: PluginLogger;
     // Resolved OpenClaw config (host-internal shape; read defensively).
     config?: unknown;
-    // Host hook registration — used to observe the live model via "model_call_started".
-    // Feature-detected at runtime; optional because not every host/version exposes it.
+    // Host hook registration. `on` is the TYPED hook API (model_call_started /
+    // model_call_ended are typed hooks and only run through it); `registerHook`
+    // is the internal bus, kept as a fallback for hosts that lack `on`.
+    // Both feature-detected at runtime.
+    on?: (hookName: string, handler: (event: unknown, ctx?: unknown) => unknown, opts?: unknown) => void;
     registerHook?: (
       events: string | string[],
       handler: (event: unknown, ctx?: unknown) => void,
@@ -126,4 +129,13 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
   export function defineToolPlugin<TConfigSchema extends TSchema | undefined = undefined>(
     definition: DefineToolPluginOptions<TConfigSchema>
   ): DefinedToolPluginEntry;
+}
+
+// OpenClaw's state-root resolver. Mirrors openclaw/dist/plugin-sdk/state-paths.d.ts
+// (resolveStateDir: OPENCLAW_STATE_DIR, else ~/.openclaw or a legacy dir that
+// already exists). Used for its type only: state-dir.ts loads it with a guarded
+// require so a host without this module falls back instead of failing to load.
+declare module "openclaw/plugin-sdk/state-paths" {
+  export function resolveStateDir(env?: NodeJS.ProcessEnv, homedir?: () => string): string;
+  export const STATE_DIR: string;
 }

@@ -198,7 +198,28 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    return reply.send({ keys: db.listOperatorKeys(request.operator.fleetId) });
+    // #93: an armed one-off recovery grant, so the console can offer exactly
+    // that one endorsement and say plainly that it is single-use. Read-only:
+    // grants are armed and cancelled ONLY on the relay host
+    // (src/recovery-grant.ts); there is deliberately no route that writes one.
+    const grant = db.getActiveOperatorRecoveryGrant(request.operator.fleetId);
+    const fleetId = request.operator.fleetId;
+    return reply.send({
+      // `trusted`: the relay's own answer to "may this key endorse?", so the
+      // console's buttons follow the rule that binds (db.operatorKeyMayEndorse).
+      keys: db.listOperatorKeys(fleetId).map((k) => ({
+        ...k,
+        trusted: db.operatorKeyMayEndorse(fleetId, k.key_id)
+      })),
+      recovery_grant: grant
+        ? {
+            grant_id: grant.id,
+            endorser_key_id: grant.endorser_key_id,
+            target_key_id: grant.target_key_id,
+            expires_at: grant.expires_at
+          }
+        : null
+    });
   });
 
   // Fleet agent identity keys — drives the Security screen's endorse-agents panel.

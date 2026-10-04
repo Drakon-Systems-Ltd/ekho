@@ -366,6 +366,23 @@ CREATE TABLE IF NOT EXISTS fleet_operator_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_operator_keys_fleet_active ON fleet_operator_keys(fleet_id, revoked_at);
 
+-- One-off operator-key recovery grants (#93; see migrations/023). Armed only on
+-- the relay host; lets one named key endorse one named successor operator key,
+-- once, before expires_at. Never applies to agent-key endorsements.
+CREATE TABLE IF NOT EXISTS operator_recovery_grants (
+  id TEXT PRIMARY KEY,
+  fleet_id TEXT NOT NULL,
+  endorser_key_id TEXT NOT NULL,
+  target_key_id TEXT NOT NULL,
+  confirmed_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  cancelled_at TEXT,
+  FOREIGN KEY (fleet_id) REFERENCES fleets(id)
+);
+CREATE INDEX IF NOT EXISTS idx_operator_recovery_grants_fleet ON operator_recovery_grants(fleet_id, endorser_key_id);
+
 -- Agent identity keys (agent-to-agent trust). Each agent holds its own Ed25519
 -- private key locally and registers the public key here. The operator endorses it
 -- (endorsement_sig over agentKeyEndorsementPayload, by an operator key) so peers

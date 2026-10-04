@@ -28,6 +28,7 @@ import {
 } from "./api.js";
 import {
   endorserStatus,
+  consolidationTargets,
   dependentsOf,
   trustHealth,
   deviceKeySigningState,
@@ -40,6 +41,8 @@ import {
   trustRootKey,
   thisBrowserHoldsTrustRoot,
   actingDeviceLabel,
+  activeRecoveryGrant,
+  recoveryNotice,
 } from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
@@ -53,6 +56,8 @@ export default function SecurityScreen({ session, agents = [] }) {
   const [label, setLabel] = useState("this device");
   const [keys, setKeys] = useState([]);
   const [agentKeys, setAgentKeys] = useState([]);
+  // #93: an armed one-off recovery grant, if the relay host has armed one.
+  const [recoveryGrant, setRecoveryGrant] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null); // { tone, text }
 
@@ -63,6 +68,7 @@ export default function SecurityScreen({ session, agents = [] }) {
     try {
       const [k, ak] = await Promise.all([listOperatorKeys(token), getAgentKeys(token)]);
       setKeys(k.keys || []);
+      setRecoveryGrant(k.recovery_grant || null);
       setAgentKeys(ak.keys || []);
     } catch (e) {
       note("danger", `Load failed: ${e.message || e}`);
@@ -78,7 +84,7 @@ export default function SecurityScreen({ session, agents = [] }) {
   // The rescue for a device that cannot sign for itself — without this, a key
   // minted on a stranded device is permanently invisible to every agent.
   const onEndorseKey = async (targetKeyId) => {
-    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId, agentKeys);
+    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId, agentKeys, recoveryGrant);
     if (!guard.allowed) return note("danger", guard.reason);
     const target = keys.find((k) => k.key_id === targetKeyId);
     setBusy(true);
@@ -92,7 +98,14 @@ export default function SecurityScreen({ session, agents = [] }) {
       });
       note(
         "ok",
-        `${targetKeyId} endorsed by ${unlocked.keyId}. Agents that trust ${unlocked.keyId} adopt it on their next poll — that device can send again without re-enrolling.`
+        guard.recovery
+          ? // #93: the grant is now used up. Say what comes next, in order —
+            // revoking the lost root before the agents move would orphan them.
+            `Recovery done: ${targetKeyId} endorsed by ${unlocked.keyId}. The one-time recovery is now used up. ` +
+              `Next, in this order: (1) open the browser that holds ${targetKeyId} and press “Consolidate all under this device” — ` +
+              `your agents are still endorsed by the lost key, which is correct until they have moved; ` +
+              `(2) check every agent shows as endorsed by ${targetKeyId}; (3) only then revoke the lost key.`
+          : `${targetKeyId} endorsed by ${unlocked.keyId}. Agents that trust ${unlocked.keyId} adopt it on their next poll — that device can send again without re-enrolling.`
       );
       await refresh();
     } catch (e) {
@@ -232,16 +245,15 @@ export default function SecurityScreen({ session, agents = [] }) {
     }
   };
 
-  // Re-endorse every agent whose endorser is missing/revoked under the unlocked device key.
-  // This is the one-click recovery after a key rotation: it re-roots peer trust at a live key.
-  const onReendorseAll = async () => {
+  // Endorse a set of agent keys under the unlocked device key, one by one, and
+  // report the tally once. Shared by the two bulk actions below.
+  const endorseAgentsUnderThisDevice = async (targets, noneMessage) => {
     if (!unlocked) return note("warn", "Unlock your operator identity first.");
     // #15: never sign with a key the relay has revoked — every endorsement it
     // produces is dropped by the agents on their next poll, and the old failure
     // toast blamed the agents for it.
     if (!signing.canSign) return note("danger", `${signing.reason} ${signing.recovery ?? ""}`.trim());
-    const targets = agentKeys.filter((ak) => endorserStatus(ak, keys, unlocked.keyId).needsAction);
-    if (!targets.length) return note("ok", "Every agent already trusts this device.");
+    if (!targets.length) return note("ok", noneMessage);
     setBusy(true);
     let done = 0;
     const failed = [];
@@ -263,6 +275,25 @@ export default function SecurityScreen({ session, agents = [] }) {
     await refresh();
     setBusy(false);
   };
+
+  // Re-endorse every agent whose endorser is missing/revoked under the unlocked device key.
+  // This is the one-click recovery after a key rotation: it re-roots peer trust at a live key.
+  const onReendorseAll = () =>
+    endorseAgentsUnderThisDevice(
+      agentKeys.filter((ak) => endorserStatus(ak, keys, unlocked?.keyId).needsAction),
+      "Every agent already trusts this device."
+    );
+
+  // #93: move agents that sit on ANOTHER live key onto this one. Not a fault,
+  // so the health banner stays quiet — but after a trust-root recovery this is
+  // the step that carries the fleet onto the successor, before the lost root
+  // is revoked. The 4 Oct review found the ceremony pointing at a button that
+  // could not render in exactly this state.
+  const onConsolidateAll = () =>
+    endorseAgentsUnderThisDevice(
+      consolidationTargets(agentKeys, keys, unlocked?.keyId),
+      "Every agent is already endorsed by this device."
+    );
 
   const onEndorse = async (ak) => {
     if (!unlocked) return note("warn", "Unlock your operator identity first.");
@@ -287,6 +318,7 @@ export default function SecurityScreen({ session, agents = [] }) {
 
   const nameFor = (id) => agents.find((a) => a.id === id)?.display_name || id;
   const health = trustHealth(keys, agentKeys, unlocked?.keyId);
+  const consolidation = consolidationTargets(agentKeys, keys, unlocked?.keyId);
   const signing = deviceKeySigningState(keys, unlocked?.keyId, agentKeys);
   // 16 Aug: signing.canSign only asks whether the key is live. A live-but-
   // untrusted key ran the bulk re-endorse below and moved all 8 agents onto a
@@ -320,6 +352,20 @@ export default function SecurityScreen({ session, agents = [] }) {
       </div>
 
       {msg && <div className={`sec__msg sec__msg--${msg.tone}`}>{msg.text}</div>}
+
+      {/* #93: a one-off recovery armed on the relay host. Say exactly what it
+          allows, that it is single-use, and the order of what follows. */}
+      {activeRecoveryGrant(recoveryGrant) && (
+        <div className="sec__alert">
+          <div className="sec__alert-h">⚿ One-time recovery is armed</div>
+          <div className="sec__alert-b">
+            {recoveryNotice(recoveryGrant)}{" "}
+            {unlocked?.keyId === recoveryGrant.endorser_key_id
+              ? `This browser holds ${recoveryGrant.endorser_key_id}: press Endorse on ${recoveryGrant.target_key_id} in panel ②.`
+              : `Do it from the browser that holds ${recoveryGrant.endorser_key_id}.`}
+          </div>
+        </div>
+      )}
 
       {/* #15: zero live operator keys is the loudest state on this page. With no
           live key every agent's trust map empties, verification returns a null
@@ -365,6 +411,29 @@ export default function SecurityScreen({ session, agents = [] }) {
             <div className="sec__hint">{signing.canSign ? authority.reason : `${signing.reason} ${signing.recovery ?? ""}`}</div>
           ) : (
             <div className="sec__hint">Unlock your operator identity above, then re-endorse the affected agents.</div>
+          )}
+        </div>
+      )}
+
+      {/* #93 consolidation — agents endorsed by ANOTHER live device key. Health is
+          ok, so the banner above is rightly silent; but after a trust-root
+          recovery this is the step that moves the fleet onto the successor, and
+          the ceremony has to be able to follow its own copy. */}
+      {health.ok && consolidation.length > 0 && unlocked && (
+        <div className="sec__alert">
+          <div className="sec__alert-h">
+            ↻ {consolidation.length} agent{consolidation.length > 1 ? "s are" : " is"} endorsed by another device
+          </div>
+          <div className="sec__alert-b">
+            Endorsing them here re-roots their trust at this device key. After a recovery, do this from the
+            successor browser before revoking the lost key.
+          </div>
+          {signing.canSign && authority.allowed ? (
+            <button className="sec__btn sec__btn--go" disabled={busy} onClick={onConsolidateAll}>
+              Consolidate all under this device · {unlocked.keyId}
+            </button>
+          ) : (
+            <div className="sec__hint">{signing.canSign ? authority.reason : `${signing.reason} ${signing.recovery ?? ""}`}</div>
           )}
         </div>
       )}
@@ -472,8 +541,12 @@ export default function SecurityScreen({ session, agents = [] }) {
                       </span>
                       <button
                         className="sec__btn sec__btn--go"
-                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys).allowed}
-                        title={rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys).reason || `Endorse ${k.key_id} with this device's key`}
+                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys, recoveryGrant).allowed}
+                        title={
+                          rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys, recoveryGrant).reason ||
+                          rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys, recoveryGrant).notice ||
+                          `Endorse ${k.key_id} with this device's key`
+                        }
                         onClick={() => onEndorseKey(k.key_id)}
                       >
                         Endorse
