@@ -554,6 +554,12 @@ export class EkhoDb {
         fromB64url(endorser.public_key)
       );
       if (!ok) throw new Error("invalid key endorsement signature");
+      // Same authority rule as endorseOperatorKey and endorseAgentKey. Without
+      // it, registering a NEW key with an endorsement only proved the endorser
+      // was live, so a live-but-untrusted key could mint a child that the
+      // "parent is live" chain rule then treats as trusted. Recovery grants
+      // never open this path (#93): they are honoured only by endorseOperatorKey.
+      this.assertEndorserIsTrusted(fleetId, endorsement.endorsedByKeyId);
     }
     const exists = this.db
       .prepare("SELECT 1 FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
