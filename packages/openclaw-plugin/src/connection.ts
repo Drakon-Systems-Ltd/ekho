@@ -5,7 +5,7 @@ import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
 import {
   enrollOrLoad,
   loadOrCreateIdentity,
-  loadCredentials,
+  storedCredentialsState,
   saveIdentity,
   IdentityUnavailableError,
   ALLOW_NEW_IDENTITY_ENV,
@@ -355,7 +355,7 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
     const configDir = path.join(os.homedir(), ".openclaw", "extensions", "ekho-adapter");
     // Read BEFORE enrollOrLoad: a fresh enrolment writes this file, and the
     // identity rule below must see the state as it was when we arrived.
-    const hasStoredCredentials = loadCredentials(configDir) !== null;
+    const hasStoredCredentials = storedCredentialsState(configDir).state !== "absent";
     const credentials = await enrollOrLoad({
       configDir,
       relayBaseUrl: config.relayBaseUrl,

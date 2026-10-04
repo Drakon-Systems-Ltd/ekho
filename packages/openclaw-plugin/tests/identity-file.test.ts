@@ -5,9 +5,13 @@ import { join } from "node:path";
 import {
   loadOrCreateIdentity,
   saveIdentity,
+  storedCredentialsState,
+  enrollOrLoad,
   IdentityUnavailableError,
+  CredentialsUnavailableError,
   type EkhoIdentity,
 } from "../src/credentials";
+import { vi } from "vitest";
 import { registerAndBootstrapIdentity, shouldAllowNewIdentity } from "../src/connection";
 
 /**
@@ -53,6 +57,17 @@ describe("loadOrCreateIdentity", () => {
     const sidecars = readdirSync(d).filter((f) => f.startsWith(`${FILE}.unusable-`));
     expect(sidecars).toHaveLength(1);
     expect(readFileSync(join(d, sidecars[0]), "utf8")).toBe("{ not json");
+  });
+
+  it("preserves an unusable file byte-for-byte, including invalid UTF-8", () => {
+    const d = scratch();
+    const bytes = Buffer.from([0xff, 0xfe, 0x7b, 0x00, 0xc3, 0x28]); // not valid UTF-8, not JSON
+    writeFileSync(join(d, FILE), bytes);
+    expect(() => loadOrCreateIdentity(d)).toThrow(IdentityUnavailableError);
+    const sidecars = readdirSync(d).filter((f) => f.startsWith(`${FILE}.unusable-`));
+    expect(sidecars).toHaveLength(1);
+    expect(Buffer.compare(readFileSync(join(d, sidecars[0])), bytes)).toBe(0);
+    expect(Buffer.compare(readFileSync(join(d, FILE)), bytes)).toBe(0);
   });
 
   it("refuses a file that parses but carries no seed", () => {
@@ -137,5 +152,78 @@ describe("shouldAllowNewIdentity (the connect-site rule)", () => {
     expect(shouldAllowNewIdentity({ agentId: "agent_x", agentSecret: "s" }, { EKHO_ALLOW_NEW_IDENTITY: "1" }, fresh)).toBe(true);
     expect(shouldAllowNewIdentity({}, { EKHO_ALLOW_NEW_IDENTITY: "1" }, stored)).toBe(true);
     expect(shouldAllowNewIdentity({ allowNewIdentity: true }, {}, stored)).toBe(true);
+  });
+});
+
+const CREDS = ".ekho-credentials.json";
+describe("storedCredentialsState", () => {
+  it("absent / ok / unusable, and unusable is NOT null-equivalent", () => {
+    const d = scratch();
+    expect(storedCredentialsState(d)).toEqual({ state: "absent" });
+    writeFileSync(join(d, CREDS), JSON.stringify({ agentId: "agent_x", secret: "s", relayBaseUrl: "r", fleetId: "f" }));
+    expect(storedCredentialsState(d)).toMatchObject({ state: "ok", credentials: { agentId: "agent_x" } });
+    writeFileSync(join(d, CREDS), "{ broken");
+    expect(storedCredentialsState(d).state).toBe("unusable");
+    writeFileSync(join(d, CREDS), JSON.stringify({ relayBaseUrl: "r" })); // parses, no identity in it
+    expect(storedCredentialsState(d).state).toBe("unusable");
+  });
+  it("preserves bytes only when asked", () => {
+    const d = scratch();
+    const bytes = Buffer.from([0xff, 0x7b, 0xfe]);
+    writeFileSync(join(d, CREDS), bytes);
+    storedCredentialsState(d);
+    expect(readdirSync(d)).toEqual([CREDS]);
+    const r = storedCredentialsState(d, { preserve: true });
+    expect(r.state).toBe("unusable");
+    const side = readdirSync(d).filter((f) => f.startsWith(`${CREDS}.unusable-`));
+    expect(side).toHaveLength(1);
+    expect(Buffer.compare(readFileSync(join(d, side[0])), bytes)).toBe(0);
+  });
+});
+
+describe("enrollOrLoad never re-enrols over an unusable existing enrolment", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  const tokenConfig = (configDir: string) => ({
+    configDir,
+    relayBaseUrl: "https://relay.invalid",
+    fleetId: "flt_x",
+    enrollmentToken: "tok",
+    displayName: "t",
+  });
+
+  it("corrupt credentials + enrollment token → refuses, no network call, bytes kept", async () => {
+    const d = scratch();
+    writeFileSync(join(d, CREDS), "{ broken");
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("must not be called");
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    await expect(enrollOrLoad(tokenConfig(d))).rejects.toBeInstanceOf(CredentialsUnavailableError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(readFileSync(join(d, CREDS), "utf8")).toBe("{ broken");
+    expect(readdirSync(d).some((f) => f.startsWith(`${CREDS}.unusable-`))).toBe(true);
+  });
+
+  it("absent credentials + enrollment token → still a genuine first enrolment", async () => {
+    const d = scratch();
+    const fetchSpy = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ agent_id: "agent_new", secret: "sec", operator_keys: [] }),
+    }));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const creds = await enrollOrLoad(tokenConfig(d));
+    expect(creds.agentId).toBe("agent_new");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(storedCredentialsState(d).state).toBe("ok");
+  });
+
+  it("the connect-site presence check treats an unusable file as enrolled", () => {
+    const d = scratch();
+    writeFileSync(join(d, CREDS), "{ broken");
+    const hasStoredCredentials = storedCredentialsState(d).state !== "absent";
+    expect(shouldAllowNewIdentity({ enrollmentToken: "tok" } as never, {}, { hasStoredCredentials })).toBe(false);
   });
 });

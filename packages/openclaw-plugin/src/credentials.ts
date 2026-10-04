@@ -81,10 +81,10 @@ export interface LoadIdentityOptions {
 export function loadOrCreateIdentity(configDir: string, opts: LoadIdentityOptions = {}): EkhoIdentity {
   const filePath = path.join(configDir, IDENTITY_FILE);
   if (fs.existsSync(filePath)) {
-    let raw: string | undefined;
+    let raw: Buffer | undefined;
     try {
-      raw = fs.readFileSync(filePath, "utf-8");
-      const data = JSON.parse(raw) as Partial<EkhoIdentity>;
+      raw = fs.readFileSync(filePath);
+      const data = JSON.parse(raw.toString("utf-8")) as Partial<EkhoIdentity>;
       if (data?.seedHex) {
         // Spread the file FIRST: a field this build doesn't know about (written
         // by a newer plugin, or by the other runtime sharing the config dir)
@@ -109,7 +109,7 @@ export function loadOrCreateIdentity(configDir: string, opts: LoadIdentityOption
     // or no seed). Keep the bytes for forensics and refuse. Overwriting them
     // with a new seed would both destroy the evidence and mint a second live
     // identity for this agent on the relay.
-    const preserved = preserveUnusableIdentity(filePath, raw);
+    const preserved = preserveUnusableFile(filePath, raw);
     throw new IdentityUnavailableError(
       `[ekho] identity file ${filePath} is present but unusable; refusing to mint a replacement key` +
         (preserved ? ` (bytes preserved at ${preserved})` : "") +
@@ -132,15 +132,59 @@ export function loadOrCreateIdentity(configDir: string, opts: LoadIdentityOption
   return identity;
 }
 
-function preserveUnusableIdentity(filePath: string, raw: string | undefined): string | undefined {
+/** Byte-for-byte copy of an unusable state file, for forensics. Bytes, not a
+ *  decoded string: invalid UTF-8 must survive exactly (review, Case, 4 Oct). */
+function preserveUnusableFile(filePath: string, raw: Buffer | undefined): string | undefined {
   if (raw === undefined) return undefined;
   const target = `${filePath}.unusable-${new Date().toISOString().replace(/[:.]/g, "-")}`;
   try {
     fs.writeFileSync(target, raw, { mode: 0o600 });
     return target;
   } catch {
-    return undefined; // best effort; the refusal above is what matters
+    return undefined; // best effort; the refusal is what matters
   }
+}
+
+/**
+ * Thrown by enrollOrLoad instead of enrolling a NEW agent over an existing
+ * enrolment whose credentials file is present but unusable. Before 4 Oct 2026
+ * that file read as "nothing saved" and, with an enrollment token in config,
+ * the plugin quietly became a brand-new agent with a brand-new identity.
+ */
+export class CredentialsUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CredentialsUnavailableError";
+  }
+}
+
+export type StoredCredentialsState =
+  | { state: "absent" }
+  | { state: "ok"; credentials: EkhoCredentials }
+  | { state: "unusable"; preservedAt?: string };
+
+/**
+ * Three-way read of the saved credentials. "unusable" is a present file this
+ * build cannot use — it still proves an enrolment happened here, so callers
+ * must treat it as enrolled and fail closed, never as a first enrolment.
+ */
+export function storedCredentialsState(
+  configDir: string,
+  opts: { preserve?: boolean } = {}
+): StoredCredentialsState {
+  const filePath = path.join(configDir, CREDENTIALS_FILE);
+  if (!fs.existsSync(filePath)) return { state: "absent" };
+  let raw: Buffer | undefined;
+  try {
+    raw = fs.readFileSync(filePath);
+    const parsed = JSON.parse(raw.toString("utf-8")) as Partial<EkhoCredentials> | null;
+    if (parsed && typeof parsed.agentId === "string" && typeof parsed.secret === "string") {
+      return { state: "ok", credentials: parsed as EkhoCredentials };
+    }
+  } catch {
+    /* unusable */
+  }
+  return { state: "unusable", ...(opts.preserve ? { preservedAt: preserveUnusableFile(filePath, raw) } : {}) };
 }
 
 /**
@@ -169,14 +213,11 @@ export function identityPublicKey(identity: EkhoIdentity): string {
   return publicKeyB64urlFromSeed(new Uint8Array(Buffer.from(identity.seedHex, "hex")));
 }
 
+/** Null for absent OR unusable. Prefer storedCredentialsState where the
+ *  difference matters (it always does before enrolling or minting). */
 export function loadCredentials(configDir: string): EkhoCredentials | null {
-  const filePath = path.join(configDir, CREDENTIALS_FILE);
-  if (!fs.existsSync(filePath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as EkhoCredentials;
-  } catch {
-    return null;
-  }
+  const stored = storedCredentialsState(configDir);
+  return stored.state === "ok" ? stored.credentials : null;
 }
 
 export function saveCredentials(configDir: string, credentials: EkhoCredentials) {
@@ -221,9 +262,19 @@ export async function enrollOrLoad(config: {
     return creds;
   }
 
-  // 2. Saved credentials from previous enrollment
-  const saved = loadCredentials(config.configDir);
-  if (saved) return saved;
+  // 2. Saved credentials from previous enrollment. A present-but-unusable
+  //    file is still an enrolment: refuse, keep the bytes, and never fall
+  //    through to the token path — that path mints a NEW agent and identity.
+  const stored = storedCredentialsState(config.configDir, { preserve: true });
+  if (stored.state === "ok") return stored.credentials;
+  if (stored.state === "unusable") {
+    throw new CredentialsUnavailableError(
+      `[ekho-adapter] saved credentials at ${path.join(config.configDir, CREDENTIALS_FILE)} are present but unusable; ` +
+        `refusing to enrol a new agent over them` +
+        (stored.preservedAt ? ` (bytes preserved at ${stored.preservedAt})` : "") +
+        `. Restore the file from a backup, or remove it to enrol again on purpose.`
+    );
+  }
 
   // 3. Enroll with token
   if (!config.enrollmentToken || !config.fleetId) {
