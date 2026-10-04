@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { STOP_DRAIN_MS } from "../src/autoreply";
 
 const relay = vi.hoisted(() => ({
   nextClient: 0,
@@ -406,6 +407,69 @@ describe("unload with work in flight", () => {
       expect(await producersOver(POLL_MS * 4)).toEqual({ heartbeat: [], poll: [], beats: 0 });
     });
   }
+
+  // PR #102 r3 review (astra-pr102-r3-shutdown-logger-probe.mjs): shutdown()'s
+  // own "stopped heartbeat" line ran unguarded after the work was secured, so a
+  // throwing host logger made the unload callback throw instead of handing the
+  // host the drain promise.
+  it("a throwing host logger still gets the host the drain promise, with the work already secured", async () => {
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      if (served === 1) {
+        return Promise.resolve({
+          messages: [
+            {
+              message_id: "held",
+              conversation_id: "held-conv",
+              sender_agent_id: "peer",
+              sender_kind: "agent",
+              message_type: "direct",
+              body: { text: "held for the floor holder" }
+            }
+          ],
+          peer_autoreply: true
+        });
+      }
+      return new Promise(() => {}); // in flight at stop, never answers
+    };
+    const a = await loadPluginCopy();
+    const host = fakeApi(true);
+    a.plugin.register(host.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    expect(served).toBe(2);
+
+    const down = () => {
+      throw new Error("logger down");
+    };
+    host.log.info.mockImplementation(down);
+    host.log.warn.mockImplementation(down);
+    host.log.error.mockImplementation(down);
+    host.log.debug.mockImplementation(down);
+    relay.stopped = true;
+    let results: unknown[] = [];
+    expect(() => {
+      results = host.dispose();
+    }).not.toThrow();
+    expect(results[0]).toBeInstanceOf(Promise);
+    expect(deadLetters().map((r) => [r.message.message_id, r.reason])).toEqual([
+      ["held", "deferred_loop_stopped"]
+    ]);
+    // The same drain a repeat stop hands out, not a second one.
+    expect(a.conn.shutdown("again", host.api.logger as never)).toBe(results[0]);
+
+    let outcome: string | undefined;
+    void (results[0] as Promise<void>).then(
+      () => (outcome = "resolved"),
+      () => (outcome = "rejected")
+    );
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+    expect(outcome).toBe("resolved");
+    expect(deadLetters()).toHaveLength(1);
+    expect(relay.afterStop).toEqual([]);
+    expect(await producersOver(POLL_MS * 4)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+  });
 });
 
 // PR #102 review, blocker 2: the agent id that keys the producer claim only

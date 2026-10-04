@@ -645,9 +645,11 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
  * (runtime-registry.ts). Safe to call multiple times.
  *
  * Synchronously, before it returns, every acked message the loop still holds
- * is dead-lettered. The promise settles once the loop's in-flight tick has
- * (bounded, autoreply.ts STOP_DRAIN_MS); the host awaits it from both unload
- * hooks (index.ts). It never rejects.
+ * is dead-lettered, except a stash a covering turn that already started is
+ * delivering. The promise settles once the loop's in-flight tick has (bounded
+ * by an event-loop timer, autoreply.ts STOP_DRAIN_MS); the host awaits it from
+ * both unload hooks (index.ts). It does not throw, even if the host logger
+ * does, and the promise never rejects.
  */
 export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
   retired = true;
@@ -664,7 +666,15 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
     releaseAgentRuntime(claimedAgentId, generation);
     claimedAgentId = null;
   }
-  if (hadWork) log?.info?.(`[ekho] generation ${generation} stopped heartbeat and auto-reply (${reason})`);
+  if (hadWork) {
+    // The work is already secured; a throwing host logger must not cost the
+    // host the drain promise it awaits.
+    try {
+      log?.info?.(`[ekho] generation ${generation} stopped heartbeat and auto-reply (${reason})`);
+    } catch {
+      /* swallowed on purpose */
+    }
+  }
   return stopDrain;
 }
 
