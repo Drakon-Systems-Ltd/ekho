@@ -4,8 +4,17 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **One-off, host-armed operator-key recovery grant (#93, #94).** When the browser holding the fleet trust root is lost and no other device may endorse, the relay host can arm a single-use grant: one named key the agents still trust may endorse one named, registered, live, not-yet-endorsed successor operator key, once. It is host-only, with no HTTP route: `npm run recovery-grant -- status|arm|cancel` from `packages/relay` (`src/recovery-grant.ts` → `src/recovery-grant-cli.ts`). `arm` requires `--confirmed-by`, recorded in the audit trail; the TTL defaults to 30 minutes (maximum 120); only one armed grant per fleet. `endorseOperatorKey` consults a matching unexpired, unused, uncancelled grant only when the ordinary authority rule refuses, and consumes it in the same transaction as the endorsement; a bad signature, wrong target or endorser, expiry, cancellation or second use fails closed. `endorseAgentKey` never consults grants. Migration 023 adds `operator_recovery_grants`; `GET /v1/operator/keys` adds `recovery_grant` (`confirmed_by` is not exposed); the console accepts the grant only for its one target from its one endorser. The lost root is not revoked: endorse the successor, re-endorse the agents from it, then revoke. Procedure: [Operations Guide → Operator-key recovery](docs/operations.md#operator-key-recovery).
+
+### Security
+- **Registering an operator key with an endorsement now applies the trusted-endorser rule.** `registerOperatorKey` checked that the endorser was live but not that the fleet trusts it, unlike `endorseOperatorKey` / `endorseAgentKey`; it now applies the same `assertEndorserIsTrusted` check. Recovery grants still open only `endorseOperatorKey`.
+
+### Fixed
+- **The Docker image build fails when the console build fails.** The Dockerfile ran `ui:build` as `2>/dev/null || true`, and `.dockerignore` did not exclude `packages/relay/ui-dist`, so a failed console build could ship a stale bundle left in the checkout. The suppression is gone and `packages/relay/ui-dist` is excluded from the build context.
+
 ### Documentation
-- **Install, update, operator-key and upgrade guidance corrected.** The OpenClaw plugin README now installs with `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin` (not `npm install -g`, which never installed the plugin), adds an Update section, lists all three tools and drops stale 0.4.1 notes; the README adds operator-key and upgrading guidance; `docs/operations.md` documents the full upgrade (backup, build including the console, restart, verify) and the host-armed operator-key recovery grant.
+- **Install, update, operator-key and upgrade guidance corrected.** The OpenClaw plugin README now installs with `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin` (not `npm install -g`, which never installed the plugin) followed by configure and `openclaw plugins enable ekho-adapter`; documents the plugin's two state files (`.ekho-credentials.json` and `.ekho-identity.json`) and backing up both before any update; covers updating pinned installs by package spec; builds the SDK before the plugin from source; lists all three tools; and drops stale 0.4.1 notes. The README separates console sign-in, operator-key endorsement and agent signature verification, and adds upgrading guidance. `docs/operations.md` documents the full upgrade (backup, build including the console, restart, verify) and the operator-key recovery grant, including the Docker invocation and per-agent re-endorsement. The OpenClaw plugin's packaged CHANGELOG is brought up to date for 0.5.1–0.5.5.
 
 ## [0.5.5] - 2026-10-03
 
