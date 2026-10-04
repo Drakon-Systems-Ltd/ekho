@@ -12,6 +12,10 @@ const hoisted = vi.hoisted(() => ({
   stopped: false,
   // When set, a spawned turn runs until the test calls its `exit`.
   holdTurns: false,
+  // When set, spawn throws: no child, no turn (the reviewer's failed-cover probe).
+  failSpawn: false,
+  // With holdTurns: the held child fails with an "error" event instead of exiting.
+  errorTurns: false,
   running: [] as Array<() => void>
 }));
 
@@ -20,9 +24,12 @@ vi.mock("node:child_process", async () => {
   return {
     spawn: (_cmd: string, args: string[]) => {
       hoisted.spawns.push({ afterStop: hoisted.stopped, prompt: args[args.length - 1] });
+      if (hoisted.failSpawn) throw new Error("synthetic spawn failure");
       const child = new EventEmitter() as EventEmitter & { kill: () => void };
       child.kill = () => {};
-      const exit = () => child.emit("exit", 0);
+      const exit = hoisted.errorTurns
+        ? () => child.emit("error", new Error("spawn ENOENT"))
+        : () => child.emit("exit", 0);
       if (hoisted.holdTurns) hoisted.running.push(exit);
       else setTimeout(exit, 0);
       return child;
@@ -83,13 +90,13 @@ function stubRelay() {
   };
 }
 
-function start(relay: ReturnType<typeof stubRelay>, records: any[], warnings: string[] = []) {
+function start(relay: ReturnType<typeof stubRelay>, records: any[], warnings: string[] = [], log?: any) {
   return startAutoReply({
     client: relay.client as any,
     api: {} as any,
     selfAgentId: "self",
     peerEnabled: true,
-    log: { info: () => {}, warn: (m: unknown) => warnings.push(String(m)), debug: () => {}, error: () => {} } as any,
+    log: log ?? ({ info: () => {}, warn: (m: unknown) => warnings.push(String(m)), debug: () => {}, error: () => {} } as any),
     onDeadLetter: (r) => records.push(...r)
   });
 }
@@ -101,6 +108,8 @@ beforeEach(() => {
   hoisted.spawns.length = 0;
   hoisted.stopped = false;
   hoisted.holdTurns = false;
+  hoisted.failSpawn = false;
+  hoisted.errorTurns = false;
   hoisted.running.length = 0;
 });
 
@@ -248,5 +257,163 @@ describe("stop() later in the tick", () => {
     hoisted.running.forEach((exit) => exit());
     await drained;
     expect(records).toEqual([]);
+  });
+});
+
+// PR #102 round-2 review, blocker: a covering turn whose spawn FAILED kept its
+// stash exempt from stop()'s flush until the tick's awaited floor release
+// finished. With that release hung past STOP_DRAIN_MS, stop() settled with the
+// acked "held" message in no turn and on no dead-letter record. Seeded from the
+// reviewer's probe (astra-pr102-r2-cover-probe.mjs), which asserted the defect;
+// this asserts the guarantee instead.
+describe("a covering turn that never started (reviewer probe)", () => {
+  function coverScenario() {
+    const relay = stubRelay();
+    const records: any[] = [];
+    const release = deferred<void>();
+    let free = false;
+    relay.client.getInbox
+      .mockResolvedValueOnce({ messages: [peer("held", "conv")], peer_autoreply: true })
+      .mockResolvedValueOnce({ messages: [peer("fresh", "conv")], peer_autoreply: true });
+    relay.client.acquireFloor.mockImplementation(async () => ({ granted: free, holder_agent_id: "other" }));
+    relay.client.releaseFloor.mockImplementation(() => release.promise);
+    const stop = start(relay, records);
+    return { relay, records, release, stop, freeFloor: () => (free = true) };
+  }
+
+  it("failed spawn + floor release outlasting STOP_DRAIN_MS: the held stash is dead-lettered before stop settles", async () => {
+    const { relay, records, release, stop, freeFloor } = coverScenario();
+    await tick(); // "held" acked and stashed: another agent holds the floor
+    expect(records).toEqual([]);
+
+    freeFloor();
+    hoisted.failSpawn = true;
+    await tick(); // "fresh" acked, floor granted, covering spawn throws, release hangs
+    expect(relay.client.ackMessages).toHaveBeenCalledTimes(2);
+    expect(hoisted.spawns).toHaveLength(1);
+    expect(hoisted.spawns[0].prompt).toContain("synthetic held");
+    expect(relay.client.releaseFloor).toHaveBeenCalledTimes(1);
+
+    hoisted.stopped = true;
+    const drained = stop();
+    // Secured at stop(), not left to the tick's end behind the hung release.
+    expect(records.map((r) => [r.message.message_id, r.reason])).toEqual([["held", DEFERRED_LOOP_STOPPED_REASON]]);
+
+    let settled = false;
+    void drained.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+    expect(settled).toBe(true); // the bound held; the release is still pending
+    expect(records.map((r) => r.message.message_id)).toEqual(["held"]);
+
+    release.resolve();
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    expect(records.map((r) => r.message.message_id)).toEqual(["held"]); // one record, not two
+    expect(hoisted.spawns).toHaveLength(1);
+    expect(relay.after()).toEqual([]);
+  });
+
+  it("stop while the covering spawn is pending, then it fails: dead-lettered as soon as the failure is known", async () => {
+    const { relay, records, release, stop, freeFloor } = coverScenario();
+    await tick();
+    freeFloor();
+    hoisted.holdTurns = true;
+    hoisted.errorTurns = true;
+    await tick(); // covering child created; its spawn error has not fired yet
+    expect(hoisted.spawns).toHaveLength(1);
+
+    hoisted.stopped = true;
+    const drained = stop();
+    expect(records).toEqual([]); // the turn may still start: it owns the stash
+
+    hoisted.running.forEach((fail) => fail()); // ENOENT-style "error" event
+    await vi.advanceTimersByTimeAsync(0);
+    // Known not to have started: secured now, while the release still hangs.
+    expect(relay.client.releaseFloor).toHaveBeenCalledTimes(1);
+    expect(records.map((r) => [r.message.message_id, r.reason])).toEqual([["held", DEFERRED_LOOP_STOPPED_REASON]]);
+
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+    await drained;
+    release.resolve();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(records).toHaveLength(1);
+  });
+
+  it("control: a covering turn that DID start keeps its stash through a hung release and a stop", async () => {
+    const { records, stop, freeFloor } = coverScenario();
+    await tick();
+    freeFloor();
+    await tick(); // covering turn spawned and exited; release hangs
+    expect(hoisted.spawns).toHaveLength(1);
+    expect(hoisted.spawns[0].prompt).toContain("synthetic held");
+
+    hoisted.stopped = true;
+    const drained = stop();
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+    await drained;
+    expect(records).toEqual([]); // delivered by the turn: no dead-letter
+  });
+});
+
+describe("deferred retry turn that never started", () => {
+  it("is dead-lettered before its awaited floor release, so a hung release cannot outlast stop()", async () => {
+    const relay = stubRelay();
+    const records: any[] = [];
+    const release = deferred<void>();
+    let free = false;
+    relay.client.getInbox
+      .mockResolvedValueOnce({ messages: [peer("held", "conv")], peer_autoreply: true })
+      .mockResolvedValue({ messages: [] });
+    relay.client.acquireFloor.mockImplementation(async () => ({ granted: free, holder_agent_id: "other" }));
+    relay.client.releaseFloor.mockImplementation(() => release.promise);
+    const stop = start(relay, records);
+    await tick(); // stashed
+    free = true;
+    hoisted.failSpawn = true;
+    // A quiet tick services the stash: floor granted, spawn throws, release hangs.
+    // The retry may wait for its window; give it time.
+    for (let i = 0; i < 20 && hoisted.spawns.length === 0; i++) await tick();
+    expect(hoisted.spawns).toHaveLength(1);
+    expect(records.map((r) => r.message.message_id)).toEqual(["held"]);
+
+    hoisted.stopped = true;
+    const drained = stop();
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+    await drained;
+    release.resolve();
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(records.map((r) => r.message.message_id)).toEqual(["held"]);
+  });
+});
+
+describe("stop() with a throwing logger", () => {
+  it("still secures the stash, and its promise resolves rather than rejecting", async () => {
+    const relay = stubRelay();
+    const records: any[] = [];
+    let broken = false;
+    const maybeThrow = () => {
+      if (broken) throw new Error("logger down");
+    };
+    relay.client.getInbox
+      .mockResolvedValueOnce({ messages: [peer("held", "held-conv")], peer_autoreply: true })
+      .mockReturnValueOnce(new Promise(() => {}));
+    const stop = start(relay, records, [], { info: maybeThrow, warn: maybeThrow, debug: maybeThrow, error: maybeThrow });
+    await tick(); // stashed
+    await tick(); // poll hangs, so stop() hits its bound and warns
+
+    broken = true;
+    let outcome: string | undefined;
+    let returned!: Promise<void>;
+    expect(() => {
+      returned = stop();
+    }).not.toThrow();
+    void returned.then(
+      () => (outcome = "resolved"),
+      () => (outcome = "rejected")
+    );
+    expect(records.map((r) => r.message.message_id)).toEqual(["held"]);
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+    expect(outcome).toBe("resolved");
   });
 });

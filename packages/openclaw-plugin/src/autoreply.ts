@@ -1959,23 +1959,24 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
       started = false;
     } finally {
       state.inFlight = false;
-      try {
-        await opts.releaseFloor(conv);
-      } catch (err) {
-        log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
-      }
     }
     if (!started) {
       // The stash is already out of the map and the messages were acked: a turn
-      // that never started must leave a record, not a gap (#78).
+      // that never started must leave a record, not a gap (#78). Recorded BEFORE
+      // the floor release below: stop() cannot see this stash, and a release
+      // that hangs past its drain bound must not hold the record back.
+      opts.deadLetter(stash.messages, DEFERRED_RETRY_SPAWN_FAILED_REASON);
       log?.warn?.(
         `[ekho-autoreply] deferred conversation ${conv} retry turn failed to spawn — ` +
-          `dead-lettering ${stash.messages.length} msg(s)`
+          `dead-lettered ${stash.messages.length} msg(s)`
       );
-      opts.deadLetter(stash.messages, DEFERRED_RETRY_SPAWN_FAILED_REASON);
-      return 0;
     }
-    return 1; // at most one retry-turn per tick
+    try {
+      await opts.releaseFloor(conv);
+    } catch (err) {
+      log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+    }
+    return started ? 1 : 0; // at most one retry-turn per tick
   }
   return 0;
 }
@@ -2111,6 +2112,16 @@ export function startAutoReply(opts: {
 
   const state = createAutoReplyState();
 
+  // Logging on the stop path. stop() promises to secure acked work and never
+  // reject; a host logger that throws must not break either promise.
+  const quietly = (level: "info" | "warn", msg: string): void => {
+    try {
+      log?.[level]?.(msg);
+    } catch {
+      /* the record matters, not the log line */
+    }
+  };
+
   // A stash that will never get its ordinary turn is acked work: it leaves a
   // dead-letter record, never a silent gap (#78).
   const deadLetterDeferred = (messages: InboxMessage[], reason: string): void => {
@@ -2121,7 +2132,7 @@ export function startAutoReply(opts: {
         messages.map((m) => ({ rejected_at: at, reason, kind: "deferred", key_id: null, message: m }))
       );
     } catch (err) {
-      log?.warn?.(`[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
+      quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
     }
   };
 
@@ -2144,8 +2155,10 @@ export function startAutoReply(opts: {
   // Messages the tick in flight has acked (or is acking) but not yet handed to
   // a turn or the stash. In that window they exist only in this tick's memory.
   let unhanded: InboxMessage[] = [];
-  // Stashed conversations the turn in flight is delivering. They stay in the
-  // stash until that turn has started, but they are the turn's, not stop()'s.
+  // Stashed conversations the turn in flight may be delivering. They stay in
+  // the stash until that turn's spawn is decided and are the turn's, not
+  // stop()'s, only until then: the exemption ends the moment the spawn result
+  // is known, never after the floor-release awaits that follow it.
   let covering = new Set<string>();
 
   // Whatever a stopped loop still holds will never get its turn here. Runs
@@ -2155,22 +2168,25 @@ export function startAutoReply(opts: {
     if (unhanded.length > 0) {
       const msgs = unhanded;
       unhanded = [];
-      log?.warn?.(
-        `[ekho-autoreply] loop stopped mid-tick with ${msgs.length} acked msg(s) not yet ` +
-          `handed to a turn — dead-lettering them; they will get no turn`
-      );
       deadLetterDeferred(msgs, INFLIGHT_LOOP_STOPPED_REASON);
+      quietly(
+        "warn",
+        `[ekho-autoreply] loop stopped mid-tick with ${msgs.length} acked msg(s) not yet ` +
+          `handed to a turn — dead-lettered them; they will get no turn`
+      );
     }
-    // A stash a covering turn is delivering is left to that turn: cleared if
-    // it started, flushed by the tick's own end if it did not.
+    // A stash a covering turn may still be delivering is left to that turn
+    // until its spawn is decided: cleared if it started, flushed right then
+    // (before any floor-release await) if it did not.
     for (const [conv, stash] of [...state.deferredByConversation]) {
       if (covering.has(conv)) continue;
       state.deferredByConversation.delete(conv);
-      log?.warn?.(
-        `[ekho-autoreply] loop stopped with ${stash.messages.length} held-back msg(s) for ` +
-          `conversation ${conv} — dead-lettering them; they will get no turn`
-      );
       deadLetterDeferred(stash.messages, DEFERRED_LOOP_STOPPED_REASON);
+      quietly(
+        "warn",
+        `[ekho-autoreply] loop stopped with ${stash.messages.length} held-back msg(s) for ` +
+          `conversation ${conv} — dead-lettered them; they will get no turn`
+      );
     }
   };
 
@@ -2537,6 +2553,32 @@ export function startAutoReply(opts: {
         started = false;
       } finally {
         state.inFlight = false;
+        // The spawn is decided: settle who owns the covered stash NOW, before
+        // the floor releases below. Those are network awaits that can outlast
+        // stop()'s drain bound, and a stash exempt from stop()'s flush across
+        // them could be in no turn and on no record when the host exits.
+        covering = new Set();
+        if (started) {
+          // The stash left memory via a TURN — the only safe moment to clear it.
+          // Before the spawn, a failure here binned it for good.
+          for (const conv of cover.coveredConversationIds) clearDeferred(state, conv);
+        } else if (cover.coveredConversationIds.length > 0) {
+          if (stopped) {
+            // stop() skipped it while the spawn was undecided. No turn has it
+            // and none will start here: on the record before any await.
+            flushOnStop();
+          } else {
+            // KEPT, not dead-lettered: the stash still has live paths to a turn
+            // (the floor retry, then the overrun delivery the TTL guarantees), so
+            // a transient spawn failure must not end them; a stop() from here on
+            // flushes it. The failure handling for the fresh messages is
+            // unchanged — they have no stash to fall back on.
+            log?.warn?.(
+              `[ekho-autoreply] covering turn failed to spawn — keeping the held-back ` +
+                `stash(es) for ${cover.coveredConversationIds.join(", ")}`
+            );
+          }
+        }
         for (const conv of plan.toRelease) {
           try {
             await client.releaseFloor(conv);
@@ -2545,23 +2587,8 @@ export function startAutoReply(opts: {
           }
         }
       }
-      if (started) {
-        // The stash left memory via a TURN — the only safe moment to clear it.
-        // Before the spawn, a failure here binned it for good.
-        for (const conv of cover.coveredConversationIds) clearDeferred(state, conv);
-      } else if (cover.coveredConversationIds.length > 0) {
-        // KEPT, not dead-lettered: the stash still has live paths to a turn (the
-        // floor retry, then the overrun delivery the TTL guarantees), so a
-        // transient spawn failure must not end them. The failure handling for
-        // the fresh messages is unchanged — they have no stash to fall back on.
-        log?.warn?.(
-          `[ekho-autoreply] covering turn failed to spawn — keeping the held-back ` +
-            `stash(es) for ${cover.coveredConversationIds.join(", ")}`
-        );
-      }
     }
 
-    covering = new Set();
     if (stopped) return;
     await serviceDeferred();
   };
@@ -2607,12 +2634,13 @@ export function startAutoReply(opts: {
     stopped = true;
     clearInterval(timer);
     flushOnStop();
-    log?.info?.(`[ekho-autoreply] stopped listening as ${selfAgentId}`);
+    quietly("info", `[ekho-autoreply] stopped listening as ${selfAgentId}`);
     const inFlight = currentTick;
     stopping = inFlight
       ? settleWithin(inFlight, opts.stopDrainMs ?? STOP_DRAIN_MS).then((settled) => {
           if (!settled) {
-            log?.warn?.(
+            quietly(
+              "warn",
               `[ekho-autoreply] in-flight tick still running ${opts.stopDrainMs ?? STOP_DRAIN_MS}ms after stop; ` +
                 `not waiting longer (it acks and starts nothing more)`
             );

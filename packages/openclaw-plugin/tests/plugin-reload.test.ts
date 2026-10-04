@@ -467,6 +467,47 @@ describe("reload during first enrolment", () => {
     expect(hostB.log.warn).not.toHaveBeenCalledWith(expect.stringMatching(/startup connect failed/));
   });
 
+  it("an enrolment request that never answers is abandoned at its deadline and frees the queued successor", async () => {
+    // PR #102 round-2 review nit: the lock is held until fn settles, and the
+    // enrol fetch had no deadline — a request that never answered held every
+    // same-key successor forever. The stub never answers but honours abort.
+    const enrol = { calls: 0, aborted: 0 };
+    vi.stubGlobal("fetch", async (url: string, init?: { signal?: AbortSignal }) => {
+      if (new URL(url).pathname !== "/v1/enroll") return Response.json({});
+      enrol.calls++;
+      if (enrol.calls > 1) return Response.json({ agent_id: "agent_enrolled", secret: "fresh-secret" });
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          enrol.aborted++;
+          reject(init.signal!.reason);
+        });
+      });
+    });
+    const { ENROLL_TIMEOUT_MS } = await import("../src/credentials");
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true, enrolConfig());
+    a.plugin.register(hostA.api);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enrol.calls).toBe(1);
+    hostA.fire("gateway_stop", { reason: "plugin replacement" });
+    hostA.dispose();
+
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true, enrolConfig());
+    b.plugin.register(hostB.api);
+    await vi.advanceTimersByTimeAsync(ENROLL_TIMEOUT_MS - 1);
+    expect(enrol.calls).toBe(1); // B still queued: never two enrolments at once
+    expect(enrol.aborted).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(enrol.aborted).toBe(1);
+    const conn = await b.conn.ensureConnected(enrolConfig() as never);
+    expect(conn.credentials.agentId).toBe("agent_enrolled");
+    expect(enrol.calls).toBe(2);
+    expect((await producersOver(POLL_MS)).heartbeat).toHaveLength(1);
+    expect(hostB.log.warn).not.toHaveBeenCalledWith(expect.stringMatching(/startup connect failed/));
+  });
+
   it("a 400 on a spent token re-checks once for credentials saved meanwhile", async () => {
     vi.stubGlobal("fetch", async (url: string) =>
       new URL(url).pathname === "/v1/enroll"
