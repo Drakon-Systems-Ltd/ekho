@@ -10,6 +10,32 @@ All notable changes to Ekho are documented here.
 - **Plugin updates no longer delete the agent's credentials and identity key (#98).** Both files lived in the plugin's install directory, `~/.openclaw/extensions/ekho-adapter/`, which `openclaw plugins update` replaces wholesale, so a routine update took the agent offline (or unsigned) until someone restored them by hand. State now lives under OpenClaw's state directory, `~/.openclaw/ekho-adapter/` by default (follows `OPENCLAW_STATE_DIR`), and can be placed elsewhere with the new `stateDir` config key or the `EKHO_STATE_DIR` environment variable. On the first start after upgrading, files found in the old location are copied (never moved) to the new one, owner-only; anything already in the new location wins and is left untouched. A legacy file that cannot be read is not copied: an unusable credentials file stops the connect, and an unusable identity file runs the agent unsigned, the same as an unusable file in the new location, so a failed read can never turn into a newly minted key. Attachment downloads move to `attachments/` under the same directory. `.ekho-credentials.json` is now also written owner-only (`0600`) and atomically, like the identity file; it used to be written with default permissions. **One-time caveat for a managed (npm) install upgrading from an affected version:** the very update that installs this fix still replaces the install directory before the new code runs, so there is nothing left there for the migration to find on that first upgrade. Back up `~/.openclaw/extensions/ekho-adapter/.ekho-credentials.json` and `.ekho-identity.json` before updating this one time; every update after this version is safe automatically.
 - **an agent never silently mints a second identity key.** `loadOrCreateIdentity` used to answer an unparseable identity file, or an absent one in whatever directory the process resolved, with a fresh random seed that `connect()` then registered with the relay. Seven live "Jarvis" identity keys with no private half anywhere were found on 4 Oct 2026, each later endorsed by the operator in good faith. Now: a present-but-unusable file is preserved beside itself and refused; an absent file on an already-enrolled agent (agentId + agentSecret in config) is refused unless `EKHO_ALLOW_NEW_IDENTITY=1` or `allowNewIdentity: true`; a genuine first enrolment still mints. The refusal runs the box unsigned and logs at error level. `saveIdentity` is now atomic (temp file + rename), so no concurrent reader can observe a truncated file. The same rule covers the credentials file: a present-but-unusable `.ekho-credentials.json` no longer reads as "never enrolled" and falls through to token enrolment of a brand-new agent; it is preserved byte-for-byte and refused. Preserved copies of both files are exact bytes, not re-encoded text.
 
+## [0.5.5] - 2026-10-03
+
+### Fixed
+- **The operator board's live model and turn-health now update on current OpenClaw hosts.** `model_call_started` / `model_call_ended` are typed plugin hooks, and OpenClaw's typed runner only invokes handlers registered with `api.on(...)`; the plugin registered them only through `api.registerHook(...)`, the internal hook bus, which the typed runner never calls. On such hosts the board kept the configured seed model and showed turn-health `unknown`, so an agent whose every turn failed could not read red. The plugin now wires both hooks through `api.on` when the host exposes it, and falls back to `registerHook` only on hosts without `api.on` — never both, so no host can count a call twice. Relay connection and messaging were unaffected.
+
+## [0.5.4] - 2026-09-24
+
+### Fixed
+- **The seen-filter no longer drops a different message that reuses a seen `message_id` (#83).** Already-handled messages were deduped by id alone, so a relay reusing an id for a genuinely different message had it acked and dropped before it reached a turn or the deferred stash. The seen set is now keyed on `heldKey` (id **and** signed-material digest), the identity the deferred path uses since #78; a genuine redelivery of the same message is still deduped. `refreshBudgetForProgressSignals` now reads its verdict through `verdictFor`, so a verdict bound to a signal's `heldKey` wins over one stored under a reused id; this has no effect yet with the poll loop's one id-keyed caller and is defense-in-depth.
+
+## [0.5.3] - 2026-09-23
+
+### Fixed
+- **The inbox view no longer shows a valid message carrying another message's failed verification label on a `message_id` collision (#82).** `recordVerifications` attached verdicts to the cached inbox ring by id alone; a verdict now attaches only when the cached message has the same signed material it was computed for (`sameSignedMaterial`).
+- **A peer message deferred to a floor holder is delivered late rather than dead-lettered, and is never silently dropped (#78).** Extends the 0.5.2 fix; the retry window (`FLOOR_TTL_SECONDS + DEFERRED_GRACE_S`) is unchanged. Past the window the held-back turn runs without the floor, and its prompt says so. A turn that covers a conversation now delivers that conversation's stash instead of clearing it, each message keeping its own verification verdict, with late messages marked `[HELD BACK — delivered late]`. Overflowing the per-conversation or 50-conversation cap, or failing to spawn a late or retry turn, now dead-letters with a `WARNING` instead of dropping silently. The poll loop serialises its ticks, so two ticks can no longer spawn concurrent turns. Held-back messages are identified by `heldKey` (message id **and** signed-material digest) rather than the relay-chosen id alone. Full detail: the root [CHANGELOG](../../CHANGELOG.md).
+
+## [0.5.2] - 2026-09-23
+
+### Fixed
+- **Deferred peer messages no longer silently dropped when a legitimate floor holder outlasts the retry window (#78).** The retry TTL (600s) was shorter than the floor TTL (`FLOOR_TTL_SECONDS`, 960s by default), so a holder mid-turn for 10–16 minutes could outlive the retry window and have its stash popped with no log line and no record. `autoreply.ts` now derives the retry TTL from the floor TTL (`FLOOR_TTL_SECONDS + 120`), and a genuine expiry now logs a WARNING and writes a dead-letter entry instead of dropping silently.
+
+## [0.5.1] - 2026-09-22
+
+### Notes
+- No OpenClaw plugin change. Version bumped in lockstep with the relay and SDK (relay event/heartbeat retention, #75; the Hermes plugin gained the advisory-revocation warning throttle this plugin has had since 0.4.7).
+
 ## [0.5.0] - 2026-09-21
 
 ### Changed
@@ -179,7 +205,7 @@ Deploy-readiness and production hardening.
 
 ### Deployment & Release
 - Release workflow now builds and publishes the relay container image to GHCR (`ghcr.io/drakon-systems-ltd/ekho`)
-- New [Operations Guide](docs/operations.md): deployment, secrets, TLS, backups, upgrades, troubleshooting
+- New [Operations Guide](../../docs/operations.md): deployment, secrets, TLS, backups, upgrades, troubleshooting
 
 ### Security & Runtime Hardening
 - Relay refuses to start with an unset or default operator session secret (`EKHO_DEV_INSECURE=1` opt-out for local dev); `npm run setup` now generates and persists a strong secret

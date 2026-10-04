@@ -4,8 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **The Docker image build fails when the console build fails.** The Dockerfile ran `ui:build` as `2>/dev/null || true`, and `.dockerignore` did not exclude `packages/relay/ui-dist`, so a failed console build could ship a stale bundle left in the checkout. The suppression is gone and `packages/relay/ui-dist` is excluded from the build context.
+
 ### Documentation
-- **Install, update, operator-key and upgrade guidance corrected.** The OpenClaw plugin README now installs with `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin` (not `npm install -g`, which never installed the plugin), adds an Update section, lists all three tools and drops stale 0.4.1 notes; the README adds operator-key and upgrading guidance; `docs/operations.md` documents the full upgrade (backup, build including the console, restart, verify) and the host-armed operator-key recovery grant.
+- **Install, update, operator-key and upgrade guidance corrected.** The OpenClaw plugin README now installs with `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin` (not `npm install -g`, which never installed the plugin) followed by configure and `openclaw plugins enable ekho-adapter`; documents the plugin's two state files (`.ekho-credentials.json` and `.ekho-identity.json`) and backing up both before any update; covers updating pinned installs by package spec; builds the SDK before the plugin from source; lists all three tools; and drops stale 0.4.1 notes. The README separates console sign-in, operator-key endorsement and agent signature verification, and adds upgrading guidance. `docs/operations.md` documents the full upgrade (backup, build including the console, restart, verify) and the operator-key recovery grant, including the Docker invocation and per-agent re-endorsement. The OpenClaw plugin's packaged CHANGELOG is brought up to date for 0.5.1–0.5.5.
 
 ## [0.5.6] - 2026-10-04
 
