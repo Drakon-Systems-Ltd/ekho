@@ -122,32 +122,6 @@ describe("#19 the relay enforces endorse authority, not just the console", () =>
     expect(() => endorseAgent(rescued)).toThrow(/no agent trusts it|not trusted|untrusted/i);
   });
 
-  it("allows the key that endorsed the live trust root — agents adopted the root through it (#93)", () => {
-    // 4 Oct 2026: X6Nv endorsed _sthCg, every agent re-rooted onto _sthCg, then
-    // _sthCg's browser passphrase was lost. Every live agent still pins X6Nv.
-    const origin = makeOperatorKey(90);
-    const root = makeOperatorKey(91);
-    relay.db.registerOperatorKey(relay.fleetId, origin.pubB64, "old-browser");
-    relay.db.registerOperatorKey(relay.fleetId, root.pubB64, "phone");
-    endorseAgent(origin); // bootstrap onto the origin
-    endorseOperator(origin, root); // origin vouches for the new root
-    endorseAgent(root); // agent re-rooted: origin now has no dependents
-
-    expect(endorseAgent(origin)).toBe(true);
-  });
-
-  it("still refuses a key whose endorsee has no agents pinned to it (#93 stays narrow)", () => {
-    const root = makeOperatorKey(92);
-    const x = makeOperatorKey(93);
-    const leaf = makeOperatorKey(94);
-    relay.db.registerOperatorKey(relay.fleetId, root.pubB64, "phone");
-    relay.db.registerOperatorKey(relay.fleetId, x.pubB64, "laptop");
-    relay.db.registerOperatorKey(relay.fleetId, leaf.pubB64, "tablet");
-    endorseAgent(root);
-    expect(() => endorseOperator(x, leaf)).toThrow(/no agent trusts it|not trusted|untrusted/i);
-    expect(() => endorseAgent(x)).toThrow(/no agent trusts it|not trusted|untrusted/i);
-  });
-
   it("REFUSES an operator endorsement from a live but untrusted key", () => {
     const root = makeOperatorKey(78);
     const orphan = makeOperatorKey(79);

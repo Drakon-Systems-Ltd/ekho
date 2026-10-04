@@ -270,21 +270,6 @@ export class EkhoDb {
     // Already a trust root: agents verify against it today, so endorsing from it
     // keeps them where they are.
     if (agentKeys.some((k) => k.endorsed_by_key_id === endorserKeyId)) return true;
-    // Endorsed a live trust root (#93): every agent that adopted that root did
-    // so BY CHAIN from this key, which it could only do because it already
-    // pinned this key. 4 Oct 2026: the operator lost the passphrase for the
-    // root's browser (_sthCg); its endorser X6Nv was pinned by every live agent
-    // yet refused here, leaving no device able to sign anything.
-    const endorsedRoot = this.db
-      .prepare(
-        `SELECT 1 FROM fleet_operator_keys o
-           WHERE o.fleet_id = ? AND o.endorsed_by_key_id = ? AND o.revoked_at IS NULL
-             AND EXISTS (SELECT 1 FROM agent_identity_keys a
-                           WHERE a.fleet_id = o.fleet_id AND a.revoked_at IS NULL
-                             AND a.endorsed_by_key_id = o.key_id)`
-      )
-      .get(fleetId, endorserKeyId);
-    if (endorsedRoot) return true;
     // Chains to a live key, so agents adopt it by themselves (#13).
     const parent = this.db
       .prepare("SELECT endorsed_by_key_id FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")

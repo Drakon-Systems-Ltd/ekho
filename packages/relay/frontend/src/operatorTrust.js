@@ -268,11 +268,6 @@ export function endorseAuthority(unlockedKeyId, operatorKeys, agentKeys) {
   // Already a trust root: agents verify against it today, so endorsing from it
   // keeps them where they are.
   if (dependentsOf(unlockedKeyId, agentKeys) > 0) return { allowed: true, reason: null };
-  // Endorsed a live trust root (#93): agents adopted that root by chain from
-  // this key, so they already pin it. Mirrors endorserIsTrusted in db.ts.
-  if (keys.some((k) => !k.revoked_at && k.endorsed_by_key_id === unlockedKeyId && dependentsOf(k.key_id, agentKeys) > 0)) {
-    return { allowed: true, reason: null };
-  }
   // Chains to a live key, so agents adopt it by themselves (#13).
   const endorser = mine.endorsed_by_key_id
     ? keys.find((k) => k.key_id === mine.endorsed_by_key_id && !k.revoked_at)
