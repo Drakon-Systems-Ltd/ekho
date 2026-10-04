@@ -40,6 +40,8 @@ import {
   trustRootKey,
   thisBrowserHoldsTrustRoot,
   actingDeviceLabel,
+  activeRecoveryGrant,
+  recoveryNotice,
 } from "./operatorTrust.js";
 
 const SHORT = (s) => (s ? `${String(s).slice(0, 10)}…` : "—");
@@ -53,6 +55,8 @@ export default function SecurityScreen({ session, agents = [] }) {
   const [label, setLabel] = useState("this device");
   const [keys, setKeys] = useState([]);
   const [agentKeys, setAgentKeys] = useState([]);
+  // #93: an armed one-off recovery grant, if the relay host has armed one.
+  const [recoveryGrant, setRecoveryGrant] = useState(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null); // { tone, text }
 
@@ -63,6 +67,7 @@ export default function SecurityScreen({ session, agents = [] }) {
     try {
       const [k, ak] = await Promise.all([listOperatorKeys(token), getAgentKeys(token)]);
       setKeys(k.keys || []);
+      setRecoveryGrant(k.recovery_grant || null);
       setAgentKeys(ak.keys || []);
     } catch (e) {
       note("danger", `Load failed: ${e.message || e}`);
@@ -78,7 +83,7 @@ export default function SecurityScreen({ session, agents = [] }) {
   // The rescue for a device that cannot sign for itself — without this, a key
   // minted on a stranded device is permanently invisible to every agent.
   const onEndorseKey = async (targetKeyId) => {
-    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId, agentKeys);
+    const guard = rescueGuard(targetKeyId, keys, unlocked?.keyId, agentKeys, recoveryGrant);
     if (!guard.allowed) return note("danger", guard.reason);
     const target = keys.find((k) => k.key_id === targetKeyId);
     setBusy(true);
@@ -92,7 +97,13 @@ export default function SecurityScreen({ session, agents = [] }) {
       });
       note(
         "ok",
-        `${targetKeyId} endorsed by ${unlocked.keyId}. Agents that trust ${unlocked.keyId} adopt it on their next poll — that device can send again without re-enrolling.`
+        guard.recovery
+          ? // #93: the grant is now used up. Say what comes next, in order —
+            // revoking the lost root before the agents move would orphan them.
+            `Recovery done: ${targetKeyId} endorsed by ${unlocked.keyId}. The one-time recovery is now used up. ` +
+              `Next, in this order: (1) open the browser that holds ${targetKeyId} and press “Re-endorse all” for your agents; ` +
+              `(2) check every agent shows as endorsed by ${targetKeyId}; (3) only then revoke the lost key.`
+          : `${targetKeyId} endorsed by ${unlocked.keyId}. Agents that trust ${unlocked.keyId} adopt it on their next poll — that device can send again without re-enrolling.`
       );
       await refresh();
     } catch (e) {
@@ -321,6 +332,20 @@ export default function SecurityScreen({ session, agents = [] }) {
 
       {msg && <div className={`sec__msg sec__msg--${msg.tone}`}>{msg.text}</div>}
 
+      {/* #93: a one-off recovery armed on the relay host. Say exactly what it
+          allows, that it is single-use, and the order of what follows. */}
+      {activeRecoveryGrant(recoveryGrant) && (
+        <div className="sec__alert">
+          <div className="sec__alert-h">⚿ One-time recovery is armed</div>
+          <div className="sec__alert-b">
+            {recoveryNotice(recoveryGrant)}{" "}
+            {unlocked?.keyId === recoveryGrant.endorser_key_id
+              ? `This browser holds ${recoveryGrant.endorser_key_id}: press Endorse on ${recoveryGrant.target_key_id} in panel ②.`
+              : `Do it from the browser that holds ${recoveryGrant.endorser_key_id}.`}
+          </div>
+        </div>
+      )}
+
       {/* #15: zero live operator keys is the loudest state on this page. With no
           live key every agent's trust map empties, verification returns a null
           verdict rather than a rejection, and on the default requireSigned:"warn"
@@ -472,8 +497,12 @@ export default function SecurityScreen({ session, agents = [] }) {
                       </span>
                       <button
                         className="sec__btn sec__btn--go"
-                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys).allowed}
-                        title={rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys).reason || `Endorse ${k.key_id} with this device's key`}
+                        disabled={busy || !rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys, recoveryGrant).allowed}
+                        title={
+                          rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys, recoveryGrant).reason ||
+                          rescueGuard(k.key_id, keys, unlocked?.keyId, agentKeys, recoveryGrant).notice ||
+                          `Endorse ${k.key_id} with this device's key`
+                        }
                         onClick={() => onEndorseKey(k.key_id)}
                       >
                         Endorse

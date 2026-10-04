@@ -41,6 +41,24 @@ export interface AgentIdentityKeyRow {
   endorsed_at: string | null;
 }
 
+/** A one-off operator-key recovery grant (#93). See createOperatorRecoveryGrant. */
+export interface OperatorRecoveryGrantRow {
+  id: string;
+  fleet_id: string;
+  endorser_key_id: string;
+  target_key_id: string;
+  confirmed_by: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  cancelled_at: string | null;
+}
+
+/** Default and ceiling for a recovery grant's lifetime. Short on purpose: the
+ *  grant exists for one sitting, while the operator is at both browsers. */
+export const RECOVERY_GRANT_DEFAULT_TTL_MINUTES = 30;
+export const RECOVERY_GRANT_MAX_TTL_MINUTES = 120;
+
 const IDEMPOTENT_DDL_ERROR = /duplicate column|already exists/i;
 
 // Peer turn budgets are OPT-IN. 0 in storage means "no limit" and is the default
@@ -283,13 +301,198 @@ export class EkhoDb {
     return Boolean(liveParent);
   }
 
-  private assertEndorserIsTrusted(fleetId: string, endorserKeyId: string) {
-    if (this.endorserIsTrusted(fleetId, endorserKeyId)) return;
-    throw new Error(
+  private untrustedEndorserError(endorserKeyId: string): Error {
+    return new Error(
       `${endorserKeyId} is live but unendorsed, and no agent trusts it — endorsing from here would ` +
         `move the fleet onto a key none of its agents pin. Endorse from a device holding a trusted key, ` +
         `or have that device endorse this one first.`
     );
+  }
+
+  private assertEndorserIsTrusted(fleetId: string, endorserKeyId: string) {
+    if (this.endorserIsTrusted(fleetId, endorserKeyId)) return;
+    throw this.untrustedEndorserError(endorserKeyId);
+  }
+
+  // ---- One-off operator-key recovery (#93) ---------------------------------
+  //
+  // 4 Oct 2026: the operator lost the passphrase for the browser holding the
+  // fleet trust root _sthCgMINcL9GAXO. Every live agent key is endorsed by
+  // _sthCg; _sthCg was itself endorsed by X6NvGXWiMP32k0J6, which is unlocked in
+  // another browser but is not a trust root and chains to a revoked key, so
+  // endorserIsTrusted refuses it. No device could sign anything.
+  //
+  // A STANDING rule ("a key that endorsed a live root may endorse") was rejected
+  // in review: it infers what agents pin from a historical relay edge (a newly
+  // enrolled or re-keyed agent may pin only the root, never its parent), and it
+  // hands that key permanent authority. Instead the relay accepts ONE
+  // endorsement, of ONE named successor operator key, from ONE named recovering
+  // key, inside a short window — and only after someone on the relay host armed
+  // it with the operator's out-of-band confirmation. Whether the fleet really
+  // pins the recovering key is a fact the humans check before arming (agents'
+  // identity files), not one the relay infers.
+  //
+  // Ordering after the grant is used (deliberately NOT automated here):
+  //   1. the successor is endorsed by the recovering key; agents that pin the
+  //      recovering key chain-adopt it on their next poll (#13);
+  //   2. the operator re-endorses every agent key from the successor's browser
+  //      (the successor now passes endorserIsTrusted by the #13 chain rule);
+  //   3. only then is the lost root revoked, through the console's revokeGuard.
+  // Revoking the lost root earlier would orphan every agent still endorsed by it.
+
+  /**
+   * Arm a one-off recovery grant. HOST-ONLY: there is no HTTP route to this; it
+   * is reached from src/recovery-grant.ts on the relay box, after the operator
+   * confirms to the person running it directly. `confirmedBy` records who
+   * confirmed and how (stored and written to the audit trail).
+   */
+  createOperatorRecoveryGrant(
+    fleetId: string,
+    opts: { endorserKeyId: string; targetKeyId: string; confirmedBy: string; ttlMinutes?: number },
+    now: Date = new Date()
+  ): OperatorRecoveryGrantRow {
+    const ttl = opts.ttlMinutes ?? RECOVERY_GRANT_DEFAULT_TTL_MINUTES;
+    if (!Number.isInteger(ttl) || ttl < 1 || ttl > RECOVERY_GRANT_MAX_TTL_MINUTES) {
+      throw new Error(`ttl must be a whole number of minutes between 1 and ${RECOVERY_GRANT_MAX_TTL_MINUTES}`);
+    }
+    const confirmedBy = (opts.confirmedBy ?? "").trim();
+    if (!confirmedBy) throw new Error("confirmed-by is required: who confirmed this recovery, and how");
+    if (opts.endorserKeyId === opts.targetKeyId) throw new Error("a key cannot be granted recovery over itself");
+    const fleet = this.db.prepare("SELECT 1 FROM fleets WHERE id = ?").get(fleetId);
+    if (!fleet) throw new Error("fleet not found");
+    const keyRow = this.db.prepare(
+      "SELECT revoked_at, endorsed_by_key_id FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
+    );
+    const endorser = keyRow.get(fleetId, opts.endorserKeyId) as
+      | { revoked_at: string | null; endorsed_by_key_id: string | null }
+      | undefined;
+    if (!endorser) throw new Error(`recovering key ${opts.endorserKeyId} is not registered in this fleet`);
+    if (endorser.revoked_at) throw new Error(`recovering key ${opts.endorserKeyId} is revoked`);
+    const target = keyRow.get(fleetId, opts.targetKeyId) as
+      | { revoked_at: string | null; endorsed_by_key_id: string | null }
+      | undefined;
+    if (!target) {
+      throw new Error(
+        `successor key ${opts.targetKeyId} is not registered in this fleet — generate it in the new browser first`
+      );
+    }
+    if (target.revoked_at) throw new Error(`successor key ${opts.targetKeyId} is revoked`);
+    if (target.endorsed_by_key_id) {
+      throw new Error(
+        `successor key ${opts.targetKeyId} is already endorsed by ${target.endorsed_by_key_id}; a recovery grant only names an unendorsed key`
+      );
+    }
+    const nowStr = now.toISOString();
+    const grant: OperatorRecoveryGrantRow = {
+      id: id("rcg"),
+      fleet_id: fleetId,
+      endorser_key_id: opts.endorserKeyId,
+      target_key_id: opts.targetKeyId,
+      confirmed_by: confirmedBy,
+      created_at: nowStr,
+      expires_at: new Date(now.getTime() + ttl * 60_000).toISOString(),
+      consumed_at: null,
+      cancelled_at: null
+    };
+    this.db.transaction(() => {
+      // One live grant per fleet at a time: two would be two ways in.
+      const live = this.db
+        .prepare(
+          `SELECT id FROM operator_recovery_grants
+             WHERE fleet_id = ? AND consumed_at IS NULL AND cancelled_at IS NULL AND expires_at > ?`
+        )
+        .get(fleetId, nowStr) as { id: string } | undefined;
+      if (live) throw new Error(`recovery grant ${live.id} is already armed for this fleet; cancel it first`);
+      this.db
+        .prepare(
+          `INSERT INTO operator_recovery_grants
+             (id, fleet_id, endorser_key_id, target_key_id, confirmed_by, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(grant.id, fleetId, grant.endorser_key_id, grant.target_key_id, confirmedBy, nowStr, grant.expires_at);
+      this.recordEvent(fleetId, "operator_key.recovery_grant_armed", "host", null, "operator_key", grant.target_key_id, null, {
+        grant_id: grant.id,
+        endorser_key_id: grant.endorser_key_id,
+        target_key_id: grant.target_key_id,
+        confirmed_by: confirmedBy,
+        expires_at: grant.expires_at
+      });
+    })();
+    return grant;
+  }
+
+  /** Withdraw an armed grant before it is used (host-only, like arming). */
+  cancelOperatorRecoveryGrant(fleetId: string, grantId: string, now: Date = new Date()): boolean {
+    const nowStr = now.toISOString();
+    const res = this.db
+      .prepare(
+        `UPDATE operator_recovery_grants SET cancelled_at = ?
+           WHERE fleet_id = ? AND id = ? AND consumed_at IS NULL AND cancelled_at IS NULL`
+      )
+      .run(nowStr, fleetId, grantId);
+    if (res.changes > 0) {
+      this.recordEvent(fleetId, "operator_key.recovery_grant_cancelled", "host", null, "operator_recovery_grant", grantId, null, {
+        cancelled_at: nowStr
+      });
+    }
+    return res.changes > 0;
+  }
+
+  listOperatorRecoveryGrants(fleetId: string): OperatorRecoveryGrantRow[] {
+    return this.db
+      .prepare("SELECT * FROM operator_recovery_grants WHERE fleet_id = ? ORDER BY created_at ASC")
+      .all(fleetId) as OperatorRecoveryGrantRow[];
+  }
+
+  /** The fleet's armed grant (unconsumed, uncancelled, unexpired), if any. */
+  getActiveOperatorRecoveryGrant(fleetId: string, now: Date = new Date()): OperatorRecoveryGrantRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM operator_recovery_grants
+           WHERE fleet_id = ? AND consumed_at IS NULL AND cancelled_at IS NULL AND expires_at > ?
+           ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(fleetId, now.toISOString()) as OperatorRecoveryGrantRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * The grant that lets `endorserKeyId` endorse `targetKeyId` right now, or a
+   * thrown error saying exactly why not. Called ONLY from endorseOperatorKey,
+   * and only once the ordinary authority rule has already refused the endorser.
+   * Every branch that is not a perfect match fails closed.
+   */
+  private requireRecoveryGrant(
+    fleetId: string,
+    endorserKeyId: string,
+    targetKeyId: string,
+    target: { endorsed_by_key_id: string | null },
+    nowStr: string
+  ): OperatorRecoveryGrantRow {
+    const grant = this.db
+      .prepare(
+        `SELECT * FROM operator_recovery_grants
+           WHERE fleet_id = ? AND endorser_key_id = ?
+           ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(fleetId, endorserKeyId) as OperatorRecoveryGrantRow | undefined;
+    // No grant was ever armed for this key: the ordinary refusal, unchanged.
+    if (!grant) throw this.untrustedEndorserError(endorserKeyId);
+    const tag = `one-time recovery grant ${grant.id} for ${endorserKeyId}`;
+    if (grant.consumed_at) throw new Error(`${tag} was already used at ${grant.consumed_at}; it is single-use`);
+    if (grant.cancelled_at) throw new Error(`${tag} was cancelled at ${grant.cancelled_at}`);
+    if (grant.expires_at <= nowStr) {
+      throw new Error(`${tag} expired at ${grant.expires_at}; ask the relay host to arm a new one`);
+    }
+    if (grant.target_key_id !== targetKeyId) {
+      throw new Error(`${tag} names successor ${grant.target_key_id} only; it cannot endorse ${targetKeyId}`);
+    }
+    if (target.endorsed_by_key_id) {
+      throw new Error(
+        `${tag}: successor ${targetKeyId} is already endorsed by ${target.endorsed_by_key_id}; the grant no longer applies`
+      );
+    }
+    return grant;
   }
 
   /**
@@ -351,6 +554,12 @@ export class EkhoDb {
         fromB64url(endorser.public_key)
       );
       if (!ok) throw new Error("invalid key endorsement signature");
+      // Same authority rule as endorseOperatorKey and endorseAgentKey. Without
+      // it, registering a NEW key with an endorsement only proved the endorser
+      // was live, so a live-but-untrusted key could mint a child that the
+      // "parent is live" chain rule then treats as trusted. Recovery grants
+      // never open this path (#93): they are honoured only by endorseOperatorKey.
+      this.assertEndorserIsTrusted(fleetId, endorsement.endorsedByKeyId);
     }
     const exists = this.db
       .prepare("SELECT 1 FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
@@ -393,12 +602,21 @@ export class EkhoDb {
    * key id is burnt and the operator stays locked out of his own fleet. This is
    * the recovery path: the healthy device signs for the stranded one, and agents
    * chain-adopt the endorsed key on their next poll.
+   *
+   * #93: this is the ONLY path an operator recovery grant can open (never
+   * endorseAgentKey, never registerOperatorKey). When the ordinary authority
+   * rule refuses the endorser, a matching armed grant (same endorser, same
+   * target, unexpired, unused) is consumed in the SAME transaction as the
+   * endorsement, so it can never be spent twice or spent without effect. The
+   * lost root is NOT revoked here; see the ordering note above
+   * createOperatorRecoveryGrant.
    */
   endorseOperatorKey(
     fleetId: string,
     targetKeyId: string,
     endorsement: { endorsedByKeyId: string; signature: string },
-    actorKeyId?: string | null
+    actorKeyId?: string | null,
+    now: Date = new Date()
   ): void {
     // A key rooting its own trust is the exact self-assertion the chain exists
     // to prevent; check before anything else so it can never be talked around.
@@ -407,9 +625,11 @@ export class EkhoDb {
     }
     const target = this.db
       .prepare(
-        "SELECT public_key, revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
+        "SELECT public_key, revoked_at, endorsed_by_key_id FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
       )
-      .get(fleetId, targetKeyId) as { public_key: string; revoked_at: string | null } | undefined;
+      .get(fleetId, targetKeyId) as
+      | { public_key: string; revoked_at: string | null; endorsed_by_key_id: string | null }
+      | undefined;
     if (!target) throw new Error("operator key not found");
     if (target.revoked_at) throw new Error("cannot endorse a revoked key");
     const endorser = this.db
@@ -418,29 +638,65 @@ export class EkhoDb {
       )
       .get(fleetId, endorsement.endorsedByKeyId) as { public_key: string } | undefined;
     if (!endorser) throw new Error("endorsement references an unknown or revoked key");
-    this.assertEndorserIsTrusted(fleetId, endorsement.endorsedByKeyId);
+    const nowStr = now.toISOString();
+    // Ordinary authority first; a recovery grant is consulted only when that
+    // refuses, and is then the sole reason the endorsement may proceed.
+    const grant = this.endorserIsTrusted(fleetId, endorsement.endorsedByKeyId)
+      ? null
+      : this.requireRecoveryGrant(fleetId, endorsement.endorsedByKeyId, targetKeyId, target, nowStr);
     this.assertNoEndorsementCycle(fleetId, targetKeyId, endorsement.endorsedByKeyId);
     const ok = verifyCanonical(
       endorsementPayload(fleetId, targetKeyId, target.public_key),
       endorsement.signature,
       fromB64url(endorser.public_key)
     );
+    // A bad signature never consumes the grant: nothing was endorsed.
     if (!ok) throw new Error("invalid key endorsement signature");
-    this.db
-      .prepare(
-        "UPDATE fleet_operator_keys SET endorsed_by_key_id = ?, endorsement_sig = ? WHERE fleet_id = ? AND key_id = ?"
-      )
-      .run(endorsement.endorsedByKeyId, endorsement.signature, fleetId, targetKeyId);
-    this.recordEvent(
-      fleetId,
-      "operator_key.endorsed",
-      "operator",
-      actorKeyId ?? endorsement.endorsedByKeyId,
-      "operator_key",
-      targetKeyId,
-      null,
-      { endorsed_by_key_id: endorsement.endorsedByKeyId }
-    );
+    this.db.transaction(() => {
+      if (grant) {
+        // Conditional on still being unused, uncancelled and unexpired, so a
+        // racing second use (or a cancel/expiry in between) finds 0 rows and
+        // the whole transaction, endorsement included, rolls back.
+        const spent = this.db
+          .prepare(
+            `UPDATE operator_recovery_grants SET consumed_at = ?
+               WHERE id = ? AND consumed_at IS NULL AND cancelled_at IS NULL AND expires_at > ?`
+          )
+          .run(nowStr, grant.id, nowStr);
+        if (spent.changes !== 1) {
+          throw new Error(`one-time recovery grant ${grant.id} is no longer usable (used, cancelled or expired)`);
+        }
+      }
+      this.db
+        .prepare(
+          "UPDATE fleet_operator_keys SET endorsed_by_key_id = ?, endorsement_sig = ? WHERE fleet_id = ? AND key_id = ?"
+        )
+        .run(endorsement.endorsedByKeyId, endorsement.signature, fleetId, targetKeyId);
+      this.recordEvent(
+        fleetId,
+        "operator_key.endorsed",
+        "operator",
+        actorKeyId ?? endorsement.endorsedByKeyId,
+        "operator_key",
+        targetKeyId,
+        null,
+        grant
+          ? { endorsed_by_key_id: endorsement.endorsedByKeyId, recovery_grant_id: grant.id }
+          : { endorsed_by_key_id: endorsement.endorsedByKeyId }
+      );
+      if (grant) {
+        this.recordEvent(
+          fleetId,
+          "operator_key.recovery_grant_consumed",
+          "operator",
+          actorKeyId ?? endorsement.endorsedByKeyId,
+          "operator_recovery_grant",
+          grant.id,
+          null,
+          { endorser_key_id: grant.endorser_key_id, target_key_id: grant.target_key_id, consumed_at: nowStr }
+        );
+      }
+    })();
   }
 
   listOperatorKeys(fleetId: string): OperatorKeyRow[] {

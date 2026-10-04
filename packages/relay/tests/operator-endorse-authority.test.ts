@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { endorseAuthority } from "../frontend/src/operatorTrust.js";
+import { endorseAuthority, rescueGuard } from "../frontend/src/operatorTrust.js";
 
 /**
  * 16 Aug 2026, 08:33Z — the fleet-wide break this exists to stop.
@@ -83,5 +83,88 @@ describe("endorseAuthority", () => {
     const g = endorseAuthority("ghost", [key("root")], [agentKey("a1", "root")]);
     expect(g.allowed).toBe(false);
     expect(g.reason).toMatch(/unknown|not registered|never/i);
+  });
+});
+
+/**
+ * #93 — the console side of the one-off recovery grant. The live shape: X6Nv
+ * endorsed _sthCg, every agent is on _sthCg, _sthCg's passphrase is lost, and
+ * the operator has generated a fresh unendorsed key ("succ") in a new browser.
+ * The relay is the control (endorseOperatorKey); these pin what the buttons say.
+ */
+describe("endorseAuthority / rescueGuard with a one-off recovery grant (#93)", () => {
+  const keys = [
+    key("X6Nv", { endorsed_by_key_id: "2T8z" }),
+    key("2T8z", { revoked_at: "2026-08-17T00:00:00Z" }),
+    key("sthCg", { endorsed_by_key_id: "X6Nv" }),
+    key("succ"),
+    key("other"),
+  ];
+  const agentKeys = [agentKey("a1", "sthCg"), agentKey("a2", "sthCg")];
+  const NOW = Date.parse("2026-10-04T11:00:00Z");
+  const grant = {
+    grant_id: "rcg_1",
+    endorser_key_id: "X6Nv",
+    target_key_id: "succ",
+    expires_at: "2026-10-04T11:30:00Z",
+  };
+
+  it("with NO grant, the recovering key is refused — the standing #93 rule is gone", () => {
+    expect(endorseAuthority("X6Nv", keys, agentKeys).allowed).toBe(false);
+    expect(rescueGuard("succ", keys, "X6Nv", agentKeys).allowed).toBe(false);
+  });
+
+  it("ALLOWS exactly the grant's target from the grant's endorser, with plain one-time copy", () => {
+    const g = endorseAuthority("X6Nv", keys, agentKeys, { recoveryGrant: grant, targetKeyId: "succ", now: NOW });
+    expect(g.allowed).toBe(true);
+    expect(g.recovery).toBe(true);
+    expect(g.notice).toMatch(/one-time recovery/i);
+    expect(g.notice).toMatch(/once/i);
+    expect(g.notice).toMatch(/re-endorse every agent.*only then revoke/i);
+  });
+
+  it("refuses the agent panels (no target) even with a grant, and says why", () => {
+    const g = endorseAuthority("X6Nv", keys, agentKeys, { recoveryGrant: grant, now: NOW });
+    expect(g.allowed).toBe(false);
+    expect(g.reason).toMatch(/ONE recovery endorsement only/);
+    expect(g.reason).toMatch(/cannot endorse agents/);
+  });
+
+  it("refuses any other target", () => {
+    expect(
+      endorseAuthority("X6Nv", keys, agentKeys, { recoveryGrant: grant, targetKeyId: "other", now: NOW }).allowed
+    ).toBe(false);
+  });
+
+  it("refuses the wrong endorser", () => {
+    expect(
+      endorseAuthority("other", keys, agentKeys, { recoveryGrant: grant, targetKeyId: "succ", now: NOW }).allowed
+    ).toBe(false);
+  });
+
+  it("refuses once the grant has expired by this browser's clock", () => {
+    const later = Date.parse("2026-10-04T11:30:00Z");
+    expect(
+      endorseAuthority("X6Nv", keys, agentKeys, { recoveryGrant: grant, targetKeyId: "succ", now: later }).allowed
+    ).toBe(false);
+  });
+
+  it("rescueGuard (panel ② Endorse) passes the grant through for its one target only", () => {
+    // rescueGuard reads the real clock, so give it a grant that is live now.
+    const live = { ...grant, expires_at: new Date(Date.now() + 10 * 60_000).toISOString() };
+    const ok = rescueGuard("succ", keys, "X6Nv", agentKeys, live);
+    expect(ok.allowed).toBe(true);
+    expect(ok.recovery).toBe(true);
+    expect(rescueGuard("other", keys, "X6Nv", agentKeys, live).allowed).toBe(false);
+    const already = keys.map((k) => (k.key_id === "succ" ? { ...k, endorsed_by_key_id: "sthCg" } : k));
+    expect(rescueGuard("succ", already, "X6Nv", agentKeys, live).allowed).toBe(false);
+  });
+
+  it("Case: a later agent pinned only to the root, and a divergent fleet, still give no standing authority", () => {
+    const late = [...agentKeys, agentKey("zeus", "sthCg")];
+    expect(endorseAuthority("X6Nv", keys, late).allowed).toBe(false);
+    const split = [agentKey("a1", "sthCg"), agentKey("a2", "other")];
+    const splitKeys = keys.map((k) => (k.key_id === "other" ? { ...k, endorsed_by_key_id: "sthCg" } : k));
+    expect(endorseAuthority("X6Nv", splitKeys, split).allowed).toBe(false);
   });
 });

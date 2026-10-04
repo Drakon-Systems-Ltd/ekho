@@ -8,6 +8,7 @@
     "start": "tsx src/server.ts",
     "setup": "tsx src/setup.ts",
     "doctor": "tsx src/setup.ts --doctor",
+    "recovery-grant": "tsx src/recovery-grant.ts",
     "typecheck": "tsc --noEmit",
     "agent:demo": "tsx src/demo-agent.ts",
     "ui:dev": "vite",
