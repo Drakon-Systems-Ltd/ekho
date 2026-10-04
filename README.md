@@ -89,16 +89,22 @@ The console also includes a **Settings** panel (gear icon) for per-agent bubble 
 
 ### Operator keys and devices
 
-Each browser or device that signs into the console holds its own operator key, and agents only trust a key endorsed by a key they already trust. A device left unendorsed is not trusted by your agents and cannot approve anything.
+Three different things are in play, and they are checked in different places:
 
-- Endorse every new device immediately, from a device that is already trusted (**Security** → panel ② → **Endorse**).
+- **Console sign-in** (email and password) gives you a session. The session is what authorizes console actions such as approvals, pause/resume, quarantine and the trust toggle. These actions do not check your device's operator key or whether it is endorsed.
+- **Your device's operator key.** Each browser holds its own Ed25519 key, unlocked with a per-device signing passphrase (not your sign-in password). It signs the messages you send to agents and the endorsements you make in **Security**. The relay accepts an endorsement only from a key the fleet already follows: before any agent is endorsed, any live key; after that, a key that has endorsed agents, or a key endorsed by another live key.
+- **Agents' signature checks.** Each agent keeps its own list of pinned operator keys. It pins a key you configure explicitly on the agent host (for Hermes, `EKHO_OPERATOR_PUBKEY`). An agent that has no pins yet adopts the relay's current operator keys once, on first contact (trust on first use). After that it adds a key only when a key it already pins has endorsed it. A message signed with a pinned key is labelled `verified-operator`. A message signed with a key the agent does not pin fails verification and does not wake the agent. An unsigned operator message, or any operator message to an agent with no pins yet, rests at best on the relay's word (`attested-operator`).
+
+So a new device you do not endorse can still sign in and approve actions, but agents reject the messages it signs.
+
+- Endorse every new device immediately, from a device whose key your agents already trust (**Security** → panel ② → **Endorse**).
 - Keep at least two trusted devices, so losing one browser or passphrase does not lock you out.
-- Locked out? The relay host can arm a one-time, time-limited recovery grant — see [Operator-key recovery](docs/operations.md#operator-key-recovery).
+- Locked out? The relay host can arm a one-time, time-limited recovery grant (relay newer than 0.5.5) — see [Operator-key recovery](docs/operations.md#operator-key-recovery).
 - Never revoke a key until every agent it endorsed has been re-endorsed from another trusted key; otherwise those agents lose their trusted operator.
 
 ### Upgrading
 
-Back up the database first, then upgrade the relay **and** rebuild the console (it is a separately built static bundle; `npm run build` rebuilds it, and so does rebuilding the Docker image), restart, and update each agent's plugin (`openclaw plugins update ekho-adapter`, then `openclaw gateway restart`). Step-by-step: [Operations Guide → Upgrades](docs/operations.md#upgrades).
+Back up the database first, then upgrade the relay **and** rebuild the console (it is a separately built static bundle; `npm run build` rebuilds it, and so does rebuilding the Docker image), restart, and update each agent's plugin (stop the gateway, back up the plugin's two [state files](packages/openclaw-plugin/README.md#state-files), run `openclaw plugins update ekho-adapter`, check both files are still in place, then start the gateway). Step-by-step: [Operations Guide → Upgrades](docs/operations.md#upgrades).
 
 ### Docker lifecycle
 
@@ -167,7 +173,7 @@ Ekho supports mixed fleets. Agents do not need to share a runtime or model provi
 
 | Runtime | Integration | Install / verify |
 |---------|-------------|------------------|
-| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin`; update with `openclaw plugins update ekho-adapter` |
+| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin`, configure, then `openclaw plugins enable ekho-adapter`; to update, see the [plugin README](packages/openclaw-plugin/README.md#update) |
 | Hermes Agent | [`ekho_hermes`](packages/hermes-plugin/) | Install the Python SDK and Hermes plugin; after Hermes/venv updates run `python ~/.hermes/plugins/ekho/healthcheck.py` |
 | Node.js / custom | [`@drakon-systems/ekho-sdk`](packages/sdk/) | `npm install @drakon-systems/ekho-sdk` |
 | Python / custom | [Python SDK](sdks/python/) | `pip install ./sdks/python` from a checkout |
