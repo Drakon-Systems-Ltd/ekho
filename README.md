@@ -8,7 +8,6 @@
   <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522-0d9488" alt="Node 22+"/>
-  <img src="https://img.shields.io/badge/tests-797%20passing-34d399" alt="797 tests passing"/>
   <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
 </p>
 
@@ -88,6 +87,19 @@ The same five steps appear in the console itself under the **?** (Help) icon —
 
 The console also includes a **Settings** panel (gear icon) for per-agent bubble colours and a typing-animation toggle, persisted locally in your browser.
 
+### Operator keys and devices
+
+Each browser or device that signs into the console holds its own operator key, and agents only trust a key endorsed by a key they already trust. A device left unendorsed is not trusted by your agents and cannot approve anything.
+
+- Endorse every new device immediately, from a device that is already trusted (**Security** → panel ② → **Endorse**).
+- Keep at least two trusted devices, so losing one browser or passphrase does not lock you out.
+- Locked out? The relay host can arm a one-time, time-limited recovery grant — see [Operator-key recovery](docs/operations.md#operator-key-recovery).
+- Never revoke a key until every agent it endorsed has been re-endorsed from another trusted key; otherwise those agents lose their trusted operator.
+
+### Upgrading
+
+Back up the database first, then upgrade the relay **and** rebuild the console (it is a separately built static bundle; `npm run build` rebuilds it, and so does rebuilding the Docker image), restart, and update each agent's plugin (`openclaw plugins update ekho-adapter`, then `openclaw gateway restart`). Step-by-step: [Operations Guide → Upgrades](docs/operations.md#upgrades).
+
 ### Docker lifecycle
 
 ```bash
@@ -155,7 +167,7 @@ Ekho supports mixed fleets. Agents do not need to share a runtime or model provi
 
 | Runtime | Integration | Install / verify |
 |---------|-------------|------------------|
-| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `npm install -g @drakon-systems/ekho-openclaw-plugin` |
+| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin`; update with `openclaw plugins update ekho-adapter` |
 | Hermes Agent | [`ekho_hermes`](packages/hermes-plugin/) | Install the Python SDK and Hermes plugin; after Hermes/venv updates run `python ~/.hermes/plugins/ekho/healthcheck.py` |
 | Node.js / custom | [`@drakon-systems/ekho-sdk`](packages/sdk/) | `npm install @drakon-systems/ekho-sdk` |
 | Python / custom | [Python SDK](sdks/python/) | `pip install ./sdks/python` from a checkout |
@@ -333,12 +345,12 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Node suite: 527 tests
+npm test                     # Node test suite
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```
 
-Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (**64 tests**) and [`packages/hermes-plugin/`](packages/hermes-plugin/) (**206 tests**) — **797 tests total** across the monorepo, verified on 9 Aug 2026.
+Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packages/hermes-plugin/`](packages/hermes-plugin/).
 
 ## Project Status
 
