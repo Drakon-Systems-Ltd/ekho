@@ -130,3 +130,12 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
     definition: DefineToolPluginOptions<TConfigSchema>
   ): DefinedToolPluginEntry;
 }
+
+// OpenClaw's state-root resolver. Mirrors openclaw/dist/plugin-sdk/state-paths.d.ts
+// (resolveStateDir: OPENCLAW_STATE_DIR, else ~/.openclaw or a legacy dir that
+// already exists). Used for its type only: state-dir.ts loads it with a guarded
+// require so a host without this module falls back instead of failing to load.
+declare module "openclaw/plugin-sdk/state-paths" {
+  export function resolveStateDir(env?: NodeJS.ProcessEnv, homedir?: () => string): string;
+  export const STATE_DIR: string;
+}
