@@ -8,7 +8,6 @@
   <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522-0d9488" alt="Node 22+"/>
-  <img src="https://img.shields.io/badge/tests-797%20passing-34d399" alt="797 tests passing"/>
   <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
 </p>
 
@@ -88,6 +87,33 @@ The same five steps appear in the console itself under the **?** (Help) icon —
 
 The console also includes a **Settings** panel (gear icon) for per-agent bubble colours and a typing-animation toggle, persisted locally in your browser.
 
+### Operator keys and devices
+
+Three different things are in play, and they are checked in different places:
+
+- **Console sign-in** (email and password) gives you a session. The session is what authorizes console actions such as approvals, pause/resume, quarantine and the trust toggle. These actions do not check your device's operator key or whether it is endorsed.
+- **Your device's operator key.** Each browser holds its own Ed25519 key, unlocked with a per-device signing passphrase (not your sign-in password). It signs the messages you send to agents and the endorsements you make in **Security**. The relay accepts an endorsement only from a key the fleet already follows: before any agent is endorsed, any live key; after that, a key that has endorsed a live agent key, or one whose chain of endorsements reaches such a key through live keys only. Being endorsed by a live key is not enough on its own: that key's chain must reach the agents too. The one exception is a successor key endorsed under a [recovery grant](docs/operations.md#operator-key-recovery). `GET /v1/operator/keys` reports the relay's answer for each key as `trusted`.
+- **Agents' signature checks.** Each agent keeps its own list of pinned operator keys in its identity file, together with a first-contact latch and a ledger of operator keys it has seen revoked. With no pins and an unset latch, it can adopt eligible operator keys from the relay on trust (trust on first use); the latch is set only when at least one key is adopted. Once latched, an empty pin list does not reopen first-contact trust. After that it adds a key only when a key it already pins has endorsed it. A message signed with a pinned key is labelled `verified-operator`. A message signed with a key the agent does not pin fails verification and does not wake the agent. An unsigned operator message, or any operator message to an agent with no pins yet, rests at best on the relay's word (`attested-operator`).
+
+How you pre-pin a key depends on the agent runtime:
+
+**Hermes.** Set `EKHO_OPERATOR_PUBKEY` on the agent host (`<b64url>` or `<key_id>:<b64url>`, comma-separated). The agent pins a valid key there before first contact, so the relay's keys are not adopted on trust, and re-applies it on every connect unless its identity file records that key as revoked, in which case it logs a warning, unpins it and leaves it unpinned.
+
+**OpenClaw.** The 0.5.6 plugin has no supported operator-key seed setting; normal enrollment relies on first contact and endorsements. Its code reads an internal `operatorPubkey` value, but it is declared in neither of the plugin's config schemas (`openclaw.plugin.json` and the schema built into the plugin), so it is not a supported setting: do not set it or rely on it. See [State files](packages/openclaw-plugin/README.md#state-files).
+
+The identity file holds the agent's signing key and all of this trust state, so back it up and restore it if it is lost; do not treat regenerating it as harmless. A regenerated identity is a new key that must be endorsed again, starts with no pins (a Hermes agent's `EKHO_OPERATOR_PUBKEY` is pinned again on connect) and with its first-contact latch reset (so an agent left with no pins trusts the relay's operator keys afresh on first contact), and has forgotten which operator keys were revoked (so a revoked key still listed in `EKHO_OPERATOR_PUBKEY` is pinned again). The Hermes plugin mints a replacement without asking when its identity file is missing or unreadable. The OpenClaw plugin refuses to mint a replacement for an enrolled agent unless told to; see [State files](packages/openclaw-plugin/README.md#state-files) for deliberate re-keying and its consequences.
+
+So a new device you do not endorse can still sign in and approve actions, but an agent that already has pins, and does not pin that device's key, rejects the messages it signs.
+
+- Endorse every new device immediately, from a device whose key your agents already trust (**Security** → panel ② → **Endorse**).
+- Keep at least two trusted devices, so losing one browser or passphrase does not lock you out.
+- Locked out? The relay host can arm a one-time, time-limited recovery grant (relay 0.5.6 or later) — see [Operator-key recovery](docs/operations.md#operator-key-recovery).
+- Never revoke a key until every agent it endorsed has been re-endorsed from another trusted key; otherwise those agents lose their trusted operator.
+
+### Upgrading
+
+Back up the database first, then upgrade the relay **and** rebuild the console (it is a separately built static bundle; `npm run build` rebuilds it, and so does rebuilding the Docker image), restart, and update each agent's plugin (`openclaw plugins update ekho-adapter` for an npm install, or reinstall the rebuilt folder for a local-folder install). Since 0.5.6 the plugin keeps its [state files](packages/openclaw-plugin/README.md#state-files) outside its install directory, so updates leave them alone; the update from 0.5.5 or earlier is the exception and needs a [backup first](packages/openclaw-plugin/README.md#upgrading-from-055-or-earlier). Step-by-step: [Operations Guide → Upgrades](docs/operations.md#upgrades).
+
 ### Docker lifecycle
 
 ```bash
@@ -155,7 +181,7 @@ Ekho supports mixed fleets. Agents do not need to share a runtime or model provi
 
 | Runtime | Integration | Install / verify |
 |---------|-------------|------------------|
-| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `npm install -g @drakon-systems/ekho-openclaw-plugin` |
+| OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin`, configure, then `openclaw plugins enable ekho-adapter`; to update, see the [plugin README](packages/openclaw-plugin/README.md#update) |
 | Hermes Agent | [`ekho_hermes`](packages/hermes-plugin/) | Install the Python SDK and Hermes plugin; after Hermes/venv updates run `python ~/.hermes/plugins/ekho/healthcheck.py` |
 | Node.js / custom | [`@drakon-systems/ekho-sdk`](packages/sdk/) | `npm install @drakon-systems/ekho-sdk` |
 | Python / custom | [Python SDK](sdks/python/) | `pip install ./sdks/python` from a checkout |
@@ -333,12 +359,12 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Node suite: 527 tests
+npm test                     # Node test suite
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```
 
-Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) (**64 tests**) and [`packages/hermes-plugin/`](packages/hermes-plugin/) (**206 tests**) — **797 tests total** across the monorepo, verified on 9 Aug 2026.
+Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packages/hermes-plugin/`](packages/hermes-plugin/).
 
 ## Project Status
 
