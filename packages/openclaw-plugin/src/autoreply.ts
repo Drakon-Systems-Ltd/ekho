@@ -268,6 +268,12 @@ export const DEFERRED_RETRY_SPAWN_FAILED_REASON = "deferred_retry_spawn_failed";
 // The loop was stopped (plugin unload/reload) with stashes still held: their
 // turn would have come from this loop, and the next generation never saw them.
 export const DEFERRED_LOOP_STOPPED_REASON = "deferred_loop_stopped";
+// The loop was stopped between acking a batch and handing its messages to a
+// turn or the stash: the stopping tick will never get to them.
+export const INFLIGHT_LOOP_STOPPED_REASON = "inflight_loop_stopped";
+// How long a stop() waits for an in-flight tick to settle. Under OpenClaw's
+// 5 s budget for an unload hook, so the host never cuts the wait short.
+export const STOP_DRAIN_MS = 4_000;
 
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
 const LAST_BATCH_CAP = 25; // ring exposed to ekho_inbox (Part B1)
@@ -1853,6 +1859,8 @@ export interface ServiceDeferredOptions {
   /** Sink for a stash that will never get its turn. Acked work, so it is a
    *  record on disk, never a silent gap. */
   deadLetter: (messages: InboxMessage[], reason: string) => void;
+  /** True once the loop was stopped: no further floor or turn work. */
+  isStopped?: () => boolean;
   log?: Logger;
 }
 
@@ -1909,6 +1917,14 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
     } catch (err) {
       log?.debug?.(`[ekho-autoreply] deferred-retry acquire failed for ${conv}: ${String(err)}`);
       continue; // relay hiccup — keep the stash, try again next tick
+    }
+    if (opts.isStopped?.()) {
+      // stop() dead-lettered the stash while we awaited the acquire; a
+      // stopped loop starts no turn. Hand back a floor we were just given.
+      if (res?.granted) {
+        try { await opts.releaseFloor(conv); } catch { /* best-effort */ }
+      }
+      return 0;
     }
     if (!res?.granted) continue; // still held — keep waiting
     if (state.inFlight) {
@@ -2058,7 +2074,9 @@ async function triggerTurn(
  * Start the background auto-reply loop. Polls the relay on an interval; on a
  * qualifying inbound message it wakes the agent (which replies via ekho_send).
  * Spends zero LLM tokens unless a real message arrives. Returns an idempotent
- * stop() that clears the timer and dead-letters any stash still held back.
+ * stop(): it clears the timer and dead-letters every acked message still held
+ * in memory before returning, and its promise settles once the tick in flight
+ * has (bounded). A stopped loop acks, stashes and spawns nothing more.
  */
 export function startAutoReply(opts: {
   client: EkhoAgentClient;
@@ -2081,7 +2099,9 @@ export function startAutoReply(opts: {
   onDeadLetter?: (records: DeadLetterRecord[]) => void;
   // #5: peer wake strictness — see RequireSignedMode. Default "warn".
   requireSigned?: RequireSignedMode;
-}): () => void {
+  // Upper bound on how long stop()'s promise waits for an in-flight tick.
+  stopDrainMs?: number;
+}): () => Promise<void> {
   const { client, api, selfAgentId, log } = opts;
   const pollIntervalMs = opts.pollIntervalMs ?? 5000;
   const peerEnabled = opts.peerEnabled ?? false;
@@ -2114,14 +2134,37 @@ export function startAutoReply(opts: {
   // One tick at a time; a tick that finds this set returns immediately, and
   // the next interval fires soon enough.
   let tickRunning = false;
-  // Set by the returned stop(). A stopped loop polls no more: a tick that is
-  // already past its poll finishes (those messages are consumed — abandoning
-  // them mid-tick would lose them), but no new one starts.
+  // Set by the returned stop(). A stopped loop starts no tick, and the tick in
+  // flight checks it after every await: from then on it acks nothing, stashes
+  // nothing and spawns no turn.
   let stopped = false;
+  // The tick in flight, for stop() to wait on.
+  let currentTick: Promise<void> | null = null;
+  let stopping: Promise<void> | null = null;
+  // Messages the tick in flight has acked (or is acking) but not yet handed to
+  // a turn or the stash. In that window they exist only in this tick's memory.
+  let unhanded: InboxMessage[] = [];
+  // Stashed conversations the turn in flight is delivering. They stay in the
+  // stash until that turn has started, but they are the turn's, not stop()'s.
+  let covering = new Set<string>();
 
-  // Whatever a stopped loop still holds back will never get its turn here.
-  const flushDeferredOnStop = (): void => {
+  // Whatever a stopped loop still holds will never get its turn here. Runs
+  // synchronously in stop(), so it is on disk before stop() returns: the host
+  // may exit the process as soon as its unload hook settles.
+  const flushOnStop = (): void => {
+    if (unhanded.length > 0) {
+      const msgs = unhanded;
+      unhanded = [];
+      log?.warn?.(
+        `[ekho-autoreply] loop stopped mid-tick with ${msgs.length} acked msg(s) not yet ` +
+          `handed to a turn — dead-lettering them; they will get no turn`
+      );
+      deadLetterDeferred(msgs, INFLIGHT_LOOP_STOPPED_REASON);
+    }
+    // A stash a covering turn is delivering is left to that turn: cleared if
+    // it started, flushed by the tick's own end if it did not.
     for (const [conv, stash] of [...state.deferredByConversation]) {
+      if (covering.has(conv)) continue;
       state.deferredByConversation.delete(conv);
       log?.warn?.(
         `[ekho-autoreply] loop stopped with ${stash.messages.length} held-back msg(s) for ` +
@@ -2139,10 +2182,25 @@ export function startAutoReply(opts: {
     try {
       batch = (await client.getInbox()) as unknown as InboxBatch; // consumes: queued→delivered
     } catch (err) {
+      if (stopped) return;
       log?.warn?.(`[ekho-autoreply] poll failed: ${String(err)}`);
       return;
     }
     if (!batch || !Array.isArray(batch.messages)) return;
+    if (stopped) {
+      // The loop was stopped while the poll was in flight. Nothing here was
+      // acked, so the relay still owns these messages: it re-queues a
+      // delivered-but-unacked message after its delivery timeout, and the
+      // next generation polls it then. Processing them here would be work by
+      // a retired loop; acking them would bin them.
+      if (batch.messages.length > 0) {
+        log?.info?.(
+          `[ekho-autoreply] poll returned ${batch.messages.length} msg(s) after stop — not acked or ` +
+            `processed; the relay redelivers them after its delivery timeout`
+        );
+      }
+      return;
+    }
     // Rooms the relay leaves unlimited still honour a locally configured cap;
     // resolved once here so the latch, the stall notice and the prompt agree.
     batch = withLocalRoomCap(batch, peerTurnBudget);
@@ -2322,6 +2380,7 @@ export function startAutoReply(opts: {
         releaseFloor: async (conv) => { await client.releaseFloor(conv); },
         runTurn: runDeferredTurn,
         deadLetter: deadLetterDeferred,
+        isStopped: () => stopped,
         log
       });
 
@@ -2333,6 +2392,7 @@ export function startAutoReply(opts: {
           log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
         }
       }
+      if (stopped) return;
       await serviceDeferred(); // quiet tick — the moment a busy floor frees up
       return;
     }
@@ -2363,6 +2423,8 @@ export function startAutoReply(opts: {
       } catch (err) {
         log?.debug?.(`[ekho-autoreply] stall escalation failed for ${conv}: ${String(err)}`);
       }
+      // Nothing is acked yet: the relay redelivers the batch to the next loop.
+      if (stopped) return;
     }
 
     // Remaining peer budget per peer-triggered CAPPED conversation, AFTER this
@@ -2383,6 +2445,9 @@ export function startAutoReply(opts: {
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m);
 
+    // From the ack on, `kept` lives only in this tick until a turn or the
+    // stash takes it; a stop() in that window dead-letters it (flushOnStop).
+    unhanded = kept;
     // ACK BEFORE the turn (Part C, rule 2 — at-most-once auto-reply). A slow or
     // crashed turn can never cause a redelivery that re-triggers us.
     if (ackAll.length > 0) {
@@ -2392,6 +2457,7 @@ export function startAutoReply(opts: {
         log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
       }
     }
+    if (stopped) return; // stop() has dead-lettered `kept`
 
     if (kept.length === 0) {
       await serviceDeferred(); // consumed, no new turn — still service the stash
@@ -2403,6 +2469,13 @@ export function startAutoReply(opts: {
     // agent already holds are deferred to it — stashed for retry so they can't
     // silently vanish; the floor holder gets a fresh tail.
     const plan = await planFloorTurn(kept, (conv) => client.acquireFloor(conv, FLOOR_TTL_SECONDS), log);
+    if (stopped) {
+      // stop() has dead-lettered `kept`; hand back the floors we just took.
+      for (const conv of plan.toRelease) {
+        try { await client.releaseFloor(conv); } catch { /* best-effort */ }
+      }
+      return;
+    }
     const nowMs = Date.now();
     // The deferred path binds verdicts to objects, so re-key this tick's
     // id-keyed map once, here, at its boundary (#78 r4). Anything the relay let
@@ -2427,6 +2500,9 @@ export function startAutoReply(opts: {
     // A conversation that gets a turn ABSORBS its stash: the held-back messages
     // are delivered BY this turn rather than cleared unread (#78).
     const cover = mergeCoveredStashes(state, plan.floored, batchVerdicts, nowMs);
+    // Every kept message is now in the stash or in `cover`, whose turn is
+    // spawned below without another await.
+    unhanded = [];
 
     if (plan.floored.length > 0) {
       if (cover.coveredConversationIds.length > 0) {
@@ -2438,6 +2514,7 @@ export function startAutoReply(opts: {
       }
       let started = false;
       state.inFlight = true;
+      covering = new Set(cover.coveredConversationIds);
       try {
         const flooredBatch: InboxBatch = {
           ...batch,
@@ -2484,6 +2561,8 @@ export function startAutoReply(opts: {
       }
     }
 
+    covering = new Set();
+    if (stopped) return;
     await serviceDeferred();
   };
 
@@ -2495,14 +2574,21 @@ export function startAutoReply(opts: {
       await runTick();
     } finally {
       tickRunning = false;
-      // stop() arrived mid-tick: it left the stash to us, as this tick may
-      // still have been adding to it.
-      if (stopped) flushDeferredOnStop();
+      unhanded = [];
+      covering = new Set();
+      // Safety net: stop() already flushed, and a stopped tick adds nothing,
+      // so this is normally a no-op.
+      if (stopped) flushOnStop();
     }
   };
 
   const timer = setInterval(() => {
-    void tick();
+    if (stopped || tickRunning) return;
+    const t = tick();
+    currentTick = t;
+    void t.finally(() => {
+      if (currentTick === t) currentTick = null;
+    });
   }, pollIntervalMs);
   if (typeof timer === "object" && timer && "unref" in timer) timer.unref?.();
 
@@ -2513,11 +2599,38 @@ export function startAutoReply(opts: {
     `build=${formatBuildIdentityShort(buildIdentity())})`
   );
 
+  // Idempotent. Everything acked and still held in memory is dead-lettered
+  // before this returns; the promise then settles once the tick in flight has
+  // (bounded by stopDrainMs), so a host that awaits it exits on a quiet loop.
   return () => {
-    if (stopped) return;
+    if (stopping) return stopping;
     stopped = true;
     clearInterval(timer);
-    if (!tickRunning) flushDeferredOnStop();
+    flushOnStop();
     log?.info?.(`[ekho-autoreply] stopped listening as ${selfAgentId}`);
+    const inFlight = currentTick;
+    stopping = inFlight
+      ? settleWithin(inFlight, opts.stopDrainMs ?? STOP_DRAIN_MS).then((settled) => {
+          if (!settled) {
+            log?.warn?.(
+              `[ekho-autoreply] in-flight tick still running ${opts.stopDrainMs ?? STOP_DRAIN_MS}ms after stop; ` +
+                `not waiting longer (it acks and starts nothing more)`
+            );
+          }
+        })
+      : Promise.resolve();
+    return stopping;
   };
+}
+
+/** True if `p` settles (either way) within `ms`, false if the wait ran out. */
+function settleWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    if (typeof timer === "object" && timer && "unref" in timer) timer.unref?.();
+    p.then(
+      () => { clearTimeout(timer); resolve(true); },
+      () => { clearTimeout(timer); resolve(true); }
+    );
+  });
 }

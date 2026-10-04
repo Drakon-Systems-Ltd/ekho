@@ -473,12 +473,14 @@ plugin.register = (api) => {
   // `openclaw plugins reload|update` swaps in a fresh module copy inside the
   // same gateway process; the old copy's setIntervals would otherwise beat
   // forever beside the new one's. On a swap OpenClaw (2026.9.8) runs the old
-  // instance's gateway_stop hooks with reason "plugin replacement", then
-  // disposes it, which runs api.lifecycle.onDispose callbacks
-  // (src/gateway/server-plugin-reload.ts, runLifecycleHooks/disposeInstances).
-  // Both are wired, both feature-detected; shutdown() is idempotent. A host
-  // with neither is covered by the process-wide registry: the next copy stops
-  // this one when it connects (runtime-registry.ts).
+  // instance's gateway_stop hooks with reason "plugin replacement"
+  // (src/gateway/server-plugin-reload-cleanup.ts), then disposes it, which
+  // runs the api.lifecycle.onDispose callbacks (registered at
+  // src/plugins/plugin-instance.ts:100-102, run at :705-715). Gateway
+  // shutdown runs gateway_stop too. Both are wired, both feature-detected;
+  // shutdown() is idempotent. A host with neither is covered by the
+  // process-wide registry: the next copy stops this one when it connects
+  // (runtime-registry.ts).
   activateRuntime();
   wireUnload(api);
 
@@ -490,7 +492,14 @@ plugin.register = (api) => {
   }
 };
 
-/** Tie shutdown() to whichever unload signals this host offers. Never throws. */
+/**
+ * Tie shutdown() to whichever unload signals this host offers. Never throws.
+ * Both handlers return shutdown()'s drain promise, and OpenClaw awaits both,
+ * each bounded at 5 s: onDispose callbacks via raceWithTimeout
+ * (src/plugins/plugin-instance.ts:705-715, SHUTDOWN_TIMEOUT_MS :35), and
+ * gateway_stop handlers via awaitHook (src/plugins/hooks.ts:636, budget :103).
+ * The drain is bounded below that (autoreply.ts STOP_DRAIN_MS).
+ */
 function wireUnload(api: Parameters<typeof plugin.register>[0]): void {
   const routes: string[] = [];
   try {
@@ -503,7 +512,7 @@ function wireUnload(api: Parameters<typeof plugin.register>[0]): void {
     if (typeof api.on === "function") {
       api.on("gateway_stop", (event: unknown) => {
         const reason = (event as { reason?: unknown } | undefined)?.reason;
-        shutdown(`gateway_stop: ${typeof reason === "string" && reason ? reason : "unspecified"}`, api.logger);
+        return shutdown(`gateway_stop: ${typeof reason === "string" && reason ? reason : "unspecified"}`, api.logger);
       });
       routes.push("gateway_stop");
     }

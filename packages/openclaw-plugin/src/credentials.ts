@@ -255,6 +255,14 @@ export function takeEnrollOperatorKeys(): EnrollOperatorKey[] | null {
   return keys;
 }
 
+/** The relay refused the enrolment (a 400 for a spent or expired token). */
+export class EnrollmentFailedError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "EnrollmentFailedError";
+  }
+}
+
 export async function enrollOrLoad(config: {
   configDir: string;
   relayBaseUrl: string;
@@ -308,7 +316,7 @@ export async function enrollOrLoad(config: {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`[ekho-adapter] Enrollment failed: ${res.status} ${text}`);
+    throw new EnrollmentFailedError(`[ekho-adapter] Enrollment failed: ${res.status} ${text}`, res.status);
   }
 
   const body = await res.json() as { agent_id: string; secret: string; operator_keys?: EnrollOperatorKey[] };

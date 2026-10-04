@@ -21,13 +21,17 @@ export const RUNTIME_REGISTRY_KEY = Symbol.for("ekho-adapter.runtime");
 export interface AgentRuntimeHolder {
   generation: number;
   /** Stops this holder's heartbeat, auto-reply loop and anything else it runs. */
-  stop: (reason: string) => void;
+  stop: (reason: string) => void | Promise<void>;
 }
 
 interface RuntimeRegistry {
   /** Last generation handed out; module copies take the next one at load. */
   generations: number;
   byAgent: Map<string, AgentRuntimeHolder>;
+  /** Tail of each enrolment key's lock queue (see runEnrolmentExclusive). */
+  enrolments?: Map<string, Promise<void>>;
+  /** Operator keys from an enrolment, for whichever copy bootstraps identity. */
+  enrolOperatorKeys?: Map<string, unknown[]>;
 }
 
 function registry(): RuntimeRegistry {
@@ -78,4 +82,46 @@ export function releaseAgentRuntime(agentId: string, generation: number): void {
 /** Test seam: the generation currently holding `agentId`, if any. */
 export function agentRuntimeGeneration(agentId: string): number | undefined {
   return registry().byAgent.get(agentId)?.generation;
+}
+
+/**
+ * Run `fn` (an enrol-or-load) with every other module copy's enrol-or-load for
+ * the same `key` queued behind it. An enrolment token is single-use, and the
+ * agent id that keys the producer claim above only exists once it succeeds:
+ * a copy retired mid-enrolment (a reload) has spent the token while the new
+ * copy, finding no credentials yet, would spend it again and get a 400 — so
+ * neither would produce. Queued here, the new copy runs once the old one's
+ * enrolment has settled and loads the credentials it saved.
+ */
+export async function runEnrolmentExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const r = registry();
+  // Added after the first registry shape: an older copy may have created it.
+  const locks = (r.enrolments ??= new Map());
+  const prev = locks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = prev.then(() => mine);
+  locks.set(key, tail);
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    if (locks.get(key) === tail) locks.delete(key);
+  }
+}
+
+/** Leave an enrolment's operator keys for the copy that pins them (TOFU). */
+export function putEnrolOperatorKeys(key: string, keys: unknown[]): void {
+  (registry().enrolOperatorKeys ??= new Map()).set(key, keys);
+}
+
+/** Take (once) the operator keys an enrolment under `key` left behind. */
+export function takeEnrolOperatorKeys(key: string): unknown[] | null {
+  const m = registry().enrolOperatorKeys;
+  const keys = m?.get(key) ?? null;
+  m?.delete(key);
+  return keys;
 }

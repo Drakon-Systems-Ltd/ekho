@@ -5,15 +5,35 @@
 // plugin entry (src/index.ts) twice in one process via vi.resetModules, against
 // a stub relay client, and count who is still beating / polling.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const relay = vi.hoisted(() => ({
   nextClient: 0,
   heartbeats: [] as Array<{ client: number; metrics: Record<string, string> }>,
-  polls: [] as number[]
+  polls: [] as number[],
+  // Set once the test has told the plugin to stop; relay calls note it.
+  stopped: false,
+  afterStop: [] as string[],
+  // Overridable inbox; the default is an empty batch.
+  inbox: null as null | (() => Promise<unknown>),
+  floorFree: (conv: string) => conv !== "held-conv",
+  spawnsAfterStop: 0
 }));
+
+vi.mock("node:child_process", async () => {
+  const { EventEmitter } = await import("node:events");
+  return {
+    spawn: () => {
+      if (relay.stopped) relay.spawnsAfterStop++;
+      const child = new EventEmitter() as EventEmitter & { kill: () => void };
+      child.kill = () => {};
+      setTimeout(() => child.emit("exit", 0), 0);
+      return child;
+    }
+  };
+});
 
 // Stub relay: every client the plugin constructs gets a number, so a heartbeat
 // or inbox poll can be traced to the module copy that sent it.
@@ -29,9 +49,20 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
     }
     async getInbox() {
       relay.polls.push(this.n);
-      return { messages: [] };
+      return relay.inbox ? relay.inbox() : { messages: [] };
     }
     async ackMessages() {
+      if (relay.stopped) relay.afterStop.push("ack");
+      return {};
+    }
+    async acquireFloor(conv: string) {
+      if (relay.stopped) relay.afterStop.push("acquire");
+      return { granted: relay.floorFree(conv), holder_agent_id: "other" };
+    }
+    async releaseFloor() {
+      return {};
+    }
+    async raiseNotice() {
       return {};
     }
   }
@@ -73,18 +104,11 @@ function logger() {
 }
 
 /** A fake host api. `signals` adds OpenClaw's unload surfaces (on + lifecycle). */
-function fakeApi(signals: boolean) {
+function fakeApi(signals: boolean, pluginConfig: Record<string, unknown> = defaultConfig()) {
   const disposers: Array<() => unknown> = [];
   const hooks = new Map<string, Array<(event: unknown) => unknown>>();
   const api: Record<string, unknown> = {
-    pluginConfig: {
-      relayBaseUrl: "http://relay.invalid",
-      agentId: "agent_reload",
-      agentSecret: "s3cret",
-      heartbeatIntervalMs: HEARTBEAT_MS,
-      allowNewIdentity: true,
-      stateDir
-    },
+    pluginConfig,
     logger: logger()
   };
   if (signals) {
@@ -102,9 +126,58 @@ function fakeApi(signals: boolean) {
   return {
     api,
     log: api.logger as ReturnType<typeof logger>,
-    dispose: () => disposers.forEach((d) => d()),
-    fire: (name: string, event: unknown) => (hooks.get(name) ?? []).forEach((h) => h(event))
+    // What the host gets back from each callback (OpenClaw awaits them).
+    dispose: () => disposers.map((d) => d()),
+    fire: (name: string, event: unknown) => (hooks.get(name) ?? []).map((h) => h(event))
   };
+}
+
+function defaultConfig(): Record<string, unknown> {
+  return {
+    relayBaseUrl: "http://relay.invalid",
+    agentId: "agent_reload",
+    agentSecret: "s3cret",
+    heartbeatIntervalMs: HEARTBEAT_MS,
+    allowNewIdentity: true,
+    stateDir
+  };
+}
+
+/** A config with no credentials yet: the first connect spends the token. */
+function enrolConfig(): Record<string, unknown> {
+  return {
+    relayBaseUrl: "http://relay.invalid",
+    fleetId: "fleet_reload",
+    enrollmentToken: "single-use-token",
+    heartbeatIntervalMs: HEARTBEAT_MS,
+    stateDir
+  };
+}
+
+function deadLetters(): Array<{ reason: string; message: { message_id: string } }> {
+  const f = join(stateDir, ".ekho-dead-letter.jsonl");
+  if (!existsSync(f)) return [];
+  return readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+/**
+ * A stub /v1/enroll with the relay's single-use token: the first call is held
+ * until `release()`, then succeeds; any later call is refused with 400
+ * (packages/relay/src/routes-agent.ts).
+ */
+function stubEnrolment() {
+  const enrol = { calls: 0, release: () => {} };
+  const held = new Promise<void>((r) => {
+    enrol.release = r;
+  });
+  vi.stubGlobal("fetch", async (url: string) => {
+    if (new URL(url).pathname !== "/v1/enroll") return Response.json({});
+    enrol.calls++;
+    if (enrol.calls > 1) return Response.json({ error: "invalid or expired token" }, { status: 400 });
+    await held;
+    return Response.json({ agent_id: "agent_enrolled", secret: "fresh-secret" });
+  });
+  return enrol;
 }
 
 /**
@@ -134,6 +207,10 @@ beforeEach(() => {
   relay.nextClient = 0;
   relay.heartbeats.length = 0;
   relay.polls.length = 0;
+  relay.stopped = false;
+  relay.afterStop.length = 0;
+  relay.inbox = null;
+  relay.spawnsAfterStop = 0;
   // LEGACY_EKHO_DIR is read from HOME at import: keep every copy off the real home.
   vi.stubEnv("HOME", mkScratch("home"));
   vi.stubEnv("EKHO_AUTOREPLY_DISABLE", "");
@@ -146,6 +223,7 @@ afterEach(() => {
   delete (globalThis as Record<symbol, unknown>)[Symbol.for("ekho-adapter.runtime")];
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   for (const d of scratch) rmSync(d, { recursive: true, force: true });
   scratch.length = 0;
 });
@@ -245,5 +323,172 @@ describe("plugin reload in one process", () => {
     a.plugin.register(fakeApi(false).api);
     await untilConnected(a.conn);
     expect(relay.heartbeats[0].metrics).toMatchObject({ turn_health: "unknown", model_calls_1h: "0" });
+  });
+});
+
+// PR #102 review, blocker 1, through the real plugin entry and both of
+// OpenClaw's unload routes: a held (acked, deferred) message is on disk before
+// the hook's promise is even awaited, and a poll still in flight at stop
+// brings nothing that gets acked or turned.
+describe("unload with work in flight", () => {
+  const routes: Array<[string, (host: ReturnType<typeof fakeApi>) => unknown[]]> = [
+    // Real gateway shutdown: OpenClaw's reason (src/gateway/server-start.ts:132).
+    ["gateway_stop (gateway stopping)", (h) => h.fire("gateway_stop", { reason: "gateway stopping" })],
+    ["gateway_stop (plugin replacement)", (h) => h.fire("gateway_stop", { reason: "plugin replacement" })],
+    ["lifecycle.onDispose", (h) => h.dispose()]
+  ];
+  for (const [route, unload] of routes) {
+    it(`${route}: secures the held message before returning and processes nothing afterwards`, async () => {
+      let pending: (batch: unknown) => void = () => {};
+      let served = 0;
+      relay.inbox = () => {
+        served++;
+        if (served === 1) {
+          return Promise.resolve({
+            messages: [
+              {
+                message_id: "held",
+                conversation_id: "held-conv",
+                sender_agent_id: "peer",
+                sender_kind: "agent",
+                message_type: "direct",
+                body: { text: "held for the floor holder" }
+              }
+            ],
+            peer_autoreply: true
+          });
+        }
+        return new Promise((r) => {
+          pending = r;
+        });
+      };
+      const a = await loadPluginCopy();
+      const host = fakeApi(true);
+      a.plugin.register(host.api);
+      await untilConnected(a.conn);
+      await vi.advanceTimersByTimeAsync(POLL_MS * 2); // tick 1 stashes, tick 2 polls
+      expect(served).toBe(2);
+      expect(deadLetters()).toEqual([]);
+
+      relay.stopped = true;
+      const results = unload(host);
+      // The host awaits a promise, and the acked message is already on disk.
+      expect(results.length).toBe(1);
+      expect(results[0]).toBeInstanceOf(Promise);
+      expect(deadLetters().map((r) => [r.message.message_id, r.reason])).toEqual([
+        ["held", "deferred_loop_stopped"]
+      ]);
+
+      let drained = false;
+      void (results[0] as Promise<void>).then(() => {
+        drained = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(drained).toBe(false); // still waiting on the poll in flight
+      pending({
+        messages: [
+          {
+            message_id: "late",
+            conversation_id: "free-conv",
+            sender_agent_id: "peer",
+            sender_kind: "agent",
+            message_type: "direct",
+            body: { text: "arrived after stop" }
+          }
+        ],
+        peer_autoreply: true
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(drained).toBe(true);
+      expect(relay.afterStop).toEqual([]);
+      expect(relay.spawnsAfterStop).toBe(0);
+      expect(deadLetters()).toHaveLength(1);
+      expect(await producersOver(POLL_MS * 4)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+    });
+  }
+});
+
+// PR #102 review, blocker 2: the agent id that keys the producer claim only
+// exists once enrolment succeeds, and the token is single-use. Seeded from the
+// reviewer's probe (astra-pr102-enroll-probe.mjs): before the fix a reload
+// mid-enrolment left NO producer — the new copy spent the token again (400)
+// and the old copy, retired, rightly started nothing.
+describe("reload during first enrolment", () => {
+  it("the new copy waits for the old copy's enrolment and becomes the one producer (probe)", async () => {
+    const enrol = stubEnrolment();
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true, enrolConfig());
+    a.plugin.register(hostA.api);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enrol.calls).toBe(1); // A has spent the token; its response is delayed
+
+    hostA.fire("gateway_stop", { reason: "plugin replacement" });
+    hostA.dispose();
+
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true, enrolConfig());
+    b.plugin.register(hostB.api);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enrol.calls).toBe(1); // B queued behind A instead of re-enrolling
+
+    enrol.release();
+    await vi.advanceTimersByTimeAsync(0);
+    const conn = await b.conn.ensureConnected(enrolConfig() as never);
+    expect(conn.credentials.agentId).toBe("agent_enrolled");
+
+    const after = await producersOver(POLL_MS * 2);
+    expect(enrol.calls).toBe(1);
+    expect(after.heartbeat).toHaveLength(1);
+    expect(after.poll).toEqual(after.heartbeat);
+    expect(after.beats).toBe((POLL_MS * 2) / HEARTBEAT_MS);
+    expect(hostB.log.warn).not.toHaveBeenCalledWith(expect.stringMatching(/startup connect failed/));
+  });
+
+  it("two copies enrolling concurrently (no host signal): one enrol call, one producer", async () => {
+    const enrol = stubEnrolment();
+    const a = await loadPluginCopy();
+    a.plugin.register(fakeApi(false, enrolConfig()).api);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false, enrolConfig());
+    b.plugin.register(hostB.api);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(enrol.calls).toBe(1);
+
+    enrol.release();
+    await vi.advanceTimersByTimeAsync(0);
+    await a.conn.ensureConnected(enrolConfig() as never);
+    await b.conn.ensureConnected(enrolConfig() as never);
+
+    const after = await producersOver(POLL_MS * 2);
+    expect(enrol.calls).toBe(1);
+    // A connected first (client 1) and was superseded by B (client 2).
+    expect(after.heartbeat).toEqual([2]);
+    expect(after.poll).toEqual([2]);
+    expect(hostB.log.warn).not.toHaveBeenCalledWith(expect.stringMatching(/startup connect failed/));
+  });
+
+  it("a 400 on a spent token re-checks once for credentials saved meanwhile", async () => {
+    vi.stubGlobal("fetch", async (url: string) =>
+      new URL(url).pathname === "/v1/enroll"
+        ? Response.json({ error: "invalid or expired token" }, { status: 400 })
+        : Response.json({})
+    );
+    const a = await loadPluginCopy();
+    const host = fakeApi(false, enrolConfig());
+    a.plugin.register(host.api);
+    await vi.advanceTimersByTimeAsync(0);
+    // Whoever spent the token (outside this process's registry) saves now.
+    const { saveCredentials } = await import("../src/credentials");
+    saveCredentials(stateDir, {
+      agentId: "agent_elsewhere",
+      secret: "s",
+      relayBaseUrl: "http://relay.invalid",
+      fleetId: "fleet_reload"
+    });
+    await vi.advanceTimersByTimeAsync(a.conn.ENROL_RECHECK_MS);
+    const conn = await a.conn.ensureConnected(enrolConfig() as never);
+    expect(conn.credentials.agentId).toBe("agent_elsewhere");
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([1]);
+    expect(host.log.warn).not.toHaveBeenCalledWith(expect.stringMatching(/startup connect failed/));
   });
 });
