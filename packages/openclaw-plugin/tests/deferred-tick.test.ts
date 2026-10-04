@@ -28,7 +28,7 @@ vi.mock("node:child_process", async () => {
   };
 });
 
-import { startAutoReply, DEFERRED_MESSAGES_PER_CONV, DEFERRED_RETRY_TTL_MS } from "../src/autoreply";
+import { startAutoReply, DEFERRED_CONVERSATION_CAP, DEFERRED_MESSAGES_PER_CONV, DEFERRED_RETRY_TTL_MS } from "../src/autoreply";
 
 function peerMsg(i: number, conv = `c${i}`): any {
   return {
@@ -174,6 +174,11 @@ describe("#78 the tick dead-letters a stash the cap evicts", () => {
       stop();
     }
 
+    // stop() dead-letters every stash the cap kept (the loop is gone, so no turn
+    // will come for them); the tick's own drop is the one record before those.
+    const stopped = records.filter((r) => r.reason === "deferred_loop_stopped");
+    expect(stopped).toHaveLength(DEFERRED_CONVERSATION_CAP);
+    records.splice(0, records.length, ...records.filter((r) => r.reason !== "deferred_loop_stopped"));
     expect(records).toHaveLength(1);
     expect(records[0].reason).toBe("deferred_evicted_cap");
     expect(records[0].kind).toBe("deferred");
@@ -300,6 +305,11 @@ describe("#78 r2 the tick dead-letters a per-conversation overflow", () => {
       stop();
     }
 
+    // stop() dead-letters the newest messages the per-conversation cap kept (the loop is gone, so no turn
+    // will come for them); the tick's own drop is the one record before those.
+    const stopped = records.filter((r) => r.reason === "deferred_loop_stopped");
+    expect(stopped).toHaveLength(DEFERRED_MESSAGES_PER_CONV);
+    records.splice(0, records.length, ...records.filter((r) => r.reason !== "deferred_loop_stopped"));
     expect(records).toHaveLength(1);
     expect(records[0].reason).toBe("deferred_overflow_per_conv");
     expect(records[0].kind).toBe("deferred");

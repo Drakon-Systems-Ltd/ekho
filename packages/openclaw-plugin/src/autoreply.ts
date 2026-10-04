@@ -265,6 +265,9 @@ export const DEFERRED_EVICTED_REASON = "deferred_evicted_cap";
 export const DEFERRED_OVERFLOW_REASON = "deferred_overflow_per_conv";
 export const DEFERRED_SPAWN_FAILED_REASON = "deferred_expired_spawn_failed";
 export const DEFERRED_RETRY_SPAWN_FAILED_REASON = "deferred_retry_spawn_failed";
+// The loop was stopped (plugin unload/reload) with stashes still held: their
+// turn would have come from this loop, and the next generation never saw them.
+export const DEFERRED_LOOP_STOPPED_REASON = "deferred_loop_stopped";
 
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
 const LAST_BATCH_CAP = 25; // ring exposed to ekho_inbox (Part B1)
@@ -2054,8 +2057,8 @@ async function triggerTurn(
 /**
  * Start the background auto-reply loop. Polls the relay on an interval; on a
  * qualifying inbound message it wakes the agent (which replies via ekho_send).
- * Spends zero LLM tokens unless a real message arrives. Returns a stop() that
- * clears the timer.
+ * Spends zero LLM tokens unless a real message arrives. Returns an idempotent
+ * stop() that clears the timer and dead-letters any stash still held back.
  */
 export function startAutoReply(opts: {
   client: EkhoAgentClient;
@@ -2111,6 +2114,22 @@ export function startAutoReply(opts: {
   // One tick at a time; a tick that finds this set returns immediately, and
   // the next interval fires soon enough.
   let tickRunning = false;
+  // Set by the returned stop(). A stopped loop polls no more: a tick that is
+  // already past its poll finishes (those messages are consumed — abandoning
+  // them mid-tick would lose them), but no new one starts.
+  let stopped = false;
+
+  // Whatever a stopped loop still holds back will never get its turn here.
+  const flushDeferredOnStop = (): void => {
+    for (const [conv, stash] of [...state.deferredByConversation]) {
+      state.deferredByConversation.delete(conv);
+      log?.warn?.(
+        `[ekho-autoreply] loop stopped with ${stash.messages.length} held-back msg(s) for ` +
+          `conversation ${conv} — dead-lettering them; they will get no turn`
+      );
+      deadLetterDeferred(stash.messages, DEFERRED_LOOP_STOPPED_REASON);
+    }
+  };
 
   const runTick = async () => {
     // With `tickRunning` held, only this tick can set `inFlight` — so this is
@@ -2469,12 +2488,16 @@ export function startAutoReply(opts: {
   };
 
   const tick = async () => {
+    if (stopped) return;
     if (tickRunning) return; // a tick is still mid-await — never overlap them
     tickRunning = true;
     try {
       await runTick();
     } finally {
       tickRunning = false;
+      // stop() arrived mid-tick: it left the stash to us, as this tick may
+      // still have been adding to it.
+      if (stopped) flushDeferredOnStop();
     }
   };
 
@@ -2491,6 +2514,10 @@ export function startAutoReply(opts: {
   );
 
   return () => {
+    if (stopped) return;
+    stopped = true;
     clearInterval(timer);
+    if (!tickRunning) flushDeferredOnStop();
+    log?.info?.(`[ekho-autoreply] stopped listening as ${selfAgentId}`);
   };
 }

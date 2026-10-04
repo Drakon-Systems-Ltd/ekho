@@ -4,6 +4,14 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **A plugin reload or update no longer leaves the previous copy's heartbeat and inbox poll running.** `openclaw plugins reload` and `openclaw plugins update` load a fresh copy of the plugin into the running gateway (OpenClaw 2026.9.8 captures each generation into its own directory and imports it with the module cache off). The heartbeat and the auto-reply poll were `setInterval`s in module state, and nothing stopped them on unload, so every reload added another heartbeat producer and another inbox poller for the same agent. One 0.5.5 box was seen sending about four heartbeats per 30 s cycle. The stale producers also carried their own, empty model-call windows, so the newest heartbeat could hide a real turn-health signal. The fix has two parts:
+  - The plugin now stops its timers on the host's unload signals: `api.lifecycle.onDispose` and the `gateway_stop` hook, which OpenClaw runs on the old instance with reason `"plugin replacement"`. Both are feature-detected.
+  - For hosts that send neither, a process-wide registry (`globalThis[Symbol.for("ekho-adapter.runtime")]`, keyed by agent id) allows at most one producer per agent per process. A newer copy stops the older copy's timers when it connects. An older copy that finishes connecting after a newer one starts nothing.
+
+  A stopped copy never restarts its timers; a late tool call on it still gets a working client. Messages still held back for a floor holder when the loop stops are dead-lettered with reason `deferred_loop_stopped` and a `WARNING`, not lost with the old copy's memory (#78). The log now shows the unload route (`unload hooks: lifecycle.onDispose, gateway_stop`) and a `stopped heartbeat and auto-reply (<reason>)` line.
+- **Turn health reads `unknown` instead of disappearing when no model call was recorded in the last hour.** The heartbeat now carries `turn_health: "unknown"` and `model_calls_1h: "0"` in that case. An omitted field looked the same as a plugin too old to report one, so a `model_call` hook that never fired was invisible on the board. The relay already treats `"unknown"` exactly like an absent field, so board status is unchanged. The hook route (`model_call hooks: typed|legacy|none`) is now logged at info level, once per load.
+
 ## [0.5.6] - 2026-10-04
 
 ### Fixed
