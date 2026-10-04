@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 // Pure trust-state helpers shared by the Security screen. No React, so they unit-test cleanly.
 import {
   endorserStatus,
+  consolidationTargets,
   dependentsOf,
   trustHealth,
   deviceKeySigningState,
@@ -365,5 +366,87 @@ describe("fleet trust root (#19)", () => {
       const s = deviceKeySigningState(keys, "devK");
       expect(s.recovery).toMatch(/another device|device that holds|live key/i);
     });
+  });
+});
+
+// #93 review (Tars, 4 Oct 2026): after the one-off recovery the Security screen
+// told the operator to press "Re-endorse all" — a button that cannot render in
+// that state. Every agent is still endorsed by the lost root, which is LIVE on
+// purpose (revoking it first orphans them), so each is "foreign", needsAction
+// false, trust health ok, banner hidden, bulk targets zero. The ceremony could
+// not follow its own instructions.
+describe("post-recovery transition (#93 review)", () => {
+  const keys = [
+    { key_id: "X6Nv", label: "old browser", revoked_at: null, endorsed_by_key_id: "2T8z", trusted: false },
+    { key_id: "2T8z", label: "older", revoked_at: "2026-08-17T00:00:00Z", endorsed_by_key_id: null, trusted: false },
+    { key_id: "sthCg", label: "lost browser", revoked_at: null, endorsed_by_key_id: "X6Nv", trusted: true },
+    { key_id: "succ", label: "new browser", revoked_at: null, endorsed_by_key_id: "X6Nv", trusted: true },
+  ];
+  const agents = [
+    { agent_id: "jarvis", key_id: "k-j", endorsed_by_key_id: "sthCg" },
+    { agent_id: "edith", key_id: "k-e", endorsed_by_key_id: "sthCg" },
+  ];
+
+  it("is healthy, so the trust-health banner and its 'Re-endorse all' are rightly absent", () => {
+    expect(trustHealth(keys, agents, "succ").ok).toBe(true);
+    // What the old bulk button would have selected: nothing.
+    expect(agents.filter((a) => endorserStatus(a, keys, "succ").needsAction)).toEqual([]);
+  });
+
+  it("offers consolidation of every agent onto the successor while the lost root is still live", () => {
+    expect(consolidationTargets(agents, keys, "succ").map((a) => a.agent_id)).toEqual(["jarvis", "edith"]);
+    expect(endorseAuthority("succ", keys, agents).allowed).toBe(true);
+  });
+
+  it("offers nothing once the agents have moved, or when the console is locked", () => {
+    const moved = agents.map((a) => ({ ...a, endorsed_by_key_id: "succ" }));
+    expect(consolidationTargets(moved, keys, "succ")).toEqual([]);
+    expect(consolidationTargets(agents, keys, null)).toEqual([]);
+  });
+
+  it("never counts an agent on a revoked or unknown key — that is the health banner's job", () => {
+    const broken = [
+      { agent_id: "z", key_id: "k-z", endorsed_by_key_id: "2T8z" },
+      { agent_id: "y", key_id: "k-y", endorsed_by_key_id: null },
+    ];
+    expect(consolidationTargets(broken, keys, "succ")).toEqual([]);
+    expect(trustHealth(keys, broken, "succ").ok).toBe(false);
+  });
+});
+
+describe("endorseAuthority follows the relay's `trusted` verdict when given (#93 review)", () => {
+  const rootK = { key_id: "rootK", label: "phone", revoked_at: null, endorsed_by_key_id: null };
+  const agents = [{ agent_id: "a", key_id: "k-a", endorsed_by_key_id: "rootK" }];
+
+  it("trusts a key the relay trusts even when the browser cannot see why (a consumed recovery grant)", () => {
+    const x6 = { key_id: "X6Nv", label: "old", revoked_at: null, endorsed_by_key_id: null, trusted: false };
+    const succ = { key_id: "succ", label: "new", revoked_at: null, endorsed_by_key_id: "X6Nv", trusted: true };
+    expect(endorseAuthority("succ", [rootK, x6, succ], agents).allowed).toBe(true);
+  });
+
+  it("refuses an unrooted descendant of a live key that the one-hop fallback would allow", () => {
+    const spare = { key_id: "spare", label: "spare", revoked_at: null, endorsed_by_key_id: null };
+    const desc = { key_id: "desc", label: "desc", revoked_at: null, endorsed_by_key_id: "spare" };
+    // No verdict from the relay: the local reading is one hop — parent is live, allowed.
+    expect(endorseAuthority("desc", [rootK, spare, desc], agents).allowed).toBe(true);
+    // With the relay's refusal, it wins, and the copy still names the root device.
+    const g = endorseAuthority("desc", [rootK, spare, { ...desc, trusted: false }], agents);
+    expect(g.allowed).toBe(false);
+    expect(g.reason).toMatch(/phone/);
+  });
+
+  it("a revoked key is refused whatever the flag says", () => {
+    const dead = { key_id: "dead", label: "dead", revoked_at: "2026-08-16T08:33:00Z", endorsed_by_key_id: null, trusted: true };
+    expect(endorseAuthority("dead", [rootK, dead], agents).allowed).toBe(false);
+  });
+
+  it("the recovering key, trusted:false, still gets its one grant endorsement and nothing else", () => {
+    const x6 = { key_id: "X6Nv", label: "old", revoked_at: null, endorsed_by_key_id: null, trusted: false };
+    const succ = { key_id: "succ", label: "new", revoked_at: null, endorsed_by_key_id: null, trusted: false };
+    const grant = { grant_id: "rcg", endorser_key_id: "X6Nv", target_key_id: "succ", expires_at: "2099-01-01T00:00:00Z" };
+    const ks = [rootK, x6, succ];
+    expect(endorseAuthority("X6Nv", ks, agents, { recoveryGrant: grant, targetKeyId: "succ" }).allowed).toBe(true);
+    expect(endorseAuthority("X6Nv", ks, agents, { recoveryGrant: grant }).allowed).toBe(false);
+    expect(endorseAuthority("X6Nv", ks, agents).allowed).toBe(false);
   });
 });

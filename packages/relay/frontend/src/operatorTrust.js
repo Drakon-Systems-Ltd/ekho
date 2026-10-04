@@ -30,6 +30,23 @@ export function endorserStatus(agentKey, operatorKeys, currentKeyId) {
   return { state: "foreign", endorserId, endorserLabel, needsAction: false };
 }
 
+/**
+ * Agents endorsed by a live operator key OTHER than this browser's (#93).
+ *
+ * After a trust-root recovery every agent is still endorsed by the lost root,
+ * which is deliberately left live until they have moved — revoking it first
+ * would orphan them. Those agents are "foreign": healthy, needsAction false,
+ * so the trust-health banner and its "Re-endorse all" are rightly absent. The
+ * 4 Oct review found the recovery copy telling the operator to press exactly
+ * that absent button. This is the explicit second step instead: the set the
+ * successor browser moves onto itself. Never agents on a revoked or unknown
+ * key — those are faults, and the health banner owns them.
+ */
+export function consolidationTargets(agentKeys, operatorKeys, currentKeyId) {
+  if (!currentKeyId) return [];
+  return (agentKeys || []).filter((ak) => endorserStatus(ak, operatorKeys, currentKeyId).state === "foreign");
+}
+
 /** How many agent identity keys are endorsed by (depend on) a given operator key. */
 export function dependentsOf(keyId, agentKeys) {
   return (agentKeys || []).filter((ak) => ak.endorsed_by_key_id === keyId).length;
@@ -242,7 +259,7 @@ export function recoveryNotice(grant) {
   return (
     `One-time recovery: ${grant.endorser_key_id} may endorse the new key ${grant.target_key_id} once, ` +
     `until ${until} UTC. It cannot be used for anything else, and it is used up the moment it succeeds. ` +
-    `Next: open the browser holding ${grant.target_key_id}, re-endorse every agent there, and only then revoke the lost key.`
+    `Next: open the browser holding ${grant.target_key_id} and press “Consolidate all under this device” to re-endorse every agent there; only then revoke the lost key.`
   );
 }
 
@@ -292,19 +309,28 @@ export function endorseAuthority(unlockedKeyId, operatorKeys, agentKeys, recover
           : `Do it from another device that holds a live key.`),
     };
   }
-  // Already a trust root: agents verify against it today, so endorsing from it
-  // keeps them where they are.
-  if (dependentsOf(unlockedKeyId, agentKeys) > 0) return { allowed: true, reason: null };
-  // Chains to a live key, so agents adopt it by themselves (#13).
-  const endorser = mine.endorsed_by_key_id
-    ? keys.find((k) => k.key_id === mine.endorsed_by_key_id && !k.revoked_at)
-    : undefined;
-  if (endorser) return { allowed: true, reason: null };
-  // Nothing is pinned to anything yet, so there is no trust to destroy. This is
-  // "no agent is endorsed", not "no agent exists": an enrolled agent whose key
-  // has never been endorsed is still the fresh-fleet case, and testing for an
-  // empty list would strand a fleet the moment its first agent enrolled.
-  if (!agentKeys || agentKeys.every((k) => !k.endorsed_by_key_id)) return { allowed: true, reason: null };
+  if (typeof mine.trusted === "boolean") {
+    // #93 review: the relay publishes its own verdict per key (GET
+    // /v1/operator/keys), from the rule that binds. Prefer it: the local reading
+    // below is one hop and cannot see a consumed recovery grant, so on its own
+    // it would refuse the successor after a recovery and trust an unrooted
+    // descendant of a live key — a button whose every press fails is #15 again.
+    if (mine.trusted) return { allowed: true, reason: null };
+  } else {
+    // Already a trust root: agents verify against it today, so endorsing from it
+    // keeps them where they are.
+    if (dependentsOf(unlockedKeyId, agentKeys) > 0) return { allowed: true, reason: null };
+    // Chains to a live key, so agents adopt it by themselves (#13).
+    const endorser = mine.endorsed_by_key_id
+      ? keys.find((k) => k.key_id === mine.endorsed_by_key_id && !k.revoked_at)
+      : undefined;
+    if (endorser) return { allowed: true, reason: null };
+    // Nothing is pinned to anything yet, so there is no trust to destroy. This is
+    // "no agent is endorsed", not "no agent exists": an enrolled agent whose key
+    // has never been endorsed is still the fresh-fleet case, and testing for an
+    // empty list would strand a fleet the moment its first agent enrolled.
+    if (!agentKeys || agentKeys.every((k) => !k.endorsed_by_key_id)) return { allowed: true, reason: null };
+  }
   // #93: a one-off recovery grant, armed on the relay host after the operator
   // confirmed it out of band. Consulted only once every ordinary rule above has
   // refused. It opens exactly ONE operator-key endorsement (the grant's named
