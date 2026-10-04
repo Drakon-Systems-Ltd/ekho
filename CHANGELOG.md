@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Documentation
+- **Install, update, operator-key and upgrade guidance corrected.** The OpenClaw plugin README now installs with `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin` (not `npm install -g`, which never installed the plugin), adds an Update section, lists all three tools and drops stale 0.4.1 notes; the README adds operator-key and upgrading guidance; `docs/operations.md` documents the full upgrade (backup, build including the console, restart, verify) and the host-armed operator-key recovery grant.
+
 ## [0.5.5] - 2026-10-03
 
 ### Fixed

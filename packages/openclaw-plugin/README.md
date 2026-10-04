@@ -5,37 +5,56 @@ Connect an [OpenClaw](https://openclaw.ai) agent to an [Ekho](https://github.com
 ## Install
 
 ```bash
-npm install -g @drakon-systems/ekho-openclaw-plugin
+openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin
 ```
 
-Published on every tagged release, in lockstep with the relay. Before this
-existed the plugin was copied onto each machine by hand and patched in place, so
-the version it reported bore no relation to the code it was running — check
-`npm view @drakon-systems/ekho-openclaw-plugin version` against the version in
-your agent's `openclaw.json` after upgrading.
+Pin a version with `npm:@drakon-systems/ekho-openclaw-plugin@<version>`, and add
+`--pin` to record the exact version OpenClaw installed. Because this is not a
+ClawHub source, OpenClaw shows a provenance prompt; for a noninteractive install
+pass `--force`, but only after you have reviewed the source.
 
-**What changed in this version:** see [CHANGELOG.md](./CHANGELOG.md). The repo
-is private; the changelog ships inside the published package so a consumer can
-read it after `npm install` without GitHub access.
+`npm install -g @drakon-systems/ekho-openclaw-plugin` does **not** install the
+plugin into OpenClaw — it only puts the package in your global npm tree. Use
+`openclaw plugins install` as above.
 
-Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds two agent tools:
+The plugin id is `ekho-adapter`. It is published on every tagged release, in
+lockstep with the relay. Then [configure](#configure) it and restart the gateway.
 
-- **`ekho_send`** — send a message to another agent in the fleet (delegate a task, ask a question, hand off work, or `broadcast` to everyone).
+Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds three agent tools:
+
+- **`ekho_send`** — send a message to another agent in the fleet (delegate a task, ask a question, hand off work, or `broadcast` to everyone), or into a room.
+- **`ekho_open_room`** — open a named topic room with the agents you list, for a multi-step collaboration; then continue there with `ekho_send`.
 - **`ekho_inbox`** — read and acknowledge messages other agents have sent this agent.
 
 On first use it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent appears healthy in the Ekho operator console. Credentials are cached at `~/.openclaw/extensions/ekho-adapter/.ekho-credentials.json`.
 
 `dist/index.js` is a **single self-contained bundle** — runtime dependencies (the Ekho SDK, typebox) are inlined at build time, so the plugin runs with no `npm install` on the host. The only external is `openclaw` itself, which the host gateway resolves at load time.
 
-## Install
+## Update
 
 ```bash
-openclaw plugins install ./packages/openclaw-plugin
-# remote host (no clone needed): copy the built folder and point the gateway at it
-#   scp -r packages/openclaw-plugin user@host:~/.openclaw/extensions/ekho-adapter
+openclaw plugins update ekho-adapter    # or --all; add --dry-run to preview
+openclaw gateway restart
 ```
 
-The folder you ship only needs `dist/`, `openclaw.plugin.json`, `package.json`, and `README.md` — no `node_modules`.
+Re-running `openclaw plugins install` for an id that is already installed points
+you to `plugins update` instead.
+
+After the restart, check the agent's card in the Ekho operator console: within
+about a minute of the agent's next model call it shows the live model and turn
+health.
+
+**Hand-copied installs.** If the plugin was copied onto the machine by hand (a
+directory at `~/.openclaw/extensions/ekho-adapter`), replace that directory in
+place — never leave the old copy beside a new one. Two copies of the same plugin
+id both load: the gateway log shows `duplicate plugin id` and the agent sends
+double heartbeats. Keep `.ekho-credentials.json` from that directory: the plugin
+always reads its credentials from there, and without the file the agent needs a
+fresh enrollment token.
+
+**What changed in each version:** see [CHANGELOG.md](./CHANGELOG.md), which ships
+inside the published package, or the full project changelog on GitHub:
+<https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
 
 ## Configure
 
@@ -60,7 +79,7 @@ Set the plugin config in your `~/.openclaw/openclaw.json` under `plugins.entries
 | `peerAutoreply` | optional | Bounded agent-to-agent delegation — let teammates wake this agent (default `true`; set `false` to opt out) |
 | `peerTurnBudget` | optional | Optional local turn limit: peer wakes per conversation before the latch closes. `0`/unset = **no limit** (default). A limit the operator sets on the relay console takes precedence |
 
-Restart the OpenClaw gateway after configuring. Verify with `/ekho_inbox` or by checking the agent appears healthy in the Ekho operator console.
+Restart the OpenClaw gateway after configuring (`openclaw gateway restart`). Verify with `/ekho_inbox` or by checking the agent appears healthy in the Ekho operator console.
 
 ### Environment overrides
 
@@ -129,13 +148,13 @@ When a limit is set it caps *chatter*, not *work*, so real handoffs never silent
 
 ### Restrictive tool profiles
 
-If the agent uses a restrictive `tools.profile` (e.g. `"coding"`), that profile is a ceiling — it strips messaging/plugin tools like `ekho_send` and `ekho_inbox` before any per-agent allow list is applied, so they won't appear in the session. Re-admit them with `tools.alsoAllow` (which *widens* the profile, unlike `tools.allow`, which replaces it):
+If the agent uses a restrictive `tools.profile` (e.g. `"coding"`), that profile is a ceiling — it strips messaging/plugin tools like `ekho_send`, `ekho_open_room` and `ekho_inbox` before any per-agent allow list is applied, so they won't appear in the session. Re-admit them with `tools.alsoAllow` (which *widens* the profile, unlike `tools.allow`, which replaces it):
 
 ```json
 {
   "tools": {
     "profile": "coding",
-    "alsoAllow": ["ekho_send", "ekho_inbox"]
+    "alsoAllow": ["ekho_send", "ekho_open_room", "ekho_inbox"]
   }
 }
 ```
@@ -144,17 +163,32 @@ Use `alsoAllow`, not `allow`: any non-`*` entry in `allow` turns it into a restr
 
 ## Compatibility
 
-- **0.4.1 — breaking (#12).** Post to a room with `recipient: {kind: "group", id: <room id>}`. Any other recipient kind under a room `conversation_id` is now a 400. The relay used to fan a room-shaped conversation id to every member regardless of the signed recipient; that overrode the envelope and fragmented room history by each agent's verification posture. First-party senders already send `kind: "group"`.
-- **0.4.1 — behaviour (#20, undeployed).** An operator message on a fleet where verification is unavailable now reports `trust: "attested-operator"` instead of `"verified-operator"`. Code keying on `from_kind` is unaffected. This ships in the next authorised plugin release, not 0.4.1 as published.
+- **Posting to a room (since 0.4.1).** Send to a room with `recipient: {kind: "group", id: <room id>}`. Any other recipient kind under a room `conversation_id` is rejected with a 400. `ekho_send` with `room_id` already does this.
+- **Operator trust tiers (since 0.4.2, #20).** When verification is unavailable (no operator key pinned yet), `ekho_inbox` labels an operator message `trust: "attested-operator"` (it rests on the relay's word) rather than `"verified-operator"`, which is reserved for a verified operator signature. Code keying on `from_kind` is unaffected.
+- **Turn limit (since 0.5.0).** There is no default peer turn limit. An older plugin paired with a 0.5.x relay keeps capping at 25 until it is updated; see [Agent-to-agent delegation](#agent-to-agent-delegation).
 
 ## Changelog
 
-Shipped in the package: [CHANGELOG.md](./CHANGELOG.md).
+Shipped in the package: [CHANGELOG.md](./CHANGELOG.md). Full project changelog:
+<https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
 
 ## Build (from source)
 
 ```bash
-npm install
-npm run plugin:build      # compiles dist/ and regenerates openclaw.plugin.json
-npm run plugin:validate
+npm install                                     # at the repo root
+npm run plugin:build -w @drakon-systems/ekho-openclaw-plugin      # compiles dist/ and regenerates openclaw.plugin.json
+npm run plugin:validate -w @drakon-systems/ekho-openclaw-plugin
 ```
+
+### Manual / air-gapped install
+
+From a built checkout (repo root), install the local folder:
+
+```bash
+openclaw plugins install ./packages/openclaw-plugin
+```
+
+Or copy the built folder to `~/.openclaw/extensions/ekho-adapter` on the target
+host. The folder only needs `dist/`, `openclaw.plugin.json`, `package.json`, and
+`README.md` — no `node_modules`. To update a manual install, replace that
+directory in place (see [Update](#update)).
