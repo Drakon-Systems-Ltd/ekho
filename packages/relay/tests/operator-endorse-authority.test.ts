@@ -84,4 +84,23 @@ describe("endorseAuthority", () => {
     expect(g.allowed).toBe(false);
     expect(g.reason).toMatch(/unknown|not registered|never/i);
   });
+
+  it("allows the key that endorsed the live trust root — agents adopted the root through it (#93)", () => {
+    // 4 Oct 2026: passphrase for the root's browser lost; its endorser is pinned by every agent.
+    const keys = [key("X6Nv", { endorsed_by_key_id: "2T8z" }), key("2T8z", { revoked_at: "2026-08-17" }), key("sthCg", { endorsed_by_key_id: "X6Nv" })];
+    const agentKeys = [agentKey("a1", "sthCg"), agentKey("a2", "sthCg")];
+    expect(endorseAuthority("X6Nv", keys, agentKeys)).toEqual({ allowed: true, reason: null });
+  });
+
+  it("still REFUSES a key that only endorsed a root with no dependents (#93 stays narrow)", () => {
+    const keys = [key("root"), key("x", { endorsed_by_key_id: null }), key("leaf", { endorsed_by_key_id: "x" })];
+    const agentKeys = [agentKey("a1", "root")];
+    expect(endorseAuthority("x", keys, agentKeys).allowed).toBe(false);
+  });
+
+  it("still REFUSES a key that endorsed a REVOKED root (#93)", () => {
+    const keys = [key("x"), key("deadroot", { endorsed_by_key_id: "x", revoked_at: "2026-10-01" }), key("root")];
+    const agentKeys = [agentKey("a1", "deadroot"), agentKey("a2", "root")];
+    expect(endorseAuthority("x", keys, agentKeys).allowed).toBe(false);
+  });
 });
