@@ -285,20 +285,50 @@ export class EkhoDb {
     // endorsed is exactly the fresh-fleet case, and testing for an empty table
     // instead would make a fleet unbootstrappable the moment one agent enrolled.
     if (agentKeys.every((k) => !k.endorsed_by_key_id)) return true;
-    // Already a trust root: agents verify against it today, so endorsing from it
-    // keeps them where they are.
-    if (agentKeys.some((k) => k.endorsed_by_key_id === endorserKeyId)) return true;
-    // Chains to a live key, so agents adopt it by themselves (#13).
-    const parent = this.db
-      .prepare("SELECT endorsed_by_key_id FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
-      .get(fleetId, endorserKeyId) as { endorsed_by_key_id: string | null } | undefined;
-    if (!parent?.endorsed_by_key_id) return false;
-    const liveParent = this.db
-      .prepare(
-        "SELECT 1 FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
-      )
-      .get(fleetId, parent.endorsed_by_key_id);
-    return Boolean(liveParent);
+    // Otherwise the key must reach a root hop by hop, every hop live (#13) —
+    // or be the key an operator placed by a one-off recovery grant (#93).
+    //
+    // 4 Oct 2026 review (Tars): the test used to be one hop, "my parent is
+    // live". X6Nv is live and chains to a revoked key, so X6Nv itself was
+    // refused — but any key that merely RECORDED X6Nv as its endorser passed,
+    // and registerOperatorKey accepted such an endorsement from any live key.
+    // That was a standing way around the grant. Now the chain has to arrive
+    // at a key agents actually pin. The single exception is the recovery
+    // transition itself: a key whose recorded endorser consumed a grant naming
+    // it is trusted on the operator's out-of-band confirmation, and that
+    // confirmation outlives the recovering key — revoking the old browser
+    // later does not unseat the successor. Everything else that is not rooted,
+    // including the chains 16 Aug left in the live table, is refused however
+    // live its ancestors are.
+    //
+    // Walked-set, not belt-and-braces: the live table already holds a cycle
+    // (2T8zn <-> X6Nv) and a naive walk would spin on it.
+    const roots = new Set(agentKeys.map((k) => k.endorsed_by_key_id).filter(Boolean));
+    const hop = this.db.prepare(
+      "SELECT endorsed_by_key_id, revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
+    );
+    const recoveredVia = this.db.prepare(
+      `SELECT 1 FROM operator_recovery_grants
+         WHERE fleet_id = ? AND target_key_id = ? AND endorser_key_id = ? AND consumed_at IS NOT NULL`
+    );
+    const walked = new Set<string>();
+    let cursor: string | null = endorserKeyId;
+    while (cursor && !walked.has(cursor)) {
+      walked.add(cursor);
+      const row = hop.get(fleetId, cursor) as
+        | { endorsed_by_key_id: string | null; revoked_at: string | null }
+        | undefined;
+      // Unknown or revoked hop: a dead chain, whatever still points at it.
+      if (!row || row.revoked_at) return false;
+      // Agents verify against it today, so endorsing from it keeps them where they are.
+      if (roots.has(cursor)) return true;
+      // Live, endorsed by nobody, pinned by nobody: the 16 Aug orphan.
+      if (!row.endorsed_by_key_id) return false;
+      // The operator's confirmed recovery transition (#93).
+      if (recoveredVia.get(fleetId, cursor, row.endorsed_by_key_id)) return true;
+      cursor = row.endorsed_by_key_id;
+    }
+    return false;
   }
 
   private untrustedEndorserError(endorserKeyId: string): Error {
@@ -312,6 +342,24 @@ export class EkhoDb {
   private assertEndorserIsTrusted(fleetId: string, endorserKeyId: string) {
     if (this.endorserIsTrusted(fleetId, endorserKeyId)) return;
     throw this.untrustedEndorserError(endorserKeyId);
+  }
+
+  /**
+   * May `keyId` endorse today? The one rule endorseOperatorKey, endorseAgentKey
+   * and registerOperatorKey all bind on, published per key by
+   * GET /v1/operator/keys so the console shapes its buttons from the relay's
+   * answer instead of a browser-side guess. The guess cannot see a consumed
+   * recovery grant (so it would refuse the successor) and is one hop deep (so
+   * it would trust the unrooted descendants this rule refuses) — a button whose
+   * every press fails is the #15 failure over again. Revoked keys are never
+   * trusted, bootstrap or not.
+   */
+  operatorKeyMayEndorse(fleetId: string, keyId: string): boolean {
+    const row = this.db
+      .prepare("SELECT revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+      .get(fleetId, keyId) as { revoked_at: string | null } | undefined;
+    if (!row || row.revoked_at) return false;
+    return this.endorserIsTrusted(fleetId, keyId);
   }
 
   // ---- One-off operator-key recovery (#93) ---------------------------------

@@ -129,7 +129,7 @@ describe("#93 one-off operator recovery grant (relay)", () => {
     expect(endorsed).toContainEqual({ endorsed_by_key_id: origin.id, recovery_grant_id: g.id });
   });
 
-  it("after recovery the successor re-endorses agents by the EXISTING #13 chain rule; the recovering key gains nothing", () => {
+  it("after recovery the successor re-endorses agents — on the consumed grant, not by chaining through the recovering key; the recovering key gains nothing", () => {
     arm();
     endorseOperator(origin, successor);
     for (const a of agents) expect(endorseAgent(successor, a)).toBe(true);
@@ -338,6 +338,96 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       expect(() => endorseAgent(origin, late)).toThrow(UNTRUSTED);
       expect(() => endorseAgent(origin, agents[1])).toThrow(UNTRUSTED);
       expect(grantRow(g.id).consumed_at).toBeNull();
+    });
+  });
+
+  describe("Tars's review (4 Oct): the grant is the ONLY way around the rule", () => {
+    const registerEndorsedBy = (k: K, endorser: K, label: string) =>
+      relay.db.registerOperatorKey(relay.fleetId, k.pubB64, label, {
+        endorsedByKeyId: endorser.id,
+        signature: signCanonical(endorsementPayload(relay.fleetId, k.id, k.pubB64), endorser.seed),
+      });
+    // A chain row as the 16 Aug incident left them: written before the rule
+    // existed, rooted in nothing. Only raw SQL can make one now — which is the
+    // point: closing registration alone would have left these in place.
+    const forgeParent = (child: K, parent: K) =>
+      relay.db
+        .raw()
+        .prepare("UPDATE fleet_operator_keys SET endorsed_by_key_id = ? WHERE fleet_id = ? AND key_id = ?")
+        .run(parent.id, relay.fleetId, child.id);
+    const trusted = (k: K) => relay.db.operatorKeyMayEndorse(relay.fleetId, k.id);
+
+    it("registration REFUSES an endorsement from the recovering key, with or without a grant, and never spends the grant", () => {
+      const child = makeKey();
+      expect(() => registerEndorsedBy(child, origin, "minted around the rule")).toThrow(UNTRUSTED);
+      const g = arm();
+      expect(() => registerEndorsedBy(child, origin, "minted around the rule")).toThrow(UNTRUSTED);
+      expect(grantRow(g.id).consumed_at).toBeNull();
+      expect(relay.db.listOperatorKeys(relay.fleetId).find((r) => r.key_id === child.id)).toBeUndefined();
+    });
+
+    it("registration still accepts an endorsement from the root, and from the successor once recovered", () => {
+      const fromRoot = makeKey();
+      expect(registerEndorsedBy(fromRoot, root, "second device").keyId).toBe(fromRoot.id);
+      arm();
+      endorseOperator(origin, successor);
+      const fromSuccessor = makeKey();
+      expect(registerEndorsedBy(fromSuccessor, successor, "third device").keyId).toBe(fromSuccessor.id);
+      expect(trusted(fromSuccessor)).toBe(true);
+    });
+
+    it("a pre-existing unrooted descendant of the recovering key is refused on every path — one hop was never enough", () => {
+      const legacy = makeKey();
+      register(legacy, "left behind by 16 Aug");
+      forgeParent(legacy, origin); // parent is live; chain is rooted in nothing
+      expect(trusted(legacy)).toBe(false);
+      expect(() => endorseAgent(legacy, agents[0])).toThrow(UNTRUSTED);
+      expect(() => endorseOperator(legacy, successor)).toThrow(UNTRUSTED);
+      expect(() => registerEndorsedBy(makeKey(), legacy, "grandchild")).toThrow(UNTRUSTED);
+      // Arming origin -> successor changes nothing for the descendant.
+      arm();
+      expect(() => endorseAgent(legacy, agents[0])).toThrow(UNTRUSTED);
+    });
+
+    it("the successor's authority comes from the consumed grant and survives revoking the recovering key", () => {
+      expect(trusted(successor)).toBe(false);
+      arm();
+      endorseOperator(origin, successor);
+      // Nothing has moved yet: the successor roots nothing and its parent is untrusted.
+      expect(opKey(successor).endorsed_by_key_id).toBe(origin.id);
+      expect(trusted(successor)).toBe(true);
+      relay.db.revokeOperatorKey(relay.fleetId, origin.id);
+      expect(trusted(successor)).toBe(true);
+      for (const a of agents) expect(endorseAgent(successor, a)).toBe(true);
+    });
+
+    it("a chain still reaches the root through more than one live hop (#13), and breaks at a revoked one", () => {
+      const b = makeKey();
+      const c = makeKey();
+      register(b, "B");
+      register(c, "C");
+      endorseOperator(root, b);
+      endorseOperator(b, c);
+      expect(trusted(c)).toBe(true);
+      const d = makeKey();
+      register(d, "D");
+      endorseOperator(b, d);
+      relay.db.revokeOperatorKey(relay.fleetId, b.id);
+      expect(trusted(d)).toBe(false);
+      expect(() => endorseAgent(d, agents[1])).toThrow(UNTRUSTED);
+    });
+
+    it("GET /v1/operator/keys publishes `trusted` per key from the relay's rule", async () => {
+      const read = async () => {
+        const r = await relay.operatorRequest("GET", "/v1/operator/keys");
+        return Object.fromEntries(r.body.keys.map((k: { key_id: string; trusted: boolean }) => [k.key_id, k.trusted]));
+      };
+      expect(await read()).toEqual({ [origin.id]: false, [root.id]: true, [successor.id]: false });
+      arm();
+      endorseOperator(origin, successor);
+      expect(await read()).toEqual({ [origin.id]: false, [root.id]: true, [successor.id]: true });
+      relay.db.revokeOperatorKey(relay.fleetId, root.id); // the operator's later step
+      expect((await read())[root.id]).toBe(false);
     });
   });
 
