@@ -6,6 +6,8 @@ import {
   enrollOrLoad,
   loadOrCreateIdentity,
   saveIdentity,
+  IdentityUnavailableError,
+  ALLOW_NEW_IDENTITY_ENV,
   identityPublicKey,
   takeEnrollOperatorKeys,
   type EkhoCredentials,
@@ -32,6 +34,12 @@ export interface EkhoPluginConfig {
   // trusted out-of-band channel for agents that predate signing).
   // "<b64url>" or "<key_id>:<b64url>", comma-separated.
   operatorPubkey?: string;
+  /**
+   * Let an already-enrolled agent mint a brand-new identity key when its
+   * identity file is absent. Off by default; EKHO_ALLOW_NEW_IDENTITY=1 is the
+   * env equivalent. See credentials.ts IdentityUnavailableError.
+   */
+  allowNewIdentity?: boolean;
   // #5: "warn" (default) | "require" | "off". "require" wakes on a peer message
   // ONLY when it is signed and verifies; unsigned/unverifiable peers are
   // dead-lettered. EKHO_REQUIRE_SIGNED overrides per-process.
@@ -57,11 +65,27 @@ let identityConfigDir = "";
  * key(s) from config (the trusted out-of-band channel for agents that predate
  * signing). Best-effort: a relay blip must never break connecting.
  */
+/**
+ * May this process mint a brand-new identity key if none is on disk? Yes for a
+ * fresh enrolment (no agentId/secret in config yet). For an enrolled agent only
+ * with the operator's explicit say-so: the env flag or `allowNewIdentity` in
+ * the plugin config. Pure, so the rule itself is tested, not just the loader.
+ */
+export function shouldAllowNewIdentity(
+  config: { agentId?: string; agentSecret?: string; allowNewIdentity?: boolean },
+  env: NodeJS.ProcessEnv
+): boolean {
+  const enrolled = Boolean(config.agentId && config.agentSecret);
+  return !enrolled || env[ALLOW_NEW_IDENTITY_ENV] === "1" || config.allowNewIdentity === true;
+}
+
 export async function registerAndBootstrapIdentity(
   client: EkhoAgentClient,
-  opts: { operatorPubkey?: string; configDir: string; log?: Logger }
+  opts: { operatorPubkey?: string; configDir: string; log?: Logger; allowCreate?: boolean }
 ): Promise<EkhoIdentity> {
-  const id = loadOrCreateIdentity(opts.configDir);
+  // Throws IdentityUnavailableError rather than minting over a lost or
+  // unreadable file — see credentials.ts. Nothing is registered in that case.
+  const id = loadOrCreateIdentity(opts.configDir, { allowCreate: opts.allowCreate });
   try {
     await client.registerIdentityKey(identityPublicKey(id));
   } catch (err) {
@@ -338,11 +362,18 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
 
     // Register our identity key + bootstrap-pin the operator key (best-effort).
     identityConfigDir = configDir;
+    // An agent whose config already names enrolled credentials has an identity
+    // somewhere; an absent file here is a lost or moved file. Minting a fresh
+    // key for it needs the operator's explicit say-so (env or config), never a
+    // silent default: that default is how seven phantom "Jarvis" keys came to
+    // exist on the relay. A fresh enrolment (no agentId/secret yet) may mint.
+    const allowCreate = shouldAllowNewIdentity(config, process.env);
     try {
       identity = await registerAndBootstrapIdentity(client, {
         operatorPubkey: config.operatorPubkey,
         configDir,
-        log
+        log,
+        allowCreate
       });
       // TOFU (#5): pin the operator keys the relay handed us at enrollment —
       // sent since the beginning, dropped on the floor until now. Only fires
@@ -358,7 +389,13 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
         log?.info?.(`[ekho] pinned ${Object.keys(identity.pinnedOperatorKeys).length} operator key(s) from enrollment (TOFU)`);
       }
     } catch (err) {
-      log?.warn?.(`[ekho] identity bootstrap failed: ${String(err)}`);
+      if (err instanceof IdentityUnavailableError) {
+        // Loud and unsigned, not quiet and re-keyed. Peers that require
+        // signatures will refuse this box until the operator restores the file.
+        (log?.error ?? log?.warn)?.(`[ekho] identity unavailable, running UNSIGNED: ${err.message}`);
+      } else {
+        log?.warn?.(`[ekho] identity bootstrap failed: ${String(err)}`);
+      }
     }
 
     if (!heartbeatTimer) {

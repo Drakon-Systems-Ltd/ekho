@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **openclaw-plugin: an agent never silently mints a second identity key.** `loadOrCreateIdentity` used to answer an unparseable identity file, or an absent one in whatever directory the process resolved, with a fresh random seed that `connect()` then registered with the relay. Seven live "Jarvis" identity keys with no private half anywhere were found on 4 Oct 2026, each later endorsed by the operator in good faith. Now: a present-but-unusable file is preserved beside itself and refused; an absent file on an already-enrolled agent (agentId + agentSecret in config) is refused unless `EKHO_ALLOW_NEW_IDENTITY=1` or `allowNewIdentity: true`; a genuine first enrolment still mints. The refusal runs the box unsigned and logs at error level. `saveIdentity` is now atomic (temp file + rename), so no concurrent reader can observe a truncated file.
+
 ## [0.5.5] - 2026-10-03
 
 ### Fixed

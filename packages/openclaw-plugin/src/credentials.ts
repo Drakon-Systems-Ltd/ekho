@@ -46,11 +46,45 @@ export interface EkhoIdentity {
   operatorKeyAdmissions?: Record<string, OperatorKeyAdmission>;
 }
 
-export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
+/**
+ * Thrown instead of minting. Before 4 Oct 2026 an identity file that was
+ * present but unparseable, or absent on a box whose config already names an
+ * enrolled agent, silently produced a NEW random seed and registered it with
+ * the relay. Seven live "Jarvis" identity keys with no private half anywhere
+ * were found that way, each later endorsed by the operator in good faith. A
+ * key that exists only because a read failed is a forged identity, not a
+ * recovery; the caller must stop and say so.
+ */
+export class IdentityUnavailableError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "unreadable" | "missing"
+  ) {
+    super(message);
+    this.name = "IdentityUnavailableError";
+  }
+}
+
+/** Set to "1" to let an already-enrolled agent mint a brand-new identity key. */
+export const ALLOW_NEW_IDENTITY_ENV = "EKHO_ALLOW_NEW_IDENTITY";
+
+export interface LoadIdentityOptions {
+  /**
+   * Whether an ABSENT file may be answered with a freshly minted identity.
+   * Default true (first enrolment). Pass false for an agent whose config already
+   * carries enrolled credentials: its identity must already exist somewhere,
+   * so an absent file is a lost/moved file, not a new agent.
+   */
+  allowCreate?: boolean;
+}
+
+export function loadOrCreateIdentity(configDir: string, opts: LoadIdentityOptions = {}): EkhoIdentity {
   const filePath = path.join(configDir, IDENTITY_FILE);
   if (fs.existsSync(filePath)) {
+    let raw: string | undefined;
     try {
-      const data = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Partial<EkhoIdentity>;
+      raw = fs.readFileSync(filePath, "utf-8");
+      const data = JSON.parse(raw) as Partial<EkhoIdentity>;
       if (data?.seedHex) {
         // Spread the file FIRST: a field this build doesn't know about (written
         // by a newer plugin, or by the other runtime sharing the config dir)
@@ -69,8 +103,26 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
         };
       }
     } catch {
-      /* fall through and regenerate */
+      /* present but unusable: handled below, never regenerated over */
     }
+    // The file is there but this build cannot use it (unreadable, not JSON,
+    // or no seed). Keep the bytes for forensics and refuse. Overwriting them
+    // with a new seed would both destroy the evidence and mint a second live
+    // identity for this agent on the relay.
+    const preserved = preserveUnusableIdentity(filePath, raw);
+    throw new IdentityUnavailableError(
+      `[ekho] identity file ${filePath} is present but unusable; refusing to mint a replacement key` +
+        (preserved ? ` (bytes preserved at ${preserved})` : "") +
+        `. Restore the file from a backup, or remove it and set ${ALLOW_NEW_IDENTITY_ENV}=1 to enrol a new key on purpose.`,
+      "unreadable"
+    );
+  }
+  if (opts.allowCreate === false) {
+    throw new IdentityUnavailableError(
+      `[ekho] no identity file at ${filePath} but this agent is already enrolled; refusing to mint a new key. ` +
+        `Restore the file from a backup (the relay already holds this agent's key), or set ${ALLOW_NEW_IDENTITY_ENV}=1 to re-key on purpose.`,
+      "missing"
+    );
   }
   const identity: EkhoIdentity = {
     seedHex: crypto.randomBytes(32).toString("hex"),
@@ -80,11 +132,37 @@ export function loadOrCreateIdentity(configDir: string): EkhoIdentity {
   return identity;
 }
 
+function preserveUnusableIdentity(filePath: string, raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const target = `${filePath}.unusable-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  try {
+    fs.writeFileSync(target, raw, { mode: 0o600 });
+    return target;
+  } catch {
+    return undefined; // best effort; the refusal above is what matters
+  }
+}
+
+/**
+ * Atomic: write a sibling temp file and rename it over the real one, so no
+ * reader (another plugin instance, a CLI run, the other runtime sharing this
+ * dir) can ever observe a truncated identity file mid-write.
+ */
 export function saveIdentity(configDir: string, identity: EkhoIdentity) {
   fs.mkdirSync(configDir, { recursive: true });
-  fs.writeFileSync(path.join(configDir, IDENTITY_FILE), JSON.stringify(identity, null, 2), {
-    mode: 0o600
-  });
+  const filePath = path.join(configDir, IDENTITY_FILE);
+  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(identity, null, 2), { mode: 0o600 });
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* nothing to clean */
+    }
+    throw err;
+  }
 }
 
 export function identityPublicKey(identity: EkhoIdentity): string {
