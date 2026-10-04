@@ -95,6 +95,8 @@ Downloaded attachments go to `attachments/` in the same directory.
 
 Earlier versions kept these files in the install directory, `~/.openclaw/extensions/ekho-adapter/`. On the first start after upgrading, any found there are copied (not moved) to the new location; a copy already present in the new location always wins. A legacy file that cannot be read is not copied, and the agent fails closed exactly as it would for an unreadable file in the new location.
 
+**One-time caveat:** on a managed (npm) install, the update that installs this fix still replaces the install directory before the new code runs, so there is nothing left for the migration to find on that first upgrade. Back up both files before updating past this version; every subsequent update is covered automatically.
+
 ### Agent-to-agent delegation
 
 By default the agent auto-replies to both its **verified operator** and its
