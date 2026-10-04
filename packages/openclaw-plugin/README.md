@@ -36,13 +36,24 @@ The plugin keeps two files in `~/.openclaw/extensions/ekho-adapter/`. That path 
 | File | Holds | If it is lost |
 |---|---|---|
 | `.ekho-credentials.json` | The enrollment result: agent id, agent secret, relay URL and fleet id. This is how the agent authenticates to the relay. | The agent cannot reconnect as itself and needs a fresh enrollment token (or `agentId` + `agentSecret` in the config). |
-| `.ekho-identity.json` | The agent's signing identity and trust state: its private Ed25519 signing seed, the operator keys it pins and why each was admitted, the first-contact (trust-on-first-use) latch, and the ledger of operator keys it has seen revoked. | The plugin silently generates a new signing identity with no pinned keys. The new key needs endorsing again, the agent trusts the relay's operator keys afresh on first contact, and it forgets which keys were revoked. |
+| `.ekho-identity.json` | The agent's signing identity and trust state: its private Ed25519 signing seed, the operator keys it pins and why each was admitted, the first-contact (trust-on-first-use) latch, and the ledger of operator keys it has seen revoked. | The plugin silently generates a new signing identity with no pinned keys except any `operatorPubkey` you configured, which it re-applies on connect. The new key needs endorsing again, an agent left with no pins trusts the relay's operator keys afresh on first contact, and it forgets which keys were revoked. |
 
 Keeping only the credentials file is not enough: the agent still reconnects, but with a new identity and none of its trust state. Back up **both** files before any update, reinstall or uninstall.
 
 `dist/index.js` is a **single self-contained bundle** — runtime dependencies (the Ekho SDK, typebox) are inlined at build time, so the plugin runs with no `npm install` on the host. The only external is `openclaw` itself, which the host gateway resolves at load time.
 
 ## Update
+
+How you update depends on how the plugin was installed. `openclaw plugins
+inspect ekho-adapter` prints the install record: `Source: npm` is an npm-managed
+install; `Source: path` is a local-folder install (copied, or linked with
+`--link`). A folder copied by hand has no install record.
+
+Run these steps from an interactive shell. In a noninteractive one,
+`openclaw gateway stop` refuses unless you add `--force`. If the stop or the
+backup fails, do not continue.
+
+### npm-managed installs (recommended)
 
 ```bash
 # 1. Stop the gateway, so the plugin cannot start without its state files
@@ -63,14 +74,12 @@ ls -a ~/.openclaw/extensions/ekho-adapter/
 openclaw gateway start
 ```
 
-OpenClaw updates a plugin by replacing its install directory as a whole: the
-old directory is moved aside and then deleted. Whether the plugin's install
-directory is also the directory holding the state files depends on how it was
-installed and on your OpenClaw version (a local-folder or hand-copied install
-lives in `~/.openclaw/extensions/ekho-adapter`), so back up both files first in
-every case. With the gateway running, an update also refreshes the gateway
-itself, and a plugin that starts without its files creates new ones, which is
-why the gateway is stopped first.
+Current OpenClaw keeps a managed npm install in its own npm project directory,
+apart from `~/.openclaw/extensions/ekho-adapter`, so the update does not touch
+the state files; the backup is insurance in case your install differs. With the
+gateway running, an update also refreshes the gateway itself, and a plugin that
+starts without its files creates new ones, which is why the gateway is stopped
+first.
 
 Re-running `openclaw plugins install` for an id that is already installed points
 you to `plugins update` instead.
@@ -88,26 +97,43 @@ openclaw plugins update @drakon-systems/ekho-openclaw-plugin             # back 
 OpenClaw maps the package back to the installed `ekho-adapter` and records the new
 spec, so later `openclaw plugins update ekho-adapter` runs follow it.
 
-After the gateway starts, check the agent's card in the Ekho operator console: within
-about a minute of the agent's next model call it shows the live model and turn
-health.
+### Local-folder and hand-copied installs
 
-**Hand-copied installs.** If the plugin was copied onto the machine by hand (a
-directory at `~/.openclaw/extensions/ekho-adapter`), that directory also holds
-both [state files](#state-files). To update it:
+`openclaw plugins update` does not update these. It updates only npm,
+marketplace, ClawHub and git installs, and skips a local-folder install with
+`Skipping "ekho-adapter" (source: path)`, leaving the old build in place. Both
+kinds put the plugin itself in `~/.openclaw/extensions/ekho-adapter`, the same
+directory that holds the [state files](#state-files), and replacing it replaces
+the whole directory. To update:
 
-1. Stop the gateway (`openclaw gateway stop`).
-2. Copy `.ekho-identity.json` and `.ekho-credentials.json` out of the plugin
+1. In your Ekho checkout, pull and rebuild: the SDK first, then the plugin (see
+   [Build (from source)](#build-from-source)).
+2. Stop the gateway (`openclaw gateway stop`).
+3. Copy `.ekho-identity.json` and `.ekho-credentials.json` out of the plugin
    discovery tree, for example to `~/ekho-adapter-state/` (not to another folder
    under `~/.openclaw/extensions/`).
-3. Replace the `ekho-adapter` directory with the new build.
-4. Copy both files back into `~/.openclaw/extensions/ekho-adapter/`.
-5. Start the gateway (`openclaw gateway start`).
+4. Install the new build:
+   - local-folder install: `openclaw plugins install ./packages/openclaw-plugin --force`
+     from the checkout root (`--force` overwrites the existing install);
+   - hand-copied install: replace the `ekho-adapter` directory with the new build.
+5. Check both files are in `~/.openclaw/extensions/ekho-adapter/`; copy back
+   any that are missing from `~/ekho-adapter-state/`.
+6. Start the gateway (`openclaw gateway start`).
+7. Check the version: `openclaw plugins inspect ekho-adapter`.
+
+A linked install (`openclaw plugins install --link`) loads the plugin from your
+checkout rather than a copy, so updating it is rebuilding the checkout and
+restarting the gateway; the state files stay in
+`~/.openclaw/extensions/ekho-adapter/`.
 
 Never leave an old copy of the plugin (a backup folder, say) under
 `~/.openclaw/extensions/`. OpenClaw discovers it as a second plugin with the same
 id, loads only one of them and disables the other ("overridden by …"), and the
 copy that wins may be the stale one.
+
+After the gateway starts, check the agent's card in the Ekho operator console:
+within about a minute of the agent's next model call it shows the live model and
+turn health.
 
 **What changed in each version:** see [CHANGELOG.md](./CHANGELOG.md), which ships
 inside the published package, or the full project changelog on GitHub:
@@ -258,5 +284,6 @@ openclaw plugins install ./packages/openclaw-plugin
 
 Or copy the built folder to `~/.openclaw/extensions/ekho-adapter` on the target
 host. The folder only needs `dist/`, `openclaw.plugin.json`, `package.json`, and
-`README.md` — no `node_modules`. To update a manual install, follow
-*Hand-copied installs* under [Update](#update), keeping both state files.
+`README.md` — no `node_modules`. To update either kind of manual install,
+follow [Local-folder and hand-copied installs](#local-folder-and-hand-copied-installs),
+keeping both state files.

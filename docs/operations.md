@@ -111,7 +111,7 @@ The relay has two parts that must move together: the server, and the operator co
    - **Image / Helm:** pull the new tagged image (`ghcr.io/drakon-systems-ltd/ekho:<version>`); it already contains the matching console. For Helm: `helm upgrade ekho ./deploy/helm/ekho --set image.tag=<version> ...`.
 3. **Restart the relay.** Schema migrations in `packages/relay/migrations/` apply automatically and idempotently on boot; there is no manual migration step.
 4. **Verify.** `GET /readyz` returns `{"ready":true}`; reload the console in the browser (the relay serves `index.html` with revalidation, so a reload picks up the new build) and check that agents report healthy.
-5. **Update the agents' plugins.** For OpenClaw: stop the gateway, back up the plugin's `.ekho-identity.json` and `.ekho-credentials.json`, run `openclaw plugins update ekho-adapter`, check both files are still in place, then start the gateway; see the [plugin README](../packages/openclaw-plugin/README.md#update). Read [CHANGELOG.md](../CHANGELOG.md) for any mixed-version notes.
+5. **Update the agents' plugins.** For OpenClaw: stop the gateway, back up the plugin's `.ekho-identity.json` and `.ekho-credentials.json`, run `openclaw plugins update ekho-adapter` (npm installs only; `plugins update` skips a local-folder install, which you rebuild and reinstall with `--force`), check both files are still in place, then start the gateway. Do this from an interactive shell, and stop if the gateway stop or the backup fails. See the [plugin README](../packages/openclaw-plugin/README.md#update). Read [CHANGELOG.md](../CHANGELOG.md) for any mixed-version notes.
 
 ## Operator-key recovery
 
