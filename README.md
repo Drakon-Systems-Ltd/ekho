@@ -93,9 +93,9 @@ Three different things are in play, and they are checked in different places:
 
 - **Console sign-in** (email and password) gives you a session. The session is what authorizes console actions such as approvals, pause/resume, quarantine and the trust toggle. These actions do not check your device's operator key or whether it is endorsed.
 - **Your device's operator key.** Each browser holds its own Ed25519 key, unlocked with a per-device signing passphrase (not your sign-in password). It signs the messages you send to agents and the endorsements you make in **Security**. The relay accepts an endorsement only from a key the fleet already follows: before any agent is endorsed, any live key; after that, a key that has endorsed agents, or a key endorsed by another live key.
-- **Agents' signature checks.** Each agent keeps its own list of pinned operator keys. It pins a key you configure explicitly on the agent host (for Hermes, `EKHO_OPERATOR_PUBKEY`). An agent that has no pins yet adopts the relay's current operator keys once, on first contact (trust on first use). After that it adds a key only when a key it already pins has endorsed it. A message signed with a pinned key is labelled `verified-operator`. A message signed with a key the agent does not pin fails verification and does not wake the agent. An unsigned operator message, or any operator message to an agent with no pins yet, rests at best on the relay's word (`attested-operator`).
+- **Agents' signature checks.** Each agent keeps its own list of pinned operator keys. It pins a key you configure explicitly on the agent host (for Hermes, `EKHO_OPERATOR_PUBKEY`; for OpenClaw, `operatorPubkey`), and re-applies it on every connect, so it is pinned again even if the agent's identity file is lost and regenerated. An agent that has no pins yet adopts the relay's current operator keys once, on first contact (trust on first use). After that it adds a key only when a key it already pins has endorsed it. A message signed with a pinned key is labelled `verified-operator`. A message signed with a key the agent does not pin fails verification and does not wake the agent. An unsigned operator message, or any operator message to an agent with no pins yet, rests at best on the relay's word (`attested-operator`).
 
-So a new device you do not endorse can still sign in and approve actions, but agents reject the messages it signs.
+So a new device you do not endorse can still sign in and approve actions, but an agent that already has pins, and does not pin that device's key, rejects the messages it signs.
 
 - Endorse every new device immediately, from a device whose key your agents already trust (**Security** → panel ② → **Endorse**).
 - Keep at least two trusted devices, so losing one browser or passphrase does not lock you out.
@@ -104,7 +104,7 @@ So a new device you do not endorse can still sign in and approve actions, but ag
 
 ### Upgrading
 
-Back up the database first, then upgrade the relay **and** rebuild the console (it is a separately built static bundle; `npm run build` rebuilds it, and so does rebuilding the Docker image), restart, and update each agent's plugin (stop the gateway, back up the plugin's two [state files](packages/openclaw-plugin/README.md#state-files), run `openclaw plugins update ekho-adapter`, check both files are still in place, then start the gateway). Step-by-step: [Operations Guide → Upgrades](docs/operations.md#upgrades).
+Back up the database first, then upgrade the relay **and** rebuild the console (it is a separately built static bundle; `npm run build` rebuilds it, and so does rebuilding the Docker image), restart, and update each agent's plugin (stop the gateway, back up the plugin's two [state files](packages/openclaw-plugin/README.md#state-files), run `openclaw plugins update ekho-adapter` for an npm install or reinstall the rebuilt folder for a local-folder install, check both files are still in place, then start the gateway). Step-by-step: [Operations Guide → Upgrades](docs/operations.md#upgrades).
 
 ### Docker lifecycle
 
