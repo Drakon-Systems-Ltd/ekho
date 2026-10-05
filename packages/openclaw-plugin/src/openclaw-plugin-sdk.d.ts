@@ -96,6 +96,15 @@ declare module "openclaw/plugin-sdk/tool-plugin" {
       handler: (event: unknown, ctx?: unknown) => void,
       opts?: unknown
     ) => void;
+    // Per-instance lifecycle (openclaw src/plugins/plugin-instance.types.ts).
+    // `signal` aborts and `onDispose` callbacks run when the host disposes this
+    // plugin instance — on a reload/update swap as well as on gateway shutdown.
+    // Optional in the host's own type, and absent on older hosts.
+    lifecycle?: {
+      readonly signal?: AbortSignal;
+      onDispose?: (dispose: () => void | Promise<void>) => () => void;
+      [key: string]: unknown;
+    };
     runtime?: {
       agent?: {
         runEmbeddedAgent?: (...args: unknown[]) => unknown;

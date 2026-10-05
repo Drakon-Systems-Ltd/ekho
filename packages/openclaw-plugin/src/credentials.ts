@@ -255,6 +255,25 @@ export function takeEnrollOperatorKeys(): EnrollOperatorKey[] | null {
   return keys;
 }
 
+/**
+ * Total deadline for the enrol request, response headers AND body. Enrolment
+ * runs under the process-wide enrolment lock (runtime-registry.ts), so a
+ * request that never answers would hold every same-key successor forever.
+ * Aborted, this copy saves nothing: a queued successor then enrols itself, and
+ * if the abandoned request did reach the relay, the single-use token is spent
+ * and the successor gets the 400 path (one re-check, then a visible failure),
+ * never a second identity.
+ */
+export const ENROLL_TIMEOUT_MS = 30_000;
+
+/** The relay refused the enrolment (a 400 for a spent or expired token). */
+export class EnrollmentFailedError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "EnrollmentFailedError";
+  }
+}
+
 export async function enrollOrLoad(config: {
   configDir: string;
   relayBaseUrl: string;
@@ -295,23 +314,35 @@ export async function enrollOrLoad(config: {
     throw new Error("[ekho-adapter] No credentials and no enrollment token configured. Set agentId+agentSecret or fleetId+enrollmentToken.");
   }
 
-  const res = await fetch(`${config.relayBaseUrl}/v1/enroll`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      fleet_id: config.fleetId,
-      token: config.enrollmentToken,
-      display_name: config.displayName,
-      runtime: "openclaw"
-    })
-  });
+  const abort = new AbortController();
+  const deadline = setTimeout(
+    () => abort.abort(new Error(`[ekho-adapter] Enrollment request timed out after ${ENROLL_TIMEOUT_MS}ms`)),
+    ENROLL_TIMEOUT_MS
+  );
+  let body: { agent_id: string; secret: string; operator_keys?: EnrollOperatorKey[] };
+  try {
+    const res = await fetch(`${config.relayBaseUrl}/v1/enroll`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        fleet_id: config.fleetId,
+        token: config.enrollmentToken,
+        display_name: config.displayName,
+        runtime: "openclaw"
+      }),
+      // Also bounds the body reads below: an abort fails a pending read.
+      signal: abort.signal
+    });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`[ekho-adapter] Enrollment failed: ${res.status} ${text}`);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new EnrollmentFailedError(`[ekho-adapter] Enrollment failed: ${res.status} ${text}`, res.status);
+    }
+
+    body = await res.json() as typeof body;
+  } finally {
+    clearTimeout(deadline);
   }
-
-  const body = await res.json() as { agent_id: string; secret: string; operator_keys?: EnrollOperatorKey[] };
   lastEnrollOperatorKeys = Array.isArray(body.operator_keys) ? body.operator_keys : null;
   const creds: EkhoCredentials = {
     agentId: body.agent_id,
