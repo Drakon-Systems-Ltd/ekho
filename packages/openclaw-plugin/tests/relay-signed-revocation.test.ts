@@ -150,6 +150,71 @@ describe("relay-signed revocation → plugin pin sync", () => {
     expect(warnings.join("\n")).toMatch(/REVOKED without a valid revocation signature/);
   });
 
+  it("a LEGACY unsigned tombstone stays pinned until the console signs it; once signed the agent tombstones and unpins it", async () => {
+    // A third browser, endorsed by the root and pinned by the agent, that the
+    // pre-024 DELETE path "revoked": a time, no signer, no signature.
+    const old = makeKey();
+    await relay.operatorRequest("POST", "/v1/operator/keys", {
+      public_key: old.pubB64,
+      label: "old-browser",
+      endorsement: {
+        endorsed_by_key_id: root.id,
+        signature: signCanonical(endorsementPayload(relay.fleetId, old.id, old.pubB64), root.seed),
+      },
+    });
+    const legacyAt = "2026-06-07T21:22:53.694Z";
+    relay.db
+      .raw()
+      .prepare("UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ?")
+      .run(legacyAt, relay.fleetId, old.id);
+
+    const identity = pinnedBoth();
+    identity.pinnedOperatorKeys[old.id] = old.pubB64;
+    const before = (await inboxKeys()).find((k) => k.key_id === old.id)!;
+    expect(before).toMatchObject({ revoked: true, revoked_at: legacyAt, revocation_sig: null });
+    const warnings: string[] = [];
+    expect(
+      syncPinnedOperatorKeys(identity, await inboxKeys(), relay.fleetId, {
+        warn: (...a: unknown[]) => warnings.push(a.join(" ")),
+        info: () => {},
+      })
+    ).toBe(false);
+    expect(identity.pinnedOperatorKeys[old.id]).toBe(old.pubB64); // advisory: still trusted
+    expect(identity.revokedOperatorKeys ?? {}).toEqual({});
+    expect(warnings.join("\n")).toMatch(/REVOKED without a valid revocation signature/);
+
+    // "Sign revocation" on the console, from the device holding the trust root.
+    const revokedAt = new Date().toISOString();
+    const res = await relay.operatorRequest("POST", `/v1/operator/keys/${old.id}/revoke`, {
+      revoked_by_key_id: root.id,
+      revoked_at: revokedAt,
+      signature: signCanonical(revocationPayload(relay.fleetId, old.id, revokedAt), root.seed),
+    });
+    expect(res.status).toBe(200);
+
+    const keys = await inboxKeys();
+    const dead = keys.find((k) => k.key_id === old.id)!;
+    expect(dead).toMatchObject({ revoked: true, revoked_at: revokedAt, revoked_by_key_id: root.id });
+    expect(dead.revocation_sig).toBeTruthy();
+
+    const after: string[] = [];
+    expect(
+      syncPinnedOperatorKeys(identity, keys, relay.fleetId, {
+        warn: (...a: unknown[]) => after.push(a.join(" ")),
+        info: () => {},
+      })
+    ).toBe(true);
+    expect(identity.pinnedOperatorKeys[old.id]).toBeUndefined();
+    expect(identity.pinnedOperatorKeys).toEqual({ [root.id]: root.pubB64, [successor.id]: successor.pubB64 });
+    expect(identity.revokedOperatorKeys?.[old.id]).toBe(revokedAt);
+    expect(after.join("\n")).toMatch(/is revoked \(signed/);
+    expect(after.join("\n")).not.toMatch(/ADVISORY/);
+
+    // It sticks on the next poll.
+    expect(syncPinnedOperatorKeys(identity, await inboxKeys(), relay.fleetId, QUIET)).toBe(false);
+    expect(identity.pinnedOperatorKeys[old.id]).toBeUndefined();
+  });
+
   it("a fresh agent enrolling after the revocation TOFU-pins only the live key — the tombstone is skipped", async () => {
     const revokedAt = new Date().toISOString();
     await relay.operatorRequest("POST", `/v1/operator/keys/${root.id}/revoke`, {
