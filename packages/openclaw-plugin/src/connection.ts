@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import os from "node:os";
 import { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
@@ -10,14 +11,24 @@ import {
   ALLOW_NEW_IDENTITY_ENV,
   identityPublicKey,
   takeEnrollOperatorKeys,
+  EnrollmentFailedError,
   type EkhoCredentials,
-  type EkhoIdentity
+  type EkhoIdentity,
+  type EnrollOperatorKey
 } from "./credentials.js";
 import { parseRequireSignedMode, syncPinnedOperatorKeys } from "./verification.js";
 import { fromB64url, keyId as deriveKeyId } from "./identity.js";
 import { startAutoReply } from "./autoreply.js";
 import { appendDeadLetters } from "./dead-letter.js";
 import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./state-dir.js";
+import {
+  claimAgentRuntime,
+  nextRuntimeGeneration,
+  putEnrolOperatorKeys,
+  releaseAgentRuntime,
+  runEnrolmentExclusive,
+  takeEnrolOperatorKeys
+} from "./runtime-registry.js";
 
 export interface EkhoPluginConfig {
   relayBaseUrl: string;
@@ -59,9 +70,28 @@ type Logger = { info?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => vo
 let connection: EkhoConnection | null = null;
 let connecting: Promise<EkhoConnection> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-let stopAutoReply: (() => void) | null = null;
+let stopAutoReply: (() => Promise<void>) | null = null;
+// The last stop's drain (see shutdown), handed to every later shutdown call:
+// the host may fire more than one unload signal and await each.
+let stopDrain: Promise<void> = Promise.resolve();
 let identity: EkhoIdentity | null = null;
 let identityConfigDir = "";
+
+// This module copy's place in the process-wide producer order (see
+// runtime-registry.ts). A host reload evaluates a fresh copy, which takes a
+// higher number and stops this one's timers when it connects.
+const generation = nextRuntimeGeneration();
+// Set once this copy has been stopped (host unload, or superseded by a newer
+// copy). A retired copy still hands its client to a straggling tool call, but
+// never starts a heartbeat or an auto-reply loop again: restarting would make
+// it a second producer next to the generation that replaced it.
+let retired = false;
+// The agent this copy holds in the registry, for release on shutdown.
+let claimedAgentId: string | null = null;
+
+// After the relay refuses an enrolment token (400: spent), how long to wait
+// before looking once more for credentials someone saved meanwhile.
+export const ENROL_RECHECK_MS = 2_000;
 
 /**
  * Register the agent's identity key with the relay and bootstrap-pin the operator
@@ -230,10 +260,17 @@ export function deriveTurnHealth(
   };
 }
 
-/** Snapshot the current turn-health metrics for the heartbeat (string-valued, like model metrics). */
+/**
+ * Snapshot the current turn-health metrics for the heartbeat (string-valued,
+ * like model metrics). An empty window is reported as "unknown", not omitted:
+ * an absent field reads the same as a plugin too old to send one, so a
+ * model_call hook that never fires would otherwise be invisible on the board.
+ * The relay's health classification treats "unknown" exactly like absent
+ * (fleet-health.ts), and the console shows both as the same muted badge.
+ */
 export function turnHealthMetrics(now: number = Date.now()): Record<string, string> {
   const h = deriveTurnHealth(modelCalls, now);
-  if (h.turn_health === "unknown") return {};
+  if (h.turn_health === "unknown") return { turn_health: "unknown", model_calls_1h: "0" };
   const m: Record<string, string> = {
     turn_health: h.turn_health,
     model_errors_1h: String(h.errors_1h),
@@ -348,6 +385,7 @@ export function seedConfigModelFromOpenClawConfig(config: unknown): void {
  */
 export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, api?: PluginApi): Promise<EkhoConnection> {
   if (connection) {
+    maybeStartHeartbeat(log, config);
     maybeStartAutoReply(api, log, config);
     return connection;
   }
@@ -373,15 +411,28 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
     // Read BEFORE enrollOrLoad: a fresh enrolment writes this file, and the
     // identity rule below must see the state as it was when we arrived.
     const hasStoredCredentials = storedCredentialsState(configDir).state !== "absent";
-    const credentials = await enrollOrLoad({
-      configDir,
-      relayBaseUrl: config.relayBaseUrl,
-      fleetId: config.fleetId,
-      enrollmentToken: config.enrollmentToken,
-      agentId: config.agentId,
-      agentSecret: config.agentSecret,
-      displayName: config.displayName ?? `openclaw-${os.hostname()}`
-    });
+    const retiredAtStart = retired;
+    const enrolKey = enrolmentKey(config);
+    const credentials = await enrollOrLoadOnce(
+      {
+        configDir,
+        relayBaseUrl: config.relayBaseUrl,
+        fleetId: config.fleetId,
+        enrollmentToken: config.enrollmentToken,
+        agentId: config.agentId,
+        agentSecret: config.agentSecret,
+        displayName: config.displayName ?? `openclaw-${os.hostname()}`
+      },
+      enrolKey,
+      log
+    );
+    if (retired && !retiredAtStart) {
+      // Unloaded while enrolling (a reload mid-enrolment). The credentials are
+      // saved and the newer copy, queued behind this enrolment, connects with
+      // them; it also bootstraps the identity, so this copy must not race it
+      // to. A later tool call here connects afresh from the saved files.
+      throw new Error(`[ekho] generation ${generation} was stopped while connecting; leaving the agent to its successor`);
+    }
 
     const client = new EkhoAgentClient({
       agentId: credentials.agentId,
@@ -409,7 +460,7 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
       // sent since the beginning, dropped on the floor until now. Only fires
       // for a never-pinned identity (see syncPinnedOperatorKeys); explicit
       // config pins above always win.
-      const enrollKeys = takeEnrollOperatorKeys();
+      const enrollKeys = enrolKey ? (takeEnrolOperatorKeys(enrolKey) as EnrollOperatorKey[] | null) : null;
       if (
         enrollKeys &&
         identity &&
@@ -428,31 +479,9 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
       }
     }
 
-    if (!heartbeatTimer) {
-      // Best-effort model/provider for the operator health board. Auto-detected
-      // from the host (live model_call hook + config seed, see register), with
-      // EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER as an explicit override/fallback.
-      const reportMetrics = (): Record<string, string> => ({
-        ...pickModelMetrics({
-          envModel: process.env.EKHO_REPORT_MODEL,
-          envProvider: process.env.EKHO_REPORT_PROVIDER,
-          observedModel: observed.model,
-          observedProvider: observed.provider,
-          configModel: configured.model,
-          configProvider: configured.provider
-        }),
-        // Truthful cognitive-health signal so a brain-dead-but-connected agent
-        // (model 404/auth failing every turn) reads red, not green.
-        ...turnHealthMetrics()
-      });
-      const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
-      beat();
-      heartbeatTimer = setInterval(beat, config.heartbeatIntervalMs ?? 30_000);
-      if (typeof heartbeatTimer === "object" && "unref" in heartbeatTimer) heartbeatTimer.unref?.();
-    }
-
     connection = { client, credentials };
     log?.info?.(`[ekho] connected as ${credentials.agentId} -> ${credentials.relayBaseUrl}`);
+    maybeStartHeartbeat(log, config);
     maybeStartAutoReply(api, log, config);
     return connection;
   })();
@@ -465,12 +494,105 @@ export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, ap
 }
 
 /**
+ * The process-wide enrolment lock key, or null when this config cannot enrol
+ * (explicit credentials). Hashes the token rather than holding it on globalThis.
+ */
+function enrolmentKey(config: EkhoPluginConfig): string | null {
+  if ((config.agentId && config.agentSecret) || !config.enrollmentToken) return null;
+  const token = createHash("sha256").update(config.enrollmentToken, "utf8").digest("hex");
+  return `${config.relayBaseUrl}\n${config.fleetId ?? ""}\n${token}`;
+}
+
+/**
+ * enrollOrLoad, coordinated across module copies (runtime-registry.ts,
+ * runEnrolmentExclusive): a copy that finds no credentials waits for any other
+ * copy's enrolment with the same token, then loads what it saved instead of
+ * spending the token a second time. A 400 from the relay (spent token) gets
+ * one bounded re-check for credentials saved meanwhile — by a copy or process
+ * outside the registry — before the failure stands.
+ */
+async function enrollOrLoadOnce(
+  args: Parameters<typeof enrollOrLoad>[0],
+  key: string | null,
+  log?: Logger
+): Promise<EkhoCredentials> {
+  const run = async () => {
+    const creds = await enrollOrLoad(args);
+    // This module copy's enrolment keys go where any copy can pin them: the
+    // one that enrolled may be retired before it gets that far.
+    const keys = takeEnrollOperatorKeys();
+    if (keys && key) putEnrolOperatorKeys(key, keys);
+    return creds;
+  };
+  try {
+    return key ? await runEnrolmentExclusive(key, run) : await run();
+  } catch (err) {
+    if (!(err instanceof EnrollmentFailedError) || err.status !== 400) throw err;
+    log?.warn?.(
+      `[ekho] enrolment refused (${err.status}); re-checking for credentials saved meanwhile in ${ENROL_RECHECK_MS}ms`
+    );
+    await new Promise((r) => setTimeout(r, ENROL_RECHECK_MS));
+    if (storedCredentialsState(args.configDir).state !== "ok") throw err;
+    log?.info?.(`[ekho] found credentials saved during the refused enrolment; using them`);
+    return enrollOrLoad(args);
+  }
+}
+
+/**
+ * Claim this agent for this module copy (see runtime-registry.ts). An older
+ * copy still producing for it — a reload the host never told it about — is
+ * stopped first. False, with this copy retired, when a NEWER copy already
+ * holds the agent: this one is the stale generation and must start nothing.
+ */
+function claimRuntime(agentId: string, log?: Logger): boolean {
+  if (retired) return false;
+  if (claimedAgentId === agentId) return true;
+  if (!claimAgentRuntime(agentId, { generation, stop: (reason) => shutdown(reason, log) })) {
+    retired = true;
+    log?.info?.(
+      `[ekho] generation ${generation} is superseded for ${agentId}; not starting heartbeat or auto-reply`
+    );
+    return false;
+  }
+  claimedAgentId = agentId;
+  return true;
+}
+
+/** Start the heartbeat exactly once per (non-retired) module copy. */
+function maybeStartHeartbeat(log?: Logger, config?: EkhoPluginConfig) {
+  if (heartbeatTimer || !connection) return;
+  const { client, credentials } = connection;
+  if (!claimRuntime(credentials.agentId, log)) return;
+  // Best-effort model/provider for the operator health board. Auto-detected
+  // from the host (live model_call hook + config seed, see register), with
+  // EKHO_REPORT_MODEL / EKHO_REPORT_PROVIDER as an explicit override/fallback.
+  const reportMetrics = (): Record<string, string> => ({
+    ...pickModelMetrics({
+      envModel: process.env.EKHO_REPORT_MODEL,
+      envProvider: process.env.EKHO_REPORT_PROVIDER,
+      observedModel: observed.model,
+      observedProvider: observed.provider,
+      configModel: configured.model,
+      configProvider: configured.provider
+    }),
+    // Truthful cognitive-health signal so a brain-dead-but-connected agent
+    // (model 404/auth failing every turn) reads red, not green.
+    ...turnHealthMetrics()
+  });
+  const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
+  beat();
+  heartbeatTimer = setInterval(beat, config?.heartbeatIntervalMs ?? 30_000);
+  if (typeof heartbeatTimer === "object" && "unref" in heartbeatTimer) heartbeatTimer.unref?.();
+}
+
+/**
  * Start the auto-reply loop exactly once, sharing the single connection's
  * client. Guarded like the heartbeat timer; needs both a live connection and an
  * `api` handle (for the turn-trigger primitives) before it does anything.
  */
 function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: EkhoPluginConfig) {
   if (stopAutoReply || !connection || !api) return;
+  if (!claimRuntime(connection.credentials.agentId, log)) return;
   // The auto-reply loop wakes the agent by spawning `openclaw agent -m`, which
   // re-loads this plugin in a one-shot child. That child sets this env var so it
   // connects for the ekho_send tool but never starts its own loop (which would
@@ -517,17 +639,56 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
 }
 
 /**
- * Tear down the background timers (heartbeat + auto-reply loop) and reset the
- * singleton. Used by the register stop hook if the host provides one; safe to
- * call multiple times.
+ * Tear down the background timers (heartbeat + auto-reply loop) and retire
+ * this module copy, so nothing in it starts them again. Called by the host's
+ * stop signal (index.ts) and by a newer module copy taking over the agent
+ * (runtime-registry.ts). Safe to call multiple times.
+ *
+ * Synchronously, before it returns, every acked message the loop still holds
+ * is dead-lettered, except a stash a covering turn that already started is
+ * delivering. The promise settles once the loop's in-flight tick has (bounded
+ * by an event-loop timer, autoreply.ts STOP_DRAIN_MS); the host awaits it from
+ * both unload hooks (index.ts). It does not throw, even if the host logger
+ * does, and the promise never rejects.
  */
-export function shutdown() {
+export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
+  retired = true;
+  const hadWork = Boolean(heartbeatTimer || stopAutoReply);
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
   }
   if (stopAutoReply) {
-    stopAutoReply();
+    stopDrain = stopAutoReply();
     stopAutoReply = null;
   }
+  if (claimedAgentId) {
+    releaseAgentRuntime(claimedAgentId, generation);
+    claimedAgentId = null;
+  }
+  if (hadWork) {
+    // The work is already secured; a throwing host logger must not cost the
+    // host the drain promise it awaits.
+    try {
+      log?.info?.(`[ekho] generation ${generation} stopped heartbeat and auto-reply (${reason})`);
+    } catch {
+      /* swallowed on purpose */
+    }
+  }
+  return stopDrain;
+}
+
+/**
+ * Let this module copy produce again. register() calls it, so a host that
+ * re-registers a copy it previously stopped (rather than loading a fresh one)
+ * gets its heartbeat back on the next connect. Safe against reloads: if a newer
+ * copy holds the agent, the claim fails and this copy retires again.
+ */
+export function activateRuntime(): void {
+  retired = false;
+}
+
+/** Test seam: this module copy's runtime generation. */
+export function runtimeGeneration(): number {
+  return generation;
 }

@@ -1458,12 +1458,18 @@ function HealthTab({ agents, initialized }) {
               <span className="muted">beat {relativeTime(a.last_heartbeat_at)}</span>
             </div>
             <div className="health-row__flags">
-              {turnHealth ? (
+              {turnHealth && turnHealth !== "unknown" ? (
                 <Badge tone={turnHealth === "down" ? "danger" : turnHealth === "degraded" ? "warn" : "ok"}>
                   turns {turnHealth}{errs ? ` · ${errs} err/1h` : ""}
                 </Badge>
               ) : (
-                <Badge tone="muted" title="Agent plugin predates turn telemetry">turns —</Badge>
+                // "unknown" (no model call in the last hour) reads like absent.
+                <Badge
+                  tone="muted"
+                  title={turnHealth ? "No model call recorded in the last hour" : "Agent plugin predates turn telemetry"}
+                >
+                  turns —
+                </Badge>
               )}
               {a.operator_trusted ? <Badge tone="ok">trusted</Badge> : null}
               {a.peer_autoreply ? <Badge>delegation · {budgetLabel(a.peer_turn_budget)}</Badge> : <Badge>solo</Badge>}

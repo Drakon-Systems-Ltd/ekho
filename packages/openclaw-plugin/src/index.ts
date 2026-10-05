@@ -3,7 +3,16 @@ import fs from "node:fs";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
-import { ensureConnected, getEkhoIdentity, noteObservedModel, noteModelCallEnded, seedConfigModelFromOpenClawConfig, type EkhoPluginConfig } from "./connection.js";
+import {
+  activateRuntime,
+  ensureConnected,
+  getEkhoIdentity,
+  noteObservedModel,
+  noteModelCallEnded,
+  seedConfigModelFromOpenClawConfig,
+  shutdown,
+  type EkhoPluginConfig
+} from "./connection.js";
 import { registerModelCallHooks } from "./model-call-hooks.js";
 import { effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
 import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
@@ -453,10 +462,27 @@ plugin.register = (api) => {
       onStarted: (model, provider) => noteObservedModel(model, provider),
       onEnded: (outcome, category) => noteModelCallEnded(outcome, category)
     });
-    api.logger?.debug?.(`[ekho-adapter] model_call hooks: ${route}`);
+    // Info, once per load: with route "none" turn_health can only ever read
+    // "unknown", and this line is how an operator tells why.
+    api.logger?.info?.(`[ekho-adapter] model_call hooks: ${route}`);
   } catch (err) {
-    api.logger?.debug?.(`[ekho-adapter] model_call hooks unavailable: ${String(err)}`);
+    api.logger?.info?.(`[ekho-adapter] model_call hooks: none (${String(err)})`);
   }
+
+  // Stop this copy's heartbeat and auto-reply loop when the host unloads it.
+  // `openclaw plugins reload|update` swaps in a fresh module copy inside the
+  // same gateway process; the old copy's setIntervals would otherwise beat
+  // forever beside the new one's. On a swap OpenClaw (2026.9.8) runs the old
+  // instance's gateway_stop hooks with reason "plugin replacement"
+  // (src/gateway/server-plugin-reload-cleanup.ts), then disposes it, which
+  // runs the api.lifecycle.onDispose callbacks (registered at
+  // src/plugins/plugin-instance.ts:100-102, run at :705-715). Gateway
+  // shutdown runs gateway_stop too. Both are wired, both feature-detected;
+  // shutdown() is idempotent. A host with neither is covered by the
+  // process-wide registry: the next copy stops this one when it connects
+  // (runtime-registry.ts).
+  activateRuntime();
+  wireUnload(api);
 
   const config = api.pluginConfig as EkhoPluginConfig | undefined;
   if (config?.relayBaseUrl) {
@@ -465,5 +491,41 @@ plugin.register = (api) => {
     });
   }
 };
+
+/**
+ * Tie shutdown() to whichever unload signals this host offers. Never throws.
+ * Both handlers return shutdown()'s drain promise, and OpenClaw awaits both,
+ * each bounded at 5 s: onDispose callbacks via raceWithTimeout
+ * (src/plugins/plugin-instance.ts:705-715, SHUTDOWN_TIMEOUT_MS :35), and
+ * gateway_stop handlers via awaitHook (src/plugins/hooks.ts:636, budget :103).
+ * The drain is bounded below that (autoreply.ts STOP_DRAIN_MS).
+ */
+function wireUnload(api: Parameters<typeof plugin.register>[0]): void {
+  const routes: string[] = [];
+  try {
+    const off = api.lifecycle?.onDispose?.(() => shutdown("plugin dispose", api.logger));
+    if (off !== undefined) routes.push("lifecycle.onDispose");
+  } catch (err) {
+    api.logger?.debug?.(`[ekho-adapter] lifecycle.onDispose unavailable: ${String(err)}`);
+  }
+  try {
+    if (typeof api.on === "function") {
+      api.on("gateway_stop", (event: unknown) => {
+        const reason = (event as { reason?: unknown } | undefined)?.reason;
+        return shutdown(`gateway_stop: ${typeof reason === "string" && reason ? reason : "unspecified"}`, api.logger);
+      });
+      routes.push("gateway_stop");
+    }
+  } catch (err) {
+    api.logger?.debug?.(`[ekho-adapter] gateway_stop hook unavailable: ${String(err)}`);
+  }
+  try {
+    api.logger?.info?.(
+      `[ekho-adapter] unload hooks: ${routes.length ? routes.join(", ") : "none (relying on the reload hand-off)"}`
+    );
+  } catch {
+    /* never fail startup over a log line */
+  }
+}
 
 export default plugin;

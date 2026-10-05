@@ -60,8 +60,13 @@ describe("deriveTurnHealth", () => {
 describe("noteModelCallEnded + turnHealthMetrics (module state)", () => {
   beforeEach(() => __resetTurnHealth());
 
-  it("emits no turn keys before any call (old behaviour preserved)", () => {
-    expect(turnHealthMetrics(T0)).toEqual({});
+  it("reports unknown with zero calls before any call, never omitting the field", () => {
+    expect(turnHealthMetrics(T0)).toEqual({ turn_health: "unknown", model_calls_1h: "0" });
+  });
+
+  it("falls back to unknown once every call has aged out of the window", () => {
+    noteModelCallEnded("completed", undefined, T0 - 2 * 3600_000);
+    expect(turnHealthMetrics(T0)).toEqual({ turn_health: "unknown", model_calls_1h: "0" });
   });
 
   it("reports a down verdict with the error category after failing calls", () => {

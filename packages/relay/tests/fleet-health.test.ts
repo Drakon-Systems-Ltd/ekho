@@ -19,6 +19,16 @@ describe("deriveAgentHealth", () => {
     expect(v.reason).toMatch(/no turn data/);
   });
 
+  it("treats an explicit turn_health 'unknown' (the plugin's zero-call report) exactly like absent", () => {
+    const v = deriveAgentHealth(
+      { status: "active", last_heartbeat_at: fresh, metrics: { turn_health: "unknown", model_calls_1h: "0" } },
+      T0
+    );
+    expect(v).toEqual(deriveAgentHealth({ status: "active", last_heartbeat_at: fresh, metrics: {} }, T0));
+    expect(v.level).toBe("ok");
+    expect(v.cognitive_unknown).toBe(true);
+  });
+
   it("is DOWN when heartbeating fine but the model fails every turn (the core fix)", () => {
     const v = deriveAgentHealth(
       { status: "active", last_heartbeat_at: fresh, metrics: { turn_health: "down", last_error: "not_found" } },
