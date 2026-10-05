@@ -3137,13 +3137,18 @@ paths:
         signs the revocation with the live key it holds and the relay stores and
         distributes it verbatim (`/v1/inbox`, `/v1/enroll`). The relay refuses,
         with 400, a revocation no agent would honour: the target already revoked
-        (the original tombstone is never overwritten), the target being the
-        fleet's only live key, the signer being the target, an unknown, revoked
+        with a signature (a signed tombstone is never overwritten), the target
+        being the fleet's only live key, the signer being the target, an unknown, revoked
         or untrusted signer (same authority rule as endorsement; recovery grants
         do not apply), `revoked_at` more than 5 minutes from the relay clock, or
         a signature that does not verify. The audit actor is always the
         authenticated session; `revoked_by_key_id` is recorded as the verified
-        signer and `actor_key_id` only as an unverified debugging hint.
+        signer and `actor_key_id` only as an unverified debugging hint. A
+        legacy UNSIGNED tombstone (`revoked_at` set, no `revocation_sig`, from
+        the removed unsigned DELETE path) is still trusted by every agent, so it
+        may be signed once through this route: it returns 200 like any revoke,
+        the signed `revoked_at` replaces the unsigned one, and the audit event
+        carries `legacy_resign: true` and `prior_unsigned_revoked_at`.
       security:
         - OperatorBearer: []
       parameters:
