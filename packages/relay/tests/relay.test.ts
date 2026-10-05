@@ -9,12 +9,28 @@ import {
   verifyCanonical,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
 } from "../src/operator-identity";
 
 function makeOperatorKey(fill: number) {
   const seed = new Uint8Array(32).fill(fill);
   const pub = ed25519.getPublicKey(seed);
   return { seed, pub, pubB64: b64url(pub), id: keyId(pub) };
+}
+
+/** Revocation is SIGNED by a live key other than the target. DB-call shape. */
+function signedRevocation(fleetId: string, signer: ReturnType<typeof makeOperatorKey>, targetKeyId: string) {
+  const revokedAt = new Date().toISOString();
+  return {
+    revokedByKeyId: signer.id,
+    revokedAt,
+    signature: signCanonical(revocationPayload(fleetId, targetKeyId, revokedAt), signer.seed),
+  };
+}
+/** Same, as the POST /v1/operator/keys/:keyId/revoke body. */
+function revokeBody(fleetId: string, signer: ReturnType<typeof makeOperatorKey>, targetKeyId: string) {
+  const s = signedRevocation(fleetId, signer, targetKeyId);
+  return { revoked_by_key_id: s.revokedByKeyId, revoked_at: s.revokedAt, signature: s.signature };
 }
 
 describe("Relay integration", () => {
@@ -973,16 +989,22 @@ describe("operator keys (storage)", () => {
     expect(row?.public_key).toBe(k.pubB64);
   });
 
-  it("revokes a key: dropped from active, retained in the full list", () => {
+  it("revokes a key (signed by another live key): dropped from active, retained in the full list", () => {
     const k = makeOperatorKey(12);
+    const signer = makeOperatorKey(13);
     relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "phone");
-    expect(relay.db.revokeOperatorKey(relay.fleetId, k.id)).toBe(true);
+    relay.db.registerOperatorKey(relay.fleetId, signer.pubB64, "macbook");
+    relay.db.revokeOperatorKey(relay.fleetId, k.id, signedRevocation(relay.fleetId, signer, k.id));
     expect(relay.db.getActiveOperatorKeys(relay.fleetId).map((x) => x.key_id)).not.toContain(k.id);
     expect(relay.db.listOperatorKeys(relay.fleetId).map((x) => x.key_id)).toContain(k.id);
   });
 
-  it("revokeOperatorKey returns false for an unknown key", () => {
-    expect(relay.db.revokeOperatorKey(relay.fleetId, "nonexistent")).toBe(false);
+  it("revokeOperatorKey throws not found for an unknown key", () => {
+    const signer = makeOperatorKey(13);
+    relay.db.registerOperatorKey(relay.fleetId, signer.pubB64, "macbook");
+    expect(() =>
+      relay.db.revokeOperatorKey(relay.fleetId, "nonexistent", signedRevocation(relay.fleetId, signer, "nonexistent"))
+    ).toThrow(/not found/);
   });
 
   it("accepts a second key endorsed by an existing active key", () => {
@@ -1052,19 +1074,33 @@ describe("operator keys (API)", () => {
     expect(list.body.keys.map((x: { key_id: string }) => x.key_id)).toContain(k.id);
   });
 
-  it("revokes a key via DELETE", async () => {
+  it("revokes a key via a signed POST", async () => {
     const k = makeOperatorKey(22);
+    const signer = makeOperatorKey(23);
     await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "phone" });
-    const del = await relay.operatorRequest("DELETE", `/v1/operator/keys/${k.id}`);
-    expect(del.status).toBe(200);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: signer.pubB64, label: "macbook" });
+    const res = await relay.operatorRequest(
+      "POST",
+      `/v1/operator/keys/${k.id}/revoke`,
+      revokeBody(relay.fleetId, signer, k.id)
+    );
+    expect(res.status).toBe(200);
     const list = await relay.operatorRequest("GET", "/v1/operator/keys");
     const row = list.body.keys.find((x: { key_id: string }) => x.key_id === k.id);
     expect(row.revoked_at).toBeTruthy();
+    expect(row.revoked_by_key_id).toBe(signer.id);
+    expect(row.revocation_sig).toBeTruthy();
   });
 
   it("returns 404 revoking an unknown key", async () => {
-    const del = await relay.operatorRequest("DELETE", "/v1/operator/keys/unknownkey00");
-    expect(del.status).toBe(404);
+    const signer = makeOperatorKey(23);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: signer.pubB64, label: "macbook" });
+    const res = await relay.operatorRequest(
+      "POST",
+      "/v1/operator/keys/unknownkey00/revoke",
+      revokeBody(relay.fleetId, signer, "unknownkey00")
+    );
+    expect(res.status).toBe(404);
   });
 
   it("rejects an invalid endorsement with 400", async () => {
@@ -1217,8 +1253,10 @@ describe("operator key distribution (pinning)", () => {
 
   it("marks a revoked operator key as revoked in the inbox", async () => {
     const k = makeOperatorKey(43);
+    const signer = makeOperatorKey(44);
     await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: k.pubB64, label: "phone" });
-    await relay.operatorRequest("DELETE", `/v1/operator/keys/${k.id}`);
+    await relay.operatorRequest("POST", "/v1/operator/keys", { public_key: signer.pubB64, label: "mb" });
+    await relay.operatorRequest("POST", `/v1/operator/keys/${k.id}/revoke`, revokeBody(relay.fleetId, signer, k.id));
     const agent = await relay.enrollAgent("Pinner3");
     const inbox = await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10");
     const row = inbox.body.operator_keys.find((x: { key_id: string }) => x.key_id === k.id);

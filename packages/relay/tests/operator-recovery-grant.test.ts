@@ -11,6 +11,7 @@ import {
   signCanonical,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
 } from "../src/operator-identity";
 import { applyMigration } from "../src/db";
 import { run as runCli } from "../src/recovery-grant-cli";
@@ -63,6 +64,15 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       undefined,
       now
     );
+  // Revocation is signed by a DIFFERENT live, trusted key (never the target).
+  const revokeOperator = (signer: K, target: K) => {
+    const revokedAt = new Date().toISOString();
+    return relay.db.revokeOperatorKey(relay.fleetId, target.id, {
+      revokedByKeyId: signer.id,
+      revokedAt,
+      signature: signCanonical(revocationPayload(relay.fleetId, target.id, revokedAt), signer.seed),
+    });
+  };
   const endorseAgent = (endorser: K, a: { agentId: string; keyId: string; pubB64: string }) =>
     relay.db.endorseAgentKey(relay.fleetId, a.agentId, a.keyId, {
       endorsedByKeyId: endorser.id,
@@ -262,7 +272,7 @@ describe("#93 one-off operator recovery grant (relay)", () => {
     });
 
     it("refuses a revoked recovering key", () => {
-      relay.db.revokeOperatorKey(relay.fleetId, origin.id);
+      revokeOperator(root, origin);
       expect(() => arm()).toThrow(/revoked/i);
     });
 
@@ -396,7 +406,7 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       // Nothing has moved yet: the successor roots nothing and its parent is untrusted.
       expect(opKey(successor).endorsed_by_key_id).toBe(origin.id);
       expect(trusted(successor)).toBe(true);
-      relay.db.revokeOperatorKey(relay.fleetId, origin.id);
+      revokeOperator(root, origin);
       expect(trusted(successor)).toBe(true);
       for (const a of agents) expect(endorseAgent(successor, a)).toBe(true);
     });
@@ -412,7 +422,7 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       const d = makeKey();
       register(d, "D");
       endorseOperator(b, d);
-      relay.db.revokeOperatorKey(relay.fleetId, b.id);
+      revokeOperator(root, b);
       expect(trusted(d)).toBe(false);
       expect(() => endorseAgent(d, agents[1])).toThrow(UNTRUSTED);
     });
@@ -426,7 +436,11 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       arm();
       endorseOperator(origin, successor);
       expect(await read()).toEqual({ [origin.id]: false, [root.id]: true, [successor.id]: true });
-      relay.db.revokeOperatorKey(relay.fleetId, root.id); // the operator's later step
+      // The operator's later steps, from the successor's browser: carry the
+      // agents onto the successor, THEN revoke the lost root. In the other
+      // order the relay refuses — root would be the only key agents pin.
+      for (const a of agents) endorseAgent(successor, a);
+      revokeOperator(successor, root);
       expect((await read())[root.id]).toBe(false);
     });
   });

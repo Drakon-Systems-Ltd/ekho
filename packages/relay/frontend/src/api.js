@@ -110,13 +110,17 @@ export const registerOperatorKey = (token, { publicKey, label, endorsement }) =>
     method: "POST",
     body: { public_key: publicKey, label, ...(endorsement ? { endorsement } : {}) },
   });
-export const revokeOperatorKey = (token, keyId, actorKeyId) =>
-  request(
-    `/v1/operator/keys/${encodeURIComponent(keyId)}${
-      actorKeyId ? `?actor_key_id=${encodeURIComponent(actorKeyId)}` : ""
-    }`,
-    { token, method: "DELETE" }
-  );
+// Revocation is SIGNED: agents only drop a pinned operator key on a signature by
+// a key they pin over revocationPayload(fleet, key_id, revoked_at) (#27), so the
+// live key in THIS browser signs it and the relay stores and distributes it.
+// The old unsigned DELETE revoked the key on the relay while every agent kept
+// trusting it; the relay now refuses that path outright.
+export const revokeOperatorKey = (token, keyId, { revokedByKeyId, revokedAt, signature }) =>
+  request(`/v1/operator/keys/${encodeURIComponent(keyId)}/revoke`, {
+    token,
+    method: "POST",
+    body: { revoked_by_key_id: revokedByKeyId, revoked_at: revokedAt, signature },
+  });
 // #19: endorse a key that is already registered, signed by the live key held in
 // THIS browser. The rescue path for a device that can no longer sign for itself.
 export const endorseOperatorKey = (token, keyId, { endorsedByKeyId, signature }) =>

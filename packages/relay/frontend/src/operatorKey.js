@@ -99,6 +99,17 @@ export function endorsementPayload(fleetId, newKeyId, newPublicKeyB64url) {
   return { v: 1, t: "op-key-endorsement", fleet_id: fleetId, key_id: newKeyId, public_key: newPublicKeyB64url };
 }
 
+/**
+ * Canonical structure an operator key signs to REVOKE an operator key (#27).
+ * Byte-identical to the relay's operator-identity.ts revocationPayload and the
+ * plugins' verifiers: agents reconstruct exactly this from the inbox entry
+ * (fleet, key_id, revoked_at) and check the signature against a key they pin.
+ * `revoked_at` is inside the signed bytes so nobody can restate WHEN the key died.
+ */
+export function revocationPayload(fleetId, revokedKeyId, revokedAt) {
+  return { v: 1, t: "op-key-revocation", fleet_id: fleetId, key_id: revokedKeyId, revoked_at: revokedAt };
+}
+
 // --- passphrase encryption (WebCrypto PBKDF2 -> AES-GCM) --------------------
 
 async function deriveKey(passphrase, salt) {
