@@ -13,6 +13,7 @@ import json
 import os
 import stat
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -727,3 +728,282 @@ def test_a_symlinked_explicit_root_is_refused_not_resolved(tmp_path):
     assert backup.is_dir()
     assert not (tmp_path / ".hermes" / "backups").exists()
     assert not (tmp_path / "srv" / "backups").exists()
+
+
+# --- #89 review round 2: the full depth Hermes scans --------------------------
+
+
+def _nested_dependent(plugins_root, kind):
+    """``<root>/security/dependent``: a category plugin, one level down.
+
+    A manifest-less ``security/`` is a category to Hermes, and it recurses
+    into it (``scan_directory(depth=1)``), so what is in there is loaded.
+    Answers ``(the dependent dir, the path to deny)``.
+    """
+    if kind == "json":
+        dependent = json_plugin(plugins_root / "security", "dependent", name="dependent")
+        return dependent, dependent / "plugin.json"
+    dependent = plugin(plugins_root / "security", "dependent", name="dependent")
+    if kind == "yaml":
+        return dependent, dependent / "plugin.yaml"
+    return dependent, dependent  # "dir": the whole dependent dir at 000
+
+
+def _silence_hermes(caplog):
+    """Hermes' discovery loggers at ERROR: its warnings never reach a filter."""
+    import logging
+
+    for name in shadow_check._DISCOVERY_LOGGERS:
+        caplog.set_level(logging.ERROR, logger=name)
+
+
+def _offline_checks(monkeypatch):
+    """Every check but the shadow one answers PASS, and nothing installs."""
+    monkeypatch.setattr(healthcheck, "repair", lambda: (True, "sdk ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_sdk_surface", lambda: (True, "ok"))
+    monkeypatch.setattr(healthcheck, "check_registration", lambda: (True, "ok"))
+
+
+@needs_discovery
+@needs_unprivileged
+@pytest.mark.parametrize("kind", ["yaml", "json", "dir"])
+def test_unreadable_nested_dependent_is_undetermined_when_hermes_logs_nothing(
+    tmp_path, caplog, monkeypatch, capsys, kind
+):
+    """A denied ``security/dependent`` is inside Hermes' discovery depth (#89 r2).
+
+    The pre-verdict check read each direct child and stopped, so a manifest
+    one category down that this user cannot open was nobody's gap once the
+    Hermes warning about it was dropped: ``main`` printed ``healthy`` and
+    exited 0, and ``--repair`` moved the backup the dependent links into.
+    """
+    _silence_hermes(caplog)
+    _offline_checks(monkeypatch)
+    plugins = tmp_path / ".hermes" / "plugins"
+    live = plugin(plugins, "ekho")
+    backup = plugin(plugins, "ekho.bak-pre050")
+    dependent, deny = _nested_dependent(plugins, kind)
+    link = dependent / "data"
+    link.symlink_to(backup, target_is_directory=True)
+
+    with denied(deny):
+        with pytest.raises(PermissionError):
+            (dependent / ("plugin.json" if kind == "json" else "plugin.yaml")).read_bytes()
+
+        # Hermes alone, silenced: no gap, and no dependent to protect.
+        hermes_only = shadow_check._discover_via_hermes(
+            plugins, "ekho", shadow_check.hermes_discovery(), ()
+        )
+        assert hermes_only.unreadable == ()
+        assert dependent not in hermes_only.discovered
+
+        (gap,) = shadow_check.unreadable_children(plugins)
+        assert gap.path == dependent and str(deny) in gap.reason
+
+        code = healthcheck.main(["--plugins-dir", str(plugins)])
+        out = capsys.readouterr().out
+        assert code != 0, out
+        assert "healthy" not in out
+        assert "[PASS] plugin-shadows" not in out
+        assert str(deny) in out
+
+        moved, detail = healthcheck.repair_plugin_shadows(str(plugins))
+        assert moved is False, detail
+        assert str(deny) in detail
+
+    assert backup.is_dir() and live.is_dir()
+    assert (link / "plugin.yaml").is_file()  # the dependent still resolves
+    assert not (tmp_path / ".hermes" / "backups").exists()
+
+
+@needs_discovery
+@needs_roots
+@needs_unprivileged
+@pytest.mark.parametrize("kind", ["yaml", "json", "dir"])
+def test_unreadable_nested_dependent_in_one_root_refuses_every_root(
+    home, caplog, kind
+):
+    """The plan spans roots, and one unestablished dependent refuses all of it.
+
+    The shadow is in the default root; the dependent that links into it is in
+    a profile, one category down, unreadable, and silent.
+    """
+    _silence_hermes(caplog)
+    default = home / ".hermes" / "plugins"
+    plugin(default, "ekho")
+    backup = plugin(default, "ekho.bak-pre050")
+    profile_plugins = home / ".hermes" / "profiles" / "work" / "plugins"
+    dependent, deny = _nested_dependent(profile_plugins, kind)
+    link = dependent / "data"
+    link.symlink_to(backup, target_is_directory=True)
+
+    with denied(deny):
+        status, detail = healthcheck.check_plugin_shadows()
+        assert status != healthcheck.PASS, detail
+        moved, detail = healthcheck.repair_plugin_shadows()
+        assert moved is False, detail
+        assert str(deny) in detail
+
+    assert backup.is_dir()
+    assert (link / "plugin.yaml").is_file()
+    assert not (home / ".hermes" / "backups").exists()
+    assert not (home / ".hermes" / "profiles" / "work" / "backups").exists()
+
+
+@needs_discovery
+def test_a_readable_category_tree_is_still_clean(tmp_path):
+    """Recursing one level must not turn ordinary category plugins into gaps."""
+    plugins = tmp_path / ".hermes" / "plugins"
+    plugin(plugins, "ekho")
+    _nested_dependent(plugins, "yaml")
+    json_plugin(plugins / "tools", "portable", name="portable")
+
+    assert shadow_check.unreadable_children(plugins) == ()
+    status, detail = healthcheck.check_plugin_shadows(str(plugins))
+    assert status == healthcheck.PASS, detail
+
+
+# --- #89 review round 2: ``symlink/..`` is not a lexical no-op ---------------
+
+
+def _parent_traversal_layout(tmp_path, under):
+    """``lexical/alias -> actual/child``, so ``lexical/alias/../<under>`` is
+    ``actual/<under>`` to the kernel and ``lexical/<under>`` to ``abspath``.
+
+    The kernel's tree holds only the canonical install; the unrelated lexical
+    tree holds a canonical install and a backup — the canary.
+    """
+    lexical, actual = tmp_path / "lexical", tmp_path / "actual"
+    (actual / "child").mkdir(parents=True)
+    lexical.mkdir()
+    (lexical / "alias").symlink_to(actual / "child", target_is_directory=True)
+    plugin(actual / under, "ekho")
+    plugin(lexical / under, "ekho")
+    canary = plugin(lexical / under, "ekho.bak-unrelated")
+    requested = lexical / "alias" / ".." / under
+    assert os.path.samefile(requested, actual / under)
+    assert not os.path.samefile(requested, lexical / under)
+    return requested, actual / under, lexical / under, canary
+
+
+def _unrelated_tree_unchanged(unrelated, canary):
+    assert canary.is_dir() and (canary / "plugin.yaml").is_file()
+    assert (unrelated / "ekho").is_dir()
+    assert not (unrelated.parent / "backups").exists()
+
+
+@needs_discovery
+def test_explicit_root_through_symlink_parent_is_the_kernel_directory(tmp_path):
+    """``--plugins-dir lexical/alias/../plugins`` names ``actual/plugins``.
+
+    ``abspath`` dropped ``alias/..`` before anything was traversed, so the
+    check reported the unrelated tree's two copies and ``--repair`` moved its
+    backup into a ``backups/`` nobody named.
+    """
+    requested, addressed, unrelated, canary = _parent_traversal_layout(
+        tmp_path, "plugins"
+    )
+
+    (scan_result,) = shadow_check.scan(healthcheck._roots_to_scan(str(requested))[0])
+    assert os.path.samefile(scan_result.root, addressed)
+    status, detail = healthcheck.check_plugin_shadows(str(requested))
+    assert status == healthcheck.PASS, detail
+
+    moved, detail = healthcheck.repair_plugin_shadows(str(requested))
+    assert moved is True and "no shadowing" in detail, detail
+    _unrelated_tree_unchanged(unrelated, canary)
+
+    # A real shadow in the addressed tree: still refused, not repaired
+    # through a spelling whose ``backups/`` is ambiguous.
+    shadow = plugin(addressed, "ekho.bak-pre050")
+    status, detail = healthcheck.check_plugin_shadows(str(requested))
+    assert status == healthcheck.FAIL, detail
+    moved, detail = healthcheck.repair_plugin_shadows(str(requested))
+    assert moved is False and ".." in detail, detail
+    assert shadow.is_dir()
+    assert not (tmp_path / "actual" / "backups").exists()
+    _unrelated_tree_unchanged(unrelated, canary)
+
+
+@needs_discovery
+@needs_roots
+def test_hermes_home_through_symlink_parent_is_the_kernel_directory(home, monkeypatch):
+    """``HERMES_HOME=lexical/alias/../hermes``: the same, through Hermes' resolver."""
+    requested, addressed, unrelated, canary = _parent_traversal_layout(
+        home, "hermes/plugins"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(requested.parent))
+
+    roots = shadow_check.hermes_roots()
+    assert not roots.undetermined, roots.reason
+    assert roots.roots and all(os.path.samefile(r, addressed) for r in roots.roots)
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.PASS, detail
+
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved is True and "no shadowing" in detail, detail
+    _unrelated_tree_unchanged(unrelated, canary)
+
+    shadow = plugin(addressed, "ekho.bak-pre050")
+    status, detail = healthcheck.check_plugin_shadows()
+    assert status == healthcheck.FAIL, detail
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved is False and ".." in detail, detail
+    assert shadow.is_dir()
+    assert not (home / "actual" / "hermes" / "backups").exists()
+    _unrelated_tree_unchanged(unrelated, canary)
+
+
+def test_normalised_keeps_traversal_the_kernel_would_do(tmp_path, monkeypatch):
+    """Absolute, never lexically collapsed past a component that may be a link.
+
+    Leading ``..`` of a RELATIVE path is the one exception: ``os.getcwd()`` is
+    the physical directory, so its parent is the kernel's parent too.
+    """
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "a" / "b")
+    work = Path(os.getcwd())  # physical, whatever tmp_path is spelled through
+
+    assert shadow_check.normalised("x/../y") == work / "x" / ".." / "y"
+    assert ".." in shadow_check.normalised("/p/alias/../q").parts
+    assert shadow_check.normalised("../plugins") == work.parent / "plugins"
+    assert shadow_check.normalised("../../plugins") == work.parent.parent / "plugins"
+    assert shadow_check.normalised(".") == work
+    assert shadow_check.normalised("./plugins/.") == work / "plugins"
+
+
+@needs_discovery
+@needs_roots
+def test_a_relative_hermes_home_with_leading_parent_is_one_root(home, monkeypatch):
+    """``HERMES_HOME=../.hermes`` from ``$HOME/sub``: one root, repaired once."""
+    plugins = home / ".hermes" / "plugins"
+    live = plugin(plugins, "ekho")
+    backup = plugin(plugins, "ekho.bak-pre050")
+    (home / "sub").mkdir()
+    monkeypatch.chdir(home / "sub")
+    monkeypatch.setenv("HERMES_HOME", "../.hermes")
+
+    roots = shadow_check.hermes_roots()
+    assert not roots.undetermined, roots.reason
+    assert tree(roots.roots) == {str(plugins)}
+
+    moved, detail = healthcheck.repair_plugin_shadows()
+    assert moved, detail
+    assert detail.count("->") == 1, detail
+    assert not backup.exists() and live.is_dir()
+
+
+@needs_discovery
+def test_a_relative_explicit_root_with_leading_parent_is_repaired(tmp_path, monkeypatch):
+    """``--plugins-dir ../plugins`` from a physical cwd is unambiguous."""
+    plugins = tmp_path / "hermes" / "plugins"
+    live = plugin(plugins, "ekho")
+    backup = plugin(plugins, "ekho.bak-pre050")
+    (tmp_path / "hermes" / "sub").mkdir()
+    monkeypatch.chdir(tmp_path / "hermes" / "sub")
+
+    moved, detail = healthcheck.repair_plugin_shadows("../plugins")
+    assert moved, detail
+    assert not backup.exists() and live.is_dir()
+    assert (tmp_path / "hermes" / "backups" / backup.name / "plugin.yaml").is_file()

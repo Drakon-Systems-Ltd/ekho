@@ -188,10 +188,15 @@ Two questions the check does not answer itself (#85):
   resolved, so the set is made absolute and de-duplicated by path and by
   `(st_dev, st_ino)` before anything is planned: `HERMES_HOME=.hermes` read
   from `$HOME` names one directory, not two. `--plugins-dir` replaces the set
-  with one directory, taken as addressed rather than resolved.
+  with one directory, taken as addressed rather than resolved. Neither is
+  collapsed lexically: `alias/../plugins` is the plugins dir beside the link's
+  *target*, so it is checked where the kernel puts it — and `--repair` refuses
+  any root spelled through `..` (a leading `..` of a relative path, resolved
+  against the physical cwd, is fine). Write the path without `..` to repair.
 
 When either import is unavailable, or a directory the answer rests on will not
-be read, the check **warns and says which path and which errno** — it never
+be read — any directory Hermes would read, down to a category's plugins
+(`plugins/<category>/<name>/`), whatever Hermes' own log level — the check **warns and says which path and which errno** — it never
 reports PASS on a question it could not ask — the run exits **3** without a
 `healthy` line, and `--repair` refuses and moves nothing anywhere, including
 when it had nothing to move. The repair is

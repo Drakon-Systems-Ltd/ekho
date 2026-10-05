@@ -155,14 +155,50 @@ def _dir_identity(path) -> tuple[tuple[int, int] | None, str | None]:
 
 
 def normalised(path) -> Path:
-    """*path* made absolute against the cwd: ``abspath``, deliberately not ``realpath``.
+    """*path* made absolute against the cwd — and addressing the SAME directory.
 
-    The spelling is the only thing normalised. ``realpath`` would collapse a
-    symlinked root into its target as well, and that is the layout this check
-    must REFUSE rather than quietly repair somewhere else — so links stay
-    exactly where they are and :func:`symlink_refusal` still sees them.
+    Neither ``realpath`` nor ``abspath``. ``realpath`` collapses a symlinked
+    root into its target, and that is the layout this check must REFUSE rather
+    than quietly repair somewhere else. ``abspath`` drops ``alias/..`` before
+    anything is traversed, and to the kernel that pair is the PARENT OF THE
+    LINK'S TARGET: ``lexical/alias/../plugins`` is ``actual/plugins``, not the
+    unrelated ``lexical/plugins`` it rewrote it to (#89 review round 2).
+
+    So nothing is collapsed past a component that may be a link: ``..``
+    stays where it is written, and :func:`parent_traversal_refusal` keeps the
+    repair off any root spelled with one. The only ``..`` resolved here is a
+    LEADING one of a relative path — ``os.getcwd()`` is the physical
+    directory, so its lexical parent is its real parent.
     """
-    return Path(os.path.abspath(path))
+    given = Path(os.fspath(path))
+    if given.is_absolute():
+        return given
+    base, parts = Path(os.getcwd()), list(given.parts)
+    while parts and parts[0] == "..":
+        base = base.parent
+        parts.pop(0)
+    return base.joinpath(*parts)
+
+
+def parent_traversal_refusal(paths) -> str | None:
+    """Why a root spelled through ``..`` may not be repaired — or None.
+
+    Its verdict is sound: Hermes and every stat here walk the path the way the
+    kernel does. Its LAYOUT is not checkable: the components above a ``..``
+    are not the directories it sits in, so neither the ancestor lstats nor
+    ``<root>/../backups`` describe the tree the copies are really in. Refused
+    rather than reasoned about.
+    """
+    for path in tuple(paths):
+        if ".." in Path(path).parts:
+            return (
+                f"{path} is spelled through '..': after a symlink that is not the "
+                "parent it reads as, so the tree this root really sits in — and "
+                "the 'backups' dir beside it — cannot be established from the "
+                "spelling. Re-run with the path written without '..'. Nothing "
+                "was moved in any root"
+            )
+    return None
 
 
 def _real_path(path) -> tuple[str, str | None]:
@@ -193,8 +229,8 @@ class Unreadable:
     reason: str
 
 
-def _manifest_read_problem(child: Path) -> str | None:
-    """Why one of *child*'s manifest candidates would not be READ — or None.
+def _manifest_read_problem(child: Path) -> tuple[bool, str | None]:
+    """``(is any manifest candidate there?, why one would not be READ)``.
 
     ``scan_directory`` picks a child up by asking ``(child / "plugin.yaml")
     .exists()``, then OPENS what it found, and those are two different
@@ -204,33 +240,55 @@ def _manifest_read_problem(child: Path) -> str | None:
 
     Absent is the ordinary case and no problem. A candidate that is not a
     regular file is an answer too: nobody reads a directory as a manifest,
-    here or there.
+    here or there. "There" is Hermes' test, because it decides whether the
+    child is a plugin or a category to recurse into: ``exists()`` for the YAML
+    names, ``exists() or is_symlink()`` for ``plugin.json``. Nothing is parsed.
     """
+    present = False
     for filename in MANIFEST_NAMES:
         candidate = Path(child) / filename
         try:
             mode = os.stat(candidate).st_mode
         except FileNotFoundError:
+            if filename == "plugin.json":
+                linked, problem = _is_symlink(candidate)
+                if problem:
+                    return present, problem
+                present = present or linked
             continue
         except OSError as exc:
-            return _fs_reason(candidate, exc)
+            return present, _fs_reason(candidate, exc)
+        present = True
         if not stat.S_ISREG(mode):
             continue
         try:
             with open(candidate, "rb") as handle:
                 handle.read(1)
         except OSError as exc:
-            return _fs_reason(candidate, exc)
-    return None
+            return present, _fs_reason(candidate, exc)
+    return present, None
 
 
-def unreadable_children(root: Path) -> tuple[Unreadable, ...]:
-    """Every direct child of *root* that Hermes reads and this process cannot.
+# ``scan_directory`` recurses into a manifest-less child once
+# (``depth >= 1`` stops it), so ``<root>/<category>/<name>`` is loaded and one
+# level further down is not. The pre-verdict check covers exactly that depth.
+HERMES_CATEGORY_DEPTH = 1
+
+
+def unreadable_children(root: Path, depth: int = 0) -> tuple[Unreadable, ...]:
+    """Every dir under *root* that Hermes reads and this process cannot.
 
     The children ``scan_directory`` considers, asked the questions it asks —
     lstat the entry, stat what it points at, list it, stat AND READ each
     manifest candidate — with the failures Hermes discards kept instead. Dunder
     and foreign-harness dirs are skipped because Hermes never looks in them.
+
+    A child with no manifest is a CATEGORY to Hermes, and its children are
+    plugins it loads (``plugins/security/dependent``), so they are asked the
+    same questions (#89 review round 2). Stopping at the first level made a
+    denied category plugin nobody's gap the moment Hermes' warning about it
+    was not logged — and, undiscovered, it was not protected by the repair's
+    symlink walk either.
     """
     children, problem = _list_dir(root)
     if problem:
@@ -241,6 +299,7 @@ def unreadable_children(root: Path) -> tuple[Unreadable, ...]:
             continue
         if child.name.startswith("__") and child.name.endswith("__"):
             continue
+        present = True
         _linked, problem = _is_symlink(child)  # the entry itself
         if problem is None:
             kind, problem = _dir_kind(child)  # what it points at
@@ -249,9 +308,11 @@ def unreadable_children(root: Path) -> tuple[Unreadable, ...]:
             if problem is None:
                 _entries, problem = _list_dir(child)
             if problem is None:
-                problem = _manifest_read_problem(child)
+                present, problem = _manifest_read_problem(child)
         if problem:
             found.append(Unreadable(child, problem))
+        elif not present and depth < HERMES_CATEGORY_DEPTH:
+            found.extend(unreadable_children(child, depth + 1))
     return tuple(found)
 
 
@@ -968,8 +1029,19 @@ def symlink_refusal(scans, ancestors=()) -> str | None:
     One ``lstat`` in all that which will not answer costs exactly the same:
     ``os.path.islink`` says False to a PermissionError, and False is the answer
     that lets the move happen.
+
+    A root or ancestor spelled through ``..`` is refused before any of that:
+    an lstat of ``alias/..`` is a stat of the link target's parent, and
+    nothing above it is what the spelling says (:func:`parent_traversal_refusal`).
     """
-    for component in tuple(ancestors):
+    ancestors = tuple(ancestors)
+    scans = tuple(scans)
+    refusal = parent_traversal_refusal(
+        (*ancestors, *(s.root for s in scans if not s.undetermined))
+    )
+    if refusal:
+        return refusal
+    for component in ancestors:
         linked, problem = _is_symlink(component)
         if problem:
             return f"{problem}. {FS_REMEDY}"

@@ -241,7 +241,9 @@ def _roots_to_scan(
     ``backups/``, and NOT resolved: ``.resolve()`` turned a symlinked root into
     its target before any preflight ran, so the path the operator addressed was
     never tested for being a link. Its parent is the Hermes home it hangs off
-    and is checked with it.
+    and is checked with it. Nor is it collapsed lexically: ``alias/..`` is the
+    link TARGET's parent, so it stays as written, is scanned where the kernel
+    puts it, and refuses ``--repair`` (:func:`shadow_check.normalised`).
 
     Otherwise the set is Hermes' — the default root, this profile, and every
     sibling profile — and when Hermes cannot be asked there is no set, which is
