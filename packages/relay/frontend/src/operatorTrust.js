@@ -180,6 +180,22 @@ export function liveOperatorKeys(operatorKeys) {
 }
 
 /**
+ * How a key stands with the agents, from its revocation fields:
+ *  - "live": not revoked;
+ *  - "signed": revoked with a revocation signature — agents that pin the
+ *    signer drop it. Immutable: the relay never overwrites it;
+ *  - "unsigned": a legacy tombstone from the old unsigned revoke path
+ *    (revoked_at set, no revocation_sig). Agents treat it as advisory and
+ *    STILL TRUST the key, so the console offers to sign it ("Sign revocation").
+ *
+ * @returns {"live" | "signed" | "unsigned"}
+ */
+export function revocationState(operatorKey) {
+  if (!operatorKey?.revoked_at) return "live";
+  return operatorKey.revocation_sig ? "signed" : "unsigned";
+}
+
+/**
  * Guard for revoking an operator key (#15). Revoking the console's own device
  * key is the move that broke the fleet, and the UI treated it like any other
  * row. Revoking the LAST live key is worse still and is refused outright.
@@ -189,7 +205,7 @@ export function liveOperatorKeys(operatorKeys) {
 const REVOKE_IS_TERMINAL =
   "This cannot be undone. Recovery is to mint a new device key — Endorse will not restore a revoked key.";
 
-export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
+export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents, agentKeys = []) {
   const live = liveOperatorKeys(operatorKeys);
   const isLastLive = live.length <= 1 && live.some((k) => k.key_id === keyId);
   if (isLastLive) {
@@ -204,17 +220,22 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
     };
   }
   if (keyId === unlockedKeyId) {
+    // A revocation is a SIGNED instruction: agents drop a key only on a
+    // signature by a DIFFERENT key they pin (the relay refuses self-revocation
+    // too), so this device cannot retire its own key. Name the device that can.
+    const root = trustRootKey(operatorKeys, agentKeys);
+    const other = root && root.key_id !== keyId ? root : live.find((k) => k.key_id !== keyId);
     return {
-      blocked: false,
+      blocked: true,
       selfRevoke: true,
       message:
-        `${keyId} is THIS device's key — the one the console signs with.\n\n` +
-        `Revoking it means you can no longer endorse anything from this browser: the Re-endorse ` +
-        `buttons will stop working until you Forget this device and enrol a new key.` +
+        `${keyId} is THIS device's key — the one the console signs with. A revocation has to be signed by a ` +
+        `DIFFERENT live key the agents trust, so this device cannot revoke its own key` +
+        (other ? ` — revoke it from “${other.label || other.key_id}”.` : `.`) +
         (dependents > 0
-          ? `\n\n${dependents} agent${dependents > 1 ? "s" : ""} currently trust it and will need re-endorsing under the new key.`
+          ? `\n\n${dependents} agent${dependents > 1 ? "s" : ""} currently trust it and will need re-endorsing under another key first.`
           : "") +
-        `\n\n${REVOKE_IS_TERMINAL}\n\nRevoke this device's own key?`,
+        `\n\n${REVOKE_IS_TERMINAL}`,
     };
   }
   if (dependents > 0) {

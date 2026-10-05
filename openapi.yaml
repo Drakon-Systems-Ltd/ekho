@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Ekho Relay API
-  version: 0.5.6
+  version: 0.6.0
   description: >
     Multi-agent relay service providing message routing, policy enforcement,
     approval workflows, rate limiting, and fleet management for AI agent systems.
@@ -172,6 +172,14 @@ components:
           type: integer
         policy_profile:
           type: string
+        operator_keys:
+          type: array
+          description: >
+            Every operator signing key of the fleet, revoked ones included with
+            their signed revocation, for the agent to pin at enrolment. The
+            plugins' first-contact adoption skips any key reported revoked.
+          items:
+            $ref: "#/components/schemas/AgentOperatorKey"
 
     SendMessageRequest:
       type: object
@@ -287,6 +295,14 @@ components:
             positive integer is the room's cap, `0` means the room has no limit.
             Values stay numeric for compatibility (older plugins read a
             non-positive entry as "no override").
+        operator_keys:
+          type: array
+          description: >
+            Every operator signing key of the fleet for ongoing pin sync, revoked
+            ones included with their signed revocation (`revoked_at`,
+            `revoked_by_key_id`, `revocation_sig`).
+          items:
+            $ref: "#/components/schemas/AgentOperatorKey"
 
     TurnBudgetInput:
       type: [integer, "null"]
@@ -1107,7 +1123,7 @@ components:
           example: ekho-relay
         version:
           type: string
-          example: 0.5.6
+          example: 0.6.0
         tier:
           type: string
         setup_required:
@@ -1201,6 +1217,30 @@ components:
           type: string
           nullable: true
 
+    KeyRevocation:
+      type: object
+      description: >
+        A signed operator-key revocation. `signature` is an Ed25519 signature by
+        the live, trusted operator key `revoked_by_key_id` over the canonical
+        JSON of `{v:1, t:"op-key-revocation", fleet_id, key_id, revoked_at}`
+        (revocationPayload). Agents drop a pinned operator key ONLY on such a
+        signature by a key they already pin; an unsigned `revoked` flag is
+        advisory to them. `revoked_at` is inside the signed bytes and must be
+        within 5 minutes of the relay clock.
+      required: [revoked_by_key_id, revoked_at, signature]
+      properties:
+        revoked_by_key_id:
+          type: string
+          minLength: 1
+          maxLength: 32
+        revoked_at:
+          type: string
+          format: date-time
+        signature:
+          type: string
+          minLength: 1
+          maxLength: 128
+
     KeyEndorsement:
       type: object
       required: [endorsed_by_key_id, signature]
@@ -1236,6 +1276,48 @@ components:
         revoked_at:
           type: string
           format: date-time
+          nullable: true
+        endorsed_by_key_id:
+          type: string
+          nullable: true
+        endorsement_sig:
+          type: string
+          nullable: true
+        revoked_by_key_id:
+          type: string
+          nullable: true
+          description: The operator key that signed this key's revocation. Null on a live key, and on a key revoked before signed revocation existed.
+        revocation_sig:
+          type: string
+          nullable: true
+          description: Signature by `revoked_by_key_id` over revocationPayload(fleet_id, key_id, revoked_at).
+
+    AgentOperatorKey:
+      type: object
+      description: >
+        One operator signing key as served to agents in `/v1/enroll` and
+        `/v1/inbox`. Every key is listed, revoked ones included. The agent drops
+        a pinned key only when `revocation_sig` verifies, with a key it already
+        pins, over revocationPayload(fleet_id, key_id, revoked_at); `revoked`
+        on its own is advisory (the key is skipped for new adoption and nothing
+        else). The four revocation fields are always present and null on a live key.
+      required: [key_id, public_key, revoked, revoked_at, revoked_by_key_id, revocation_sig, endorsed_by_key_id, endorsement_sig]
+      properties:
+        key_id:
+          type: string
+        public_key:
+          type: string
+        revoked:
+          type: boolean
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_by_key_id:
+          type: string
+          nullable: true
+        revocation_sig:
+          type: string
           nullable: true
         endorsed_by_key_id:
           type: string
@@ -3044,14 +3126,35 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /v1/operator/keys/{keyId}:
-    delete:
-      operationId: revokeOperatorKey
+  /v1/operator/keys/{keyId}/revoke:
+    post:
+      operationId: revokeOperatorKeySigned
       tags: [Operator]
-      summary: Revoke an operator signing key
+      summary: Revoke an operator signing key with a signed revocation
       description: >
-        The audit actor is always the authenticated session. `actor_key_id` is
-        recorded only as an unverified debugging hint and is never read as identity.
+        Agents drop a pinned operator key only on a signature by a key they pin
+        over revocationPayload(fleet_id, key_id, revoked_at), so the console
+        signs the revocation with the live key it holds and the relay stores and
+        distributes it verbatim (`/v1/inbox`, `/v1/enroll`). The relay refuses,
+        with 400: the target already revoked with a signature (a signed
+        tombstone is never overwritten), the target being the fleet's only live
+        key, the signer being the target, an unknown or revoked signer, a signer
+        not rooted in the keys agents report as pinned (the endorsement rule;
+        in a fleet where no agent is endorsed yet any live key may sign; an
+        armed recovery grant does not apply), a revocation after which no live
+        key would pass that rule (the target is the only key the agents are
+        endorsed by, or the signer is rooted only through the target),
+        `revoked_at` not exactly in `Date.toISOString()` form
+        (`YYYY-MM-DDTHH:mm:ss.sssZ`) or more than 5 minutes from the relay
+        clock, or a signature that does not verify. Agents independently verify
+        the signature against their own pin before honouring it. The audit actor is always the
+        authenticated session; `revoked_by_key_id` is recorded as the verified
+        signer and `actor_key_id` only as an unverified debugging hint. A
+        legacy UNSIGNED tombstone (`revoked_at` set, no `revocation_sig`, from
+        the removed unsigned DELETE path) is still trusted by every agent, so it
+        may be signed once through this route: it returns 200 like any revoke,
+        the signed `revoked_at` replaces the unsigned one, and the audit event
+        carries `legacy_resign: true` and `prior_unsigned_revoked_at`.
       security:
         - OperatorBearer: []
       parameters:
@@ -3065,21 +3168,60 @@ paths:
           description: Unverified hint naming the device key that initiated the revoke.
           schema:
             type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeyRevocation"
       responses:
         "200":
-          description: Key revoked.
+          description: Key revoked; echoes the stored signed values.
           content:
             application/json:
               schema:
                 type: object
-                required: [revoked]
+                required: [revoked, key_id, revoked_at, revoked_by_key_id]
                 properties:
                   revoked:
                     type: boolean
+                  key_id:
+                    type: string
+                  revoked_at:
+                    type: string
+                    format: date-time
+                  revoked_by_key_id:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/operator/keys/{keyId}:
+    delete:
+      operationId: revokeOperatorKey
+      deprecated: true
+      tags: [Operator]
+      summary: "Refused: unsigned revocation (use POST /v1/operator/keys/{keyId}/revoke)"
+      description: >
+        The unsigned revoke path revoked the key on the relay while every agent
+        kept trusting it (an unsigned `revoked` flag is advisory to agents). It
+        now always answers 400 naming the signed replacement and revokes nothing.
+      security:
+        - OperatorBearer: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /v1/operator/agents/{agentId}/endorse-key:
     post:

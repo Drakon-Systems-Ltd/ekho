@@ -7,12 +7,23 @@ import {
   signCanonical,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
 } from "../src/operator-identity";
 
 function makeOperatorKey(fill: number) {
   const seed = new Uint8Array(32).fill(fill);
   const pub = ed25519.getPublicKey(seed);
   return { seed, pub, pubB64: b64url(pub), id: keyId(pub) };
+}
+
+/** The signed block a device sends to revoke `target`, signed by `signer`. */
+function signedRevocation(fleetId: string, signer: ReturnType<typeof makeOperatorKey>, targetKeyId: string) {
+  const revokedAt = new Date().toISOString();
+  return {
+    revokedByKeyId: signer.id,
+    revokedAt,
+    signature: signCanonical(revocationPayload(fleetId, targetKeyId, revokedAt), signer.seed),
+  };
 }
 
 function makeAgentKey(fill: number) {
@@ -39,7 +50,7 @@ describe("#50 operator-key lifecycle writes events", () => {
     const target = makeOperatorKey(22);
     relay.db.registerOperatorKey(relay.fleetId, actor.pubB64, "actor", undefined, actor.id);
     relay.db.registerOperatorKey(relay.fleetId, target.pubB64, "target", undefined, actor.id);
-    expect(relay.db.revokeOperatorKey(relay.fleetId, target.id, actor.id)).toBe(true);
+    relay.db.revokeOperatorKey(relay.fleetId, target.id, signedRevocation(relay.fleetId, actor, target.id), actor.id);
     const revoked = lifecycle(relay).items.filter((e) => e.event_type === "operator_key.revoked");
     expect(revoked).toHaveLength(1);
     expect(revoked[0].actor_id).toBe(actor.id);
@@ -47,7 +58,11 @@ describe("#50 operator-key lifecycle writes events", () => {
   });
 
   it("a revoke that changes nothing writes no event", () => {
-    expect(relay.db.revokeOperatorKey(relay.fleetId, "missing-key", "actor-key")).toBe(false);
+    const actor = makeOperatorKey(26);
+    relay.db.registerOperatorKey(relay.fleetId, actor.pubB64, "actor", undefined, actor.id);
+    expect(() =>
+      relay.db.revokeOperatorKey(relay.fleetId, "missing-key", signedRevocation(relay.fleetId, actor, "missing-key"), actor.id)
+    ).toThrow(/not found/);
     expect(lifecycle(relay).items.filter((e) => e.event_type === "operator_key.revoked")).toHaveLength(0);
   });
 
