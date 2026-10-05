@@ -196,26 +196,29 @@ describe("signed operator-key revocation (db)", () => {
     expect(row(victim).revoked_at).toBeTruthy();
   });
 
-  it("REFUSES a revoked_at that Date.parse accepts but is not the exact toISOString() form", () => {
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const spaced = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}`;
-    const named = now.toUTCString(); // e.g. "Mon, 05 Oct 2026 08:00:00 GMT"
-    const loose = [
-      spaced, // "2026-10-05 08:00"
-      `${now.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${now.getUTCDate()} ${now.getUTCFullYear()}`, // "Oct 5 2026"
-      named,
-      String(now.getTime()), // unix ms as a string
-      now.toISOString().replace(/\.\d{3}Z$/, "Z"), // milliseconds omitted
-      now.toISOString().replace("Z", "+00:00"),
-    ];
-    for (const at of loose) {
-      expect(() => revoke(root, victim, at), at).toThrow(/revoked_at must be an ISO-8601 UTC timestamp/);
-    }
+  // Each is accepted by Date.parse and (bar the unix-ms string) within the skew
+  // window, so only the canonical-form check stands between it and storage.
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const looseForms: [string, (d: Date) => string][] = [
+    ["space instead of T, no seconds (2026-10-05 08:00)", (d) =>
+      `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`],
+    ["month name (Oct 5 2026)", (d) =>
+      `${d.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${d.getUTCDate()} ${d.getUTCFullYear()}`],
+    ["unix milliseconds as a string", (d) => String(d.getTime())],
+    ["RFC 1123 (toUTCString)", (d) => d.toUTCString()],
+    ["milliseconds omitted", (d) => d.toISOString().replace(/\.\d{3}Z$/, "Z")],
+    ["+00:00 offset instead of Z", (d) => d.toISOString().replace("Z", "+00:00")],
+  ];
+  it.each(looseForms)("REFUSES a non-canonical revoked_at: %s", (_label, form) => {
+    const at = form(new Date());
+    expect(() => revoke(root, victim, at)).toThrow(/revoked_at must be an ISO-8601 UTC timestamp/);
     expect(row(victim).revoked_at).toBeNull();
-    const canonical = now.toISOString();
-    revoke(root, victim, canonical);
-    expect(row(victim).revoked_at).toBe(canonical);
+  });
+
+  it("accepts the canonical toISOString() revoked_at and stores it verbatim", () => {
+    const at = new Date().toISOString();
+    revoke(root, victim, at);
+    expect(row(victim).revoked_at).toBe(at);
   });
 
   it("REFUSES to revoke an already-revoked key and leaves the original revoked_at and signature alone", () => {
