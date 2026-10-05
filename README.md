@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.5.6` — the OpenClaw plugin keeps its credentials and identity key outside the plugin install directory so `openclaw plugins update` can no longer delete them (#98), never silently mints a second identity key, and the relay gains a one-off, host-armed recovery grant for a lost operator trust root (#93). See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.6.0` — operator-key revocation now reaches the agents: revoking a key in the console produces a revocation signed by another trusted device, which every agent honours and unpins. **Breaking:** the unsigned `DELETE /v1/operator/keys/{keyId}` route now returns 400; use the signed `POST /v1/operator/keys/{keyId}/revoke`. Upgrade the relay first. This release also includes the OpenClaw plugin reload fix (no stale heartbeat or inbox pollers; idle turn health reads `unknown`) and fails the Docker image build if the operator console build fails. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -109,7 +109,7 @@ So a new device you do not endorse can still sign in and approve actions, but an
 - Keep at least two trusted devices, so losing one browser or passphrase does not lock you out.
 - Locked out? The relay host can arm a one-time, time-limited recovery grant (relay 0.5.6 or later) — see [Operator-key recovery](docs/operations.md#operator-key-recovery).
 - Never revoke a key until every agent it endorsed has been re-endorsed from another trusted key; otherwise those agents lose their trusted operator.
-- Revoke from a device holding a *different*, trusted key. A revocation is signed by that key (`POST /v1/operator/keys/{keyId}/revoke`); agents drop a pinned key only on that signature, which is why a key cannot revoke itself. The relay requires the signer to be rooted in the keys agents report as pinned, except in a fleet where no agent is endorsed yet, where any live key may sign; agents independently verify the signature against their own pin before honouring it. The relay also refuses a revocation that would leave no key able to endorse: move the agents onto a successor first. Keys revoked before relay 0.5.7 carry no signature and are still trusted by the agents; the console marks them **revoked · unsigned (advisory)** and a trusted device can sign them with **Sign revocation**. A signed revocation is immutable.
+- Revoke from a device holding a *different*, trusted key. A revocation is signed by that key (`POST /v1/operator/keys/{keyId}/revoke`); agents drop a pinned key only on that signature, which is why a key cannot revoke itself. The relay requires the signer to be rooted in the keys agents report as pinned, except in a fleet where no agent is endorsed yet, where any live key may sign; agents independently verify the signature against their own pin before honouring it. The relay also refuses a revocation that would leave no key able to endorse: move the agents onto a successor first. Keys revoked before relay 0.6.0 carry no signature and are still trusted by the agents; the console marks them **revoked · unsigned (advisory)** and a trusted device can sign them with **Sign revocation**. A signed revocation is immutable.
 
 ### Upgrading
 
@@ -370,7 +370,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packa
 
 ## Project Status
 
-Ekho `v0.5.6` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.6.0` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 
