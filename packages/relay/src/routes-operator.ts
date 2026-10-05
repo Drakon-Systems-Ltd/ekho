@@ -296,9 +296,11 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
   // key they pin over revocationPayload(fleet, key_id, revoked_at) (#27), so the
   // console signs the revocation with the live key it holds and the relay stores
   // and distributes it verbatim. The relay checks it before storing (target
-  // live, not the last live key, signer ≠ target, signer live and trusted,
-  // revoked_at near now, signature valid) so the console surfaces a bad
-  // revocation immediately rather than every agent ignoring it in silence.
+  // live or an UNSIGNED legacy tombstone, not the last live key, signer ≠
+  // target, signer live and trusted, revoked_at near now, signature valid) so
+  // the console surfaces a bad revocation immediately rather than every agent
+  // ignoring it in silence. Signing a legacy tombstone is a normal 200; a
+  // signed tombstone is immutable and stays a 400.
   app.post("/v1/operator/keys/:keyId/revoke", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });

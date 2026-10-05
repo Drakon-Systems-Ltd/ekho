@@ -820,12 +820,19 @@ export class EkhoDb {
    * (never here: the relay holds no private keys) and stored verbatim.
    *
    * Rules, in order, each its own refusal:
-   *  - the target exists and is not already revoked (an existing tombstone and
-   *    its signature are never overwritten — the un-revoke compare-and-swap
-   *    on the agents binds to the ORIGINAL revoked_at);
+   *  - the target exists and is not already revoked WITH a signature (a signed
+   *    tombstone and its signature are never overwritten — the un-revoke
+   *    compare-and-swap on the agents binds to the ORIGINAL revoked_at). A
+   *    LEGACY tombstone — `revoked_at` set, `revocation_sig` NULL, as the
+   *    pre-024 unsigned DELETE path wrote it — is the one exception: no agent
+   *    ever honoured it (advisory, #27), so it may be signed once, and the
+   *    signed revoked_at replaces the unsigned one (the audit event keeps the
+   *    old value, flagged `legacy_resign`);
    *  - the target is not the fleet's only live key (the console's revokeGuard
    *    "isLastLive", enforced where it binds: a fleet with no live operator key
-   *    has no trust root and no way to sign its way back);
+   *    has no trust root and no way to sign its way back). A legacy-tombstoned
+   *    target is already out of the live set, so signing its revocation cannot
+   *    shrink it and this rule does not apply to it;
    *  - the signer is not the target: a key cannot attest its own death any more
    *    than it can root its own trust, and no agent would verify it anyway once
    *    it had dropped the key;
@@ -855,10 +862,15 @@ export class EkhoDb {
     now: Date = new Date()
   ): { revoked_at: string; revoked_by_key_id: string } {
     const target = this.db
-      .prepare("SELECT revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
-      .get(fleetId, targetKeyId) as { revoked_at: string | null } | undefined;
+      .prepare(
+        `SELECT revoked_at, revoked_at IS NOT NULL AND revocation_sig IS NULL AS legacy_unsigned
+           FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?`
+      )
+      .get(fleetId, targetKeyId) as { revoked_at: string | null; legacy_unsigned: number } | undefined;
     if (!target) throw new Error("operator key not found");
-    if (target.revoked_at) {
+    // The unsigned tombstone this signature replaces, or null for a live target.
+    const legacyRevokedAt = target.legacy_unsigned ? target.revoked_at : null;
+    if (target.revoked_at && !legacyRevokedAt) {
       throw new Error(`operator key ${targetKeyId} is already revoked (at ${target.revoked_at})`);
     }
     const live = (
@@ -866,7 +878,7 @@ export class EkhoDb {
         .prepare("SELECT key_id FROM fleet_operator_keys WHERE fleet_id = ? AND revoked_at IS NULL")
         .all(fleetId) as { key_id: string }[]
     ).map((r) => r.key_id);
-    if (live.length <= 1) {
+    if (!legacyRevokedAt && live.length <= 1) {
       throw new Error(
         `${targetKeyId} is the fleet's only live operator key. Revoking it would leave the fleet with no ` +
           `trust root and no key that could sign its way back. Register and endorse a replacement first.`
@@ -907,14 +919,22 @@ export class EkhoDb {
     if (!ok) throw new Error("invalid revocation signature");
 
     this.db.transaction(() => {
-      // Conditional on still being live, so a racing second revoke finds 0 rows
-      // and never overwrites the first tombstone.
-      const res = this.db
-        .prepare(
-          `UPDATE fleet_operator_keys SET revoked_at = ?, revoked_by_key_id = ?, revocation_sig = ?
-             WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL`
-        )
-        .run(signed.revokedAt, signed.revokedByKeyId, signed.signature, fleetId, targetKeyId);
+      // Conditional on the state checked above — still live, or still the same
+      // UNSIGNED legacy tombstone — so a racing second revoke finds 0 rows and
+      // never overwrites a signed tombstone.
+      const res = legacyRevokedAt
+        ? this.db
+            .prepare(
+              `UPDATE fleet_operator_keys SET revoked_at = ?, revoked_by_key_id = ?, revocation_sig = ?
+                 WHERE fleet_id = ? AND key_id = ? AND revoked_at = ? AND revocation_sig IS NULL`
+            )
+            .run(signed.revokedAt, signed.revokedByKeyId, signed.signature, fleetId, targetKeyId, legacyRevokedAt)
+        : this.db
+            .prepare(
+              `UPDATE fleet_operator_keys SET revoked_at = ?, revoked_by_key_id = ?, revocation_sig = ?
+                 WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL`
+            )
+            .run(signed.revokedAt, signed.revokedByKeyId, signed.signature, fleetId, targetKeyId);
       if (res.changes !== 1) throw new Error(`operator key ${targetKeyId} is already revoked`);
       this.recordEvent(
         fleetId,
@@ -927,7 +947,8 @@ export class EkhoDb {
         {
           revoked_at: signed.revokedAt,
           revoked_by_key_id: signed.revokedByKeyId,
-          claimed_actor_key_id_unverified: claimedActorKeyId ?? null
+          claimed_actor_key_id_unverified: claimedActorKeyId ?? null,
+          ...(legacyRevokedAt ? { legacy_resign: true, prior_unsigned_revoked_at: legacyRevokedAt } : {})
         }
       );
     })();

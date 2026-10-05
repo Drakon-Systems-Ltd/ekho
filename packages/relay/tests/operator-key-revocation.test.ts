@@ -382,6 +382,187 @@ describe("signed operator-key revocation (HTTP)", () => {
   });
 });
 
+/**
+ * Legacy UNSIGNED tombstones. Before signed revocation the relay's DELETE path
+ * set `revoked_at` and nothing else. Agents treat that as advisory (#27), so
+ * those keys are still pinned and trusted on every agent — and as long as the
+ * relay refused any revocation of a key with `revoked_at` set, there was no way
+ * to finish the job. A legacy tombstone (revoked_at set, revocation_sig NULL)
+ * may now be signed once by a trusted live key; a SIGNED tombstone never
+ * changes.
+ */
+describe("signed operator-key revocation — legacy unsigned tombstones", () => {
+  let relay: TestRelay;
+  let root: K;
+  let second: K;
+  let legacy: K; // tombstoned by the pre-024 unsigned DELETE path
+  const LEGACY_AT = "2026-06-07T21:22:53.694Z";
+
+  const register = (k: K, label: string, endorser?: K) =>
+    relay.db.registerOperatorKey(
+      relay.fleetId,
+      k.pubB64,
+      label,
+      endorser
+        ? {
+            endorsedByKeyId: endorser.id,
+            signature: signCanonical(endorsementPayload(relay.fleetId, k.id, k.pubB64), endorser.seed),
+          }
+        : undefined
+    );
+  /** Exactly what the old DELETE /v1/operator/keys/:keyId wrote: a time, no signature. */
+  const tombstoneUnsigned = (k: K, at = LEGACY_AT) =>
+    relay.db
+      .raw()
+      .prepare("UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ?")
+      .run(at, relay.fleetId, k.id);
+  /** The whole stored row, every column, for byte-for-byte comparisons. */
+  const fullRow = (k: K) =>
+    relay.db
+      .raw()
+      .prepare("SELECT * FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+      .get(relay.fleetId, k.id) as Record<string, unknown>;
+  const row = (k: K) => relay.db.listOperatorKeys(relay.fleetId).find((x) => x.key_id === k.id)!;
+  const revoke = (signer: K, target: K, revokedAt?: string) =>
+    relay.db.revokeOperatorKey(relay.fleetId, target.id, signedRevocation(relay.fleetId, signer, target, revokedAt));
+  const revokedEvents = () =>
+    relay.db
+      .getActivity(relay.fleetId, { limit: 50, type: "operator_key" })
+      .filter((e) => e.event_type === "operator_key.revoked");
+
+  beforeEach(async () => {
+    relay = await createTestRelay();
+    root = makeKey();
+    second = makeKey();
+    legacy = makeKey();
+    register(root, "phone");
+    register(second, "laptop", root);
+    register(legacy, "old-browser", root);
+    const agentId = (await relay.enrollAgent("Case")).agent_id;
+    const ak = makeKey();
+    const akId = relay.db.setAgentIdentityKey(agentId, relay.fleetId, ak.pubB64).keyId;
+    relay.db.endorseAgentKey(relay.fleetId, agentId, akId, {
+      endorsedByKeyId: root.id,
+      signature: signCanonical(agentKeyEndorsementPayload(relay.fleetId, agentId, akId, ak.pubB64), root.seed),
+    });
+    tombstoneUnsigned(legacy);
+    expect(row(legacy)).toMatchObject({ revoked_at: LEGACY_AT, revoked_by_key_id: null, revocation_sig: null });
+  });
+  afterEach(() => relay.cleanup());
+
+  it("a legacy unsigned tombstone CAN be signed: the signed revoked_at, signer and signature replace it", () => {
+    const at = new Date().toISOString();
+    expect(revoke(root, legacy, at)).toEqual({ revoked_at: at, revoked_by_key_id: root.id });
+    const r = row(legacy);
+    expect(r.revoked_at).toBe(at);
+    expect(r.revoked_by_key_id).toBe(root.id);
+    expect(verifyCanonical(revocationPayload(relay.fleetId, legacy.id, at), r.revocation_sig!, root.pub)).toBe(true);
+  });
+
+  it("records operator_key.revoked with legacy_resign and the prior unsigned revoked_at", () => {
+    const at = new Date().toISOString();
+    relay.db.revokeOperatorKey(relay.fleetId, legacy.id, signedRevocation(relay.fleetId, root, legacy, at), relay.operatorId);
+    const ev = revokedEvents();
+    expect(ev).toHaveLength(1);
+    expect(ev[0].actor_id).toBe(relay.operatorId);
+    expect(ev[0].resource_id).toBe(legacy.id);
+    expect(ev[0].payload).toMatchObject({
+      revoked_at: at,
+      revoked_by_key_id: root.id,
+      legacy_resign: true,
+      prior_unsigned_revoked_at: LEGACY_AT,
+    });
+  });
+
+  it("a normal revocation of a live key carries no legacy_resign flag", () => {
+    revoke(root, second);
+    const ev = revokedEvents();
+    expect(ev).toHaveLength(1);
+    expect(ev[0].payload.legacy_resign).toBeUndefined();
+    expect(ev[0].payload.prior_unsigned_revoked_at).toBeUndefined();
+  });
+
+  it("a SIGNED tombstone is immutable: a second signed revocation is refused and the row is unchanged byte-for-byte", () => {
+    revoke(root, legacy);
+    const before = fullRow(legacy);
+    expect(before.revocation_sig).toBeTruthy();
+    expect(() => revoke(second, legacy)).toThrow(/already revoked/i);
+    expect(() => revoke(root, legacy)).toThrow(/already revoked/i);
+    expect(fullRow(legacy)).toEqual(before);
+    expect(revokedEvents()).toHaveLength(1);
+  });
+
+  it("the last-live rule does not block signing a legacy tombstone (it cannot shrink the live set) and still guards live keys", () => {
+    // Leave `root` as the ONLY live key: the legacy target is already out of
+    // the live set, so signing its tombstone keeps exactly one live key.
+    revoke(root, second);
+    expect(relay.db.getActiveOperatorKeys(relay.fleetId).map((k) => k.key_id)).toEqual([root.id]);
+    revoke(root, legacy);
+    expect(row(legacy).revocation_sig).toBeTruthy();
+    expect(relay.db.getActiveOperatorKeys(relay.fleetId).map((k) => k.key_id)).toEqual([root.id]);
+    // ...while the last live key itself is still protected.
+    expect(() => revoke(legacy, root)).toThrow(/only live operator key/i);
+    expect(row(root).revoked_at).toBeNull();
+  });
+
+  it("every other guard still applies to a legacy target, which stays unsigned when refused", () => {
+    const orphan = makeKey();
+    register(orphan, "stolen-session");
+    const at = new Date().toISOString();
+    expect(() => revoke(legacy, legacy)).toThrow(/cannot revoke itself|itself revoked/i);
+    expect(() => revoke(orphan, legacy)).toThrow(/no agent trusts it/i);
+    expect(() => revoke(makeKey(), legacy)).toThrow(/unknown/i);
+    expect(() => revoke(root, legacy, new Date(Date.now() - 6 * MIN).toISOString())).toThrow(/revoked_at/i);
+    expect(() =>
+      relay.db.revokeOperatorKey(relay.fleetId, legacy.id, {
+        revokedByKeyId: root.id,
+        revokedAt: at,
+        signature: signCanonical(revocationPayload(relay.fleetId, legacy.id, at), second.seed),
+      })
+    ).toThrow(/invalid revocation signature/i);
+    // A revoked signer — including another legacy tombstone — cannot sign.
+    tombstoneUnsigned(second);
+    expect(() => revoke(second, legacy)).toThrow(/itself revoked/i);
+    expect(row(legacy)).toMatchObject({ revoked_at: LEGACY_AT, revoked_by_key_id: null, revocation_sig: null });
+    expect(revokedEvents()).toHaveLength(0);
+  });
+
+  it("HTTP: signing a legacy tombstone is 200; re-signing a signed tombstone is 400 and changes nothing", async () => {
+    const body = wireBody(relay.fleetId, root, legacy);
+    const ok = await relay.operatorRequest("POST", `/v1/operator/keys/${legacy.id}/revoke`, body);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ revoked: true, key_id: legacy.id, revoked_at: body.revoked_at, revoked_by_key_id: root.id });
+    const listed = (await relay.operatorRequest("GET", "/v1/operator/keys")).body.keys.find(
+      (x: { key_id: string }) => x.key_id === legacy.id
+    );
+    expect(listed).toMatchObject({ revoked_at: body.revoked_at, revoked_by_key_id: root.id, revocation_sig: body.signature });
+
+    const before = fullRow(legacy);
+    const again = await relay.operatorRequest("POST", `/v1/operator/keys/${legacy.id}/revoke`, wireBody(relay.fleetId, second, legacy));
+    expect(again.status).toBe(400);
+    expect(String(again.body.error)).toMatch(/already revoked/i);
+    expect(fullRow(legacy)).toEqual(before);
+
+    const ghost = makeKey();
+    const nf = await relay.operatorRequest("POST", `/v1/operator/keys/${ghost.id}/revoke`, wireBody(relay.fleetId, root, ghost));
+    expect(nf.status).toBe(404);
+  });
+
+  it("the inbox serves a legacy tombstone with no signature, and the signed fields once it is signed", async () => {
+    const agent = await relay.enrollAgent("Poller");
+    const inboxEntry = async () =>
+      ((await relay.agentRequest(agent.agent_id, agent.secret, "GET", "/v1/inbox?limit=10")).body.operator_keys as Array<
+        Record<string, unknown>
+      >).find((k) => k.key_id === legacy.id)!;
+    expect(await inboxEntry()).toMatchObject({ revoked: true, revoked_at: LEGACY_AT, revoked_by_key_id: null, revocation_sig: null });
+    const at = new Date().toISOString();
+    revoke(root, legacy, at);
+    const signed = await inboxEntry();
+    expect(signed).toMatchObject({ revoked: true, revoked_at: at, revoked_by_key_id: root.id });
+    expect(verifyCanonical(revocationPayload(relay.fleetId, legacy.id, at), signed.revocation_sig as string, root.pub)).toBe(true);
+  });
+});
+
 describe("migration 024 (revoked_by_key_id, revocation_sig)", () => {
   const sql = fs.readFileSync(
     fileURLToPath(new URL("../migrations/024_operator_key_revocation_sig.sql", import.meta.url)),
