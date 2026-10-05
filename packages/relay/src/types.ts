@@ -155,6 +155,16 @@ export const endorseOperatorKeySchema = z.object({
   signature: z.string().min(1).max(128)
 });
 
+// Signed operator-key revocation: `signature` is by the live, trusted key
+// `revoked_by_key_id` over revocationPayload(fleet_id, key_id, revoked_at).
+// `revoked_at` is inside the signed bytes and must sit close to the relay clock
+// (db.revokeOperatorKey), so it is only loosely shaped here.
+export const revokeOperatorKeySchema = z.object({
+  revoked_by_key_id: z.string().min(1).max(32),
+  revoked_at: z.string().min(1).max(64),
+  signature: z.string().min(1).max(128)
+});
+
 export const operatorKeySchema = z.object({
   public_key: z.string().min(1).max(128),
   label: z.string().min(1).max(80),

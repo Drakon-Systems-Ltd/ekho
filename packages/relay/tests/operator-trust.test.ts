@@ -8,6 +8,7 @@ import {
   deviceKeySigningState,
   liveOperatorKeys,
   revokeGuard,
+  revocationState,
   pickEndorser,
   mayGenerateNewOperatorIdentity,
   trustRootKey,
@@ -160,14 +161,22 @@ describe("revocation guard (#15)", () => {
     expect(g.message).toMatch(/only live operator key/i);
   });
 
-  it("demands a distinct confirmation for the console's OWN device key", () => {
+  it("BLOCKS revoking the console's OWN device key — a revocation is signed by a different key", () => {
     const g = revokeGuard("live1", opKeys, "live1", 0);
-    expect(g.blocked).toBe(false);
+    expect(g.blocked).toBe(true);
     expect(g.selfRevoke).toBe(true);
     expect(g.message).toMatch(/this device/i);
-    expect(g.message).toMatch(/endorse/i); // says what you lose
+    expect(g.message).toMatch(/signed by a different live key/i);
+    expect(g.message).toMatch(/revoke it from “iPhone”/); // names the other live device
     expect(g.message).toMatch(/cannot be undone/i);
     expect(g.message).toMatch(/mint a new device key/i);
+  });
+
+  it("names the trust-root device when one exists, for a self-revoke", () => {
+    const agentKeys = [{ agent_id: "a1", key_id: "ak1", endorsed_by_key_id: "live2" }];
+    const g = revokeGuard("live1", opKeys, "live1", 0, agentKeys);
+    expect(g.blocked).toBe(true);
+    expect(g.message).toMatch(/revoke it from “iPhone”/);
   });
 
   it("keeps the plain dependents warning for someone else's key", () => {
@@ -448,5 +457,27 @@ describe("endorseAuthority follows the relay's `trusted` verdict when given (#93
     expect(endorseAuthority("X6Nv", ks, agents, { recoveryGrant: grant, targetKeyId: "succ" }).allowed).toBe(true);
     expect(endorseAuthority("X6Nv", ks, agents, { recoveryGrant: grant }).allowed).toBe(false);
     expect(endorseAuthority("X6Nv", ks, agents).allowed).toBe(false);
+  });
+});
+
+describe("revocationState", () => {
+  it("live when not revoked", () => {
+    expect(revocationState({ key_id: "k", revoked_at: null, revocation_sig: null })).toBe("live");
+    expect(revocationState({ key_id: "k" })).toBe("live");
+  });
+  it("signed when revoked with a revocation signature — the plain 'revoked' row, no action", () => {
+    expect(revocationState({ key_id: "k", revoked_at: "2026-10-01T00:00:00.000Z", revocation_sig: "sig" })).toBe("signed");
+  });
+  it("unsigned for a legacy tombstone (revoked_at, no signature) — agents still trust it, so the console offers to sign it", () => {
+    expect(revocationState({ key_id: "k", revoked_at: "2026-06-07T21:22:53.694Z", revocation_sig: null })).toBe("unsigned");
+    expect(revocationState({ key_id: "k", revoked_at: "2026-06-07T21:22:53.694Z" })).toBe("unsigned");
+  });
+  it("revokeGuard does not treat a legacy tombstone as the last live key", () => {
+    const keys = [
+      { key_id: "live1", label: "MacBook", revoked_at: null },
+      { key_id: "old", label: "old-browser", revoked_at: "2026-06-07T21:22:53.694Z", revocation_sig: null },
+    ];
+    const g = revokeGuard("old", keys, "live1", 0, []);
+    expect(g.blocked).toBe(false);
   });
 });

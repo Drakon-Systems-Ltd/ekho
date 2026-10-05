@@ -13,6 +13,7 @@ import {
   fromB64url,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
 } from "./operator-identity";
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
@@ -27,6 +28,37 @@ export interface OperatorKeyRow {
   revoked_at: string | null;
   endorsed_by_key_id: string | null;
   endorsement_sig: string | null;
+  /** The live, trusted key that signed this key's revocation, and the signature
+   *  over revocationPayload(fleet_id, key_id, revoked_at). NULL on a key
+   *  revoked before signed revocation existed: agents treat that as advisory. */
+  revoked_by_key_id: string | null;
+  revocation_sig: string | null;
+}
+
+/** The signed block a device sends to revoke an operator key. */
+export interface SignedOperatorKeyRevocation {
+  revokedByKeyId: string;
+  revokedAt: string;
+  signature: string;
+}
+
+/** How far a signed `revoked_at` may sit from the relay clock. Inside the signed
+ *  bytes so a captured signature cannot restate WHEN a key died; bounded so a
+ *  captured signature cannot be replayed later either. Generous enough for
+ *  device clock skew. */
+export const REVOCATION_MAX_SKEW_MS = 5 * 60 * 1000;
+
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+/** A signed `revoked_at` is stored and served verbatim, so it must be the one
+ *  form every reader parses the same way: exactly what the console's
+ *  `new Date().toISOString()` produces. `Date.parse` alone also accepts
+ *  "2026-10-05 08:00", "Oct 5 2026" and the like, which would then be signed
+ *  and stored as-is. */
+export function isCanonicalIsoTimestamp(s: string): boolean {
+  if (!ISO_TIMESTAMP.test(s)) return false;
+  const d = new Date(s);
+  return Number.isFinite(d.getTime()) && d.toISOString() === s;
 }
 
 export interface AgentIdentityKeyRow {
@@ -273,18 +305,14 @@ export class EkhoDb {
    * not a control: the same request was still reachable with an operator token
    * and curl. This is that rule where it binds.
    */
-  private endorserIsTrusted(fleetId: string, endorserKeyId: string): boolean {
-    const agentKeys = this.db
-      .prepare(
-        "SELECT endorsed_by_key_id FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL"
-      )
-      .all(fleetId) as { endorsed_by_key_id: string | null }[];
+  private endorserIsTrusted(fleetId: string, endorserKeyId: string, excludeKeyId?: string): boolean {
+    const pinned = this.agentPinnedRoots(fleetId);
     // Nothing is pinned to anything yet, so there is no trust to destroy and
     // first enrolment still works. Note this is "no agent is endorsed", not "no
     // agent exists" — an enrolled agent whose identity key has never been
     // endorsed is exactly the fresh-fleet case, and testing for an empty table
     // instead would make a fleet unbootstrappable the moment one agent enrolled.
-    if (agentKeys.every((k) => !k.endorsed_by_key_id)) return true;
+    if (!pinned) return true;
     // Otherwise the key must reach a root hop by hop, every hop live (#13) —
     // or be the key an operator placed by a one-off recovery grant (#93).
     //
@@ -303,7 +331,14 @@ export class EkhoDb {
     //
     // Walked-set, not belt-and-braces: the live table already holds a cycle
     // (2T8zn <-> X6Nv) and a naive walk would spin on it.
-    const roots = new Set(agentKeys.map((k) => k.endorsed_by_key_id).filter(Boolean));
+    //
+    // `excludeKeyId` asks the same question about the fleet as it would be with
+    // that key revoked (revokeOperatorKey's surviving-authority rule): it is
+    // neither a root nor a usable hop. A consumed recovery grant naming it as
+    // the endorser still counts, exactly as it does once that key really is
+    // revoked.
+    const roots = new Set(pinned);
+    if (excludeKeyId) roots.delete(excludeKeyId);
     const hop = this.db.prepare(
       "SELECT endorsed_by_key_id, revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
     );
@@ -319,7 +354,7 @@ export class EkhoDb {
         | { endorsed_by_key_id: string | null; revoked_at: string | null }
         | undefined;
       // Unknown or revoked hop: a dead chain, whatever still points at it.
-      if (!row || row.revoked_at) return false;
+      if (!row || row.revoked_at || cursor === excludeKeyId) return false;
       // Agents verify against it today, so endorsing from it keeps them where they are.
       if (roots.has(cursor)) return true;
       // Live, endorsed by nobody, pinned by nobody: the 16 Aug orphan.
@@ -329,6 +364,21 @@ export class EkhoDb {
       cursor = row.endorsed_by_key_id;
     }
     return false;
+  }
+
+  /**
+   * The operator keys agents report as pinned: the endorsers of live agent
+   * identity keys. Null when no agent is endorsed yet (the fresh-fleet case
+   * endorserIsTrusted exempts).
+   */
+  private agentPinnedRoots(fleetId: string): Set<string> | null {
+    const agentKeys = this.db
+      .prepare(
+        "SELECT endorsed_by_key_id FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL"
+      )
+      .all(fleetId) as { endorsed_by_key_id: string | null }[];
+    if (agentKeys.every((k) => !k.endorsed_by_key_id)) return null;
+    return new Set(agentKeys.map((k) => k.endorsed_by_key_id).filter((k): k is string => Boolean(k)));
   }
 
   private untrustedEndorserError(endorserKeyId: string): Error {
@@ -751,7 +801,7 @@ export class EkhoDb {
     return this.db
       .prepare(
         `SELECT fleet_id, key_id, public_key, label, created_at, last_used_at, revoked_at,
-                endorsed_by_key_id, endorsement_sig
+                endorsed_by_key_id, endorsement_sig, revoked_by_key_id, revocation_sig
            FROM fleet_operator_keys WHERE fleet_id = ? ORDER BY created_at ASC`
       )
       .all(fleetId) as OperatorKeyRow[];
@@ -761,44 +811,226 @@ export class EkhoDb {
     return this.db
       .prepare(
         `SELECT fleet_id, key_id, public_key, label, created_at, last_used_at, revoked_at,
-                endorsed_by_key_id, endorsement_sig
+                endorsed_by_key_id, endorsement_sig, revoked_by_key_id, revocation_sig
            FROM fleet_operator_keys WHERE fleet_id = ? AND revoked_at IS NULL ORDER BY created_at ASC`
       )
       .all(fleetId) as OperatorKeyRow[];
   }
 
   /**
-   * Tombstone an operator key. `actorKeyId` is the AUTHENTICATED actor and is
-   * the only thing written to the audit trail's actor_id. `claimedActorKeyId`
-   * (#53) is a caller-asserted device key id, recorded in the payload as
-   * unverified so a debugging hint can never pass for an identity.
+   * The wire shape of one operator key as agents read it (/v1/inbox and
+   * /v1/enroll). Every key is listed, revoked ones included: a tombstone the
+   * agent can VERIFY (`revocation_sig` by a key it pins over
+   * revocationPayload(fleet, key_id, revoked_at)) is the only thing that makes
+   * it drop the key. `revoked` alone is advisory to the plugins (#27), so the
+   * three signed fields are always present, nulled on a live key, so a plugin
+   * reads every entry the same way.
+   */
+  operatorKeysForAgents(fleetId: string) {
+    return this.listOperatorKeys(fleetId).map((k) => ({
+      key_id: k.key_id,
+      public_key: k.public_key,
+      revoked: Boolean(k.revoked_at),
+      revoked_at: k.revoked_at,
+      revoked_by_key_id: k.revoked_by_key_id,
+      revocation_sig: k.revocation_sig,
+      endorsed_by_key_id: k.endorsed_by_key_id,
+      endorsement_sig: k.endorsement_sig
+    }));
+  }
+
+  /**
+   * Revoke an operator key with a SIGNED revocation.
+   *
+   * Agents only drop a pinned operator key on a signature by a key they already
+   * pin over revocationPayload(fleet, key_id, revoked_at) (#27, both plugins).
+   * Until this existed the relay set `revoked_at` and told agents `revoked:
+   * true`, which they rightly treated as advisory — so no revocation ever
+   * reached an agent and a lost or stolen operator key stayed a valid signer on
+   * every box. The signature is produced on the device that holds a live key
+   * (never here: the relay holds no private keys) and stored verbatim.
+   *
+   * Rules, in order, each its own refusal:
+   *  - the target exists and is not already revoked WITH a signature (a signed
+   *    tombstone and its signature are never overwritten — the un-revoke
+   *    compare-and-swap on the agents binds to the ORIGINAL revoked_at). A
+   *    LEGACY tombstone — `revoked_at` set, `revocation_sig` NULL, as the
+   *    pre-024 unsigned DELETE path wrote it — is the one exception: no agent
+   *    ever honoured it (advisory, #27), so it may be signed once, and the
+   *    signed revoked_at replaces the unsigned one (the audit event keeps the
+   *    old value, flagged `legacy_resign`);
+   *  - the target is not the fleet's only live key (the console's revokeGuard
+   *    "isLastLive", enforced where it binds: a fleet with no live operator key
+   *    has no trust root and no way to sign its way back). A legacy-tombstoned
+   *    target is already out of the live set, so signing its revocation cannot
+   *    shrink it and this rule does not apply to it;
+   *  - the signer is not the target: a key cannot attest its own death any more
+   *    than it can root its own trust, and no agent would verify it anyway once
+   *    it had dropped the key;
+   *  - the signer is registered and live;
+   *  - the signer passes the same authority rule as endorsement
+   *    (endorserIsTrusted): it is rooted in the keys agents report as pinned,
+   *    except in a fleet where no agent is endorsed yet, where any live key may
+   *    sign. That is the relay's view, not proof of any agent's pin; each agent
+   *    verifies the signature against its own pin before honouring it. A signer
+   *    outside the rule would show "revoked" on the console while agents kept
+   *    trusting the key, which is the exact lie this fixes.
+   *    Recovery grants (#93) do NOT open this path; they are honoured only by
+   *    endorseOperatorKey;
+   *  - authority survives the revocation (assertAuthoritySurvives): with the
+   *    target treated as revoked, the signer still reaches a key agents report
+   *    as pinned, and the target is not the only such key;
+   *  - `revokedAt` is exactly the `Date.toISOString()` form and sits within REVOCATION_MAX_SKEW_MS of the relay
+   *    clock, so a captured signature cannot be replayed to restate when a key
+   *    died;
+   *  - the signature verifies.
+   *
+   * `actorOperatorId` is the AUTHENTICATED actor (#53) and the only thing written
+   * to the audit trail's actor_id. `revoked_by_key_id` in the payload IS
+   * verified (it signed). `claimedActorKeyId` is the caller-asserted device hint,
+   * recorded as unverified so it can never pass for an identity.
    */
   revokeOperatorKey(
     fleetId: string,
     targetKeyId: string,
-    actorKeyId?: string | null,
-    claimedActorKeyId?: string | null
-  ): boolean {
-    const revokedAt = nowIso();
-    const res = this.db
+    signed: SignedOperatorKeyRevocation,
+    actorOperatorId?: string | null,
+    claimedActorKeyId?: string | null,
+    now: Date = new Date()
+  ): { revoked_at: string; revoked_by_key_id: string } {
+    const target = this.db
       .prepare(
-        "UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL"
+        `SELECT revoked_at, revoked_at IS NOT NULL AND revocation_sig IS NULL AS legacy_unsigned
+           FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?`
       )
-      .run(revokedAt, fleetId, targetKeyId);
-    if (res.changes > 0) {
+      .get(fleetId, targetKeyId) as { revoked_at: string | null; legacy_unsigned: number } | undefined;
+    if (!target) throw new Error("operator key not found");
+    // The unsigned tombstone this signature replaces, or null for a live target.
+    const legacyRevokedAt = target.legacy_unsigned ? target.revoked_at : null;
+    if (target.revoked_at && !legacyRevokedAt) {
+      throw new Error(`operator key ${targetKeyId} is already revoked (at ${target.revoked_at})`);
+    }
+    const live = (
+      this.db
+        .prepare("SELECT key_id FROM fleet_operator_keys WHERE fleet_id = ? AND revoked_at IS NULL")
+        .all(fleetId) as { key_id: string }[]
+    ).map((r) => r.key_id);
+    if (!legacyRevokedAt && live.length <= 1) {
+      throw new Error(
+        `${targetKeyId} is the fleet's only live operator key. Revoking it would leave the fleet with no ` +
+          `trust root and no key that could sign its way back. Register and endorse a replacement first.`
+      );
+    }
+    if (signed.revokedByKeyId === targetKeyId) {
+      throw new Error("a key cannot revoke itself — sign the revocation from a device holding another live key");
+    }
+    const signer = this.db
+      .prepare("SELECT public_key, revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?")
+      .get(fleetId, signed.revokedByKeyId) as { public_key: string; revoked_at: string | null } | undefined;
+    if (!signer) throw new Error(`revocation signer ${signed.revokedByKeyId} is unknown to this fleet`);
+    if (signer.revoked_at) {
+      throw new Error(`revocation signer ${signed.revokedByKeyId} is itself revoked (at ${signer.revoked_at})`);
+    }
+    if (!this.endorserIsTrusted(fleetId, signed.revokedByKeyId)) {
+      throw new Error(
+        `${signed.revokedByKeyId} is live but unendorsed, and no agent trusts it — a revocation it signs would ` +
+          `be ignored by every agent while the console showed the key as revoked. Revoke from a device ` +
+          `holding a trusted key, or have that device endorse this one first.`
+      );
+    }
+    this.assertAuthoritySurvives(fleetId, targetKeyId, signed.revokedByKeyId);
+    if (!isCanonicalIsoTimestamp(signed.revokedAt)) {
+      throw new Error(
+        `revoked_at must be an ISO-8601 UTC timestamp in the exact form Date.toISOString() produces ` +
+          `(YYYY-MM-DDTHH:mm:ss.sssZ); got ${JSON.stringify(signed.revokedAt)}`
+      );
+    }
+    const revokedAtMs = Date.parse(signed.revokedAt);
+    if (Math.abs(revokedAtMs - now.getTime()) > REVOCATION_MAX_SKEW_MS) {
+      throw new Error(
+        `revoked_at ${signed.revokedAt} is more than ${REVOCATION_MAX_SKEW_MS / 60000} minutes from the relay ` +
+          `clock (${now.toISOString()}); sign a fresh revocation`
+      );
+    }
+    const ok = verifyCanonical(
+      revocationPayload(fleetId, targetKeyId, signed.revokedAt),
+      signed.signature,
+      fromB64url(signer.public_key)
+    );
+    if (!ok) throw new Error("invalid revocation signature");
+
+    this.db.transaction(() => {
+      // Conditional on the state checked above — still live, or still the same
+      // UNSIGNED legacy tombstone — so a racing second revoke finds 0 rows and
+      // never overwrites a signed tombstone.
+      const res = legacyRevokedAt
+        ? this.db
+            .prepare(
+              `UPDATE fleet_operator_keys SET revoked_at = ?, revoked_by_key_id = ?, revocation_sig = ?
+                 WHERE fleet_id = ? AND key_id = ? AND revoked_at = ? AND revocation_sig IS NULL`
+            )
+            .run(signed.revokedAt, signed.revokedByKeyId, signed.signature, fleetId, targetKeyId, legacyRevokedAt)
+        : this.db
+            .prepare(
+              `UPDATE fleet_operator_keys SET revoked_at = ?, revoked_by_key_id = ?, revocation_sig = ?
+                 WHERE fleet_id = ? AND key_id = ? AND revoked_at IS NULL`
+            )
+            .run(signed.revokedAt, signed.revokedByKeyId, signed.signature, fleetId, targetKeyId);
+      if (res.changes !== 1) throw new Error(`operator key ${targetKeyId} is already revoked`);
       this.recordEvent(
         fleetId,
         "operator_key.revoked",
         "operator",
-        actorKeyId ?? null,
+        actorOperatorId ?? signed.revokedByKeyId,
         "operator_key",
         targetKeyId,
         null,
-        { revoked_at: revokedAt, claimed_actor_key_id_unverified: claimedActorKeyId ?? null }
+        {
+          revoked_at: signed.revokedAt,
+          revoked_by_key_id: signed.revokedByKeyId,
+          claimed_actor_key_id_unverified: claimedActorKeyId ?? null,
+          ...(legacyRevokedAt ? { legacy_resign: true, prior_unsigned_revoked_at: legacyRevokedAt } : {})
+        }
       );
-      return true;
+    })();
+    return { revoked_at: signed.revokedAt, revoked_by_key_id: signed.revokedByKeyId };
+  }
+
+  /**
+   * Surviving authority: after this revocation at least one live operator key
+   * must still pass the trust rule, or no agent endorsement can ever be issued
+   * again. "Two live keys" is not that proof. Agents pin root R, C is endorsed
+   * by R, C signs R's revocation: every other guard passes (C is live and
+   * trusted while R is), and afterwards C's chain runs through a revoked hop,
+   * so nothing in the fleet may endorse.
+   *
+   * So the signer is re-checked by the same walk with the target treated as
+   * revoked: it must reach a root other than the target (a key agents report
+   * as pinned) over live, non-target keys, or hold a consumed recovery grant
+   * (#93). A target that is the only such root is refused outright, with the
+   * way out. The fresh-fleet
+   * exemption is endorserIsTrusted's own and is untouched: with no agent
+   * endorsed there is no root to lose. A legacy tombstone is already not live,
+   * so excluding it changes nothing in the normal case.
+   */
+  private assertAuthoritySurvives(fleetId: string, targetKeyId: string, signerKeyId: string) {
+    const pinned = this.agentPinnedRoots(fleetId);
+    if (!pinned) return;
+    if (pinned.has(targetKeyId) && pinned.size === 1) {
+      throw new Error(
+        `${targetKeyId} is the only operator key the endorsed agents pin; revoking it would leave no surviving ` +
+          `key they trust and nothing could endorse again. Endorse the agents under a successor key first ` +
+          `(Security → "Consolidate all under this device" on the successor's device, i.e. ` +
+          `POST /v1/operator/agents/{agentId}/endorse-key), then revoke ${targetKeyId}.`
+      );
     }
-    return false;
+    if (!this.endorserIsTrusted(fleetId, signerKeyId, targetKeyId)) {
+      throw new Error(
+        `${signerKeyId} is trusted only through ${targetKeyId}: once ${targetKeyId} is revoked it reaches no ` +
+          `surviving key the agents pin, and its revocation would leave it unable to endorse. Sign the ` +
+          `revocation from a key rooted elsewhere, or endorse the agents under a successor key first, then revoke.`
+      );
+    }
   }
 
   // ---- Agent identity keys (agent-to-agent trust) --------------------------
@@ -1990,16 +2222,10 @@ export class EkhoDb {
       // Rooms (of the ones in this batch) the polling agent is a MEMBER of, so a
       // reply can be framed as going to the named room rather than a 1:1 thread.
       rooms: roomRows.map((r) => ({ id: r.id, name: r.name })),
-      // Pinned operator signing keys (incl. revoked, so agents can drop them).
-      operator_keys: fleetId
-        ? this.listOperatorKeys(fleetId).map((k) => ({
-            key_id: k.key_id,
-            public_key: k.public_key,
-            revoked: Boolean(k.revoked_at),
-            endorsed_by_key_id: k.endorsed_by_key_id,
-            endorsement_sig: k.endorsement_sig
-          }))
-        : []
+      // Pinned operator signing keys, revoked ones included WITH their signed
+      // revocation (revoked_at / revoked_by_key_id / revocation_sig) — the only
+      // form of revocation an agent will act on (#27).
+      operator_keys: fleetId ? this.operatorKeysForAgents(fleetId) : []
     };
   }
 

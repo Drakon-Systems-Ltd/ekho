@@ -131,6 +131,9 @@ describe("transactional migrations (M6)", () => {
     // on events(event_type, created_at) and heartbeats(received_at)) applies cleanly.
     db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT)");
     db.exec("CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT)");
+    // …and fleet_operator_keys in its pre-024 shape, so migration 024 (ALTER TABLE
+    // fleet_operator_keys ADD COLUMN revoked_by_key_id/revocation_sig) applies cleanly.
+    db.exec("CREATE TABLE fleet_operator_keys (fleet_id TEXT, key_id TEXT, public_key TEXT, label TEXT, created_at TEXT, last_used_at TEXT, revoked_at TEXT, endorsed_by_key_id TEXT, endorsement_sig TEXT, PRIMARY KEY (fleet_id, key_id))");
     // Mark every migration through 014 as applied so runMigrationsOn runs 015+.
     const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");
     for (let v = 1; v <= 14; v++) mark.run(v, "2026-06-28T00:00:00.000Z");
@@ -166,6 +169,8 @@ describe("transactional migrations (M6)", () => {
       -- events (001) and heartbeats (001), which migration 022 indexes.
       CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT);
       CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT);
+      -- fleet_operator_keys in its pre-024 shape, which migration 024 adds two columns to.
+      CREATE TABLE fleet_operator_keys (fleet_id TEXT, key_id TEXT, public_key TEXT, label TEXT, created_at TEXT, last_used_at TEXT, revoked_at TEXT, endorsed_by_key_id TEXT, endorsement_sig TEXT, PRIMARY KEY (fleet_id, key_id));
     `);
     db.exec(`
       INSERT INTO a2a_tasks (id, fleet_id, agent_id, context_id, state, history_json, artifacts_json, created_at, updated_at)
@@ -205,6 +210,8 @@ describe("transactional migrations (M6)", () => {
       // events/heartbeats (001) are what migration 022 adds its retention indexes to.
       db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT)");
       db.exec("CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT)");
+      // fleet_operator_keys in its pre-024 shape, which migration 024 adds two columns to.
+      db.exec("CREATE TABLE fleet_operator_keys (fleet_id TEXT, key_id TEXT, public_key TEXT, label TEXT, created_at TEXT, last_used_at TEXT, revoked_at TEXT, endorsed_by_key_id TEXT, endorsement_sig TEXT, PRIMARY KEY (fleet_id, key_id))");
       db.exec(`
         INSERT INTO agents (id, peer_turn_budget) VALUES
           ('old_default_6', 6), ('old_default_25', 25), ('custom_8', 8), ('custom_200', 200), ('custom_1', 1);

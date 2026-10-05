@@ -7,6 +7,7 @@ import {
   encryptSeed,
   agentKeyEndorsementPayload,
   endorsementPayload,
+  revocationPayload,
 } from "./operatorKey.js";
 import {
   getUnlocked,
@@ -34,6 +35,7 @@ import {
   deviceKeySigningState,
   liveOperatorKeys,
   revokeGuard,
+  revocationState,
   pickEndorser,
   mayGenerateNewOperatorIdentity,
   rescueGuard,
@@ -225,20 +227,47 @@ export default function SecurityScreen({ session, agents = [] }) {
   };
 
   const onRevoke = async (kid) => {
-    // #15: revoking the console's OWN device key, or the last live key, is what
-    // took the fleet's trust chain down — and the UI treated both like any other
-    // row. The guard blocks the unrecoverable case and words the self-revoke
-    // confirmation for what it actually costs.
+    // A revocation is a SIGNED instruction. Agents drop a pinned operator key
+    // only on a signature by a key they already pin over
+    // revocationPayload(fleet, key_id, revoked_at) (#27); an unsigned "revoked"
+    // flag is advisory to them. Until this change the console sent exactly that,
+    // so every "Revoke" showed the key as dead here while every agent kept
+    // trusting it. The live key in THIS browser signs; the relay checks and
+    // stores the signature and serves it in every inbox.
+    if (!unlocked) {
+      return note("warn", "Unlock your operator identity first — a revocation has to be signed by this device's live key.");
+    }
+    // #15: never sign with a key the relay has revoked — agents ignore it.
+    if (!signing.canSign) return note("danger", `${signing.reason} ${signing.recovery ?? ""}`.trim());
+    // 16 Aug: live is not trusted. A device that cannot endorse cannot revoke
+    // either — a revocation signed by a key no agent pins is one no agent will
+    // honour, and the relay refuses to store it for the same reason.
+    if (!authority.allowed) {
+      return note(
+        "danger",
+        `This device cannot revoke keys: a revocation it signs would be ignored by every agent. ${authority.reason}` +
+          (rootLabel && !holdsRoot ? ` Revoke from “${rootLabel}” instead.` : "")
+      );
+    }
+    // The guard blocks the unrecoverable cases (last live key; this device's own
+    // key, which cannot sign its own revocation) and words the rest for what it
+    // actually costs.
     const deps = dependentsOf(kid, agentKeys);
-    const guard = revokeGuard(kid, keys, unlocked?.keyId, deps);
+    const guard = revokeGuard(kid, keys, unlocked.keyId, deps, agentKeys);
     if (guard.blocked) {
       note("danger", guard.message);
       return;
     }
     if (!window.confirm(guard.message)) return;
     try {
-      await revokeOperatorKey(token, kid, unlocked?.keyId);
-      note("muted", `Revoked ${kid}.${deps > 0 ? ` Re-endorse the ${deps} affected agent(s) now.` : ""}`);
+      const revokedAt = new Date().toISOString();
+      const signature = signCanonical(revocationPayload(fleetId, kid, revokedAt), unlocked.seed);
+      await revokeOperatorKey(token, kid, { revokedByKeyId: unlocked.keyId, revokedAt, signature });
+      note(
+        "muted",
+        `Revoked ${kid} — signed by ${unlocked.keyId}; agents that trust this device drop it on their next poll.` +
+          (deps > 0 ? ` Re-endorse the ${deps} affected agent(s) now.` : "")
+      );
       await refresh();
     } catch (e) {
       note("danger", `Revoke failed: ${e.message || e}`);
@@ -525,8 +554,38 @@ export default function SecurityScreen({ session, agents = [] }) {
                   </span>
                 )
               )}
-              {k.revoked_at ? (
+              {revocationState(k) === "signed" ? (
                 <span className="sec__tag sec__tag--off">revoked</span>
+              ) : revocationState(k) === "unsigned" ? (
+                <>
+                  {/* A legacy tombstone from the old unsigned revoke path. No
+                      agent honours an unsigned revocation (#27), so every agent
+                      that pinned this key still trusts it. Signing it goes
+                      through exactly the same path and guards as Revoke; once
+                      signed it is immutable. */}
+                  <span
+                    className="sec__tag sec__tag--warn"
+                    title="Revoked on the relay without a signature. Agents treat that as advisory and still trust this key — sign the revocation from a trusted device so they drop it."
+                  >
+                    revoked · unsigned (advisory)
+                  </span>
+                  <button
+                    className="sec__btn sec__btn--danger"
+                    disabled={busy}
+                    title={
+                      !unlocked
+                        ? "Unlock this device's key first — a revocation is signed"
+                        : k.key_id === unlocked.keyId
+                          ? "A key cannot revoke itself — do this from another device"
+                          : !authority.allowed
+                            ? "This device cannot sign a revocation the agents would honour"
+                            : `Sign the revocation of ${k.key_id} with ${unlocked.keyId}`
+                    }
+                    onClick={() => onRevoke(k.key_id)}
+                  >
+                    Sign revocation
+                  </button>
+                </>
               ) : (
                 <>
                   <span className="sec__tag sec__tag--live">active</span>
@@ -553,7 +612,22 @@ export default function SecurityScreen({ session, agents = [] }) {
                       </button>
                     </>
                   )}
-                  <button className="sec__btn sec__btn--danger" onClick={() => onRevoke(k.key_id)}>Revoke</button>
+                  <button
+                    className="sec__btn sec__btn--danger"
+                    disabled={busy}
+                    title={
+                      !unlocked
+                        ? "Unlock this device's key first — a revocation is signed"
+                        : k.key_id === unlocked.keyId
+                          ? "A key cannot revoke itself — do this from another device"
+                          : !authority.allowed
+                            ? "This device cannot sign a revocation the agents would honour"
+                            : `Revoke ${k.key_id}, signed by ${unlocked.keyId}`
+                    }
+                    onClick={() => onRevoke(k.key_id)}
+                  >
+                    Revoke
+                  </button>
                 </>
               )}
             </div>

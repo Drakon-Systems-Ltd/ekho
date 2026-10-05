@@ -1,12 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { createTestRelay, type TestRelay } from "./setup";
-import { b64url, keyId, signCanonical, endorsementPayload } from "../src/operator-identity";
+import { b64url, keyId, signCanonical, endorsementPayload, revocationPayload } from "../src/operator-identity";
 
 function makeOperatorKey(fill: number) {
   const seed = new Uint8Array(32).fill(fill);
   const pub = ed25519.getPublicKey(seed);
   return { seed, pub, pubB64: b64url(pub), id: keyId(pub) };
+}
+
+/** Revocation is SIGNED by a live key other than the target. */
+function revokeSigned(relay: TestRelay, signer: ReturnType<typeof makeOperatorKey>, target: ReturnType<typeof makeOperatorKey>) {
+  const revokedAt = new Date().toISOString();
+  return relay.db.revokeOperatorKey(relay.fleetId, target.id, {
+    revokedByKeyId: signer.id,
+    revokedAt,
+    signature: signCanonical(revocationPayload(relay.fleetId, target.id, revokedAt), signer.seed),
+  });
 }
 
 /**
@@ -53,8 +63,10 @@ describe("#19 operator signing key must be live to send", () => {
 
   it("REJECTS a message signed by a revoked key instead of accepting and letting every recipient bin it", () => {
     const k = makeOperatorKey(22);
+    const other = makeOperatorKey(23);
     relay.db.registerOperatorKey(relay.fleetId, k.pubB64, "laptop");
-    relay.db.revokeOperatorKey(relay.fleetId, k.id);
+    relay.db.registerOperatorKey(relay.fleetId, other.pubB64, "phone");
+    revokeSigned(relay, other, k);
     expect(() => send(k.id)).toThrow(/revoked|not a live/i);
   });
 
@@ -106,7 +118,7 @@ describe("#19 endorsing an already-registered operator key", () => {
     const orphan = makeOperatorKey(34);
     relay.db.registerOperatorKey(relay.fleetId, root.pubB64, "phone");
     relay.db.registerOperatorKey(relay.fleetId, orphan.pubB64, "laptop");
-    relay.db.revokeOperatorKey(relay.fleetId, root.id);
+    revokeSigned(relay, orphan, root);
     expect(() => endorse(root, orphan)).toThrow(/unknown or revoked/i);
   });
 
@@ -129,7 +141,7 @@ describe("#19 endorsing an already-registered operator key", () => {
     const dead = makeOperatorKey(38);
     relay.db.registerOperatorKey(relay.fleetId, root.pubB64, "phone");
     relay.db.registerOperatorKey(relay.fleetId, dead.pubB64, "laptop");
-    relay.db.revokeOperatorKey(relay.fleetId, dead.id);
+    revokeSigned(relay, root, dead);
     expect(() => endorse(root, dead)).toThrow(/revoked/i);
   });
 

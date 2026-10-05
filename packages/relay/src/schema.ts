@@ -361,6 +361,11 @@ CREATE TABLE IF NOT EXISTS fleet_operator_keys (
   revoked_at TEXT,
   endorsed_by_key_id TEXT,
   endorsement_sig TEXT,
+  -- Signed revocation (see migrations/024): the live, trusted key that signed
+  -- revocationPayload(fleet_id, key_id, revoked_at), and the signature. Agents
+  -- treat a revocation WITHOUT these as advisory and keep the key pinned.
+  revoked_by_key_id TEXT,
+  revocation_sig TEXT,
   PRIMARY KEY (fleet_id, key_id),
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
