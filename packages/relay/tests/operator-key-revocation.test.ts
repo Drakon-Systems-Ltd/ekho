@@ -196,6 +196,28 @@ describe("signed operator-key revocation (db)", () => {
     expect(row(victim).revoked_at).toBeTruthy();
   });
 
+  it("REFUSES a revoked_at that Date.parse accepts but is not the exact toISOString() form", () => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const spaced = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}`;
+    const named = now.toUTCString(); // e.g. "Mon, 05 Oct 2026 08:00:00 GMT"
+    const loose = [
+      spaced, // "2026-10-05 08:00"
+      `${now.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${now.getUTCDate()} ${now.getUTCFullYear()}`, // "Oct 5 2026"
+      named,
+      String(now.getTime()), // unix ms as a string
+      now.toISOString().replace(/\.\d{3}Z$/, "Z"), // milliseconds omitted
+      now.toISOString().replace("Z", "+00:00"),
+    ];
+    for (const at of loose) {
+      expect(() => revoke(root, victim, at), at).toThrow(/revoked_at must be an ISO-8601 UTC timestamp/);
+    }
+    expect(row(victim).revoked_at).toBeNull();
+    const canonical = now.toISOString();
+    revoke(root, victim, canonical);
+    expect(row(victim).revoked_at).toBe(canonical);
+  });
+
   it("REFUSES to revoke an already-revoked key and leaves the original revoked_at and signature alone", () => {
     const first = new Date(Date.now() - 1 * MIN).toISOString();
     revoke(root, victim, first);

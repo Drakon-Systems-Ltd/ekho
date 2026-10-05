@@ -48,6 +48,19 @@ export interface SignedOperatorKeyRevocation {
  *  device clock skew. */
 export const REVOCATION_MAX_SKEW_MS = 5 * 60 * 1000;
 
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+/** A signed `revoked_at` is stored and served verbatim, so it must be the one
+ *  form every reader parses the same way: exactly what the console's
+ *  `new Date().toISOString()` produces. `Date.parse` alone also accepts
+ *  "2026-10-05 08:00", "Oct 5 2026" and the like, which would then be signed
+ *  and stored as-is. */
+export function isCanonicalIsoTimestamp(s: string): boolean {
+  if (!ISO_TIMESTAMP.test(s)) return false;
+  const d = new Date(s);
+  return Number.isFinite(d.getTime()) && d.toISOString() === s;
+}
+
 export interface AgentIdentityKeyRow {
   agent_id: string;
   fleet_id: string;
@@ -864,7 +877,7 @@ export class EkhoDb {
    *  - authority survives the revocation (assertAuthoritySurvives): with the
    *    target treated as revoked, the signer still reaches a key agents pin, and
    *    the target is not the only key they pin;
-   *  - `revokedAt` parses and sits within REVOCATION_MAX_SKEW_MS of the relay
+   *  - `revokedAt` is exactly the `Date.toISOString()` form and sits within REVOCATION_MAX_SKEW_MS of the relay
    *    clock, so a captured signature cannot be replayed to restate when a key
    *    died;
    *  - the signature verifies.
@@ -923,10 +936,13 @@ export class EkhoDb {
       );
     }
     this.assertAuthoritySurvives(fleetId, targetKeyId, signed.revokedByKeyId);
-    const revokedAtMs = Date.parse(signed.revokedAt);
-    if (!Number.isFinite(revokedAtMs)) {
-      throw new Error("revoked_at must be an ISO-8601 timestamp");
+    if (!isCanonicalIsoTimestamp(signed.revokedAt)) {
+      throw new Error(
+        `revoked_at must be an ISO-8601 UTC timestamp in the exact form Date.toISOString() produces ` +
+          `(YYYY-MM-DDTHH:mm:ss.sssZ); got ${JSON.stringify(signed.revokedAt)}`
+      );
     }
+    const revokedAtMs = Date.parse(signed.revokedAt);
     if (Math.abs(revokedAtMs - now.getTime()) > REVOCATION_MAX_SKEW_MS) {
       throw new Error(
         `revoked_at ${signed.revokedAt} is more than ${REVOCATION_MAX_SKEW_MS / 60000} minutes from the relay ` +
