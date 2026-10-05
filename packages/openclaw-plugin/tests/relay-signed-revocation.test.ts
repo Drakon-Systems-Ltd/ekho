@@ -79,6 +79,15 @@ describe("relay-signed revocation → plugin pin sync", () => {
       endorsedByKeyId: root.id,
       signature: signCanonical(agentKeyEndorsementPayload(relay.fleetId, agent.agent_id, akId, ak.pubB64), root.seed),
     });
+    // The documented order before revoking a root: carry the agent onto the
+    // successor first. The relay refuses to revoke the only key agents pin.
+    relay.db.endorseAgentKey(relay.fleetId, agent.agent_id, akId, {
+      endorsedByKeyId: successor.id,
+      signature: signCanonical(
+        agentKeyEndorsementPayload(relay.fleetId, agent.agent_id, akId, ak.pubB64),
+        successor.seed
+      ),
+    });
   });
   afterEach(() => relay.cleanup());
 
@@ -151,15 +160,15 @@ describe("relay-signed revocation → plugin pin sync", () => {
   });
 
   it("a LEGACY unsigned tombstone stays pinned until the console signs it; once signed the agent tombstones and unpins it", async () => {
-    // A third browser, endorsed by the root and pinned by the agent, that the
+    // A third browser, endorsed by the trust root (the successor) and pinned by the agent, that the
     // pre-024 DELETE path "revoked": a time, no signer, no signature.
     const old = makeKey();
     await relay.operatorRequest("POST", "/v1/operator/keys", {
       public_key: old.pubB64,
       label: "old-browser",
       endorsement: {
-        endorsed_by_key_id: root.id,
-        signature: signCanonical(endorsementPayload(relay.fleetId, old.id, old.pubB64), root.seed),
+        endorsed_by_key_id: successor.id,
+        signature: signCanonical(endorsementPayload(relay.fleetId, old.id, old.pubB64), successor.seed),
       },
     });
     const legacyAt = "2026-06-07T21:22:53.694Z";
@@ -186,15 +195,15 @@ describe("relay-signed revocation → plugin pin sync", () => {
     // "Sign revocation" on the console, from the device holding the trust root.
     const revokedAt = new Date().toISOString();
     const res = await relay.operatorRequest("POST", `/v1/operator/keys/${old.id}/revoke`, {
-      revoked_by_key_id: root.id,
+      revoked_by_key_id: successor.id,
       revoked_at: revokedAt,
-      signature: signCanonical(revocationPayload(relay.fleetId, old.id, revokedAt), root.seed),
+      signature: signCanonical(revocationPayload(relay.fleetId, old.id, revokedAt), successor.seed),
     });
     expect(res.status).toBe(200);
 
     const keys = await inboxKeys();
     const dead = keys.find((k) => k.key_id === old.id)!;
-    expect(dead).toMatchObject({ revoked: true, revoked_at: revokedAt, revoked_by_key_id: root.id });
+    expect(dead).toMatchObject({ revoked: true, revoked_at: revokedAt, revoked_by_key_id: successor.id });
     expect(dead.revocation_sig).toBeTruthy();
 
     const after: string[] = [];

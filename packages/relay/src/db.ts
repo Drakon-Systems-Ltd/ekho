@@ -292,18 +292,14 @@ export class EkhoDb {
    * not a control: the same request was still reachable with an operator token
    * and curl. This is that rule where it binds.
    */
-  private endorserIsTrusted(fleetId: string, endorserKeyId: string): boolean {
-    const agentKeys = this.db
-      .prepare(
-        "SELECT endorsed_by_key_id FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL"
-      )
-      .all(fleetId) as { endorsed_by_key_id: string | null }[];
+  private endorserIsTrusted(fleetId: string, endorserKeyId: string, excludeKeyId?: string): boolean {
+    const pinned = this.agentPinnedRoots(fleetId);
     // Nothing is pinned to anything yet, so there is no trust to destroy and
     // first enrolment still works. Note this is "no agent is endorsed", not "no
     // agent exists" — an enrolled agent whose identity key has never been
     // endorsed is exactly the fresh-fleet case, and testing for an empty table
     // instead would make a fleet unbootstrappable the moment one agent enrolled.
-    if (agentKeys.every((k) => !k.endorsed_by_key_id)) return true;
+    if (!pinned) return true;
     // Otherwise the key must reach a root hop by hop, every hop live (#13) —
     // or be the key an operator placed by a one-off recovery grant (#93).
     //
@@ -322,7 +318,14 @@ export class EkhoDb {
     //
     // Walked-set, not belt-and-braces: the live table already holds a cycle
     // (2T8zn <-> X6Nv) and a naive walk would spin on it.
-    const roots = new Set(agentKeys.map((k) => k.endorsed_by_key_id).filter(Boolean));
+    //
+    // `excludeKeyId` asks the same question about the fleet as it would be with
+    // that key revoked (revokeOperatorKey's surviving-authority rule): it is
+    // neither a root nor a usable hop. A consumed recovery grant naming it as
+    // the endorser still counts, exactly as it does once that key really is
+    // revoked.
+    const roots = new Set(pinned);
+    if (excludeKeyId) roots.delete(excludeKeyId);
     const hop = this.db.prepare(
       "SELECT endorsed_by_key_id, revoked_at FROM fleet_operator_keys WHERE fleet_id = ? AND key_id = ?"
     );
@@ -338,7 +341,7 @@ export class EkhoDb {
         | { endorsed_by_key_id: string | null; revoked_at: string | null }
         | undefined;
       // Unknown or revoked hop: a dead chain, whatever still points at it.
-      if (!row || row.revoked_at) return false;
+      if (!row || row.revoked_at || cursor === excludeKeyId) return false;
       // Agents verify against it today, so endorsing from it keeps them where they are.
       if (roots.has(cursor)) return true;
       // Live, endorsed by nobody, pinned by nobody: the 16 Aug orphan.
@@ -348,6 +351,21 @@ export class EkhoDb {
       cursor = row.endorsed_by_key_id;
     }
     return false;
+  }
+
+  /**
+   * The operator keys agents report as pinned: the endorsers of live agent
+   * identity keys. Null when no agent is endorsed yet (the fresh-fleet case
+   * endorserIsTrusted exempts).
+   */
+  private agentPinnedRoots(fleetId: string): Set<string> | null {
+    const agentKeys = this.db
+      .prepare(
+        "SELECT endorsed_by_key_id FROM agent_identity_keys WHERE fleet_id = ? AND revoked_at IS NULL"
+      )
+      .all(fleetId) as { endorsed_by_key_id: string | null }[];
+    if (agentKeys.every((k) => !k.endorsed_by_key_id)) return null;
+    return new Set(agentKeys.map((k) => k.endorsed_by_key_id).filter((k): k is string => Boolean(k)));
   }
 
   private untrustedEndorserError(endorserKeyId: string): Error {
@@ -843,6 +861,9 @@ export class EkhoDb {
    *    every agent kept trusting the key, which is the exact lie this fixes.
    *    Recovery grants (#93) do NOT open this path; they are honoured only by
    *    endorseOperatorKey;
+   *  - authority survives the revocation (assertAuthoritySurvives): with the
+   *    target treated as revoked, the signer still reaches a key agents pin, and
+   *    the target is not the only key they pin;
    *  - `revokedAt` parses and sits within REVOCATION_MAX_SKEW_MS of the relay
    *    clock, so a captured signature cannot be replayed to restate when a key
    *    died;
@@ -901,6 +922,7 @@ export class EkhoDb {
           `holding a trusted key, or have that device endorse this one first.`
       );
     }
+    this.assertAuthoritySurvives(fleetId, targetKeyId, signed.revokedByKeyId);
     const revokedAtMs = Date.parse(signed.revokedAt);
     if (!Number.isFinite(revokedAtMs)) {
       throw new Error("revoked_at must be an ISO-8601 timestamp");
@@ -953,6 +975,42 @@ export class EkhoDb {
       );
     })();
     return { revoked_at: signed.revokedAt, revoked_by_key_id: signed.revokedByKeyId };
+  }
+
+  /**
+   * Surviving authority: after this revocation at least one live operator key
+   * must still pass the trust rule, or no agent endorsement can ever be issued
+   * again. "Two live keys" is not that proof. Agents pin root R, C is endorsed
+   * by R, C signs R's revocation: every other guard passes (C is live and
+   * trusted while R is), and afterwards C's chain runs through a revoked hop,
+   * so nothing in the fleet may endorse.
+   *
+   * So the signer is re-checked by the same walk with the target treated as
+   * revoked: it must reach a root other than the target over live, non-target
+   * keys, or hold a consumed recovery grant (#93). A target that is the only
+   * key agents pin is refused outright, with the way out. The fresh-fleet
+   * exemption is endorserIsTrusted's own and is untouched: with no agent
+   * endorsed there is no root to lose. A legacy tombstone is already not live,
+   * so excluding it changes nothing in the normal case.
+   */
+  private assertAuthoritySurvives(fleetId: string, targetKeyId: string, signerKeyId: string) {
+    const pinned = this.agentPinnedRoots(fleetId);
+    if (!pinned) return;
+    if (pinned.has(targetKeyId) && pinned.size === 1) {
+      throw new Error(
+        `${targetKeyId} is the only operator key the endorsed agents pin; revoking it would leave no surviving ` +
+          `key they trust and nothing could endorse again. Endorse the agents under a successor key first ` +
+          `(Security → "Consolidate all under this device" on the successor's device, i.e. ` +
+          `POST /v1/operator/agents/{agentId}/endorse-key), then revoke ${targetKeyId}.`
+      );
+    }
+    if (!this.endorserIsTrusted(fleetId, signerKeyId, targetKeyId)) {
+      throw new Error(
+        `${signerKeyId} is trusted only through ${targetKeyId}: once ${targetKeyId} is revoked it reaches no ` +
+          `surviving key the agents pin, and its revocation would leave it unable to endorse. Sign the ` +
+          `revocation from a key rooted elsewhere, or endorse the agents under a successor key first, then revoke.`
+      );
+    }
   }
 
   // ---- Agent identity keys (agent-to-agent trust) --------------------------

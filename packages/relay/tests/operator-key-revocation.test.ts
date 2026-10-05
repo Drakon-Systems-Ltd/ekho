@@ -563,6 +563,186 @@ describe("signed operator-key revocation — legacy unsigned tombstones", () => 
   });
 });
 
+describe("signed operator-key revocation — authority must survive the revocation", () => {
+  // "Two live keys" is not proof that anything can still endorse afterwards.
+  // Agents pin R; C is endorsed by R; C signs R's revocation. Every other guard
+  // passes, and then C's chain runs through a revoked hop: no key in the fleet
+  // could endorse an agent again.
+  let relay: TestRelay;
+  const SURVIVING = /surviving key/i;
+
+  const register = (k: K, label: string, endorser?: K) =>
+    relay.db.registerOperatorKey(
+      relay.fleetId,
+      k.pubB64,
+      label,
+      endorser
+        ? {
+            endorsedByKeyId: endorser.id,
+            signature: signCanonical(endorsementPayload(relay.fleetId, k.id, k.pubB64), endorser.seed),
+          }
+        : undefined
+    );
+  const endorseOperator = (endorser: K, target: K) =>
+    relay.db.endorseOperatorKey(relay.fleetId, target.id, {
+      endorsedByKeyId: endorser.id,
+      signature: signCanonical(endorsementPayload(relay.fleetId, target.id, target.pubB64), endorser.seed),
+    });
+  type Agent = { agentId: string; keyId: string; pubB64: string };
+  const addAgent = async (name: string): Promise<Agent> => {
+    const agentId = (await relay.enrollAgent(name)).agent_id;
+    const k = makeKey();
+    return { agentId, keyId: relay.db.setAgentIdentityKey(agentId, relay.fleetId, k.pubB64).keyId, pubB64: k.pubB64 };
+  };
+  const endorseAgent = (endorser: K, a: Agent) =>
+    relay.db.endorseAgentKey(relay.fleetId, a.agentId, a.keyId, {
+      endorsedByKeyId: endorser.id,
+      signature: signCanonical(agentKeyEndorsementPayload(relay.fleetId, a.agentId, a.keyId, a.pubB64), endorser.seed),
+    });
+  const revoke = (signer: K, target: K) =>
+    relay.db.revokeOperatorKey(relay.fleetId, target.id, signedRevocation(relay.fleetId, signer, target));
+  const row = (k: K) => relay.db.listOperatorKeys(relay.fleetId).find((x) => x.key_id === k.id)!;
+  const mayEndorse = (k: K) => relay.db.operatorKeyMayEndorse(relay.fleetId, k.id);
+
+  beforeEach(async () => {
+    relay = await createTestRelay();
+  });
+  afterEach(() => relay.cleanup());
+
+  describe("one pinned root R, child C endorsed by R", () => {
+    let r: K;
+    let c: K;
+    let agent: Agent;
+    beforeEach(async () => {
+      r = makeKey();
+      c = makeKey();
+      register(r, "root");
+      register(c, "child", r);
+      agent = await addAgent("Case");
+      endorseAgent(r, agent);
+      expect(mayEndorse(c)).toBe(true);
+    });
+
+    it("REFUSES C revoking R: afterwards nothing could endorse; R stays live and the error names the way out", () => {
+      expect(() => revoke(c, r)).toThrow(SURVIVING);
+      expect(() => revoke(c, r)).toThrow(/Endorse the agents under a successor key first/);
+      expect(() => revoke(c, r)).toThrow(/POST \/v1\/operator\/agents\/\{agentId\}\/endorse-key/);
+      expect(row(r)).toMatchObject({ revoked_at: null, revoked_by_key_id: null, revocation_sig: null });
+      expect(mayEndorse(c)).toBe(true);
+    });
+
+    it("R revoking C still succeeds", () => {
+      revoke(r, c);
+      expect(row(c).revocation_sig).toBeTruthy();
+      expect(mayEndorse(r)).toBe(true);
+    });
+
+    it("C may revoke R once the agents are endorsed under C (the documented order)", () => {
+      endorseAgent(c, agent);
+      revoke(c, r);
+      expect(row(r).revoked_by_key_id).toBe(c.id);
+      expect(mayEndorse(c)).toBe(true);
+    });
+  });
+
+  describe("two pinned roots R1 and R2, C endorsed by R1", () => {
+    let r1: K;
+    let r2: K;
+    let c: K;
+    beforeEach(async () => {
+      r1 = makeKey();
+      r2 = makeKey();
+      c = makeKey();
+      register(r1, "root-1");
+      // R2 needs authority to endorse its agent at all; once it has one, it is
+      // a root in its own right (the walk stops at a pinned key).
+      register(r2, "root-2", r1);
+      register(c, "child", r1);
+      endorseAgent(r1, await addAgent("Case"));
+      endorseAgent(r2, await addAgent("Edith"));
+    });
+
+    it("REFUSES C revoking R1 while C chains only through R1", () => {
+      expect(() => revoke(c, r1)).toThrow(SURVIVING);
+      expect(() => revoke(c, r1)).toThrow(new RegExp(`${c.id} is trusted only through ${r1.id}`));
+      expect(row(r1).revoked_at).toBeNull();
+    });
+
+    it("ALLOWS C revoking R1 when C chains to R2 (re-endorsed by R2), and C can still endorse afterwards", async () => {
+      endorseOperator(r2, c);
+      revoke(c, r1);
+      expect(row(r1).revoked_by_key_id).toBe(c.id);
+      expect(mayEndorse(c)).toBe(true);
+      expect(endorseAgent(c, await addAgent("Tars"))).toBe(true);
+    });
+  });
+
+  describe("recovery-granted successor (#93)", () => {
+    // The live shape: origin bootstraps the agents and vouches for root; the
+    // agents move onto root; root's passphrase is lost; a grant lets origin
+    // endorse a fresh successor once.
+    let origin: K;
+    let root: K;
+    let successor: K;
+    let agents: Agent[];
+    beforeEach(async () => {
+      origin = makeKey();
+      root = makeKey();
+      successor = makeKey();
+      register(origin, "old browser");
+      register(root, "lost browser");
+      agents = [await addAgent("Jarvis"), await addAgent("Edith")];
+      for (const a of agents) endorseAgent(origin, a);
+      endorseOperator(origin, root);
+      for (const a of agents) endorseAgent(root, a);
+      register(successor, "new browser");
+      relay.db.createOperatorRecoveryGrant(relay.fleetId, {
+        endorserKeyId: origin.id,
+        targetKeyId: successor.id,
+        confirmedBy: "operator, out of band (test)",
+      });
+      endorseOperator(origin, successor); // consumes the grant
+      expect(relay.db.listOperatorRecoveryGrants(relay.fleetId)[0].consumed_at).not.toBeNull();
+      expect(mayEndorse(successor)).toBe(true);
+    });
+
+    it("REFUSES the successor revoking the old root while the agents are still endorsed by it", () => {
+      expect(() => revoke(successor, root)).toThrow(SURVIVING);
+      expect(row(root).revoked_at).toBeNull();
+    });
+
+    it("ALLOWS the successor revoking the old root once the agents are re-endorsed under it", () => {
+      for (const a of agents) expect(endorseAgent(successor, a)).toBe(true);
+      revoke(successor, root);
+      expect(row(root).revoked_by_key_id).toBe(successor.id);
+      expect(mayEndorse(successor)).toBe(true);
+    });
+  });
+
+  it("a legacy unsigned tombstone is already not live: signing it passes the rule", async () => {
+    const r = makeKey();
+    const legacy = makeKey();
+    register(r, "root");
+    register(legacy, "old browser", r);
+    endorseAgent(r, await addAgent("Case"));
+    relay.db
+      .raw()
+      .prepare("UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ?")
+      .run("2026-06-07T21:22:53.694Z", relay.fleetId, legacy.id);
+    revoke(r, legacy);
+    expect(row(legacy).revoked_by_key_id).toBe(r.id);
+  });
+
+  it("the fresh-fleet exemption is unchanged: with no agent endorsed, a child may revoke its parent", () => {
+    const r = makeKey();
+    const c = makeKey();
+    register(r, "root");
+    register(c, "child", r);
+    revoke(c, r);
+    expect(row(r).revoked_by_key_id).toBe(c.id);
+  });
+});
+
 describe("migration 024 (revoked_by_key_id, revocation_sig)", () => {
   const sql = fs.readFileSync(
     fileURLToPath(new URL("../migrations/024_operator_key_revocation_sig.sql", import.meta.url)),

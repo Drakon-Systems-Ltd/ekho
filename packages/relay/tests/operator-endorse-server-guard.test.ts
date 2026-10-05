@@ -128,7 +128,15 @@ describe("#19 the relay enforces endorse authority, not just the console", () =>
     relay.db.registerOperatorKey(relay.fleetId, rescued.pubB64, "laptop");
     endorseAgent(root);
     endorseOperator(root, rescued);
-    revokeSigned(relay, rescued, root); // rescued chains to the live root at signing time
+    // A signed revocation of root by rescued is now refused: it would leave no
+    // key that can endorse (surviving-authority rule)...
+    expect(() => revokeSigned(relay, rescued, root)).toThrow(/surviving key/i);
+    // ...but the state is real in fleets revoked before signed revocation: a
+    // legacy unsigned tombstone, exactly as the old DELETE path wrote it.
+    relay.db
+      .raw()
+      .prepare("UPDATE fleet_operator_keys SET revoked_at = ? WHERE fleet_id = ? AND key_id = ?")
+      .run(new Date().toISOString(), relay.fleetId, root.id);
 
     expect(() => endorseAgent(rescued)).toThrow(/no agent trusts it|not trusted|untrusted/i);
   });

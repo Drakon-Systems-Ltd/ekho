@@ -436,7 +436,11 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       arm();
       endorseOperator(origin, successor);
       expect(await read()).toEqual({ [origin.id]: false, [root.id]: true, [successor.id]: true });
-      revokeOperator(successor, root); // the operator's later step, signed from the successor's browser
+      // The operator's later steps, from the successor's browser: carry the
+      // agents onto the successor, THEN revoke the lost root. In the other
+      // order the relay refuses — root would be the only key agents pin.
+      for (const a of agents) endorseAgent(successor, a);
+      revokeOperator(successor, root);
       expect((await read())[root.id]).toBe(false);
     });
   });
