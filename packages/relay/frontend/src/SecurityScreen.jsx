@@ -35,6 +35,7 @@ import {
   deviceKeySigningState,
   liveOperatorKeys,
   revokeGuard,
+  revocationState,
   pickEndorser,
   mayGenerateNewOperatorIdentity,
   rescueGuard,
@@ -553,8 +554,38 @@ export default function SecurityScreen({ session, agents = [] }) {
                   </span>
                 )
               )}
-              {k.revoked_at ? (
+              {revocationState(k) === "signed" ? (
                 <span className="sec__tag sec__tag--off">revoked</span>
+              ) : revocationState(k) === "unsigned" ? (
+                <>
+                  {/* A legacy tombstone from the old unsigned revoke path. No
+                      agent honours an unsigned revocation (#27), so every agent
+                      that pinned this key still trusts it. Signing it goes
+                      through exactly the same path and guards as Revoke; once
+                      signed it is immutable. */}
+                  <span
+                    className="sec__tag sec__tag--warn"
+                    title="Revoked on the relay without a signature. Agents treat that as advisory and still trust this key — sign the revocation from a trusted device so they drop it."
+                  >
+                    revoked · unsigned (advisory)
+                  </span>
+                  <button
+                    className="sec__btn sec__btn--danger"
+                    disabled={busy}
+                    title={
+                      !unlocked
+                        ? "Unlock this device's key first — a revocation is signed"
+                        : k.key_id === unlocked.keyId
+                          ? "A key cannot revoke itself — do this from another device"
+                          : !authority.allowed
+                            ? "This device cannot sign a revocation the agents would honour"
+                            : `Sign the revocation of ${k.key_id} with ${unlocked.keyId}`
+                    }
+                    onClick={() => onRevoke(k.key_id)}
+                  >
+                    Sign revocation
+                  </button>
+                </>
               ) : (
                 <>
                   <span className="sec__tag sec__tag--live">active</span>

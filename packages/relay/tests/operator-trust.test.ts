@@ -8,6 +8,7 @@ import {
   deviceKeySigningState,
   liveOperatorKeys,
   revokeGuard,
+  revocationState,
   pickEndorser,
   mayGenerateNewOperatorIdentity,
   trustRootKey,
@@ -456,5 +457,27 @@ describe("endorseAuthority follows the relay's `trusted` verdict when given (#93
     expect(endorseAuthority("X6Nv", ks, agents, { recoveryGrant: grant, targetKeyId: "succ" }).allowed).toBe(true);
     expect(endorseAuthority("X6Nv", ks, agents, { recoveryGrant: grant }).allowed).toBe(false);
     expect(endorseAuthority("X6Nv", ks, agents).allowed).toBe(false);
+  });
+});
+
+describe("revocationState", () => {
+  it("live when not revoked", () => {
+    expect(revocationState({ key_id: "k", revoked_at: null, revocation_sig: null })).toBe("live");
+    expect(revocationState({ key_id: "k" })).toBe("live");
+  });
+  it("signed when revoked with a revocation signature — the plain 'revoked' row, no action", () => {
+    expect(revocationState({ key_id: "k", revoked_at: "2026-10-01T00:00:00.000Z", revocation_sig: "sig" })).toBe("signed");
+  });
+  it("unsigned for a legacy tombstone (revoked_at, no signature) — agents still trust it, so the console offers to sign it", () => {
+    expect(revocationState({ key_id: "k", revoked_at: "2026-06-07T21:22:53.694Z", revocation_sig: null })).toBe("unsigned");
+    expect(revocationState({ key_id: "k", revoked_at: "2026-06-07T21:22:53.694Z" })).toBe("unsigned");
+  });
+  it("revokeGuard does not treat a legacy tombstone as the last live key", () => {
+    const keys = [
+      { key_id: "live1", label: "MacBook", revoked_at: null },
+      { key_id: "old", label: "old-browser", revoked_at: "2026-06-07T21:22:53.694Z", revocation_sig: null },
+    ];
+    const g = revokeGuard("old", keys, "live1", 0, []);
+    expect(g.blocked).toBe(false);
   });
 });

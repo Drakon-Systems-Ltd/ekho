@@ -180,6 +180,22 @@ export function liveOperatorKeys(operatorKeys) {
 }
 
 /**
+ * How a key stands with the agents, from its revocation fields:
+ *  - "live": not revoked;
+ *  - "signed": revoked with a revocation signature — agents that pin the
+ *    signer drop it. Immutable: the relay never overwrites it;
+ *  - "unsigned": a legacy tombstone from the old unsigned revoke path
+ *    (revoked_at set, no revocation_sig). Agents treat it as advisory and
+ *    STILL TRUST the key, so the console offers to sign it ("Sign revocation").
+ *
+ * @returns {"live" | "signed" | "unsigned"}
+ */
+export function revocationState(operatorKey) {
+  if (!operatorKey?.revoked_at) return "live";
+  return operatorKey.revocation_sig ? "signed" : "unsigned";
+}
+
+/**
  * Guard for revoking an operator key (#15). Revoking the console's own device
  * key is the move that broke the fleet, and the UI treated it like any other
  * row. Revoking the LAST live key is worse still and is refused outright.
