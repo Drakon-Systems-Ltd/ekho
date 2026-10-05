@@ -160,14 +160,22 @@ describe("revocation guard (#15)", () => {
     expect(g.message).toMatch(/only live operator key/i);
   });
 
-  it("demands a distinct confirmation for the console's OWN device key", () => {
+  it("BLOCKS revoking the console's OWN device key — a revocation is signed by a different key", () => {
     const g = revokeGuard("live1", opKeys, "live1", 0);
-    expect(g.blocked).toBe(false);
+    expect(g.blocked).toBe(true);
     expect(g.selfRevoke).toBe(true);
     expect(g.message).toMatch(/this device/i);
-    expect(g.message).toMatch(/endorse/i); // says what you lose
+    expect(g.message).toMatch(/signed by a different live key/i);
+    expect(g.message).toMatch(/revoke it from “iPhone”/); // names the other live device
     expect(g.message).toMatch(/cannot be undone/i);
     expect(g.message).toMatch(/mint a new device key/i);
+  });
+
+  it("names the trust-root device when one exists, for a self-revoke", () => {
+    const agentKeys = [{ agent_id: "a1", key_id: "ak1", endorsed_by_key_id: "live2" }];
+    const g = revokeGuard("live1", opKeys, "live1", 0, agentKeys);
+    expect(g.blocked).toBe(true);
+    expect(g.message).toMatch(/revoke it from “iPhone”/);
   });
 
   it("keeps the plain dependents warning for someone else's key", () => {

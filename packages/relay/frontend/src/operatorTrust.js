@@ -189,7 +189,7 @@ export function liveOperatorKeys(operatorKeys) {
 const REVOKE_IS_TERMINAL =
   "This cannot be undone. Recovery is to mint a new device key — Endorse will not restore a revoked key.";
 
-export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
+export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents, agentKeys = []) {
   const live = liveOperatorKeys(operatorKeys);
   const isLastLive = live.length <= 1 && live.some((k) => k.key_id === keyId);
   if (isLastLive) {
@@ -204,17 +204,22 @@ export function revokeGuard(keyId, operatorKeys, unlockedKeyId, dependents) {
     };
   }
   if (keyId === unlockedKeyId) {
+    // A revocation is a SIGNED instruction: agents drop a key only on a
+    // signature by a DIFFERENT key they pin (the relay refuses self-revocation
+    // too), so this device cannot retire its own key. Name the device that can.
+    const root = trustRootKey(operatorKeys, agentKeys);
+    const other = root && root.key_id !== keyId ? root : live.find((k) => k.key_id !== keyId);
     return {
-      blocked: false,
+      blocked: true,
       selfRevoke: true,
       message:
-        `${keyId} is THIS device's key — the one the console signs with.\n\n` +
-        `Revoking it means you can no longer endorse anything from this browser: the Re-endorse ` +
-        `buttons will stop working until you Forget this device and enrol a new key.` +
+        `${keyId} is THIS device's key — the one the console signs with. A revocation has to be signed by a ` +
+        `DIFFERENT live key the agents trust, so this device cannot revoke its own key` +
+        (other ? ` — revoke it from “${other.label || other.key_id}”.` : `.`) +
         (dependents > 0
-          ? `\n\n${dependents} agent${dependents > 1 ? "s" : ""} currently trust it and will need re-endorsing under the new key.`
+          ? `\n\n${dependents} agent${dependents > 1 ? "s" : ""} currently trust it and will need re-endorsing under another key first.`
           : "") +
-        `\n\n${REVOKE_IS_TERMINAL}\n\nRevoke this device's own key?`,
+        `\n\n${REVOKE_IS_TERMINAL}`,
     };
   }
   if (dependents > 0) {

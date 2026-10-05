@@ -1,0 +1,22 @@
+-- Signed operator-key revocation.
+--
+-- Revoking an operator key used to set revoked_at and nothing else, and the
+-- inbox told agents only revoked true. Both agent plugins (since #27) treat an
+-- UNSIGNED revocation claim as advisory, so no revocation ever reached an agent
+-- and a lost or stolen operator key stayed a valid signer on every box. A
+-- revocation is now a signature by a DIFFERENT, live, trusted operator key over
+-- revocationPayload(fleet_id, key_id, revoked_at), stored verbatim here and
+-- served in /v1/inbox and /v1/enroll so agents can verify it themselves.
+--
+-- revoked_by_key_id is the key that signed. revocation_sig is the signature.
+-- Keys revoked before this migration keep NULL in both: they stay revoked on
+-- the relay but remain advisory to agents until re-revoked through the console.
+--
+-- Existing databases get the columns here, fresh ones from schema.ts. The
+-- migration runner swallows duplicate-column errors per statement, so the two
+-- paths never collide.
+--
+-- NOTE: keep these comments free of semicolons and quote characters, because
+-- the migration runner splits statements naively.
+ALTER TABLE fleet_operator_keys ADD COLUMN revoked_by_key_id TEXT;
+ALTER TABLE fleet_operator_keys ADD COLUMN revocation_sig TEXT;

@@ -72,12 +72,11 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       poll_interval_seconds: config.pollIntervalSeconds,
       policy_profile: "default",
       // Pin the operator's signing keys at enrollment — the trust bootstrap.
-      operator_keys: db.getActiveOperatorKeys(parsed.data.fleet_id).map((k) => ({
-        key_id: k.key_id,
-        public_key: k.public_key,
-        endorsed_by_key_id: k.endorsed_by_key_id,
-        endorsement_sig: k.endorsement_sig
-      }))
+      // Every key, revoked ones included with their signed revocation: the
+      // plugins' TOFU skips a key the relay claims is revoked (advisory or
+      // signed), so a fresh agent never adopts a dead key, and it carries the
+      // tombstone material from day one instead of first seeing it in an inbox.
+      operator_keys: db.operatorKeysForAgents(parsed.data.fleet_id)
     });
   });
 

@@ -109,6 +109,7 @@ So a new device you do not endorse can still sign in and approve actions, but an
 - Keep at least two trusted devices, so losing one browser or passphrase does not lock you out.
 - Locked out? The relay host can arm a one-time, time-limited recovery grant (relay 0.5.6 or later) — see [Operator-key recovery](docs/operations.md#operator-key-recovery).
 - Never revoke a key until every agent it endorsed has been re-endorsed from another trusted key; otherwise those agents lose their trusted operator.
+- Revoke from a device holding a *different*, trusted key. A revocation is signed by that key (`POST /v1/operator/keys/{keyId}/revoke`); agents drop a pinned key only on that signature, which is why a key cannot revoke itself and an unendorsed device cannot revoke anything. Keys revoked before relay 0.5.7 carry no signature and are still trusted by the agents until revoked again.
 
 ### Upgrading
 
@@ -276,6 +277,7 @@ Full specification: [openapi.yaml](openapi.yaml)
 | GET | `/v1/operator/fleet-health` | Per-agent liveness, turn health, and delivery stats |
 | GET | `/v1/operator/topology` | Fleet communication graph |
 | POST | `/v1/operator/agents/{id}/endorse-key` | Endorse an agent's identity key with an operator key |
+| POST | `/v1/operator/keys/{keyId}/revoke` | Revoke an operator key with a signed revocation (by another trusted key) |
 | POST | `/v1/operator/agents/{id}/trust` | Toggle the operator-trusted channel for an agent |
 | POST | `/v1/operator/agents/{id}/peer-autoreply` | Toggle peer auto-reply; set or clear (`0`/`null`) the optional turn limit |
 

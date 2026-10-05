@@ -4,7 +4,7 @@ import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { requireOperatorAuth } from "./auth";
 import { db } from "./db";
 import { evaluateRequestTailnetGate } from "./tailnet";
-import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, endorseOperatorKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorProfileSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, updatePolicySchema } from "./types";
+import { attachmentUploadSchema, createFeedSchema, createPolicySchema, createRoomSchema, endorseAgentKeySchema, endorseOperatorKeySchema, feedSubscribersSchema, operatorControlSchema, operatorKeySchema, operatorLoginSchema, operatorMessageSchema, operatorProfileSchema, operatorTrustSchema, peerAutoreplySchema, projectModeSchema, resumeConversationSchema, revokeOperatorKeySchema, updatePolicySchema } from "./types";
 import { fetchFeedUrl, isAllowedFeedUrl } from "./feeds";
 import { decodeBase64Strict, isAllowedMime, sanitizeFilename, sniffImageMatches } from "./attachments";
 import { sendAttachment } from "./routes-agent";
@@ -292,27 +292,67 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     return reply.send({ endorsed: true, key_id: keyId, endorsed_by_key_id: parsed.data.endorsed_by_key_id });
   });
 
+  // Signed revocation. Agents drop a pinned operator key ONLY on a signature by a
+  // key they pin over revocationPayload(fleet, key_id, revoked_at) (#27), so the
+  // console signs the revocation with the live key it holds and the relay stores
+  // and distributes it verbatim. The relay checks it before storing (target
+  // live, not the last live key, signer ≠ target, signer live and trusted,
+  // revoked_at near now, signature valid) so the console surfaces a bad
+  // revocation immediately rather than every agent ignoring it in silence.
+  app.post("/v1/operator/keys/:keyId/revoke", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const { keyId } = request.params as { keyId: string };
+    const parsed = revokeOperatorKeySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    // #53: the audit actor is the AUTHENTICATED session, never the query string.
+    // The signer (revoked_by_key_id) is verified by its signature and goes in the
+    // payload as such; ?actor_key_id= stays a debugging hint ("which browser
+    // fired this?"), kept in the payload clearly labelled as unverified.
+    const query = request.query as { actor_key_id?: string } | undefined;
+    const claimedActorKeyId =
+      typeof query?.actor_key_id === "string" && query.actor_key_id ? query.actor_key_id : null;
+    try {
+      const out = db.revokeOperatorKey(
+        request.operator.fleetId,
+        keyId,
+        {
+          revokedByKeyId: parsed.data.revoked_by_key_id,
+          revokedAt: parsed.data.revoked_at,
+          signature: parsed.data.signature
+        },
+        request.operator.id,
+        claimedActorKeyId
+      );
+      return reply.send({ revoked: true, key_id: keyId, ...out });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      // already revoked, last live key, self-revoke, unknown/revoked/untrusted
+      // signer, stale revoked_at and bad signatures are all client errors.
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  // The unsigned revoke path is GONE, loudly. It revoked the key on the relay
+  // while every agent kept trusting it (no signature → advisory, #27). Refuse
+  // rather than silently keep working, so an old console build or a script
+  // learns at once that nothing was revoked.
   app.delete("/v1/operator/keys/:keyId", { preHandler: requireOperatorAuth }, async (request, reply) => {
     if (!request.operator) {
       return reply.code(401).send({ error: "unauthorized" });
     }
     const { keyId } = request.params as { keyId: string };
-    // #53: the audit actor is the AUTHENTICATED session, never the query string.
-    // Sourcing actor_id from ?actor_key_id= let any operator session mint a
-    // revoke attributed to another device's key. The claimed id is still useful
-    // for debugging ("which browser fired this?"), so it is kept in the payload
-    // — clearly labelled as unverified, where nothing reads it as identity.
-    const query = request.query as { actor_key_id?: string } | undefined;
-    const claimedActorKeyId =
-      typeof query?.actor_key_id === "string" && query.actor_key_id ? query.actor_key_id : null;
-    const revoked = db.revokeOperatorKey(
-      request.operator.fleetId,
-      keyId,
-      request.operator.id,
-      claimedActorKeyId
-    );
-    if (!revoked) return reply.code(404).send({ error: "key not found" });
-    return reply.send({ revoked: true });
+    return reply.code(400).send({
+      error:
+        `revoking an operator key requires a signed revocation: POST /v1/operator/keys/{keyId}/revoke with ` +
+        `{ revoked_by_key_id, revoked_at, signature } signed by a live, trusted operator key other than ${keyId}. ` +
+        `An unsigned revocation is advisory to agents and would leave the key trusted on every one of them. ` +
+        `Nothing was revoked.`
+    });
   });
 
   // Operator endorses an agent's identity key — roots peer trust at the operator.

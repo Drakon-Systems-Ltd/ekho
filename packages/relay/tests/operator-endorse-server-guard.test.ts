@@ -7,12 +7,23 @@ import {
   signCanonical,
   endorsementPayload,
   agentKeyEndorsementPayload,
+  revocationPayload,
 } from "../src/operator-identity";
 
 function makeOperatorKey(fill: number) {
   const seed = new Uint8Array(32).fill(fill);
   const pub = ed25519.getPublicKey(seed);
   return { seed, pub, pubB64: b64url(pub), id: keyId(pub) };
+}
+
+/** Revocation is signed (by a live, trusted key other than the target). */
+function revokeSigned(relay: TestRelay, signer: ReturnType<typeof makeOperatorKey>, target: ReturnType<typeof makeOperatorKey>) {
+  const revokedAt = new Date().toISOString();
+  return relay.db.revokeOperatorKey(relay.fleetId, target.id, {
+    revokedByKeyId: signer.id,
+    revokedAt,
+    signature: signCanonical(revocationPayload(relay.fleetId, target.id, revokedAt), signer.seed),
+  });
 }
 
 function makeAgentKey(fill: number) {
@@ -117,7 +128,7 @@ describe("#19 the relay enforces endorse authority, not just the console", () =>
     relay.db.registerOperatorKey(relay.fleetId, rescued.pubB64, "laptop");
     endorseAgent(root);
     endorseOperator(root, rescued);
-    relay.db.revokeOperatorKey(relay.fleetId, root.id);
+    revokeSigned(relay, rescued, root); // rescued chains to the live root at signing time
 
     expect(() => endorseAgent(rescued)).toThrow(/no agent trusts it|not trusted|untrusted/i);
   });
