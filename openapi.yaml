@@ -3136,12 +3136,18 @@ paths:
         over revocationPayload(fleet_id, key_id, revoked_at), so the console
         signs the revocation with the live key it holds and the relay stores and
         distributes it verbatim (`/v1/inbox`, `/v1/enroll`). The relay refuses,
-        with 400, a revocation no agent would honour: the target already revoked
-        with a signature (a signed tombstone is never overwritten), the target
-        being the fleet's only live key, the signer being the target, an unknown, revoked
-        or untrusted signer (same authority rule as endorsement; recovery grants
-        do not apply), `revoked_at` more than 5 minutes from the relay clock, or
-        a signature that does not verify. The audit actor is always the
+        with 400: the target already revoked with a signature (a signed
+        tombstone is never overwritten), the target being the fleet's only live
+        key, the signer being the target, an unknown or revoked signer, a signer
+        not rooted in the keys agents report as pinned (the endorsement rule;
+        in a fleet where no agent is endorsed yet any live key may sign; an
+        armed recovery grant does not apply), a revocation after which no live
+        key would pass that rule (the target is the only key the agents are
+        endorsed by, or the signer is rooted only through the target),
+        `revoked_at` not exactly in `Date.toISOString()` form
+        (`YYYY-MM-DDTHH:mm:ss.sssZ`) or more than 5 minutes from the relay
+        clock, or a signature that does not verify. Agents independently verify
+        the signature against their own pin before honouring it. The audit actor is always the
         authenticated session; `revoked_by_key_id` is recorded as the verified
         signer and `actor_key_id` only as an unverified debugging hint. A
         legacy UNSIGNED tombstone (`revoked_at` set, no `revocation_sig`, from

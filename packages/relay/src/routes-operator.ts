@@ -297,7 +297,9 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
   // console signs the revocation with the live key it holds and the relay stores
   // and distributes it verbatim. The relay checks it before storing (target
   // live or an UNSIGNED legacy tombstone, not the last live key, signer ≠
-  // target, signer live and trusted, revoked_at near now, signature valid) so
+  // target, signer live and rooted in the keys agents report as pinned — any
+  // live key while no agent is endorsed — authority surviving the revocation,
+  // revoked_at canonical and near now, signature valid) so
   // the console surfaces a bad revocation immediately rather than every agent
   // ignoring it in silence. Signing a legacy tombstone is a normal 200; a
   // signed tombstone is immutable and stays a 400.

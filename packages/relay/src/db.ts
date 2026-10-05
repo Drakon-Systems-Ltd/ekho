@@ -869,14 +869,17 @@ export class EkhoDb {
    *    it had dropped the key;
    *  - the signer is registered and live;
    *  - the signer passes the same authority rule as endorsement
-   *    (endorserIsTrusted): a revocation signed by a key no agent pins is one no
-   *    agent will honour — storing it would show "revoked" on the console while
-   *    every agent kept trusting the key, which is the exact lie this fixes.
+   *    (endorserIsTrusted): it is rooted in the keys agents report as pinned,
+   *    except in a fleet where no agent is endorsed yet, where any live key may
+   *    sign. That is the relay's view, not proof of any agent's pin; each agent
+   *    verifies the signature against its own pin before honouring it. A signer
+   *    outside the rule would show "revoked" on the console while agents kept
+   *    trusting the key, which is the exact lie this fixes.
    *    Recovery grants (#93) do NOT open this path; they are honoured only by
    *    endorseOperatorKey;
    *  - authority survives the revocation (assertAuthoritySurvives): with the
-   *    target treated as revoked, the signer still reaches a key agents pin, and
-   *    the target is not the only key they pin;
+   *    target treated as revoked, the signer still reaches a key agents report
+   *    as pinned, and the target is not the only such key;
    *  - `revokedAt` is exactly the `Date.toISOString()` form and sits within REVOCATION_MAX_SKEW_MS of the relay
    *    clock, so a captured signature cannot be replayed to restate when a key
    *    died;
@@ -1002,9 +1005,10 @@ export class EkhoDb {
    * so nothing in the fleet may endorse.
    *
    * So the signer is re-checked by the same walk with the target treated as
-   * revoked: it must reach a root other than the target over live, non-target
-   * keys, or hold a consumed recovery grant (#93). A target that is the only
-   * key agents pin is refused outright, with the way out. The fresh-fleet
+   * revoked: it must reach a root other than the target (a key agents report
+   * as pinned) over live, non-target keys, or hold a consumed recovery grant
+   * (#93). A target that is the only such root is refused outright, with the
+   * way out. The fresh-fleet
    * exemption is endorserIsTrusted's own and is untouched: with no agent
    * endorsed there is no root to lose. A legacy tombstone is already not live,
    * so excluding it changes nothing in the normal case.
