@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.5.6` — the OpenClaw plugin keeps its credentials and identity key outside the plugin install directory so `openclaw plugins update` can no longer delete them (#98), never silently mints a second identity key, and the relay gains a one-off, host-armed recovery grant for a lost operator trust root (#93). See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.5.7` — OpenClaw plugin reloads and updates no longer leave stale heartbeat and inbox pollers running, and an idle agent reports turn health as `unknown`. The Docker image build now fails if the operator console build fails. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -368,7 +368,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packa
 
 ## Project Status
 
-Ekho `v0.5.6` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.5.7` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 

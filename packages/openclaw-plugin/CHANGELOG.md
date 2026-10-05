@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-10-05
+
 ### Fixed
 - **A plugin reload or update no longer leaves the previous copy's heartbeat and inbox poll running.** `openclaw plugins reload` and `openclaw plugins update` load a fresh copy of the plugin into the running gateway (OpenClaw 2026.9.8 captures each generation into its own directory and imports it with the module cache off). The heartbeat and the auto-reply poll were `setInterval`s in module state, and nothing stopped them on unload, so every reload added another heartbeat producer and another inbox poller for the same agent. One 0.5.5 box was seen sending about four heartbeats per 30 s cycle. The stale producers also carried their own, empty model-call windows, so the newest heartbeat could hide a real turn-health signal. The fix has two parts:
   - The plugin now stops its timers on the host's unload signals: the `gateway_stop` hook, which OpenClaw runs on the old instance with reason `"plugin replacement"` (and on gateway shutdown with its own reason), and `api.lifecycle.onDispose`, whose callbacks OpenClaw registers per instance (`src/plugins/plugin-instance.ts:100-102`) and runs on disposal (`:705-715`). Both are feature-detected.
