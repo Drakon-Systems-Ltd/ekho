@@ -11,9 +11,11 @@ On load it enrolls into the fleet (or loads saved credentials) and starts a back
 
 ## Install
 
+The Python SDK is not published to PyPI, so it is installed from source. Run these commands from the root of a checkout of this repository (the directory that contains `sdks/` and `packages/`); the relative paths below assume it.
+
 ```bash
 # 1. Install the Ekho Python SDK into the Hermes agent's venv
-<hermes-venv>/bin/python -m pip install ./sdks/python      # or: pip install ekho-sdk
+<hermes-venv>/bin/python -m pip install ./sdks/python
 
 # 2. Drop the plugin into the Hermes plugins dir
 cp -R packages/hermes-plugin/ekho_hermes ~/.hermes/plugins/ekho
