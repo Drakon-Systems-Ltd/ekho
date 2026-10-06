@@ -20,3 +20,37 @@ jobs:
       - run: npm run build -w @drakon-systems/ekho-sdk
       - run: npm run typecheck
       - run: npx vitest run
+
+  # The Hermes plugin's shadow check takes its verdict from Hermes' own
+  # discovery (hermes_cli) and its root set from hermes_constants, so the
+  # tests that prove it need the real thing: without it they skip (29 as of
+  # #89) and the npm tick above says nothing about the check. hermes-agent
+  # refuses to build a wheel (its setup.py guard: Hermes is distributed via
+  # the shell installer, Docker image or Nix) and its pinned runtime is far
+  # more than those modules need, so it is installed editable without deps,
+  # plus the one third-party import they do need. Installed, not PYTHONPATH:
+  # the healthcheck tests run subprocesses with PYTHONPATH stripped, the way
+  # an operator's shell is. The SDK is NOT installed: the tests put
+  # sdks/python on sys.path themselves and some assert where it came from.
+  # The ref is the Hermes the check is proven against; bump it deliberately.
+  hermes-plugin-pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HERMES_AGENT_REF: de5bb705dbfba19bdbbfa293d67ba67712339ac5  # main, 2026-10-01
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_AGENT_REF }}
+          path: .hermes-agent
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest ruamel.yaml requests cryptography
+      - run: python -m pip install --no-deps -e ./.hermes-agent
+      - name: Hermes must import, or the Hermes-backed tests skip silently
+        run: python -c "import hermes_cli.plugins_discovery, hermes_cli.plugins_manifest, hermes_constants"
+      - run: python -m pytest -q -rs
+        working-directory: packages/hermes-plugin
