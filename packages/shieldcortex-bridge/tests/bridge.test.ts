@@ -4,7 +4,8 @@ import { createShieldCortexExtension } from "../src/index";
 // Mock the MCP client since we can't spawn ShieldCortex in tests
 vi.mock("../src/mcp-client", () => {
   return {
-    McpClient: vi.fn().mockImplementation(() => ({
+    McpClient: vi.fn().mockImplementation(function () {
+      return {
       connect: vi.fn(),
       callTool: vi.fn().mockImplementation(async (name: string) => {
         if (name === "iron_dome_scan") {
@@ -19,7 +20,8 @@ vi.mock("../src/mcp-client", () => {
         return { content: [{ type: "text", text: "{}" }] };
       }),
       close: vi.fn()
-    }))
+      };
+    })
   };
 });
 
@@ -75,13 +77,15 @@ describe("@ekho/shieldcortex-bridge", () => {
     it("blocks messages with critical scan results in strict mode", async () => {
       // Override mock for this test
       const { McpClient } = await import("../src/mcp-client");
-      (McpClient as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+      (McpClient as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(function () {
+        return {
         connect: vi.fn(),
         callTool: vi.fn().mockResolvedValue({
           content: [{ type: "text", text: JSON.stringify({ clean: false, riskLevel: "CRITICAL", summary: "injection detected" }) }]
         }),
         close: vi.fn()
-      }));
+        };
+      });
 
       const ext = createShieldCortexExtension({
         cortexBinaryPath: "/fake/path",
@@ -102,7 +106,8 @@ describe("@ekho/shieldcortex-bridge", () => {
 
     it("blocks messages when Iron Dome denies", async () => {
       const { McpClient } = await import("../src/mcp-client");
-      (McpClient as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() => ({
+      (McpClient as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(function () {
+        return {
         connect: vi.fn(),
         callTool: vi.fn().mockImplementation(async (name: string) => {
           if (name === "iron_dome_scan") {
@@ -114,7 +119,8 @@ describe("@ekho/shieldcortex-bridge", () => {
           return { content: [{ type: "text", text: "{}" }] };
         }),
         close: vi.fn()
-      }));
+        };
+      });
 
       const ext = createShieldCortexExtension({
         cortexBinaryPath: "/fake/path",

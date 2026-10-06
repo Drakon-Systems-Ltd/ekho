@@ -11,6 +11,7 @@ All notable changes to Ekho are documented here.
 
 ### Documentation
 - **SDK install instructions no longer point at packages or claims that are not true.** The Hermes plugin README offered `pip install ekho-sdk` as an alternative, but the Python SDK is not published to PyPI; the alternative is gone, and the README now says to run the install from the root of a checkout of this repository, where `./sdks/python` resolves. The TypeScript SDK README no longer calls the repository private; the changelog still ships inside the npm package. The Python SDK README no longer leads with the unavailable `pip install ekho-sdk` (even marked pending) and offers the source install as the route that works today. Both READMEs now name both SDK dependencies, `requests` and `cryptography`, matching `sdks/python/pyproject.toml`. The plugin README's `--without-pip` note claimed a single dependency and offered copying `sdks/python/ekho` into `site-packages/` as an alternative install; it now says the copy installs neither dependency and works only in a venv where both are already importable.
+- **The root README's package table no longer calls the Python SDK requests-only.** Its row now names both dependencies `sdks/python/pyproject.toml` declares, `requests` and `cryptography`, alongside Python 3.9+, and says the SDK installs from this repository.
 
 ## [0.6.0] - 2026-10-05
 

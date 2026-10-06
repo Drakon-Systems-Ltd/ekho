@@ -42,7 +42,7 @@
   "devDependencies": {
     "@drakon-systems/ekho-sdk": "*",
     "@types/node": "^25.5.0",
-    "esbuild": "^0.27.7",
+    "esbuild": "^0.28.2",
     "typebox": "^1.1.38"
   },
   "publishConfig": {
