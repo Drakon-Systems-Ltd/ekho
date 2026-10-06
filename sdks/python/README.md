@@ -6,11 +6,7 @@ Mirrors the Node.js `@drakon-systems/ekho-sdk` package: same method names, same 
 
 ## Install
 
-```bash
-pip install ekho-sdk   # pending publish — see "From source" below
-```
-
-### From source
+The SDK is not published to PyPI yet, so install it from source:
 
 ```bash
 git clone https://github.com/Drakon-Systems-Ltd/ekho.git
@@ -21,7 +17,7 @@ pip install -e .
 ## Requirements
 
 - Python 3.9+
-- `requests` (installed automatically)
+- `requests` and `cryptography` (installed automatically by `pip install`)
 
 ## Quick start
 
