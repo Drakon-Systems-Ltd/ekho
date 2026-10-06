@@ -3,8 +3,9 @@
 The Python SDK is not on PyPI, so the documented install is the source route
 (``./sdks/python``) from the repository root. Pins that the unavailable
 ``pip install ekho-sdk`` route stays out of both the plugin and SDK READMEs,
-that the source route resolves, and that the dependencies the docs name match
-the ones ``sdks/python/pyproject.toml`` declares.
+that the source route resolves, and that the dependencies and Python floor the
+docs (including the root README's package table) name match the ones
+``sdks/python/pyproject.toml`` declares.
 """
 
 import re
@@ -65,6 +66,20 @@ def test_docs_name_every_declared_sdk_dependency():
         assert f"`{dep}`" in note.group(0), dep
     assert "single dependency" not in note.group(0)
     assert "not a complete install" in note.group(0)
+
+
+def test_root_readme_names_sdk_dependencies_and_python_version():
+    deps = _declared_sdk_dependencies()
+    pyproject = (_SDK_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    python = re.search(r'^requires-python = ">=(\d+\.\d+)"$', pyproject, re.M)
+    assert python, "sdks/python/pyproject.toml has no requires-python floor"
+    root = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    row = re.search(r"^\| \[Python SDK\]\(sdks/python/\) \|.*$", root, re.M)
+    assert row, "root README lost the Python SDK package row"
+    for dep in deps:
+        assert f"`{dep}`" in row.group(0), dep
+    assert f"Python {python.group(1)}+" in row.group(0)
+    assert "requests-only" not in row.group(0)
 
 
 def test_install_source_route_resolves_from_repo_root():
