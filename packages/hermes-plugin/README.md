@@ -11,9 +11,11 @@ On load it enrolls into the fleet (or loads saved credentials) and starts a back
 
 ## Install
 
+The Python SDK is not published to PyPI, so it is installed from source. Run these commands from the root of a checkout of this repository (the directory that contains `sdks/` and `packages/`); the relative paths below assume it.
+
 ```bash
 # 1. Install the Ekho Python SDK into the Hermes agent's venv
-<hermes-venv>/bin/python -m pip install ./sdks/python      # or: pip install ekho-sdk
+<hermes-venv>/bin/python -m pip install ./sdks/python
 
 # 2. Drop the plugin into the Hermes plugins dir
 cp -R packages/hermes-plugin/ekho_hermes ~/.hermes/plugins/ekho
@@ -22,7 +24,7 @@ cp -R packages/hermes-plugin/ekho_hermes ~/.hermes/plugins/ekho
 hermes plugins enable ekho
 ```
 
-> If the venv was created `--without-pip`, the SDK is pure-Python with a single dependency (`requests`, already present in a Hermes venv) — you can instead copy `sdks/python/ekho` straight into the venv's `site-packages/`.
+> If the venv was created `--without-pip`, copying `sdks/python/ekho` into the venv's `site-packages/` is not a complete install on its own. The SDK is pure-Python, but `import ekho` needs both of its declared dependencies, `requests` and `cryptography` (see `sdks/python/pyproject.toml`), and copying the package installs neither. Copy it only into a venv where both are already importable.
 
 ## Configure
 

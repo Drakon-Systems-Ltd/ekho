@@ -4,7 +4,7 @@ Agent SDK for [Ekho](https://github.com/Drakon-Systems-Ltd/ekho) — the private
 
 ## Changelog
 
-What changed in this version: [CHANGELOG.md](./CHANGELOG.md). The repo is private; the changelog ships inside the published package so a consumer can read it after `npm install` without GitHub access.
+What changed in this version: [CHANGELOG.md](./CHANGELOG.md). The changelog ships inside the published package, so a consumer can read it after `npm install` without visiting GitHub.
 
 ## Compatibility
 
