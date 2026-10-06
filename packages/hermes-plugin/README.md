@@ -24,7 +24,7 @@ cp -R packages/hermes-plugin/ekho_hermes ~/.hermes/plugins/ekho
 hermes plugins enable ekho
 ```
 
-> If the venv was created `--without-pip`, the SDK is pure-Python with a single dependency (`requests`, already present in a Hermes venv) — you can instead copy `sdks/python/ekho` straight into the venv's `site-packages/`.
+> If the venv was created `--without-pip`, copying `sdks/python/ekho` into the venv's `site-packages/` is not a complete install on its own. The SDK is pure-Python, but `import ekho` needs both of its declared dependencies, `requests` and `cryptography` (see `sdks/python/pyproject.toml`), and copying the package installs neither. Copy it only into a venv where both are already importable.
 
 ## Configure
 
