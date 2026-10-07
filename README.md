@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.6.1` — the Hermes plugin's shadow check now asks Hermes which copy of the plugin it loads, covers `HERMES_HOME` and every profile, and reports uncertainty instead of a false PASS. No relay, SDK or OpenClaw plugin behaviour changes; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.6.1` — the Hermes plugin's shadow check now asks Hermes which copy of the plugin it loads, covers `HERMES_HOME` and every profile, and reports uncertainty instead of a false PASS, and the relay's fastify, fast-uri and brace-expansion dependencies move past published advisories. No SDK or OpenClaw plugin behaviour changes; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 

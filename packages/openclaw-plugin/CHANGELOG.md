@@ -4,7 +4,7 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
-## [0.6.1] - 2026-10-06
+## [0.6.1] - 2026-10-07
 
 No plugin changes. Version kept in step with the relay.
 
