@@ -14,7 +14,7 @@ All notable changes to Ekho are documented here.
 - **The root README's package table no longer calls the Python SDK requests-only.** Its row now names both dependencies `sdks/python/pyproject.toml` declares, `requests` and `cryptography`, alongside Python 3.9+, and says the SDK installs from this repository.
 
 ### Security
-- **Development toolchain moved past published advisories (#110).** `vitest` ^3.2.1 → ^4.1.11 removes `tinypool` from the tree (GHSA-5gmw-xhrv-c9v3, GHSA-85c8-ppgw-ccpr) and clears the `@vitest/mocker` advisory; `vite` ^8.0.3 → ^8.3.3 in the relay; `tsx` ^4.23.15 and `esbuild` ^0.28.2 in the OpenClaw plugin. Build and test tooling only: no relay, SDK or plugin runtime code changed.
+- **Development toolchain moved past published advisories (#110).** `vitest` ^3.2.1 → ^4.1.11 removes `tinypool` from the tree (GHSA-5gmw-xhrv-c9v3, GHSA-85c8-ppgw-ccpr) and clears the `@vitest/mocker` advisory; `vite` ^8.0.3 → ^8.3.3 in the relay (console build); `tsx` ^4.23.15 in the root workspace; `esbuild` ^0.28.2 in the OpenClaw plugin (plugin build). No relay, SDK or plugin application source or API changed, but this is not tooling-only for every install: `tsx` is also the launcher for a relay run from a source checkout (`packages/relay` `start` runs `tsx src/server.ts`), so a source-installed relay starts under the newer `tsx` after `npm ci`. The Docker image installs its own global `tsx` at build time, so its version is not pinned by this workspace bump.
 
 ## [0.6.0] - 2026-10-05
 
