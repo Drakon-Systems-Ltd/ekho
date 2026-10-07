@@ -1,7 +1,7 @@
 {
   "name": "@drakon-systems/ekho-sdk",
   "version": "0.6.0",
-  "description": "Agent SDK for Ekho — the private communication layer for distributed AI agents.",
+  "description": "Agent SDK for Ekho \u2014 the private communication layer for distributed AI agents.",
   "license": "MIT",
   "author": "Drakon Systems <hello@drakonsystems.com> (https://drakonsystems.com)",
   "repository": {
@@ -30,6 +30,16 @@
       "require": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      }
+    },
+    "./identity": {
+      "import": {
+        "types": "./dist/esm/identity/index.d.ts",
+        "default": "./dist/esm/identity/index.js"
+      },
+      "require": {
+        "types": "./dist/identity/index.d.ts",
+        "default": "./dist/identity/index.js"
       }
     },
     "./package.json": "./package.json"
