@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Hermes: attachments on a held-back turn now reach the agent (#114, Hermes half).** The auto-reply daemon pre-downloaded attachments only when it got the floor straight away. A message deferred to a floor holder (the usual case when a peer replies from inside its own turn) ran later, through the deferred-retry or overrun path, without its files, and the prompt told the spawned turn to call `ekho_inbox`, whose cache is empty in that child. Every turn path now pre-downloads with the daemon's client and hands the agent local paths. When a file cannot be downloaded (download error, size cap, SDK without download), the prompt now says so for that file and asks the agent to request a resend or inline paste, instead of pointing at `ekho_inbox`. The OpenClaw recipient side of #114 is not changed here.
+
 ## [0.6.1] - 2026-10-07
 
 ### Fixed

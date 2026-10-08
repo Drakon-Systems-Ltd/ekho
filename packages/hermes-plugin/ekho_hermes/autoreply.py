@@ -673,6 +673,25 @@ def list_retryable_deferred(state: AutoReplyState, now: float) -> List[str]:
     return [conv for _, conv in sorted(alive)]
 
 
+def list_expired_deferred(
+    state: AutoReplyState, now: float, limit: Optional[int] = None
+) -> List[str]:
+    """Conversations whose stash is past the retry TTL, oldest deferral first
+    (at most ``limit``). Read-only: the stashes stay queued, so a caller can
+    prepare them (attachment downloads) while the original entries and stored
+    verdicts remain in the deferred map, then ``take_expired_deferred``."""
+    expired = sorted(
+        (
+            (stash["first_deferred_at"], conv)
+            for conv, stash in state.deferred_by_conversation.items()
+            if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S
+        ),
+    )
+    if limit is not None:
+        expired = expired[:limit]
+    return [conv for _, conv in expired]
+
+
 def take_expired_deferred(
     state: AutoReplyState, now: float, limit: Optional[int] = None
 ) -> List[tuple]:
@@ -684,16 +703,10 @@ def take_expired_deferred(
     LATE, without the floor. Taking a stash therefore means "I am delivering
     this now" — never "I am dropping this"; a caller that cannot run the turn
     must not call this (or must dead-letter what it took)."""
-    expired = sorted(
-        (
-            (stash["first_deferred_at"], conv)
-            for conv, stash in state.deferred_by_conversation.items()
-            if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S
-        ),
-    )
-    if limit is not None:
-        expired = expired[:limit]
-    return [(conv, state.deferred_by_conversation.pop(conv)) for _, conv in expired]
+    return [
+        (conv, state.deferred_by_conversation.pop(conv))
+        for conv in list_expired_deferred(state, now, limit)
+    ]
 
 
 def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
@@ -1169,46 +1182,43 @@ def _att_field(att: Any, key: str, default: Any = "") -> Any:
 
 
 def _attachments_note(msg: Any, local_for_msg: Optional[Sequence[Any]]) -> str:
-    """The per-message attachment line. If the daemon already downloaded the
-    files (``local_for_msg`` carries ``local_path``), point the agent straight at
-    those paths — the spawned one-shot child has an empty inbox cache, so telling
-    it to call ekho_inbox would fail. Otherwise fall back to listing the metadata
-    off the message and noting ekho_inbox."""
-    if local_for_msg:
-        parts: List[str] = []
-        have_paths = False
-        for d in local_for_msg:
-            name = _inline_safe(_att_field(d, "filename") or _att_field(d, "id") or "file", 120)
-            mime = _att_field(d, "mime")
-            size = _att_field(d, "size_bytes", 0)
-            path = _att_field(d, "local_path", None)
-            if path:
-                parts.append(f"{name} ({mime}, {size}B) — saved locally at: {path}")
-                have_paths = True
-            else:
-                parts.append(f"{name} ({mime}, {size}B)")
-        joined = "; ".join(parts)
-        if have_paths:
-            return (
-                f"\n    Attachments ({len(local_for_msg)}): {joined} — open these "
-                "files directly."
-            )
-        return (
-            f"\n    Attachments ({len(local_for_msg)}): {joined} — call the "
-            "ekho_inbox tool to download them."
-        )
+    """Describe every original attachment, including ones the daemon skipped.
+
+    The spawned child has no inbox cache, so it cannot recover missing files.
+    Match paths by attachment id; the downloader may omit individual failures.
+    """
     metas = list(getattr(msg, "attachments", []) or [])
     if not metas:
         return ""
-    names = ", ".join(
-        f"{_att_field(a, 'filename') or _att_field(a, 'id') or 'file'} "
-        f"({_att_field(a, 'mime')}, {_att_field(a, 'size_bytes', 0)}B)"
-        for a in metas
-    )
-    return (
-        f"\n    Attachments ({len(metas)}): {names} — call the ekho_inbox tool to "
-        "download them to local file paths you can open."
-    )
+    paths = {
+        attachment_id: _att_field(a, "local_path")
+        for a in local_for_msg or []
+        if isinstance(attachment_id := _att_field(a, "id"), str)
+        and attachment_id
+        and _att_field(a, "local_path")
+    }
+    parts: List[str] = []
+    have_paths = False
+    for a in metas:
+        attachment_id = _att_field(a, "id")
+        valid_id = isinstance(attachment_id, str) and bool(attachment_id)
+        name = _inline_safe(
+            _att_field(a, "filename") or (attachment_id if valid_id else "file"), 120
+        )
+        mime = _inline_safe(_att_field(a, "mime"), 120)
+        size = _att_field(a, "size_bytes", 0)
+        path = paths.get(attachment_id) if valid_id else None
+        if path:
+            parts.append(f"{name} ({mime}, {size}B) — saved locally at: {path}")
+            have_paths = True
+        else:
+            parts.append(
+                f"{name} ({mime}, {size}B) — could not be downloaded by the "
+                "Ekho daemon and is NOT available to this turn; ask the sender "
+                "to resend or paste it inline"
+            )
+    suffix = " — open these files directly." if have_paths else "."
+    return f"\n    Attachments ({len(metas)}): {'; '.join(parts)}{suffix}"
 
 
 def _inline_safe(s: Any, max_len: int = 120) -> str:
@@ -2060,6 +2070,25 @@ def process_inbox_once(
         except Exception as exc:  # noqa: BLE001 — relay auto-releases on TTL
             log.debug("[ekho-autoreply] floor release failed for %s: %s", conv, exc)
 
+    def _predownload(turn_messages: Sequence[Any]) -> Optional[List[List[Dict[str, Any]]]]:
+        """Fetch paths with the daemon's client; never hold up a turn on failure."""
+        if not any(getattr(m, "attachments", None) for m in turn_messages):
+            return None
+        try:
+            return download_inbox_attachments(client, turn_messages)
+        except Exception as exc:  # noqa: BLE001 — the turn must still spawn
+            log.debug("[ekho-autoreply] attachment pre-download failed: %s", exc)
+            return None
+
+    def _prepared_stash_attachments(
+        stash: Dict[str, Any],
+    ) -> Optional[List[List[Dict[str, Any]]]]:
+        """Prepare once while waiting for a floor, including failed attempts."""
+        if not stash.get("attachments_prepared", False):
+            stash["local_attachments"] = _predownload(stash["messages"])
+            stash["attachments_prepared"] = True
+        return stash["local_attachments"]
+
     def _retry_deferred_turn() -> int:
         """Deferred-retry: a conversation deferred to a floor holder is retried
         on later ticks — its messages were consumed + acked, so the stash is
@@ -2072,6 +2101,10 @@ def process_inbox_once(
         if not callable(acquire):
             return 0
         for conv in list_retryable_deferred(state, now):
+            stash = state.deferred_by_conversation.get(conv)
+            if not stash:
+                continue
+            local_attachments = _prepared_stash_attachments(stash)
             try:
                 res = acquire(conv, FLOOR_TTL_SECONDS) or {}
             except Exception as exc:  # noqa: BLE001 — keep the stash, retry later
@@ -2079,11 +2112,7 @@ def process_inbox_once(
                 continue
             if not bool(res.get("granted")):
                 continue  # still held — keep waiting
-            stash = state.deferred_by_conversation.get(conv)
             clear_deferred(state, conv)
-            if not stash:
-                _release_floor(conv)
-                continue
             log.info(
                 "[ekho-autoreply] deferred conversation %s floor is free — "
                 "running the held-back turn (%d msg(s))", conv, len(stash["messages"]),
@@ -2098,6 +2127,7 @@ def process_inbox_once(
                 trigger_turn(
                     stash["messages"],
                     operator_trusted,
+                    local_attachments=local_attachments,
                     roster=getattr(inbox, "roster", None),
                     spawn=spawn,
                     log=log,
@@ -2158,10 +2188,18 @@ def process_inbox_once(
         if state.in_flight:
             # Busy, not free to drop: the stash stays put for the next tick.
             return 0
-        taken = take_expired_deferred(state, now, limit=1)
-        if not taken:
+        expired = list_expired_deferred(state, now, limit=1)
+        if not expired:
             return 0
-        conv, stash = taken[0]
+        conv = expired[0]
+        # Prepare (download) while the stash, its entries and stored verdicts
+        # are still queued; only then take it for delivery. Taking first meant
+        # a cold stash (no memo, e.g. rebuilt by a fresh-message merge) did its
+        # downloads after it had already left the deferred map (#114 r2).
+        local_attachments = _prepared_stash_attachments(
+            state.deferred_by_conversation[conv]
+        )
+        stash = state.deferred_by_conversation.pop(conv)
         waited_s = max(0.0, now - stash["first_deferred_at"])
         log.warning(
             "[ekho-autoreply] deferred conversation %s exceeded retry window "
@@ -2177,6 +2215,7 @@ def process_inbox_once(
             trigger_turn(
                 stash["messages"],
                 operator_trusted,
+                local_attachments=local_attachments,
                 roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
@@ -2388,16 +2427,7 @@ def process_inbox_once(
             )
         base_hist = getattr(inbox, "conversation_history", None) or {}
         fresh_hist = {**base_hist, **tails}
-        # Pre-download any operator attachments HERE (the daemon has the relay
-        # client) so the prompt can hand the agent real local file paths — the
-        # spawned one-shot child has an empty inbox cache and couldn't fetch
-        # them itself. Best-effort: a failed download just drops the paths.
-        local_attachments = None
-        if any(getattr(m, "attachments", None) for m in turn_messages):
-            try:
-                local_attachments = download_inbox_attachments(client, turn_messages)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("[ekho-autoreply] attachment pre-download failed: %s", exc)
+        local_attachments = _predownload(turn_messages)
         state.in_flight = True
         try:
             trigger_turn(

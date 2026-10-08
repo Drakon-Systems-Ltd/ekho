@@ -339,7 +339,8 @@ def test_build_prompt_notes_attachments():
         ],
     )
     prompt = build_prompt([msg], operator_trusted=True)
-    assert "ekho_inbox" in prompt  # fallback: told how to fetch the file
+    assert "could not be downloaded by the Ekho daemon" in prompt
+    assert "ekho_inbox tool" not in prompt  # the spawned child has no inbox cache
     assert "report.pdf" in prompt
 
 
@@ -347,7 +348,9 @@ def test_build_prompt_uses_local_attachment_paths():
     # When the daemon has already downloaded the attachment, the prompt must
     # point the agent at the local file (NOT tell it to call ekho_inbox, which
     # returns an empty cache inside the spawned one-shot child).
-    msg = _msg(body={"text": "see file"})
+    msg = _msg(body={"text": "see file"}, attachments=[
+        {"id": "att1", "filename": "report.pdf", "mime": "application/pdf", "size_bytes": 10}
+    ])
     local = [
         [
             {
