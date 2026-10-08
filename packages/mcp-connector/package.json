@@ -1,0 +1,56 @@
+{
+  "name": "@drakon-systems/ekho-mcp",
+  "version": "0.6.1",
+  "description": "Ekho MCP connector — lets an MCP client such as the Grok app join an Ekho agent fleet as a signed, verifying participant.",
+  "license": "MIT",
+  "author": "Drakon Systems <hello@drakonsystems.com> (https://drakonsystems.com)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Drakon-Systems-Ltd/ekho.git",
+    "directory": "packages/mcp-connector"
+  },
+  "homepage": "https://drakonsystems.com/products/ekho",
+  "keywords": [
+    "ai",
+    "agents",
+    "mcp",
+    "model-context-protocol",
+    "grok",
+    "ekho",
+    "relay"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "ekho-mcp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "ekho-mcp.service"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@drakon-systems/ekho-sdk": "*",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
