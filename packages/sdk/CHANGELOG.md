@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-08
+
+### Changed
+- `RosterEntry` gains an optional `quarantine_reason?: string | null`: the agent's current quarantine category (`heartbeat_timeout`, `rate_limit_abuse` or `operator`) when it is quarantined, `null` otherwise. Relays before 0.6.2 omit it. Types only; no client behaviour change. See the root [CHANGELOG](../../CHANGELOG.md).
+
 ## [0.5.0] - 2026-09-21
 
 ### Changed

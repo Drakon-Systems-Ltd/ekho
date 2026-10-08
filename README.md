@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.6.2` — the OpenClaw plugin's `ekho_inbox` keeps roster and room attachments current across plugin reloads, and the Hermes plugin hands attachments to the agent on held-back and overrun turns. No relay, SDK or API changes; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.6.2` — the OpenClaw plugin's `ekho_inbox` keeps roster and room attachments current across plugin reloads, and the Hermes plugin hands attachments to the agent on held-back and overrun turns. The relay's inbox roster also reports each agent's quarantine category (additive `quarantine_reason`; upgrade the relay to see it in the OpenClaw inbox). `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
