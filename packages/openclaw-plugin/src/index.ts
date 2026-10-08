@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
 import {
   activateRuntime,
+  connectedInboxContext,
   ensureConnected,
   getEkhoIdentity,
   noteObservedModel,
@@ -333,10 +334,12 @@ const plugin = defineToolPlugin({
         // reason — the loop already acked.
         let client: EkhoAgentClient;
         let agentId: string;
+        let cacheContext: string;
         try {
           const connection = await ensureConnected(config);
           client = connection.client;
           agentId = connection.credentials.agentId;
+          cacheContext = connectedInboxContext(connection);
         } catch (err) {
           // Degraded, not empty: the inbox is genuinely unknown here, and the
           // error says so — but `build` is local and stays answerable.
@@ -347,7 +350,7 @@ const plugin = defineToolPlugin({
             error: `not connected: ${String(err)}`
           };
         }
-        const cached = getCachedInbox(agentId);
+        const cached = getCachedInbox(agentId, cacheContext);
         // Entries pair each message with ITS OWN verdict. `messages` is a
         // positional mirror (index i matches) used only for attachment resolution.
         const entries = cached.entries;
@@ -406,7 +409,8 @@ const plugin = defineToolPlugin({
             display_name: r.display_name,
             runtime: r.runtime,
             status: r.status,
-            ...(r.quarantine_reason != null ? { quarantine_reason: r.quarantine_reason } : {})
+            ...(r.status === "quarantined" && ["heartbeat_timeout", "rate_limit_abuse", "operator"].includes(String(r.quarantine_reason))
+              ? { quarantine_reason: r.quarantine_reason } : {})
           })),
           controls,
           // Recent thread per room conversation, so a manual inbox read shows the

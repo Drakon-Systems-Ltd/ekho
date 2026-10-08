@@ -6,6 +6,7 @@ import { noteModelCallEnded } from "./connection.js";
 import { buildIdentity, formatBuildIdentityShort } from "./build-info.js";
 
 import type { EkhoIdentity } from "./credentials.js";
+import { identityPublicKey } from "./credentials.js";
 import { canonicalize } from "./identity.js";
 import {
   shouldAutowake,
@@ -313,9 +314,22 @@ type BatchMeta = {
   conversation_budgets: Record<string, number>;
   peer_turns_used: Record<string, number>;
 };
-type AgentInboxCache = { entries: Map<string, CachedInboxEntry>; meta: BatchMeta };
+type AgentInboxCache = { context: string; entries: Map<string, CachedInboxEntry>; meta: BatchMeta; rejects: Map<string, VerifyResult> };
 const INBOX_CACHE_KEY = Symbol.for("ekho-adapter.inbox-cache");
-function inboxCache(agentId: string): AgentInboxCache {
+/** Only public verification material enters this digest; credentials never do. */
+export function inboxCacheContext(relayBaseUrl: string, agentId: string, fleetId: string | undefined, identity?: EkhoIdentity): string {
+  const url = new URL(relayBaseUrl);
+  const endpoint = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  const keys = Object.entries(identity?.pinnedOperatorKeys ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  return createHash("sha256").update(JSON.stringify([endpoint, agentId, fleetId ?? "", identity ? identityPublicKey(identity) : null, keys, identity?.revokedOperatorKeys ?? {}, identity?.tofuAt ?? null])).digest("hex");
+}
+function freshCache(context: string, rejects = new Map<string, VerifyResult>()): AgentInboxCache {
+  return { context, rejects, entries: new Map(), meta: {
+    recorded_at: null, operator_trusted: false, roster: [], controls: [], conversation_history: {},
+    peer_autoreply: false, peer_turn_budget: NO_PEER_TURN_LIMIT, conversation_budgets: {}, peer_turns_used: {}
+  } };
+}
+function inboxCache(agentId: string, context = "", reader = false): AgentInboxCache {
   const g = globalThis as typeof globalThis & { [INBOX_CACHE_KEY]?: { byAgent: Map<string, AgentInboxCache> } };
   let registry = g[INBOX_CACHE_KEY];
   if (!registry || typeof registry !== "object" || !(registry.byAgent instanceof Map)) {
@@ -323,11 +337,17 @@ function inboxCache(agentId: string): AgentInboxCache {
     g[INBOX_CACHE_KEY] = registry;
   }
   let cache = registry.byAgent.get(agentId);
-  if (!cache || !(cache.entries instanceof Map) || !cache.meta || typeof cache.meta !== "object") {
-    cache = { entries: new Map(), meta: {
-      recorded_at: null, operator_trusted: false, roster: [], controls: [], conversation_history: {},
-      peer_autoreply: false, peer_turn_budget: NO_PEER_TURN_LIMIT, conversation_budgets: {}, peer_turns_used: {}
-    } };
+  if (cache && cache.context !== context && reader) return freshCache(context);
+  if (!cache || !(cache.entries instanceof Map) || !cache.meta || typeof cache.meta !== "object" || cache.context !== context) {
+    const rejects = cache?.rejects instanceof Map ? cache.rejects : new Map<string, VerifyResult>();
+    // Preserve only failures across trust changes; a passing verdict has no authority here.
+    for (const entry of cache?.entries?.values() ?? []) {
+      if (entry.verification && !entry.verification.verified) {
+        const digest = materialDigest(entry.message);
+        if (!digest.startsWith(UNCOMPARABLE_PREFIX)) rejects.set(digest, entry.verification);
+      }
+    }
+    cache = freshCache(context, rejects);
     registry.byAgent.set(agentId, cache);
   }
   return cache;
@@ -516,8 +536,8 @@ function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
   return digest === materialDigest(b);
 }
 
-export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number } = {}, agentId = "") {
-  const cache = inboxCache(agentId);
+export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number } = {}, agentId = "", context = "") {
+  const cache = inboxCache(agentId, context);
   const lastBatch = cache.entries;
   const lastBatchMeta = cache.meta;
   const relayPeer = batch.peer_autoreply;
@@ -555,7 +575,7 @@ export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number 
     // message_id is exactly the compromised-relay case this whole issue is
     // about, so the carry-over is bound to the signature, not the key.
     const held = lastBatch.get(msg.message_id);
-    const previous = held && sameSignedMaterial(held.message, msg) ? held.verification : null;
+    const previous = held && sameSignedMaterial(held.message, msg) ? held.verification : cache.rejects.get(materialDigest(msg)) ?? null;
     lastBatch.delete(msg.message_id);
     lastBatch.set(msg.message_id, { message: msg, verification: previous });
   }
@@ -593,9 +613,11 @@ export function recordVerifications(
   verifications: Record<string, VerifyResult | null>,
   rejects: Array<{ message: InboxMessage; verdict: VerifyResult }> = [],
   messages?: InboxMessage[],
-  agentId = ""
+  agentId = "",
+  context = ""
 ): void {
-  const lastBatch = inboxCache(agentId).entries;
+  const cache = inboxCache(agentId, context);
+  const lastBatch = cache.entries;
   const bound = messages ? batchVerdictsByHeldKey(messages, verifications) : null;
   for (const [messageId, verdict] of Object.entries(verifications)) {
     // NEVER write a null over a verdict we already hold. verifyBatch
@@ -612,13 +634,17 @@ export function recordVerifications(
     const entry = lastBatch.get(messageId);
     if (!entry) continue;
     const bindable = bound ? bound[heldKey(entry.message)] : verdict;
-    if (bindable) entry.verification = bindable;
+    if (bindable) entry.verification = cache.rejects.get(materialDigest(entry.message)) ?? bindable;
   }
   for (const { message, verdict } of rejects) {
     if (typeof message?.message_id !== "string") continue;
     const entry = lastBatch.get(message.message_id);
     if (entry && (entry.message === message || sameSignedMaterial(entry.message, message))) {
       entry.verification = verdict;
+      if (!verdict.verified) {
+        const digest = materialDigest(message);
+        if (!digest.startsWith(UNCOMPARABLE_PREFIX)) cache.rejects.set(digest, verdict);
+      }
     }
   }
 }
@@ -661,13 +687,13 @@ export function createTurnOutcomeReporter(
   };
 }
 
-export function recordPeerUsage(usedByConversation: Map<string, number>, agentId = ""): void {
+export function recordPeerUsage(usedByConversation: Map<string, number>, agentId = "", context = ""): void {
   const snapshot: Record<string, number> = {};
   for (const [conv, used] of usedByConversation) snapshot[conv] = used;
-  inboxCache(agentId).meta.peer_turns_used = snapshot;
+  inboxCache(agentId, context).meta.peer_turns_used = snapshot;
 }
 
-export function getCachedInbox(agentId = ""): {
+export function getCachedInbox(agentId = "", context = ""): {
   /** Message + its own verdict, same lifetime. Prefer this over `messages`. */
   entries: CachedInboxEntry[];
   messages: InboxMessage[];
@@ -683,7 +709,7 @@ export function getCachedInbox(agentId = ""): {
   peer_turns_used: Record<string, number>;
   recorded_at: string | null;
 } {
-  const cache = inboxCache(agentId);
+  const cache = inboxCache(agentId, context, true);
   const lastBatch = cache.entries;
   const lastBatchMeta = cache.meta;
   const entries = Array.from(lastBatch.values());
@@ -2111,6 +2137,7 @@ export function startAutoReply(opts: {
   client: EkhoAgentClient;
   api: PluginApi;
   selfAgentId: string;
+  cacheContext?: () => string;
   log?: Logger;
   pollIntervalMs?: number;
   peerEnabled?: boolean;
@@ -2249,9 +2276,6 @@ export function startAutoReply(opts: {
     // resolved once here so the latch, the stall notice and the prompt agree.
     batch = withLocalRoomCap(batch, peerTurnBudget);
 
-    // Expose the freshly delivered batch to ekho_inbox (Part B1).
-    recordBatch(batch, { peerTurnBudget }, selfAgentId);
-
     // Agent-side verification: maintain the trust root from the inbox and compute
     // a per-message verdict. Dormant (empty verdicts) until the agent has pinned
     // operator keys — the gate then falls back to relay-attested behavior.
@@ -2275,6 +2299,10 @@ export function startAutoReply(opts: {
         now: new Date()
       });
     }
+    const cacheContext = opts.cacheContext?.() ?? "";
+    // Pin sync can change verification authority on this tick. Publish only
+    // under the resulting context, including when the batch is empty.
+    recordBatch(batch, { peerTurnBudget }, selfAgentId, cacheContext);
     // #20: quoted snapshots (reply_to, room history, floor tails) are checked
     // against the SAME trust root, not trusted for carrying a signature field.
     // Without an identity or a fleet id this stays the fail-closed verifier, so
@@ -2304,7 +2332,7 @@ export function startAutoReply(opts: {
     // never enter `verifications`. Deliberately outside the identity gate: when
     // bootstrap failed there are no verdicts but there ARE withheld messages,
     // and those are exactly the ones that must not read as ordinary (ekho#20).
-    recordVerifications(verifications, rejects, batch.messages, selfAgentId);
+    recordVerifications(verifications, rejects, batch.messages, selfAgentId, cacheContext);
     // The wording is deliberate. This used to end "dead-lettered, not acted on",
     // which was FALSE and is exactly the string an incident responder greps for
     // under time pressure: the message wakes no turn, but it stays in the
@@ -2338,6 +2366,8 @@ export function startAutoReply(opts: {
     // plugin-config bootstrap defaults when the relay omits the fields.
     const eff = effectivePeerSettings(batch, { peerEnabled, peerTurnBudget });
     reconcilePeerLatches(state, batch, eff.peerTurnBudget);
+    // A quiet poll still reconciles the active producer's fresh latch.
+    recordPeerUsage(state.peerTurnsByConversation, selfAgentId, cacheContext);
     const real = batch.messages.filter((m) =>
       isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
@@ -2484,7 +2514,7 @@ export function startAutoReply(opts: {
       peerBudgetRemaining[m.conversation_id] = Math.max(0, convBudget - used);
     }
     // Expose the post-consumption per-conversation counts to ekho_inbox.
-    recordPeerUsage(state.peerTurnsByConversation, selfAgentId);
+    recordPeerUsage(state.peerTurnsByConversation, selfAgentId, cacheContext);
 
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m);

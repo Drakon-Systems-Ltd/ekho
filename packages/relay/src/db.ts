@@ -2030,7 +2030,8 @@ export class EkhoDb {
             display_name: row.display_name,
             runtime: row.runtime,
             status: row.status,
-            quarantine_reason: row.quarantine_reason ?? null,
+            quarantine_reason: row.status === "quarantined" && ["heartbeat_timeout", "rate_limit_abuse", "operator"].includes(String(row.quarantine_reason))
+              ? row.quarantine_reason : null,
             identity_public_key: ik?.public_key ?? null,
             key_id: ik?.key_id ?? null,
             endorsed_by_key_id: ik?.endorsed_by_key_id ?? null,
@@ -2697,7 +2698,8 @@ export class EkhoDb {
       this.db.prepare(
         "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       ).run(controlId, fleetId, "agent", agentId, action, JSON.stringify(payload), operatorId, now, expiresAt);
-      this.db.prepare("UPDATE agents SET status = ? WHERE id = ? AND fleet_id = ?").run(nextStatus, agentId, fleetId);
+      this.db.prepare("UPDATE agents SET status = ?, quarantine_reason = ?, auto_quarantined_at = NULL WHERE id = ? AND fleet_id = ?")
+        .run(nextStatus, action === "quarantine" ? "operator" : null, agentId, fleetId);
       this.recordEvent(fleetId, `agent.${action}`, "operator", operatorId, "agent", agentId, null, payload);
     });
     tx();
