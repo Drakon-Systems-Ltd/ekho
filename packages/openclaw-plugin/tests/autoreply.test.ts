@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   isRealInbound,
   whyNotRealInbound,
@@ -14,6 +14,7 @@ import {
   effectiveConversationBudget,
   recordPeerUsage,
   getCachedInbox,
+  resetCachedInboxForTest,
   recordBatch,
   recordVerifications,
   stashDeferred,
@@ -34,6 +35,7 @@ import {
   withLocalRoomCap
 } from "../src/autoreply";
 import { makeSnapshotVerifier, NO_SNAPSHOT_VERIFICATION } from "../src/verification";
+import { inboxMessageView } from "../src/inbox-trust";
 import {
   agentKeyEndorsementPayload,
   keyId,
@@ -41,6 +43,21 @@ import {
   sha256Hex,
   signCanonical
 } from "../src/identity";
+import { endorsementPayload } from "../src/identity";
+
+const turnSpawns = vi.hoisted(() => vi.fn());
+vi.mock("node:child_process", async () => {
+  const { EventEmitter } = await import("node:events");
+  return {
+    spawn: (_command: string, args: string[]) => {
+      turnSpawns(args);
+      const child = new EventEmitter() as EventEmitter & { kill: () => void };
+      child.kill = () => {};
+      setTimeout(() => child.emit("exit", 0), 0);
+      return child;
+    }
+  };
+});
 
 // Loose factory — the autoreply functions read these fields structurally.
 function msg(over: Record<string, unknown> = {}): any {
@@ -1031,6 +1048,53 @@ describe("collectRequireSignedWithheld (#5)", () => {
 // used to bin them with zero trace. This drives the real tick with a fake
 // client and NO identity to prove the withheld peers are now dead-lettered.
 import { startAutoReply } from "../src/autoreply";
+
+describe("terminal verification rejection in the real poll path", () => {
+  it("does not admit endorsed redelivery after a failed acknowledgement", async () => {
+    const selfAgentId = "terminal-reject-agent";
+    const fleet = "terminal-fleet";
+    const rootSeed = new Uint8Array(32).fill(31);
+    const signerSeed = new Uint8Array(32).fill(32);
+    const rootPub = publicKeyB64urlFromSeed(rootSeed);
+    const signerPub = publicKeyB64urlFromSeed(signerSeed);
+    const rootKid = keyId(Buffer.from(rootPub, "base64url"));
+    const signerKid = keyId(Buffer.from(signerPub, "base64url"));
+    const identity = { seedHex: "00".repeat(32), pinnedOperatorKeys: { [rootKid]: rootPub } };
+    const body = { text: "wake up" };
+    const canonical = { fleet_id: fleet, key_id: signerKid, recipient: { kind: "agent", id: selfAgentId }, conversation_id: "terminal-room", body_sha256: sha256Hex(body.text), sent_at: new Date().toISOString(), nonce: "terminal-nonce", operator_id: "operator" };
+    const message = { message_id: "terminal-message", conversation_id: "terminal-room", sender_kind: "operator", sender_agent_id: "operator", message_type: "direct", body, key_id: signerKid, operator_sig: signCanonical(canonical, signerSeed), sig_canonical: canonical };
+    const endorsed = { key_id: signerKid, public_key: signerPub, endorsed_by_key_id: rootKid, endorsement_sig: signCanonical(endorsementPayload(fleet, signerKid, signerPub), rootSeed) };
+    let polls = 0;
+    let acks = 0;
+    let floors = 0;
+    const rejects: string[] = [];
+    const fakeClient = {
+      getInbox: async () => {
+        const poll = ++polls;
+        return { messages: [message], fleet_id: fleet, operator_keys: poll === 1 ? [] : [endorsed], operator_trusted: true };
+      },
+      ackMessages: async () => { if (++acks === 1) throw new Error("ACK unavailable"); },
+      acquireFloor: async () => { floors++; return { granted: true, conversation_tail: [] }; },
+      releaseFloor: async () => ({}), raiseNotice: async () => ({})
+    };
+    turnSpawns.mockClear();
+    const stop = startAutoReply({ client: fakeClient as any, api: {} as any, selfAgentId, identity, pollIntervalMs: 10, onVerificationReject: (rows) => rejects.push(...rows.map((row) => row.verdict.reason ?? "")) });
+    try {
+      await vi.waitFor(() => expect(polls).toBeGreaterThanOrEqual(3), { timeout: 2000 });
+      await vi.waitFor(() => expect(acks).toBeGreaterThanOrEqual(2), { timeout: 2000 });
+      expect(identity.pinnedOperatorKeys[signerKid]).toBe(signerPub);
+      expect(floors).toBe(0);
+      expect(turnSpawns).not.toHaveBeenCalled();
+      expect(rejects).toContain("unknown-operator-key");
+      const cached = getCachedInbox(selfAgentId);
+      expect(cached.entries[0].verification).toMatchObject({ verified: false, reason: "unknown-operator-key" });
+      expect(inboxMessageView(cached.entries[0].message as any, cached.entries[0].verification, { operatorTrusted: cached.operator_trusted })).toMatchObject({ trust: "rejected-signature", signature: { status: "failed", reason: "unknown-operator-key" } });
+    } finally {
+      await stop();
+      resetCachedInboxForTest(selfAgentId);
+    }
+  });
+});
 
 describe("require mode dead-letters withheld peers even with no identity (finding #2)", () => {
   it("calls onVerificationReject for an unsigned peer when identity bootstrap failed", async () => {

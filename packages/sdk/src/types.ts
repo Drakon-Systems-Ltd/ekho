@@ -70,6 +70,8 @@ export type RosterEntry = {
   display_name: string;
   runtime: string;
   status: string;
+  /** Current quarantine category: heartbeat_timeout, rate_limit_abuse, or operator; null otherwise. */
+  quarantine_reason?: string | null;
 };
 
 export type InboxResponse = {

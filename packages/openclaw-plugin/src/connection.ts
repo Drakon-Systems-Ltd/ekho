@@ -18,7 +18,7 @@ import {
 } from "./credentials.js";
 import { parseRequireSignedMode, syncPinnedOperatorKeys } from "./verification.js";
 import { fromB64url, keyId as deriveKeyId } from "./identity.js";
-import { startAutoReply } from "./autoreply.js";
+import { inboxCacheContext, startAutoReply } from "./autoreply.js";
 import { appendDeadLetters } from "./dead-letter.js";
 import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./state-dir.js";
 import {
@@ -63,6 +63,10 @@ export interface EkhoPluginConfig {
 export interface EkhoConnection {
   client: EkhoAgentClient;
   credentials: EkhoCredentials;
+}
+
+export function connectedInboxContext(current: EkhoConnection): string {
+  return inboxCacheContext(current.credentials.relayBaseUrl, current.credentials.agentId, current.credentials.fleetId, identity ?? undefined);
 }
 
 type Logger = { info?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
@@ -605,6 +609,7 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     client: connection.client,
     api,
     selfAgentId: connection.credentials.agentId,
+    cacheContext: () => connectedInboxContext(connection!),
     log,
     peerEnabled: config?.peerAutoreply ?? true,
     peerTurnBudget: config?.peerTurnBudget,
