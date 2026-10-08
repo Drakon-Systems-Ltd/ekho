@@ -131,9 +131,10 @@ export function createHttpServer(deps: HttpDeps): http.Server {
         await handleMcpRequest(agent, req, res, parsed, config.bodyCapBytes);
         return;
       }
-      // GET (server-initiated stream) and DELETE (session end) go to the
-      // transport, which answers 405 in stateless mode — spec behaviour, not ours.
-      await handleMcpRequest(agent, req, res, undefined, config.bodyCapBytes);
+      // No server-initiated stream and no sessions to end: a stateless server
+      // may answer 405 to GET and DELETE (MCP transport spec), and an SSE
+      // stream behind a tunnel is exactly what Grok's guidance warns against.
+      sendJson(res, 405, { error: "method_not_allowed", error_description: "POST JSON-RPC to this endpoint" }, { allow: "POST" });
       return;
     }
 

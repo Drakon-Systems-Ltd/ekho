@@ -161,3 +161,92 @@ export async function connectAgent(relay: LiveRelay, stateDir = tmpDir(), overri
   await agent.connect();
   return agent;
 }
+
+// ---- HTTP server fixture -------------------------------------------------
+import type http from "node:http";
+import { createHttpServer } from "../src/http";
+import { StaticBearerAuthenticator } from "../src/auth";
+import { OAuthServer } from "../src/oauth";
+import { loadConfig, type ConnectorConfig } from "../src/config";
+import type { WakeNotifier } from "../src/webhook";
+
+export const TEST_BEARER = "test-bearer-token-0123456789abcdef0123456789";
+export const TEST_OAUTH_PASSWORD = "correct horse battery staple";
+
+export interface RunningServer {
+  baseUrl: string;
+  mcpUrl: string;
+  config: ConnectorConfig;
+  agent: EkhoConnectorAgent;
+  oauth?: OAuthServer;
+  server: http.Server;
+  close(): Promise<void>;
+}
+
+/** A connector HTTP server on a loopback port, in bearer or oauth mode, over
+ *  an already-connected agent. In oauth mode the public URL is the listening
+ *  address, so discovery documents point back at this very server. */
+export async function startServer(
+  agent: EkhoConnectorAgent,
+  opts: { auth?: "bearer" | "oauth"; env?: Record<string, string>; now?: () => number; notifier?: WakeNotifier } = {}
+): Promise<RunningServer> {
+  const auth = opts.auth ?? "bearer";
+  const stateDir = (agent as unknown as { opts: { stateDir: string } }).opts.stateDir;
+  const baseEnv: Record<string, string> = {
+    EKHO_RELAY_BASE_URL: "http://127.0.0.1:1",
+    EKHO_MCP_STATE_DIR: stateDir,
+    EKHO_MCP_AUTH: auth,
+    EKHO_MCP_PORT: "0",
+    ...(auth === "bearer" ? { EKHO_MCP_BEARER: TEST_BEARER } : { EKHO_MCP_OAUTH_PASSWORD: TEST_OAUTH_PASSWORD, EKHO_MCP_PUBLIC_URL: "http://127.0.0.1:0" }),
+    ...(opts.env ?? {})
+  };
+  let config = loadConfig(baseEnv);
+  // Listen first to learn the port, then build the real config/oauth with it.
+  const placeholder = createHttpServer({ config, agent, authenticator: new StaticBearerAuthenticator("x".repeat(32)) });
+  await new Promise<void>((r) => placeholder.listen(0, "127.0.0.1", () => r()));
+  const port = (placeholder.address() as { port: number }).port;
+  await new Promise<void>((r) => placeholder.close(() => r()));
+  const baseUrl = `http://127.0.0.1:${port}`;
+  config = loadConfig({ ...baseEnv, ...(auth === "oauth" ? { EKHO_MCP_PUBLIC_URL: baseUrl } : {}) });
+  let oauth: OAuthServer | undefined;
+  const authenticator =
+    auth === "oauth"
+      ? (oauth = new OAuthServer({
+          stateDir,
+          publicUrl: baseUrl,
+          mcpPath: config.mcpPath,
+          password: TEST_OAUTH_PASSWORD,
+          allowedRedirectHosts: config.oauthAllowedRedirectHosts,
+          now: opts.now,
+          log: QUIET
+        })).authenticator()
+      : new StaticBearerAuthenticator(TEST_BEARER);
+  const server = createHttpServer({ config, agent, authenticator, oauth, notifier: opts.notifier, log: QUIET, now: opts.now, version: "test" });
+  await new Promise<void>((r) => server.listen(port, "127.0.0.1", () => r()));
+  return {
+    baseUrl,
+    mcpUrl: `${baseUrl}${config.mcpPath}`,
+    config,
+    agent,
+    oauth,
+    server,
+    close: () => new Promise<void>((r) => server.close(() => r()))
+  };
+}
+
+/** Raw JSON-RPC POST to the MCP endpoint, for auth/limit tests that must not
+ *  depend on the SDK client's behaviour. */
+export async function rpc(url: string, body: unknown, headers: Record<string, string> = {}) {
+  return fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+    body: typeof body === "string" ? body : JSON.stringify(body)
+  });
+}
+
+export const INITIALIZE = {
+  jsonrpc: "2.0",
+  id: 1,
+  method: "initialize",
+  params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } }
+};
