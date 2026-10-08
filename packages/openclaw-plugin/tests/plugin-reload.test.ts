@@ -56,6 +56,7 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
       if (relay.stopped) relay.afterStop.push("ack");
       return {};
     }
+    async downloadAttachment() { return { bytes: Buffer.from("ok") }; }
     async acquireFloor(conv: string) {
       if (relay.stopped) relay.afterStop.push("acquire");
       return { granted: relay.floorFree(conv), holder_agent_id: "other" };
@@ -107,10 +108,15 @@ function logger() {
 /** A fake host api. `signals` adds OpenClaw's unload surfaces (on + lifecycle). */
 function fakeApi(signals: boolean, pluginConfig: Record<string, unknown> = defaultConfig()) {
   const disposers: Array<() => unknown> = [];
+  const registered = new Map<string, { execute: (id: string, params: unknown) => Promise<{ details: any }> }>();
   const hooks = new Map<string, Array<(event: unknown) => unknown>>();
   const api: Record<string, unknown> = {
     pluginConfig,
-    logger: logger()
+    logger: logger(),
+    registerTool: (tool: { name?: string }, opts?: { name?: string }) => {
+      if (tool.name) registered.set(tool.name, tool as never);
+      else if (opts?.name) registered.set(opts.name, tool as never);
+    }
   };
   if (signals) {
     api.on = (name: string, handler: (event: unknown) => unknown) => {
@@ -126,6 +132,7 @@ function fakeApi(signals: boolean, pluginConfig: Record<string, unknown> = defau
   }
   return {
     api,
+    inbox: async () => (await registered.get("ekho_inbox")!.execute("test", {})).details,
     log: api.logger as ReturnType<typeof logger>,
     // What the host gets back from each callback (OpenClaw awaits them).
     dispose: () => disposers.map((d) => d()),
@@ -230,6 +237,119 @@ afterEach(() => {
 });
 
 describe("plugin reload in one process", () => {
+  it("registered inbox isolates transport-distinct base paths", async () => {
+    const edge = { ...defaultConfig(), relayBaseUrl: "http://relay.invalid/edge" };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false, edge);
+    a.plugin.register(hostA.api);
+    await a.conn.ensureConnected(edge as never);
+    const cache = await import("../src/autoreply");
+    cache.recordBatch({ messages: [{ message_id: "edge", conversation_id: "c", sender_agent_id: "peer", message_type: "direct", body: { text: "edge" } }] }, {}, "agent_reload", a.conn.connectedInboxContext(await a.conn.ensureConnected(edge as never)));
+    expect((await hostA.inbox()).count).toBe(1);
+    const slash = { ...edge, relayBaseUrl: "http://relay.invalid/edge/" };
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false, slash);
+    b.plugin.register(hostB.api);
+    await b.conn.ensureConnected(slash as never);
+    expect(await hostB.inbox()).toMatchObject({ count: 0, verification_generation: "unavailable" });
+  });
+  it("registered inbox shares only the matching trust context and retains rejected material", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const cacheA = await import("../src/autoreply");
+    const connectionA = await a.conn.ensureConnected(defaultConfig() as never);
+    const contextA = a.conn.connectedInboxContext(connectionA);
+    const message = { message_id: "rejected", conversation_id: "room", sender_agent_id: "operator", sender_kind: "operator", message_type: "room", body: { text: "do this" } };
+    cacheA.recordBatch({ messages: [message], roster: [{ agent_id: "peer", status: "healthy" }], operator_trusted: true }, {}, "agent_reload", contextA);
+    cacheA.recordVerifications({ rejected: { verified: false, kind: "operator", reason: "invalid-signature", keyId: "old" } }, [], [message], "agent_reload", contextA);
+    expect((await hostA.inbox()).messages[0].signature.status).toBe("failed");
+
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    expect((await hostB.inbox()).count).toBe(1);
+    expect((await hostB.inbox()).roster).toHaveLength(1);
+    b.conn.getEkhoIdentity()!.pinnedOperatorKeys.changed = "different-public-key";
+    const isolated = await hostB.inbox();
+    expect(isolated).toMatchObject({ count: 1, verification_generation: "stale", degraded: true });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect((await hostB.inbox()).count).toBe(0);
+    const cacheB = await import("../src/autoreply");
+    const connectionB = await b.conn.ensureConnected(defaultConfig() as never);
+    const contextB = b.conn.connectedInboxContext(connectionB);
+    cacheB.recordBatch({ messages: [message], operator_trusted: true }, {}, "agent_reload", contextB);
+    cacheB.recordVerifications({ rejected: { verified: true, kind: "operator", reason: null, keyId: "new" } }, [], [message], "agent_reload", contextB);
+    expect((await hostB.inbox()).messages[0].signature.status).toBe("failed");
+
+    const c = await loadPluginCopy();
+    const alternate = { ...defaultConfig(), relayBaseUrl: "http://another-relay.invalid/fleet?ignored=1" };
+    const hostC = fakeApi(false, alternate);
+    c.plugin.register(hostC.api);
+    await c.conn.ensureConnected(alternate as never);
+    expect(await hostC.inbox()).toMatchObject({ count: 0, roster: [], operator_trusted: false, roster_fetched_at: null });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect((await hostC.inbox()).count).toBe(0);
+  });
+
+  it("registered inbox reports the new producer's latch after a quiet poll", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const cacheA = await import("../src/autoreply");
+    const context = a.conn.connectedInboxContext(await a.conn.ensureConnected(defaultConfig() as never));
+    cacheA.recordBatch({ messages: [], peer_autoreply: true, peer_turn_budget: 1 }, {}, "agent_reload", context);
+    cacheA.recordPeerUsage(new Map([["room", 1]]), "agent_reload", context);
+    expect(cacheA.getCachedInbox("agent_reload", context).peer_turns_used.room).toBe(1);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    const result = await hostB.inbox();
+    expect(result.count).toBe(0);
+    expect((await import("../src/autoreply")).getCachedInbox("agent_reload", context).peer_turns_used).toEqual({});
+  });
+
+  it("serves the producer's synced generation to both retained and new tools", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const oldContext = a.conn.connectedInboxContext(await a.conn.ensureConnected(defaultConfig() as never));
+    const oldCache = await import("../src/autoreply");
+    oldCache.recordBatch({ messages: [{ message_id: "old", conversation_id: "c", sender_agent_id: "op", sender_kind: "operator", message_type: "direct", body: { text: "old" } }] }, {}, "agent_reload", oldContext);
+    oldCache.recordVerifications({ old: { verified: true, kind: "operator", reason: null, keyId: "old" } }, [], undefined, "agent_reload", oldContext);
+
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    relay.inbox = async () => ({
+      fleet_id: "fleet_reload", operator_keys: [{ key_id: "new", public_key: "new-public-key" }],
+      messages: [{ message_id: "new", conversation_id: "room", sender_agent_id: "peer", sender_kind: "agent", message_type: "room", body: { text: "evidence" }, attachments: [{ id: "att", filename: "evidence.txt", mime: "text/plain", size_bytes: 2 }] }],
+      roster: [{ agent_id: "peer", status: "healthy" }], operator_trusted: true
+    });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    const newer = await hostB.inbox();
+    const retained = await hostA.inbox();
+    expect(newer).toMatchObject({ count: 1, verification_generation: "current", degraded: false, operator_trusted: true });
+    expect(retained).toMatchObject({ count: 1, verification_generation: "stale", degraded: true, operator_trusted: true });
+    expect(retained.messages[0].body).toEqual({ text: "evidence" });
+    expect(retained.messages[0].signature.status).not.toBe("verified");
+    expect(retained.roster).toHaveLength(1);
+    expect(retained.messages[0].attachments).toHaveLength(1);
+    const different = { ...defaultConfig(), relayBaseUrl: "http://other.invalid" };
+    const c = await loadPluginCopy();
+    const hostC = fakeApi(false, different);
+    c.plugin.register(hostC.api);
+    await c.conn.ensureConnected(different as never);
+    expect(await hostC.inbox()).toMatchObject({ count: 0, verification_generation: "unavailable" });
+  });
+
   it("a second load leaves exactly one heartbeat producer and one inbox poller (host sends no unload signal)", async () => {
     const a = await loadPluginCopy();
     const hostA = fakeApi(false);

@@ -273,6 +273,23 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ControlAction"
+        roster:
+          type: array
+          items:
+            type: object
+            properties:
+              agent_id:
+                type: string
+              display_name:
+                type: string
+              runtime:
+                type: string
+              status:
+                type: string
+              quarantine_reason:
+                type: [string, "null"]
+                enum: [heartbeat_timeout, rate_limit_abuse, operator, null]
+                description: Current category only when status is quarantined; null otherwise.
         peer_autoreply:
           type: boolean
           description: Operator-controlled peer auto-reply for this agent (live).
