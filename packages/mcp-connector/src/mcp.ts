@@ -5,12 +5,15 @@
 // plain markdown; they never carry signatures, secrets or raw envelopes.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { EkhoConnectorAgent } from "./agent.js";
 import { MAX_SEND_TEXT } from "./agent.js";
 import type { StoredMessage } from "./store.js";
+
+const pkg = createRequire(import.meta.url)("../package.json") as { version: string };
 
 export const TOOL_NAMES = ["ekho_inbox", "ekho_send", "ekho_roster", "ekho_open_room", "ekho_conversation"] as const;
 
@@ -48,7 +51,7 @@ export function formatMessage(m: StoredMessage, index?: number): string {
 }
 
 export function buildMcpServer(agent: EkhoConnectorAgent): McpServer {
-  const server = new McpServer({ name: "ekho-mcp", version: "0.6.1" }, { capabilities: { tools: {} } });
+  const server = new McpServer({ name: "ekho-mcp", version: pkg.version }, { capabilities: { tools: {} } });
 
   server.registerTool(
     "ekho_inbox",

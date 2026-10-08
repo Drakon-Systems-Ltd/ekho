@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **`@drakon-systems/ekho-sdk/identity`**: the verifiable-identity layer (Ed25519 primitives with the frozen canonical form, the identity file with atomic save and refuse-to-mint rules, inbound verification, operator-key pin sync, outbound v2 signing), moved verbatim from the OpenClaw plugin so the plugin and the new MCP connector run the identical code. Published for both `import` (`dist/esm/identity`) and `require` (`dist/identity`). The root export is unchanged; nothing existing is removed or renamed, so this is not a breaking change.
+
 ## [0.5.0] - 2026-09-21
 
 ### Changed
