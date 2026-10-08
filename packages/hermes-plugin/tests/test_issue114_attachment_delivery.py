@@ -284,3 +284,128 @@ def test_malformed_prepared_ids_are_ignored_when_matching_paths():
     ])
     assert note.count("could not be downloaded") == 2
     assert "good.pdf (application/pdf, 4B) — saved locally at: /good" in note
+
+
+# --- #114 r2: overrun delivery prepares while the stash is still queued ---
+
+
+def _second_message(*attachment_ids):
+    message = _message(*attachment_ids)
+    message.message_id = "m114b"
+    message.body = {"text": "One more file"}
+    return message
+
+
+class OverrunClient(Client):
+    """Counts floor calls and checks the queue from inside each download."""
+
+    def __init__(self, message, state, *, failed=(), expect_verdict_keys=()):
+        super().__init__(message, granted=False, failed=failed)
+        self.state = state
+        self.expect_verdict_keys = tuple(expect_verdict_keys)
+        self.acquires = []
+        self.seen_queued = []
+
+    def acquire_floor(self, conversation_id, ttl_seconds=None):
+        self.acquires.append(conversation_id)
+        return super().acquire_floor(conversation_id, ttl_seconds)
+
+    def download_attachment(self, attachment_id):
+        stash = self.state.deferred_by_conversation.get("review")
+        queued = stash is not None and bool(stash.get("messages"))
+        verdicts = autoreply.stash_verdicts(stash) if stash else {}
+        self.seen_queued.append((
+            attachment_id,
+            queued,
+            all(verdicts.get(k) is not None for k in self.expect_verdict_keys),
+        ))
+        return super().download_attachment(attachment_id)
+
+
+def _overrun_tick(client, state, prompts, now, *, spawn=None, dead_letter_path=None):
+    return autoreply.process_inbox_once(
+        client, "self", state,
+        spawn=spawn or (lambda cmd, env: prompts.append(" ".join(cmd))),
+        now=now, peer_enabled=True, peer_turn_budget=25,
+        dead_letter_path=dead_letter_path,
+    )
+
+
+def test_cold_expired_stash_prepares_while_queued(download_dir):
+    state = autoreply.AutoReplyState()
+    held = _message("good", "bad")
+    held.sender_kind = "operator"
+    verdict = VerificationResult(True, "peer", None, "trusted-key")
+    autoreply.stash_deferred(state, "review", [held], {"m114": verdict}, 0.0)
+    stash = state.deferred_by_conversation["review"]
+    assert not stash.get("attachments_prepared", False)  # cold: no memo
+    key = autoreply.held_key(stash["messages"][0])
+    client = OverrunClient(held, state, failed={"bad"}, expect_verdict_keys=[key])
+    client.inbox = InboxResponse([], [], False, [])
+    prompts = []
+
+    result = _overrun_tick(client, state, prompts, autoreply.DEFERRED_RETRY_TTL_S + 1)
+
+    assert result["spawned"] == 1
+    assert len(prompts) == 1
+    # Every download ran while the stash and its stored verdict were queued.
+    assert client.seen_queued == [("good", True, True), ("bad", True, True)]
+    assert "review" not in state.deferred_by_conversation
+    # Overrun: no floor taken or released.
+    assert client.acquires == [] and client.releases == []
+    assert "WITHOUT the floor" in prompts[0]
+    assert "CRYPTOGRAPHICALLY VERIFIED" in prompts[0]
+    assert f"good.pdf (application/pdf, 4B) — saved locally at: {download_dir / 'good__good.pdf'}" in prompts[0]
+    assert "bad.pdf (application/pdf, 4B) — could not be downloaded by the Ekho daemon and is NOT available to this turn" in prompts[0]
+
+
+def test_expired_stash_plus_new_message_prepares_merged_stash_while_queued(download_dir):
+    state = autoreply.AutoReplyState()
+    held = _message("old")
+    autoreply.stash_deferred(state, "review", [held], {}, 0.0)
+    fresh = _second_message("new")
+    client = OverrunClient(fresh, state)
+    prompts = []
+
+    result = _overrun_tick(client, state, prompts, autoreply.DEFERRED_RETRY_TTL_S + 1)
+
+    assert result["spawned"] == 1
+    assert len(prompts) == 1
+    # The fresh message merged into the expired stash (rebuilt, cold), and
+    # both messages' files downloaded while that merged stash was queued.
+    assert sorted(client.seen_queued) == [("new", True, True), ("old", True, True)]
+    assert "review" not in state.deferred_by_conversation
+    # Only the fresh-message path asked for the floor; the overrun turn
+    # neither acquired nor released one.
+    assert client.acquires == ["review"]
+    assert client.releases == []
+    assert "WITHOUT the floor" in prompts[0]
+    assert str(download_dir / "old__old.pdf") in prompts[0]
+    assert str(download_dir / "new__new.pdf") in prompts[0]
+
+
+def test_cold_expired_spawn_failure_still_dead_letters(download_dir, tmp_path):
+    import json
+
+    state = autoreply.AutoReplyState()
+    held = _message("att1")
+    autoreply.stash_deferred(state, "review", [held], {}, 0.0)
+    client = OverrunClient(held, state)
+    client.inbox = InboxResponse([], [], False, [])
+    dl = tmp_path / "dl.jsonl"
+
+    def boom(cmd, env):
+        raise RuntimeError("no interpreter")
+
+    result = _overrun_tick(
+        client, state, [], autoreply.DEFERRED_RETRY_TTL_S + 1,
+        spawn=boom, dead_letter_path=str(dl),
+    )
+
+    assert result["spawned"] == 0
+    assert client.seen_queued == [("att1", True, True)]
+    assert "review" not in state.deferred_by_conversation
+    assert client.acquires == [] and client.releases == []
+    records = [json.loads(line) for line in dl.read_text().splitlines()]
+    assert [r["message"]["message_id"] for r in records] == ["m114"]
+    assert records[0]["reason"] == autoreply.DEFERRED_SPAWN_FAILED_REASON

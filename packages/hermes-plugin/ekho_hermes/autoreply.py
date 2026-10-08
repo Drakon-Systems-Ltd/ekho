@@ -673,6 +673,25 @@ def list_retryable_deferred(state: AutoReplyState, now: float) -> List[str]:
     return [conv for _, conv in sorted(alive)]
 
 
+def list_expired_deferred(
+    state: AutoReplyState, now: float, limit: Optional[int] = None
+) -> List[str]:
+    """Conversations whose stash is past the retry TTL, oldest deferral first
+    (at most ``limit``). Read-only: the stashes stay queued, so a caller can
+    prepare them (attachment downloads) while the original entries and stored
+    verdicts remain in the deferred map, then ``take_expired_deferred``."""
+    expired = sorted(
+        (
+            (stash["first_deferred_at"], conv)
+            for conv, stash in state.deferred_by_conversation.items()
+            if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S
+        ),
+    )
+    if limit is not None:
+        expired = expired[:limit]
+    return [conv for _, conv in expired]
+
+
 def take_expired_deferred(
     state: AutoReplyState, now: float, limit: Optional[int] = None
 ) -> List[tuple]:
@@ -684,16 +703,10 @@ def take_expired_deferred(
     LATE, without the floor. Taking a stash therefore means "I am delivering
     this now" — never "I am dropping this"; a caller that cannot run the turn
     must not call this (or must dead-letter what it took)."""
-    expired = sorted(
-        (
-            (stash["first_deferred_at"], conv)
-            for conv, stash in state.deferred_by_conversation.items()
-            if now - stash["first_deferred_at"] > DEFERRED_RETRY_TTL_S
-        ),
-    )
-    if limit is not None:
-        expired = expired[:limit]
-    return [(conv, state.deferred_by_conversation.pop(conv)) for _, conv in expired]
+    return [
+        (conv, state.deferred_by_conversation.pop(conv))
+        for conv in list_expired_deferred(state, now, limit)
+    ]
 
 
 def clear_deferred(state: AutoReplyState, conversation_id: str) -> None:
@@ -2175,10 +2188,18 @@ def process_inbox_once(
         if state.in_flight:
             # Busy, not free to drop: the stash stays put for the next tick.
             return 0
-        taken = take_expired_deferred(state, now, limit=1)
-        if not taken:
+        expired = list_expired_deferred(state, now, limit=1)
+        if not expired:
             return 0
-        conv, stash = taken[0]
+        conv = expired[0]
+        # Prepare (download) while the stash, its entries and stored verdicts
+        # are still queued; only then take it for delivery. Taking first meant
+        # a cold stash (no memo, e.g. rebuilt by a fresh-message merge) did its
+        # downloads after it had already left the deferred map (#114 r2).
+        local_attachments = _prepared_stash_attachments(
+            state.deferred_by_conversation[conv]
+        )
+        stash = state.deferred_by_conversation.pop(conv)
         waited_s = max(0.0, now - stash["first_deferred_at"])
         log.warning(
             "[ekho-autoreply] deferred conversation %s exceeded retry window "
@@ -2194,7 +2215,7 @@ def process_inbox_once(
             trigger_turn(
                 stash["messages"],
                 operator_trusted,
-                local_attachments=_prepared_stash_attachments(stash),
+                local_attachments=local_attachments,
                 roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
