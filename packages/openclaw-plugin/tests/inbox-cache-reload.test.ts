@@ -1,11 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getCachedInbox, recordBatch, recordVerifications, resetCachedInboxForTest } from "../src/autoreply";
+import { getCachedInbox, inboxCacheContext, recordBatch, recordVerifications, resetCachedInboxForTest } from "../src/autoreply";
 
 const agentId = "reload-cache-test-agent";
 
 afterEach(() => resetCachedInboxForTest(agentId));
 
 describe("inbox cache across module reloads (#115)", () => {
+  it("distinguishes every transport base string the SDK concatenates", () => {
+    const base = "https://relay.invalid/edge";
+    const contexts = [base, `${base}/`, `${base}?x=1`].map((url) => inboxCacheContext(url, agentId, "fleet"));
+    expect(new Set(contexts).size).toBe(3);
+    expect(inboxCacheContext(base, agentId, "fleet")).toBe(contexts[0]);
+    expect(inboxCacheContext("https://user:secret@relay.invalid/edge", agentId, "fleet")).not.toContain("secret");
+  });
   it("keeps delivered room attachments visible to another module copy after an empty poll", async () => {
     recordBatch({
       messages: [{

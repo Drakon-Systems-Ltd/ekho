@@ -347,6 +347,8 @@ const plugin = defineToolPlugin({
             build,
             count: 0,
             messages: [],
+            verification_generation: "unavailable",
+            degraded: true,
             error: `not connected: ${String(err)}`
           };
         }
@@ -377,6 +379,8 @@ const plugin = defineToolPlugin({
           // Which bundle is answering (ekho#33), without needing the journal.
           build,
           roster_fetched_at: cached.recorded_at,
+          verification_generation: cached.verification_generation,
+          degraded: cached.verification_generation !== "current",
           // When ON, the relay vouches that the console operator is this agent's
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.

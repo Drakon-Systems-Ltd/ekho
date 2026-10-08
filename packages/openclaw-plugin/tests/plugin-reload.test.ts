@@ -56,6 +56,7 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
       if (relay.stopped) relay.afterStop.push("ack");
       return {};
     }
+    async downloadAttachment() { return { bytes: Buffer.from("ok") }; }
     async acquireFloor(conv: string) {
       if (relay.stopped) relay.afterStop.push("acquire");
       return { granted: relay.floorFree(conv), holder_agent_id: "other" };
@@ -236,6 +237,22 @@ afterEach(() => {
 });
 
 describe("plugin reload in one process", () => {
+  it("registered inbox isolates transport-distinct base paths", async () => {
+    const edge = { ...defaultConfig(), relayBaseUrl: "http://relay.invalid/edge" };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false, edge);
+    a.plugin.register(hostA.api);
+    await a.conn.ensureConnected(edge as never);
+    const cache = await import("../src/autoreply");
+    cache.recordBatch({ messages: [{ message_id: "edge", conversation_id: "c", sender_agent_id: "peer", message_type: "direct", body: { text: "edge" } }] }, {}, "agent_reload", a.conn.connectedInboxContext(await a.conn.ensureConnected(edge as never)));
+    expect((await hostA.inbox()).count).toBe(1);
+    const slash = { ...edge, relayBaseUrl: "http://relay.invalid/edge/" };
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false, slash);
+    b.plugin.register(hostB.api);
+    await b.conn.ensureConnected(slash as never);
+    expect(await hostB.inbox()).toMatchObject({ count: 0, verification_generation: "unavailable" });
+  });
   it("registered inbox shares only the matching trust context and retains rejected material", async () => {
     const a = await loadPluginCopy();
     const hostA = fakeApi(false);
@@ -257,7 +274,7 @@ describe("plugin reload in one process", () => {
     expect((await hostB.inbox()).roster).toHaveLength(1);
     b.conn.getEkhoIdentity()!.pinnedOperatorKeys.changed = "different-public-key";
     const isolated = await hostB.inbox();
-    expect(isolated).toMatchObject({ count: 0, roster: [], operator_trusted: false, roster_fetched_at: null });
+    expect(isolated).toMatchObject({ count: 1, verification_generation: "stale", degraded: true });
     await vi.advanceTimersByTimeAsync(POLL_MS);
     expect((await hostB.inbox()).count).toBe(0);
     const cacheB = await import("../src/autoreply");
@@ -295,6 +312,42 @@ describe("plugin reload in one process", () => {
     const result = await hostB.inbox();
     expect(result.count).toBe(0);
     expect((await import("../src/autoreply")).getCachedInbox("agent_reload", context).peer_turns_used).toEqual({});
+  });
+
+  it("serves the producer's synced generation to both retained and new tools", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const oldContext = a.conn.connectedInboxContext(await a.conn.ensureConnected(defaultConfig() as never));
+    const oldCache = await import("../src/autoreply");
+    oldCache.recordBatch({ messages: [{ message_id: "old", conversation_id: "c", sender_agent_id: "op", sender_kind: "operator", message_type: "direct", body: { text: "old" } }] }, {}, "agent_reload", oldContext);
+    oldCache.recordVerifications({ old: { verified: true, kind: "operator", reason: null, keyId: "old" } }, [], undefined, "agent_reload", oldContext);
+
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    relay.inbox = async () => ({
+      fleet_id: "fleet_reload", operator_keys: [{ key_id: "new", public_key: "new-public-key" }],
+      messages: [{ message_id: "new", conversation_id: "room", sender_agent_id: "peer", sender_kind: "agent", message_type: "room", body: { text: "evidence" }, attachments: [{ id: "att", filename: "evidence.txt", mime: "text/plain", size_bytes: 2 }] }],
+      roster: [{ agent_id: "peer", status: "healthy" }], operator_trusted: true
+    });
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    const newer = await hostB.inbox();
+    const retained = await hostA.inbox();
+    expect(newer).toMatchObject({ count: 1, verification_generation: "current", degraded: false, operator_trusted: true });
+    expect(retained).toMatchObject({ count: 1, verification_generation: "stale", degraded: true, operator_trusted: true });
+    expect(retained.messages[0].body).toEqual({ text: "evidence" });
+    expect(retained.messages[0].signature.status).not.toBe("verified");
+    expect(retained.roster).toHaveLength(1);
+    expect(retained.messages[0].attachments).toHaveLength(1);
+    const different = { ...defaultConfig(), relayBaseUrl: "http://other.invalid" };
+    const c = await loadPluginCopy();
+    const hostC = fakeApi(false, different);
+    c.plugin.register(hostC.api);
+    await c.conn.ensureConnected(different as never);
+    expect(await hostC.inbox()).toMatchObject({ count: 0, verification_generation: "unavailable" });
   });
 
   it("a second load leaves exactly one heartbeat producer and one inbox poller (host sends no unload signal)", async () => {

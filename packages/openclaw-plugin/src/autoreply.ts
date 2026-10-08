@@ -314,17 +314,22 @@ type BatchMeta = {
   conversation_budgets: Record<string, number>;
   peer_turns_used: Record<string, number>;
 };
-type AgentInboxCache = { context: string; entries: Map<string, CachedInboxEntry>; meta: BatchMeta; rejects: Map<string, VerifyResult> };
+type AgentInboxCache = { context: string; connectionIdentity: string; verificationGeneration: string; entries: Map<string, CachedInboxEntry>; meta: BatchMeta; rejects: Map<string, VerifyResult> };
 const INBOX_CACHE_KEY = Symbol.for("ekho-adapter.inbox-cache");
-/** Only public verification material enters this digest; credentials never do. */
+/** Hash the exact base string concatenated by the SDK. The digest never exposes URL userinfo. */
 export function inboxCacheContext(relayBaseUrl: string, agentId: string, fleetId: string | undefined, identity?: EkhoIdentity): string {
-  const url = new URL(relayBaseUrl);
-  const endpoint = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  const connectionIdentity = createHash("sha256").update(JSON.stringify([relayBaseUrl, agentId, fleetId ?? "", identity ? identityPublicKey(identity) : null])).digest("hex");
   const keys = Object.entries(identity?.pinnedOperatorKeys ?? {}).sort(([a], [b]) => a.localeCompare(b));
-  return createHash("sha256").update(JSON.stringify([endpoint, agentId, fleetId ?? "", identity ? identityPublicKey(identity) : null, keys, identity?.revokedOperatorKeys ?? {}, identity?.tofuAt ?? null])).digest("hex");
+  const verificationGeneration = createHash("sha256").update(JSON.stringify([keys, identity?.revokedOperatorKeys ?? {}, identity?.tofuAt ?? null])).digest("hex");
+  return `${connectionIdentity}.${verificationGeneration}`;
+}
+function contextParts(context: string): [string, string] {
+  const dot = context.indexOf(".");
+  return dot < 0 ? [context, context] : [context.slice(0, dot), context.slice(dot + 1)];
 }
 function freshCache(context: string, rejects = new Map<string, VerifyResult>()): AgentInboxCache {
-  return { context, rejects, entries: new Map(), meta: {
+  const [connectionIdentity, verificationGeneration] = contextParts(context);
+  return { context, connectionIdentity, verificationGeneration, rejects, entries: new Map(), meta: {
     recorded_at: null, operator_trusted: false, roster: [], controls: [], conversation_history: {},
     peer_autoreply: false, peer_turn_budget: NO_PEER_TURN_LIMIT, conversation_budgets: {}, peer_turns_used: {}
   } };
@@ -337,7 +342,8 @@ function inboxCache(agentId: string, context = "", reader = false): AgentInboxCa
     g[INBOX_CACHE_KEY] = registry;
   }
   let cache = registry.byAgent.get(agentId);
-  if (cache && cache.context !== context && reader) return freshCache(context);
+  if (cache && reader && cache.connectionIdentity !== contextParts(context)[0]) return freshCache(context);
+  if (cache && reader && cache.connectionIdentity === contextParts(context)[0]) return cache;
   if (!cache || !(cache.entries instanceof Map) || !cache.meta || typeof cache.meta !== "object" || cache.context !== context) {
     const rejects = cache?.rejects instanceof Map ? cache.rejects : new Map<string, VerifyResult>();
     // Preserve only failures across trust changes; a passing verdict has no authority here.
@@ -694,6 +700,7 @@ export function recordPeerUsage(usedByConversation: Map<string, number>, agentId
 }
 
 export function getCachedInbox(agentId = "", context = ""): {
+  verification_generation: "current" | "stale" | "unavailable";
   /** Message + its own verdict, same lifetime. Prefer this over `messages`. */
   entries: CachedInboxEntry[];
   messages: InboxMessage[];
@@ -714,6 +721,7 @@ export function getCachedInbox(agentId = "", context = ""): {
   const lastBatchMeta = cache.meta;
   const entries = Array.from(lastBatch.values());
   return {
+    verification_generation: !lastBatchMeta.recorded_at ? "unavailable" : cache.verificationGeneration === contextParts(context)[1] ? "current" : "stale",
     entries,
     recorded_at: lastBatchMeta.recorded_at ?? null,
     // Kept as a positional mirror of `entries` for callers that only need the
@@ -2303,6 +2311,16 @@ export function startAutoReply(opts: {
     // Pin sync can change verification authority on this tick. Publish only
     // under the resulting context, including when the batch is empty.
     recordBatch(batch, { peerTurnBudget }, selfAgentId, cacheContext);
+    // A terminal rejection belongs to the signed material, even if a later
+    // endorsement makes this redelivery verify. Apply it to the admission map.
+    const durableRejects = inboxCache(selfAgentId, cacheContext).rejects;
+    for (const message of batch.messages) {
+      const digest = materialDigest(message);
+      if (!digest.startsWith(UNCOMPARABLE_PREFIX)) {
+        const rejected = durableRejects.get(digest);
+        if (rejected) verifications[message.message_id] = rejected;
+      }
+    }
     // #20: quoted snapshots (reply_to, room history, floor tails) are checked
     // against the SAME trust root, not trusted for carrying a signature field.
     // Without an identity or a fleet id this stays the fail-closed verifier, so
