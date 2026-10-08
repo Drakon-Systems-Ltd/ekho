@@ -332,8 +332,11 @@ const plugin = defineToolPlugin({
         // consume rows the loop is mid-processing. No ack here for the same
         // reason — the loop already acked.
         let client: EkhoAgentClient;
+        let agentId: string;
         try {
-          ({ client } = await ensureConnected(config));
+          const connection = await ensureConnected(config);
+          client = connection.client;
+          agentId = connection.credentials.agentId;
         } catch (err) {
           // Degraded, not empty: the inbox is genuinely unknown here, and the
           // error says so — but `build` is local and stays answerable.
@@ -344,7 +347,7 @@ const plugin = defineToolPlugin({
             error: `not connected: ${String(err)}`
           };
         }
-        const cached = getCachedInbox();
+        const cached = getCachedInbox(agentId);
         // Entries pair each message with ITS OWN verdict. `messages` is a
         // positional mirror (index i matches) used only for attachment resolution.
         const entries = cached.entries;
@@ -370,6 +373,7 @@ const plugin = defineToolPlugin({
           count: messages.length,
           // Which bundle is answering (ekho#33), without needing the journal.
           build,
+          roster_fetched_at: cached.recorded_at,
           // When ON, the relay vouches that the console operator is this agent's
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.
@@ -401,7 +405,8 @@ const plugin = defineToolPlugin({
             agent_id: r.agent_id,
             display_name: r.display_name,
             runtime: r.runtime,
-            status: r.status
+            status: r.status,
+            ...(r.quarantine_reason != null ? { quarantine_reason: r.quarantine_reason } : {})
           })),
           controls,
           // Recent thread per room conversation, so a manual inbox read shows the

@@ -70,6 +70,7 @@ export type RosterEntry = {
   display_name: string;
   runtime: string;
   status: string;
+  quarantine_reason?: string | null;
 };
 
 export type InboxResponse = {

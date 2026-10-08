@@ -2018,7 +2018,7 @@ export class EkhoDb {
     // the synthetic operator identity and self, capped so the inbox stays small.
     const roster = fleetId
       ? (this.db.prepare(
-          `SELECT id, display_name, runtime, status
+          `SELECT id, display_name, runtime, status, quarantine_reason
            FROM agents
            WHERE fleet_id = ? AND runtime != 'operator' AND id != ?
            ORDER BY last_seen_at DESC NULLS LAST, created_at DESC
@@ -2030,6 +2030,7 @@ export class EkhoDb {
             display_name: row.display_name,
             runtime: row.runtime,
             status: row.status,
+            quarantine_reason: row.quarantine_reason ?? null,
             identity_public_key: ik?.public_key ?? null,
             key_id: ik?.key_id ?? null,
             endorsed_by_key_id: ik?.endorsed_by_key_id ?? null,

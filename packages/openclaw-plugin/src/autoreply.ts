@@ -90,6 +90,7 @@ interface RosterEntry {
   display_name?: string;
   runtime?: string;
   status?: string;
+  quarantine_reason?: string | null;
 }
 
 interface ControlEntry {
@@ -283,7 +284,7 @@ const LAST_BATCH_CAP = 25; // ring exposed to ekho_inbox (Part B1)
 export const EKHO_ORIGIN_STAMP = "openclaw-agent";
 
 /**
- * Module-level cache of the most recent delivered batch, keyed by message_id.
+ * Process-wide cache of delivered batches, keyed by agent then message_id.
  * The background loop is the single consumer of the inbox; `ekho_inbox` reads
  * this cache instead of calling getInbox() again, so a manual tool call during
  * a turn can never double-consume rows the loop is mid-processing (Part B1).
@@ -298,8 +299,8 @@ export const EKHO_ORIGIN_STAMP = "openclaw-agent";
  * the whole point: do not reintroduce a side map.
  */
 type CachedInboxEntry = { message: InboxMessage; verification: VerifyResult | null };
-const lastBatch = new Map<string, CachedInboxEntry>();
-let lastBatchMeta: {
+type BatchMeta = {
+  recorded_at: string | null;
   operator_trusted: boolean;
   roster: RosterEntry[];
   controls: ControlEntry[];
@@ -311,16 +312,32 @@ let lastBatchMeta: {
   peer_turn_budget: number;
   conversation_budgets: Record<string, number>;
   peer_turns_used: Record<string, number>;
-} = {
-  operator_trusted: false,
-  roster: [],
-  controls: [],
-  conversation_history: {},
-  peer_autoreply: false,
-  peer_turn_budget: NO_PEER_TURN_LIMIT,
-  conversation_budgets: {},
-  peer_turns_used: {}
 };
+type AgentInboxCache = { entries: Map<string, CachedInboxEntry>; meta: BatchMeta };
+const INBOX_CACHE_KEY = Symbol.for("ekho-adapter.inbox-cache");
+function inboxCache(agentId: string): AgentInboxCache {
+  const g = globalThis as typeof globalThis & { [INBOX_CACHE_KEY]?: { byAgent: Map<string, AgentInboxCache> } };
+  let registry = g[INBOX_CACHE_KEY];
+  if (!registry || typeof registry !== "object" || !(registry.byAgent instanceof Map)) {
+    registry = { byAgent: new Map() };
+    g[INBOX_CACHE_KEY] = registry;
+  }
+  let cache = registry.byAgent.get(agentId);
+  if (!cache || !(cache.entries instanceof Map) || !cache.meta || typeof cache.meta !== "object") {
+    cache = { entries: new Map(), meta: {
+      recorded_at: null, operator_trusted: false, roster: [], controls: [], conversation_history: {},
+      peer_autoreply: false, peer_turn_budget: NO_PEER_TURN_LIMIT, conversation_budgets: {}, peer_turns_used: {}
+    } };
+    registry.byAgent.set(agentId, cache);
+  }
+  return cache;
+}
+
+/** Test seam: clear one agent's process-wide inbox without affecting other agents. */
+export function resetCachedInboxForTest(agentId = ""): void {
+  const g = globalThis as typeof globalThis & { [INBOX_CACHE_KEY]?: { byAgent?: Map<string, AgentInboxCache> } };
+  g[INBOX_CACHE_KEY]?.byAgent?.delete(agentId);
+}
 
 /**
  * Is a redelivery byte-for-byte the SAME message? Governs whether a stored
@@ -499,12 +516,16 @@ function sameSignedMaterial(a: InboxMessage, b: InboxMessage): boolean {
   return digest === materialDigest(b);
 }
 
-export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number } = {}) {
+export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number } = {}, agentId = "") {
+  const cache = inboxCache(agentId);
+  const lastBatch = cache.entries;
+  const lastBatchMeta = cache.meta;
   const relayPeer = batch.peer_autoreply;
   const localBudget = normalizeTurnBudget(local.peerTurnBudget);
   // Same precedence the latch uses, so ekho_inbox reports the budget in force.
   const effBudget = effectivePeerSettings(batch, { peerEnabled: false, peerTurnBudget: localBudget }).peerTurnBudget;
-  lastBatchMeta = {
+  cache.meta = {
+    recorded_at: new Date().toISOString(),
     operator_trusted: Boolean(batch.operator_trusted),
     roster: Array.isArray(batch.roster) ? batch.roster : [],
     controls: Array.isArray(batch.controls) ? batch.controls : [],
@@ -571,8 +592,10 @@ export function recordBatch(batch: InboxBatch, local: { peerTurnBudget?: number 
 export function recordVerifications(
   verifications: Record<string, VerifyResult | null>,
   rejects: Array<{ message: InboxMessage; verdict: VerifyResult }> = [],
-  messages?: InboxMessage[]
+  messages?: InboxMessage[],
+  agentId = ""
 ): void {
+  const lastBatch = inboxCache(agentId).entries;
   const bound = messages ? batchVerdictsByHeldKey(messages, verifications) : null;
   for (const [messageId, verdict] of Object.entries(verifications)) {
     // NEVER write a null over a verdict we already hold. verifyBatch
@@ -638,13 +661,13 @@ export function createTurnOutcomeReporter(
   };
 }
 
-export function recordPeerUsage(usedByConversation: Map<string, number>): void {
+export function recordPeerUsage(usedByConversation: Map<string, number>, agentId = ""): void {
   const snapshot: Record<string, number> = {};
   for (const [conv, used] of usedByConversation) snapshot[conv] = used;
-  lastBatchMeta.peer_turns_used = snapshot;
+  inboxCache(agentId).meta.peer_turns_used = snapshot;
 }
 
-export function getCachedInbox(): {
+export function getCachedInbox(agentId = ""): {
   /** Message + its own verdict, same lifetime. Prefer this over `messages`. */
   entries: CachedInboxEntry[];
   messages: InboxMessage[];
@@ -658,10 +681,15 @@ export function getCachedInbox(): {
   /** Project-mode room overrides (positive = cap, 0 = that room has no limit). */
   conversation_budgets: Record<string, number>;
   peer_turns_used: Record<string, number>;
+  recorded_at: string | null;
 } {
+  const cache = inboxCache(agentId);
+  const lastBatch = cache.entries;
+  const lastBatchMeta = cache.meta;
   const entries = Array.from(lastBatch.values());
   return {
     entries,
+    recorded_at: lastBatchMeta.recorded_at ?? null,
     // Kept as a positional mirror of `entries` for callers that only need the
     // message (attachment resolution). Index i of one IS index i of the other.
     messages: entries.map((e) => e.message),
@@ -2222,7 +2250,7 @@ export function startAutoReply(opts: {
     batch = withLocalRoomCap(batch, peerTurnBudget);
 
     // Expose the freshly delivered batch to ekho_inbox (Part B1).
-    recordBatch(batch, { peerTurnBudget });
+    recordBatch(batch, { peerTurnBudget }, selfAgentId);
 
     // Agent-side verification: maintain the trust root from the inbox and compute
     // a per-message verdict. Dormant (empty verdicts) until the agent has pinned
@@ -2276,7 +2304,7 @@ export function startAutoReply(opts: {
     // never enter `verifications`. Deliberately outside the identity gate: when
     // bootstrap failed there are no verdicts but there ARE withheld messages,
     // and those are exactly the ones that must not read as ordinary (ekho#20).
-    recordVerifications(verifications, rejects, batch.messages);
+    recordVerifications(verifications, rejects, batch.messages, selfAgentId);
     // The wording is deliberate. This used to end "dead-lettered, not acted on",
     // which was FALSE and is exactly the string an incident responder greps for
     // under time pressure: the message wakes no turn, but it stays in the
@@ -2456,7 +2484,7 @@ export function startAutoReply(opts: {
       peerBudgetRemaining[m.conversation_id] = Math.max(0, convBudget - used);
     }
     // Expose the post-consumption per-conversation counts to ekho_inbox.
-    recordPeerUsage(state.peerTurnsByConversation);
+    recordPeerUsage(state.peerTurnsByConversation, selfAgentId);
 
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m);
