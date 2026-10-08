@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import crypto from "node:crypto";
 import { constantTimeEqual, StaticBearerAuthenticator, TokenBucket, bearerFromHeader } from "../src/auth";
 import { startRelay, connectAgent, startServer, rpc, INITIALIZE, TEST_BEARER, type LiveRelay, type RunningServer } from "./helpers";
 
@@ -52,6 +53,22 @@ describe("bearer auth on the MCP path", () => {
     expect(bearerFromHeader("Bearer   tok ")).toBe("tok");
     expect(bearerFromHeader("Token tok")).toBeNull();
     expect(() => new StaticBearerAuthenticator("")).toThrow();
+  });
+
+  it("every presented token goes through crypto.timingSafeEqual, right or wrong (a plain === would pass every other test here)", () => {
+    const spy = vi.spyOn(crypto, "timingSafeEqual");
+    try {
+      const auth = new StaticBearerAuthenticator(TEST_BEARER);
+      expect(auth.authenticate(`Bearer ${TEST_BEARER}`).ok).toBe(true);
+      expect(auth.authenticate(`Bearer ${TEST_BEARER}x`).ok).toBe(false);
+      expect(auth.authenticate("Bearer short").ok).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(3);
+      // No token at all is rejected before any compare: nothing to time.
+      expect(auth.authenticate(undefined).ok).toBe(false);
+      expect(spy).toHaveBeenCalledTimes(3);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
