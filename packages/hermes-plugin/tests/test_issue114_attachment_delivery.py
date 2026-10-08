@@ -3,6 +3,7 @@
 import pytest
 
 from ekho import InboxMessage, InboxResponse
+from ekho.verify import VerificationResult
 from ekho_hermes import attachments, autoreply
 
 
@@ -78,7 +79,7 @@ def test_acked_stash_downloads_when_delivered(download_dir, overrun):
 
     first = _tick(client, state, prompts, 0.0)
     assert first["spawned"] == 0
-    assert client.acks and not client.downloads
+    assert client.acks and client.downloads == ["att1"]
     assert "review" in state.deferred_by_conversation
 
     client.granted = True
@@ -156,3 +157,130 @@ def test_immediate_floor_still_downloads(download_dir):
     assert client.downloads == ["att1"]
     assert f"saved locally at: {download_dir / 'att1__att1.pdf'}" in prompts[0]
     assert "call the ekho_inbox tool" not in prompts[0]
+
+
+def test_retry_prepares_before_acquire_and_spawns_without_network_after_grant(download_dir):
+    events = []
+    client = Client(_message("one", "two"), granted=False)
+    state = autoreply.AutoReplyState()
+    prompts = []
+    autoreply.stash_deferred(state, "review", client.inbox.messages, {}, 0.0)
+    client.inbox = InboxResponse([], [], False, [])
+    original_download = client.download_attachment
+    original_acquire = client.acquire_floor
+
+    def download(attachment_id):
+        events.append(("download", attachment_id))
+        return original_download(attachment_id)
+
+    def acquire(conversation_id, ttl_seconds=None):
+        events.append(("acquire", conversation_id))
+        return original_acquire(conversation_id, ttl_seconds)
+
+    client.download_attachment = download
+    client.acquire_floor = acquire
+    client.granted = True
+    autoreply.process_inbox_once(
+        client, "self", state,
+        spawn=lambda cmd, env: (events.append(("spawn", None)), prompts.append(" ".join(cmd))),
+        now=5.0, peer_enabled=True, peer_turn_budget=25,
+    )
+    assert events == [
+        ("download", "one"), ("download", "two"),
+        ("acquire", "review"), ("spawn", None),
+    ]
+    assert "review" not in state.deferred_by_conversation
+
+
+def test_slow_retry_download_takes_floor_after_elapsed_ttl(download_dir):
+    clock = [0.0]
+    events = []
+    client = Client(_message("slow"), granted=False)
+    state = autoreply.AutoReplyState()
+    prompts = []
+    autoreply.stash_deferred(state, "review", client.inbox.messages, {}, clock[0])
+    client.inbox = InboxResponse([], [], False, [])
+
+    def download(attachment_id):
+        clock[0] += autoreply.FLOOR_TTL_SECONDS + 1
+        events.append(("download", clock[0]))
+        return b"data"
+
+    def acquire(conversation_id, ttl_seconds=None):
+        events.append(("acquire", clock[0]))
+        return {"granted": True, "conversation_tail": []}
+
+    client.download_attachment = download
+    client.acquire_floor = acquire
+    result = autoreply.process_inbox_once(
+        client, "self", state,
+        spawn=lambda cmd, env: (events.append(("spawn", clock[0])), prompts.append(" ".join(cmd))),
+        now=clock[0], peer_enabled=True, peer_turn_budget=25,
+    )
+    assert result["spawned"] == 1
+    assert events == [
+        ("download", autoreply.FLOOR_TTL_SECONDS + 1),
+        ("acquire", autoreply.FLOOR_TTL_SECONDS + 1),
+        ("spawn", autoreply.FLOOR_TTL_SECONDS + 1),
+    ]
+    assert client.releases == ["review"]
+    assert "held back" in prompts[0].lower()
+
+
+def test_retry_memoizes_preparation_while_floor_held(download_dir):
+    client = Client(_message("once"), granted=False)
+    state = autoreply.AutoReplyState()
+    prompts = []
+    _tick(client, state, prompts, 0.0)
+    _tick(client, state, prompts, 1.0)
+    _tick(client, state, prompts, 2.0)
+    assert client.downloads == ["once"]
+    assert state.deferred_by_conversation["review"]["attachments_prepared"] is True
+    client.granted = True
+    assert _tick(client, state, prompts, 3.0)["spawned"] == 1
+    assert client.downloads == ["once"]
+    assert "saved locally at:" in prompts[0]
+
+
+def test_retry_failed_download_keeps_stash_and_verdict(download_dir):
+    client = Client(_message("bad"), granted=False, failed={"bad"})
+    client.inbox.messages[0].sender_kind = "operator"
+    state = autoreply.AutoReplyState()
+    verdict = VerificationResult(True, "peer", None, "trusted-key")
+    autoreply.stash_deferred(state, "review", [client.inbox.messages[0]], {"m114": verdict}, 0.0)
+    client.inbox = InboxResponse([], [], False, [])
+    prompts = []
+    assert _tick(client, state, prompts, 1.0)["spawned"] == 0
+    stash = state.deferred_by_conversation["review"]
+    assert autoreply.stash_verdicts(stash)[autoreply.held_key(stash["messages"][0])] is verdict
+    assert stash["attachments_prepared"] is True
+    assert client.downloads == ["bad"]
+    client.granted = True
+    assert _tick(client, state, prompts, 2.0)["spawned"] == 1
+    assert client.downloads == ["bad"]
+    assert "could not be downloaded by the Ekho daemon and is NOT available to this turn" in prompts[0]
+    assert "CRYPTOGRAPHICALLY VERIFIED" in prompts[0]
+    assert client.releases == ["review"]
+
+
+def test_malformed_attachment_ids_do_not_abort_valid_sibling(download_dir):
+    message = _message(["bad"], {"bad": "id"}, "good")
+    message.attachments[0].filename = ""
+    message.attachments[1].filename = ""
+    client = Client(message, granted=True)
+    prompts = []
+    assert _tick(client, autoreply.AutoReplyState(), prompts, 0.0)["spawned"] == 1
+    assert client.downloads == ["good"]
+    assert prompts[0].count("file (application/pdf, 4B) — could not be downloaded") == 2
+    assert f"good.pdf (application/pdf, 4B) — saved locally at: {download_dir / 'good__good.pdf'}" in prompts[0]
+
+
+def test_malformed_prepared_ids_are_ignored_when_matching_paths():
+    message = _message(["bad"], {"bad": "id"}, "good")
+    note = autoreply._attachments_note(message, [
+        {"id": ["bad"], "local_path": "/wrong-list"},
+        {"id": {"bad": "id"}, "local_path": "/wrong-dict"},
+        {"id": "good", "local_path": "/good"},
+    ])
+    assert note.count("could not be downloaded") == 2
+    assert "good.pdf (application/pdf, 4B) — saved locally at: /good" in note

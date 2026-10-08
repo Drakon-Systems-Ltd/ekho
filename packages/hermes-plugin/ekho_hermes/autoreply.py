@@ -1178,17 +1178,23 @@ def _attachments_note(msg: Any, local_for_msg: Optional[Sequence[Any]]) -> str:
     if not metas:
         return ""
     paths = {
-        _att_field(a, "id"): _att_field(a, "local_path")
+        attachment_id: _att_field(a, "local_path")
         for a in local_for_msg or []
-        if _att_field(a, "local_path")
+        if isinstance(attachment_id := _att_field(a, "id"), str)
+        and attachment_id
+        and _att_field(a, "local_path")
     }
     parts: List[str] = []
     have_paths = False
     for a in metas:
-        name = _inline_safe(_att_field(a, "filename") or _att_field(a, "id") or "file", 120)
+        attachment_id = _att_field(a, "id")
+        valid_id = isinstance(attachment_id, str) and bool(attachment_id)
+        name = _inline_safe(
+            _att_field(a, "filename") or (attachment_id if valid_id else "file"), 120
+        )
         mime = _inline_safe(_att_field(a, "mime"), 120)
         size = _att_field(a, "size_bytes", 0)
-        path = paths.get(_att_field(a, "id"))
+        path = paths.get(attachment_id) if valid_id else None
         if path:
             parts.append(f"{name} ({mime}, {size}B) — saved locally at: {path}")
             have_paths = True
@@ -2061,6 +2067,15 @@ def process_inbox_once(
             log.debug("[ekho-autoreply] attachment pre-download failed: %s", exc)
             return None
 
+    def _prepared_stash_attachments(
+        stash: Dict[str, Any],
+    ) -> Optional[List[List[Dict[str, Any]]]]:
+        """Prepare once while waiting for a floor, including failed attempts."""
+        if not stash.get("attachments_prepared", False):
+            stash["local_attachments"] = _predownload(stash["messages"])
+            stash["attachments_prepared"] = True
+        return stash["local_attachments"]
+
     def _retry_deferred_turn() -> int:
         """Deferred-retry: a conversation deferred to a floor holder is retried
         on later ticks — its messages were consumed + acked, so the stash is
@@ -2073,6 +2088,10 @@ def process_inbox_once(
         if not callable(acquire):
             return 0
         for conv in list_retryable_deferred(state, now):
+            stash = state.deferred_by_conversation.get(conv)
+            if not stash:
+                continue
+            local_attachments = _prepared_stash_attachments(stash)
             try:
                 res = acquire(conv, FLOOR_TTL_SECONDS) or {}
             except Exception as exc:  # noqa: BLE001 — keep the stash, retry later
@@ -2080,11 +2099,7 @@ def process_inbox_once(
                 continue
             if not bool(res.get("granted")):
                 continue  # still held — keep waiting
-            stash = state.deferred_by_conversation.get(conv)
             clear_deferred(state, conv)
-            if not stash:
-                _release_floor(conv)
-                continue
             log.info(
                 "[ekho-autoreply] deferred conversation %s floor is free — "
                 "running the held-back turn (%d msg(s))", conv, len(stash["messages"]),
@@ -2099,7 +2114,7 @@ def process_inbox_once(
                 trigger_turn(
                     stash["messages"],
                     operator_trusted,
-                    local_attachments=_predownload(stash["messages"]),
+                    local_attachments=local_attachments,
                     roster=getattr(inbox, "roster", None),
                     spawn=spawn,
                     log=log,
@@ -2179,7 +2194,7 @@ def process_inbox_once(
             trigger_turn(
                 stash["messages"],
                 operator_trusted,
-                local_attachments=_predownload(stash["messages"]),
+                local_attachments=_prepared_stash_attachments(stash),
                 roster=getattr(inbox, "roster", None),
                 spawn=spawn,
                 log=log,
