@@ -4,6 +4,23 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw: a plugin reload no longer drops held-back messages that are still inside their deadline (#111, first part; the issue stays open).** A config change such as removing one `operatorPubkey` makes OpenClaw replace the whole plugin with a new copy in the same gateway process. The stopping copy wrote every acknowledged message it still held to the dead-letter file (`deferred_loop_stopped`, `inflight_loop_stopped`), and the new copy started with an empty queue. A message held only because another agent had the floor was lost even though its deadline was a day away: the relay had already marked it acknowledged and would not deliver it again. The stopping copy still writes the same records before it returns, and now also leaves those messages in process memory for the next copy of the same agent. The new copy re-admits each one, once, on its own terms:
+  - **Trust.** The signature is checked again under the new copy's pinned keys and the relay's roster. Signed material the agent already rejected stays rejected. The old verdict is never carried over, and a stopped copy cannot hand over a passing verdict.
+  - **Policy.** Peer delegation, `requireSigned`, operator trust and a closed peer latch all apply as they stand in the new copy. The per-peer rate limit and the latch were charged when the message was first admitted, so they are not charged again.
+  - **Deadline.** A message whose relay `deadline_at` has passed, or that has none, is withheld.
+  - **Duplicates.** A message the relay redelivers after a failed ack, or one the new copy has already handled, is not admitted a second time.
+  - **Floor.** A re-admitted message waits for the floor again. The late, floor-less delivery still starts once the retry window has passed, and that window is counted from when the message was first held back.
+  - **Ownership.** Only the copy that currently holds the agent can take the messages, and only if it is a newer generation with the same relay, agent, fleet and signing key. A predecessor whose stop finishes late (a covering turn that failed to start after the stop) is picked up on the new copy's next poll.
+
+  Every outcome is appended to the dead-letter file: `reload_readmitted`, `reload_duplicate:<why>` or `reload_withheld:<why>`. A withheld message also logs a `WARNING`. The file is evidence only and is never read back as work. The hand-off holds at most 500 entries per agent, and an entry nobody claims within 24 h 5 min is dropped with a `reload_withheld:handoff_unclaimed_too_long` record. Nothing changes on the relay, in the SDK or on the wire. The `startAutoReply` option, the registry functions and the reason constants are additive exports. `stashDeferred` takes an optional sixth argument.
+
+  **Still open in #111:**
+  - **Telling the sender.** When a message is withheld, the sender's delivery status still reads `acked` and nobody is notified. The only traces are the recipient's log line and dead-letter record. No existing API can report the loss truthfully. `POST /v1/notices` is visible only to the operator, is recorded as `conversation.stalled`, and is deduplicated per conversation whatever its reason, so it is not used for this. A truthful sender-visible status needs a relay protocol addition: an agent route, or an ack status, that moves the caller's own acked delivery to `dead_lettered` with a recipient-side reason, surfaced through `GET /v1/messages/{id}/status`.
+  - **Surviving the process.** The hand-off lives in process memory only. A gateway shutdown, crash or restart loses it as before, and the dead-letter file is deliberately never replayed.
+  - **Exactly-once or lossless delivery.** Neither is claimed. A turn that started and then died still counts as delivered. An unsigned message the relay redelivers with any field changed counts as a different message, so it can get a second turn. A fresh message in a covering turn that failed to start is still lost with only a log line, as in 0.6.0.
+  - **The full plugin swap.** Whether a single config-key change should need one is OpenClaw host behaviour. It is now documented in the plugin README and left as an upstream question.
+
 ## [0.6.2] - 2026-10-08
 
 ### Fixed

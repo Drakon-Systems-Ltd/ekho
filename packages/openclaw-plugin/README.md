@@ -293,6 +293,90 @@ When a limit is set it caps *chatter*, not *work*, so real handoffs never silent
   feed — so the operator knows a conversation is waiting on them. It re-arms once
   the operator re-engages.
 
+### Reloads and held-back messages
+
+The auto-reply loop acknowledges each inbox batch to the relay before it runs a
+turn. A message that has to wait, because another agent holds the conversation's
+floor, is therefore already acknowledged: the relay will not deliver it again.
+
+When the plugin stops (gateway shutdown, `openclaw plugins reload|update`, or a
+plugin config change), every acknowledged message the loop still holds is
+written to `.ekho-dead-letter.jsonl` in the state directory before the stop
+returns. The reason is `deferred_loop_stopped` for a message held for the floor
+and `inflight_loop_stopped` for one caught between its ack and its turn. This
+has not changed.
+
+Changing the plugin config, even removing a single key, makes OpenClaw replace
+the whole plugin with a new copy in the same gateway process. That is how
+OpenClaw handles it (see the comments at `src/index.ts` about `gateway_stop` and
+`onDispose`). It has not been checked against OpenClaw's own source here. Since
+the unreleased change for #111, a stopping copy also leaves those messages in
+memory for the next copy of the same agent in the **same process**. The new copy
+re-admits each one on its own terms:
+
+- It re-checks the signature under its **current** trust root (the pinned
+  operator keys and the relay's roster). Signed material this agent already
+  rejected stays rejected. The old copy's verdict is never reused.
+- It applies its **current** policy: peer delegation on or off,
+  `requireSigned`, operator trust, and a peer latch that is closed in the new
+  copy. The old admission already charged the per-peer rate limit and the
+  latch, so they are not charged again.
+- A message whose relay `deadline_at` has passed, or that has none, is not
+  re-admitted.
+- A message the new copy already received another way is not admitted a second
+  time. This covers the relay redelivering it after a failed ack, and a message
+  already handled.
+- Re-admitted messages go into the held-back queue. They wait for the floor
+  again, and are delivered late without the floor once the retry window has
+  passed. That window is counted from when the message was **first** held back,
+  not from the reload.
+- Only the copy that currently holds the agent can take them, and only if it is
+  a newer generation with the same relay, agent, fleet and signing key.
+  Messages taken by one copy cannot be taken again.
+
+Each outcome is appended to the dead-letter file next to the stop's own record:
+
+| Reason | Meaning |
+|---|---|
+| `reload_readmitted` | Re-admitted; the message waits for the floor like any held-back message. |
+| `reload_duplicate:redelivered` / `reload_duplicate:already_seen` | The new copy already has it another way; nothing was lost. |
+| `reload_withheld:<why>` | Not re-admitted: it gets no turn. `<why>` is `expired`, `no_deadline`, `verification:<reason>`, `unsigned-require-signed`, `unverifiable-require-signed`, `not_admissible:<reason>`, `peer_latch_closed`, `malformed`, `handoff_overflow` or `handoff_unclaimed_too_long`. |
+
+The dead-letter file is evidence only. Nothing reads it back as work, and
+editing it re-admits nothing.
+
+What this does **not** do:
+
+- **Nobody is told about a withheld message.** The sender's
+  `GET /v1/messages/{id}/status` still reports `acked`, and no message, notice
+  or console event is sent. The only traces are the `WARNING` log line and the
+  dead-letter record on the recipient's box. The relay has no API that lets the
+  recipient mark an acknowledged delivery as lost. `POST /v1/notices` is not
+  used: it is visible only to the operator, it is recorded as
+  `conversation.stalled`, and the relay deduplicates it per conversation
+  whatever its reason. Telling the sender needs a relay protocol addition
+  (tracked in #111).
+- **Nothing survives the process.** A gateway shutdown, crash or restart loses
+  the in-memory hand-off, exactly as before. The dead-letter record is all that
+  remains. When no new copy of the agent appears in the process (the plugin is
+  disabled, or reconnects to a different relay, fleet or key), at most 500
+  entries per agent are held. An entry nobody claims within 24 h 5 min is
+  dropped with a `reload_withheld:handoff_unclaimed_too_long` record, written
+  when the next copy for that agent looks.
+- **No exactly-once or lossless delivery.** Messages acknowledged before the
+  turn can still be lost to a turn that started and then died, to a failed
+  dead-letter write, or to the process exiting. When the relay redelivers an
+  **unsigned** message and changes any field (`metadata` or attachment details,
+  for example), the redelivered copy counts as a different message, so it can
+  get a second turn. A verified signed message cannot: its signature nonce is
+  burned.
+- **A fresh message in a covering turn that failed to start** is still lost
+  with only a log line, as in 0.6.0, and is not handed off. Only the held-back
+  messages that turn was carrying are.
+
+Avoid changing the plugin config from inside a live agent turn, since the swap
+can also disrupt that turn's own reply. Use an idle terminal instead.
+
 ### Restrictive tool profiles
 
 If the agent uses a restrictive `tools.profile` (e.g. `"coding"`), that profile is a ceiling — it strips messaging/plugin tools like `ekho_send`, `ekho_open_room` and `ekho_inbox` before any per-agent allow list is applied, so they won't appear in the session. Re-admit them with `tools.alsoAllow` (which *widens* the profile, unlike `tools.allow`, which replaces it):
