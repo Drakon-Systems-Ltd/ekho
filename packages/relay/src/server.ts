@@ -64,7 +64,7 @@ async function buildServer() {
   registerHealthRoutes(app);
   app.get("/", async () => ({
     service: "ekho-relay",
-    version: "0.6.1",
+    version: "0.6.2",
     tier: license.tier,
     setup_required: !db.findFleetByName("default"),
     docs: {

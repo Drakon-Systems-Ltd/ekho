@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.6.1` — the Hermes plugin's shadow check now asks Hermes which copy of the plugin it loads, covers `HERMES_HOME` and every profile, and reports uncertainty instead of a false PASS, and the relay's fastify, fast-uri and brace-expansion dependencies move past published advisories. No SDK or OpenClaw plugin behaviour changes; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.6.2` — the OpenClaw plugin's `ekho_inbox` keeps roster and room attachments current across plugin reloads, and the Hermes plugin hands attachments to the agent on held-back and overrun turns. The relay's inbox roster also reports each agent's quarantine category (additive `quarantine_reason`; upgrade the relay to see it in the OpenClaw inbox). `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -370,7 +370,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packa
 
 ## Project Status
 
-Ekho `v0.6.1` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.6.2` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 
