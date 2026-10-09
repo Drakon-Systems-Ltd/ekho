@@ -27,7 +27,9 @@ const relay = vi.hoisted(() => ({
   heldFailures: [] as Array<() => void>,
   notices: [] as unknown[],
   // While set, every ack waits on it: a stop lands between ack and stash.
-  ackGate: null as null | Promise<void>
+  ackGate: null as null | Promise<void>,
+  // The next N acks throw, as a relay ack that never lands would.
+  failAcks: 0
 }));
 
 vi.mock("node:child_process", async () => {
@@ -69,6 +71,10 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
     async ackMessages() {
       if (relay.stopped) relay.afterStop.push("ack");
       if (relay.ackGate) await relay.ackGate;
+      if (relay.failAcks > 0) {
+        relay.failAcks--;
+        throw new Error("synthetic ack failure");
+      }
       return {};
     }
     async downloadAttachment() { return { bytes: Buffer.from("ok") }; }
@@ -241,6 +247,7 @@ beforeEach(() => {
   relay.heldFailures.length = 0;
   relay.notices.length = 0;
   relay.ackGate = null;
+  relay.failAcks = 0;
   // LEGACY_EKHO_DIR is read from HOME at import: keep every copy off the real home.
   vi.stubEnv("HOME", mkScratch("home"));
   vi.stubEnv("EKHO_AUTOREPLY_DISABLE", "");
@@ -1407,10 +1414,14 @@ describe("reload hand-off of held work (#111)", () => {
       expect(records()).toEqual([]); // A's covering turn still owns the stash
 
       // A's ack failed, so the relay redelivers m1 to B, which serves it.
+      // B's ack fails too: B still serves it, and the relay will redeliver.
       relay.floorFree = () => true;
       serve([{ messages: [structuredClone(m1)], fleet_id: FLEET, peer_autoreply: true }], { messages: [], fleet_id: FLEET });
       const b = await startCopy(cfg);
+      relay.failAcks = 1;
       await poll(2);
+      expect(relay.failAcks).toBe(0);
+      expect(warned(b.host)).toMatch(/ack failed/);
       expect(deliveredCount("held text m1")).toBe(2); // A's undecided covering prompt, and B's turn
       b.host.fire("gateway_stop", { reason: "plugin replacement" });
       expect(records()).toEqual([]); // B served it: nothing left to hand on
@@ -1420,8 +1431,11 @@ describe("reload hand-off of held work (#111)", () => {
       await poll();
       relay.heldFailures.shift()!();
       await vi.advanceTimersByTimeAsync(0);
+      // C's next poll carries the relay's redelivery of m1 (B's ack failed)
+      // in the same tick that takes A's late copy: one decision for both.
+      serve([{ messages: [structuredClone(m1)], fleet_id: FLEET, peer_autoreply: true }], { messages: [], fleet_id: FLEET });
       await poll(3);
-      expect(deliveredCount("held text m1")).toBe(2);
+      expect(deliveredCount("held text m1")).toBe(2); // no turn from C, by either route
       expect(deliveredCount("held text p1")).toBe(2); // A's undecided prompt, then C's turn
       expect(records()).toEqual([
         ["p1", "deferred_loop_stopped"],
@@ -1432,6 +1446,67 @@ describe("reload hand-off of held work (#111)", () => {
       expect(c.conn.runtimeGeneration()).toBeGreaterThan(b.conn.runtimeGeneration());
       expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
     });
+  }
+
+  for (const [name, signed] of lateFlushKinds) {
+    for (const first of ["A", "B"] as const) {
+      it(`an old producer's late flush cannot cancel a newer producer's unserved transfer of the same message: three generations, ${name}, ${first}'s deposit first`, async () => {
+        const op = await operatorKey(7);
+        const cfg = signed ? { ...defaultConfig(), operatorPubkey: op.pub } : defaultConfig();
+        const m1 = signed ? await signedOperator("m1", op, { text: "held text m1" }) : heldPeer("m1");
+        const nudge = signed ? await signedOperator("op1", op, { text: "operator nudge" }) : operatorNudge();
+        serve(
+          [
+            { messages: [m1], fleet_id: FLEET, peer_autoreply: true },
+            { messages: [nudge], fleet_id: FLEET, operator_trusted: true, peer_autoreply: true }
+          ],
+          { messages: [], fleet_id: FLEET }
+        );
+        const a = await startCopy(cfg);
+        await poll(); // m1 deferred and stashed
+        relay.failNextSpawns = 1;
+        await poll(); // the nudge's turn covers the stash; its spawn is undecided
+        a.host.fire("gateway_stop", { reason: "plugin replacement" });
+        expect(records()).toEqual([]); // A's covering turn still owns the stash
+
+        // A's ack failed, so the relay redelivers m1 to B. The floor is still
+        // held: B acks it and stashes it, and no turn receives it.
+        serve([{ messages: [structuredClone(m1)], fleet_id: FLEET, peer_autoreply: true }], { messages: [], fleet_id: FLEET });
+        const b = await startCopy(cfg);
+        await poll(2);
+        expect(deliveredCount("held text m1")).toBe(1); // only A's undecided covering prompt
+        expect(records()).toEqual([]);
+
+        // Between two of B's polls, A's covering spawn fails (A's late flush)
+        // and B is stopped (B's own deposit), in either order.
+        const failA = async () => {
+          relay.heldFailures.shift()!();
+          await vi.advanceTimersByTimeAsync(0);
+        };
+        const stopB = () => b.host.fire("gateway_stop", { reason: "plugin replacement" });
+        if (first === "A") {
+          await failA();
+          stopB();
+        } else {
+          stopB();
+          await failA();
+        }
+        expect(records()).toEqual([
+          ["m1", "deferred_loop_stopped"],
+          ["m1", "deferred_loop_stopped"]
+        ]);
+        expect((await registry()).reloadHandoffCount("agent_reload")).toBe(2);
+
+        // C takes both copies in one tick and delivers m1 once the floor frees.
+        relay.floorFree = () => true;
+        const c = await startCopy(cfg);
+        await poll(3);
+        expect(deliveredCount("held text m1")).toBe(2); // A's undecided prompt, then C's one turn
+        expect(records().filter(([, r]) => String(r).startsWith("reload_"))).toEqual([["m1", "reload_readmitted"]]);
+        expect(c.conn.runtimeGeneration()).toBeGreaterThan(b.conn.runtimeGeneration());
+        expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
+      });
+    }
   }
 
   it("messages acked in flight never inherit an overdue stash's clock: nothing in that conversation goes out without a floor attempt", async () => {

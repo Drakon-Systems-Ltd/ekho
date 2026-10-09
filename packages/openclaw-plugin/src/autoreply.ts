@@ -2459,12 +2459,15 @@ export function startAutoReply(opts: {
   // late flush (its in-flight tick settling after stop) is picked up too.
   // Synchronous: nothing here awaits, so a stop() cannot land half-way.
   //
-  // One message, one decision. A candidate the relay ALSO redelivered in this
-  // batch (its ack failed) is decided HERE, for both copies: whatever the
-  // outcome, the fresh copy is marked seen so it takes no second route and
-  // cannot slip past this route's deadline, latch or verification checks. It is
-  // never retired just because the raw batch contains it — the fresh copy has
-  // survived nothing yet, and the rate gate or latch could still bin it.
+  // One message, one decision. Copies of the same material deposited by
+  // several generations are one candidate, decided on the newest depositor's
+  // copy. A candidate the relay ALSO redelivered in this batch (its ack
+  // failed) is decided HERE, for both copies: whatever the outcome — including
+  // "already served by a newer generation" — the fresh copy is marked seen so
+  // it takes no second route and cannot slip past this route's deadline, latch
+  // or verification checks. It is never retired just because the raw batch
+  // contains it — the fresh copy has survived nothing yet, and the rate gate or
+  // latch could still bin it.
   //
   // Peer policy, re-evaluated rather than skipped: the authority gate (peer
   // delegation on/off, require-signed mode, operator trust) and a CLOSED latch
@@ -2547,7 +2550,6 @@ export function startAutoReply(opts: {
       const nonce = signatureNonce(m);
       if (nonce && verifications[m.message_id]?.verified && !candidates.has(heldKey(m))) spent.add(nonce);
     }
-    const handled = new Set<HeldKey>();
     const admitted = new Map<
       string,
       { messages: InboxMessage[]; verdicts: Record<HeldKey, VerifyResult | null>; firstAt: number; inflight: boolean }
@@ -2557,6 +2559,17 @@ export function startAutoReply(opts: {
     const terminal: Array<{ message: InboxMessage; verdict: VerifyResult }> = [];
     const served: InboxMessage[] = [];
     const servedVerdicts = new Map<InboxMessage, VerifyResult | null>();
+    // Ownership first: every well-formed copy of the same material (heldKey)
+    // in this take is ONE candidate, decided once, on the copy its NEWEST
+    // depositor left. An older generation's copy of something a later one
+    // stashed but never served (A's late flush, then B's own stop) is the
+    // obsolete one — it must not spend the material's decision before the
+    // newer transfer is looked at. Only the depositor's generation and clock
+    // are taken from the chosen copy; nothing about trust travels with it.
+    // `order` keeps the deposit order of first copies and malformed entries,
+    // so records read as before.
+    const groups = new Map<HeldKey, { entry: Partial<ReloadHandoffEntry> | null | undefined; m: InboxMessage; from: number }>();
+    const order: Array<HeldKey | { malformed: unknown }> = [];
     for (const raw of taken) {
       const entry = raw as Partial<ReloadHandoffEntry> | null | undefined;
       try {
@@ -2566,17 +2579,34 @@ export function startAutoReply(opts: {
           typeof m.message_id !== "string" || !m.message_id ||
           typeof m.conversation_id !== "string" || m.conversation_id !== entry?.conversationId
         ) {
-          withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}malformed` });
+          order.push({ malformed: m });
           continue;
         }
         const key = heldKey(m);
-        if (handled.has(key)) continue; // the same message twice in one hand-off: handled once
-        handled.add(key);
         const from = typeof entry?.fromGeneration === "number" ? entry.fromGeneration : Number.NEGATIVE_INFINITY;
-        // A generation newer than the depositor already took ownership of
-        // this exact message: the old producer's copy is the duplicate.
+        const prior = groups.get(key);
+        if (!prior) order.push(key);
+        if (!prior || from > prior.from) groups.set(key, { entry, m, from });
+      } catch (err) {
+        order.push({ malformed: messageOf(entry) });
+        quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${String(err)}`);
+      }
+    }
+    for (const slot of order) {
+      if (typeof slot !== "string") {
+        withheld.push({ message: slot.malformed, reason: `${RELOAD_WITHHELD_PREFIX}malformed` });
+        continue;
+      }
+      const key = slot;
+      const { entry, m, from } = groups.get(key)!;
+      try {
+        // A generation newer than the newest depositor already took ownership
+        // of this exact material: every copy here is the duplicate. Its fresh
+        // copy in this batch, if any, is the same message — consumed with it,
+        // so it does not reach a second turn through the fresh route.
         if (ledger ? servedAfter("key", key, from) : state.seen.has(key)) {
           duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}already_served` });
+          if (fresh.has(key)) markSeen(state, m);
           continue;
         }
         const decision = ((): { withhold: string; keyId?: string | null } | { admit: VerifyResult | null } => {

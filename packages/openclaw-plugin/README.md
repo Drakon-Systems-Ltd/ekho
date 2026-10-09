@@ -334,9 +334,14 @@ re-admits each one on its own terms:
   hand-off, for both copies. The redelivered copy is not admitted separately
   and cannot slip past the deadline, latch or signature checks, and the held
   copy is not dropped just because a redelivery arrived.
+- Several old copies can leave the same message: one stopped two reloads
+  earlier, and the copy after it, which queued the message but stopped before
+  serving it. They are decided once, as one message, on the newest copy's
+  deposit, so the older deposit cannot cancel the newer one.
 - A message a newer copy already served (handed to a turn or to the held-back
   queue) is not admitted again, even when the copy that left it stopped two
-  reloads earlier. A small in-memory ledger per connection records which copy
+  reloads earlier. A relay redelivery of it in the same poll gets no turn
+  either. A small in-memory ledger per connection records which copy
   served each message and signature nonce. It holds no verdicts and no message
   bodies, keeps at most 2000 of each, and drops any older than 24 h 5 min the
   next time it records something.
