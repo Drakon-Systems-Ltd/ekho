@@ -125,3 +125,40 @@ describe("reload hand-off store (#111)", () => {
     expect(takeReloadHandoff("agent_x", "conn-a", newer, NOW).taken).toHaveLength(1);
   });
 });
+
+// #111 R4: which generation last took ownership of a message or signature, per
+// connection domain, so a late deposit from an older producer can be refused.
+describe("reload served ledger (#111)", () => {
+  it("keeps the NEWEST generation per key and nonce, scoped to agent and owner", async () => {
+    const { noteReloadServed, reloadServedBy } = await import("../src/runtime-registry");
+    noteReloadServed("agent_x", "conn-a", 3, { keys: ["k1"], nonces: ["n1"] }, NOW);
+    noteReloadServed("agent_x", "conn-a", 5, { keys: ["k1"] }, NOW);
+    noteReloadServed("agent_x", "conn-a", 4, { keys: ["k1"] }, NOW); // a late, older note never lowers it
+    expect(reloadServedBy("agent_x", "conn-a", "key", "k1")).toBe(5);
+    expect(reloadServedBy("agent_x", "conn-a", "nonce", "n1")).toBe(3);
+    expect(reloadServedBy("agent_x", "conn-a", "nonce", "k1")).toBeUndefined();
+    expect(reloadServedBy("agent_x", "conn-b", "key", "k1")).toBeUndefined();
+    expect(reloadServedBy("agent_y", "conn-a", "key", "k1")).toBeUndefined();
+  });
+
+  it("is bounded by count (oldest out) and by age", async () => {
+    const { noteReloadServed, reloadServedBy, RELOAD_SERVED_CAP } = await import("../src/runtime-registry");
+    const keys = Array.from({ length: RELOAD_SERVED_CAP + 2 }, (_, i) => `k${i}`);
+    noteReloadServed("agent_x", "conn-a", 2, { keys }, NOW);
+    expect(reloadServedBy("agent_x", "conn-a", "key", "k0")).toBeUndefined();
+    expect(reloadServedBy("agent_x", "conn-a", "key", "k1")).toBeUndefined();
+    expect(reloadServedBy("agent_x", "conn-a", "key", "k2")).toBe(2);
+
+    noteReloadServed("agent_x", "conn-a", 3, { keys: ["fresh"] }, NOW + RELOAD_HANDOFF_MAX_AGE_MS + 1);
+    expect(reloadServedBy("agent_x", "conn-a", "key", "k2")).toBeUndefined();
+    expect(reloadServedBy("agent_x", "conn-a", "key", "fresh")).toBe(3);
+  });
+
+  it("ignores junk instead of throwing", async () => {
+    const { noteReloadServed, reloadServedBy } = await import("../src/runtime-registry");
+    expect(() => noteReloadServed("", "conn-a", 1, { keys: ["k"] })).not.toThrow();
+    expect(() => noteReloadServed("agent_x", "conn-a", Number.NaN, { keys: ["k"] })).not.toThrow();
+    expect(() => noteReloadServed("agent_x", "conn-a", 1, { keys: [7 as never, ""] })).not.toThrow();
+    expect(reloadServedBy("agent_x", "conn-a", "key", "k")).toBeUndefined();
+  });
+});

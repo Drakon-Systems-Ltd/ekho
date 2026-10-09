@@ -25,7 +25,9 @@ const relay = vi.hoisted(() => ({
   prompts: [] as string[],
   failNextSpawns: 0,
   heldFailures: [] as Array<() => void>,
-  notices: [] as unknown[]
+  notices: [] as unknown[],
+  // While set, every ack waits on it: a stop lands between ack and stash.
+  ackGate: null as null | Promise<void>
 }));
 
 vi.mock("node:child_process", async () => {
@@ -66,6 +68,7 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
     }
     async ackMessages() {
       if (relay.stopped) relay.afterStop.push("ack");
+      if (relay.ackGate) await relay.ackGate;
       return {};
     }
     async downloadAttachment() { return { bytes: Buffer.from("ok") }; }
@@ -237,6 +240,7 @@ beforeEach(() => {
   relay.failNextSpawns = 0;
   relay.heldFailures.length = 0;
   relay.notices.length = 0;
+  relay.ackGate = null;
   // LEGACY_EKHO_DIR is read from HOME at import: keep every copy off the real home.
   vi.stubEnv("HOME", mkScratch("home"));
   vi.stubEnv("EKHO_AUTOREPLY_DISABLE", "");
@@ -786,7 +790,11 @@ describe("reload hand-off of held work (#111)", () => {
   }
 
   /** An operator message signed by `key`, addressed to this agent unless overridden. */
-  async function signedOperator(id: string, key: { seed: Uint8Array; kid: string }, over: { recipient?: unknown; text?: string } = {}) {
+  async function signedOperator(
+    id: string,
+    key: { seed: Uint8Array; kid: string },
+    over: { recipient?: unknown; text?: string; sentAt?: string } = {}
+  ) {
     const { signCanonical, sha256Hex } = await import("../src/identity");
     const text = over.text ?? `signed text ${id}`;
     const canonical = {
@@ -797,7 +805,7 @@ describe("reload hand-off of held work (#111)", () => {
       recipient: over.recipient ?? { kind: "agent", id: "agent_reload" },
       conversation_id: "held-conv",
       body_sha256: sha256Hex(text),
-      sent_at: new Date().toISOString(),
+      sent_at: over.sentAt ?? new Date().toISOString(),
       nonce: `nonce-${id}`
     };
     return {
@@ -1036,8 +1044,9 @@ describe("reload hand-off of held work (#111)", () => {
     const delivered = (id: string) => relay.prompts.filter((p) => p.includes(`held text ${id}`)).length;
     expect(delivered("m1")).toBe(1);
     expect(delivered("m2")).toBe(1);
+    // m1's two copies are ONE admission decision, taken by the hand-off.
     expect(records().filter(([, r]) => String(r).startsWith("reload_"))).toEqual([
-      ["m1", "reload_duplicate:redelivered"],
+      ["m1", "reload_readmitted"],
       ["m2", "reload_readmitted"]
     ]);
   });
@@ -1168,5 +1177,295 @@ describe("reload hand-off of held work (#111)", () => {
     await poll(3);
     expect(relay.prompts).toEqual([]);
     expect(records()).toHaveLength(2);
+  });
+
+  // ---- #111 round 2: one decision per message, terminal rejects, isolation,
+  // ---- the served ledger and never-floor-tried clocks.
+
+  /** Plant entries as an older generation of the SAME connection would leave them. */
+  async function plant(copy: { conn: Conn }, cfg: Record<string, unknown>, messages: unknown[], over: Record<string, unknown> = {}) {
+    const owner = copy.conn.connectedInboxContext(await copy.conn.ensureConnected(cfg as never)).split(".")[0];
+    const gen = copy.conn.runtimeGeneration();
+    (await registry()).depositReloadHandoff(
+      messages.map((message) => ({
+        owner,
+        agentId: "agent_reload",
+        fromGeneration: gen - 1,
+        reason: "deferred_loop_stopped",
+        conversationId: "held-conv",
+        message,
+        firstDeferredAtMs: Date.now(),
+        depositedAtMs: Date.now(),
+        ...over
+      })) as never
+    );
+  }
+  const deliveredCount = (text: string) => relay.prompts.filter((p) => p.includes(text)).length;
+  const label = async (copy: { host: ReturnType<typeof fakeApi> }, text: string) =>
+    ((await copy.host.inbox()).messages as Array<{ body?: { text?: string }; signature?: { status?: string } }>).find(
+      (m) => m.body?.text === text
+    )?.signature?.status;
+  const dayAhead = () => new Date(Date.now() + 86_400_000).toISOString();
+  const operatorNudge = (id = "op1") => ({
+    message_id: id,
+    conversation_id: "held-conv",
+    sender_agent_id: "op",
+    sender_kind: "operator",
+    message_type: "direct",
+    body: { text: "operator nudge" }
+  });
+
+  for (const order of ["first", "last"] as const) {
+    it(`a redelivered held message is decided once by the hand-off, never lost behind a saturated rate gate (redelivered copy ${order})`, async () => {
+      const m1 = heldPeer("m1");
+      serve([{ messages: [m1], peer_autoreply: true }]);
+      const a = await startCopy();
+      await poll();
+      a.host.fire("gateway_stop", { reason: "plugin replacement" });
+
+      // The successor's first batch: five other triggers from the same peer
+      // (the rate gate's whole window) and the relay's copy of m1.
+      relay.floorFree = () => true;
+      const others = Array.from({ length: 5 }, (_, i) => heldPeer(`x${i}`, { conversation_id: "busy-conv" }));
+      const copy = structuredClone(m1);
+      serve([{ messages: order === "first" ? [copy, ...others] : [...others, copy], peer_autoreply: true }]);
+      await startCopy();
+      await poll(4);
+      expect(deliveredCount("held text m1")).toBe(1);
+      for (const o of others) expect(deliveredCount(`held text ${o.message_id}`)).toBe(1);
+      expect(records().filter(([, r]) => String(r).startsWith("reload_"))).toEqual([["m1", "reload_readmitted"]]);
+    });
+  }
+
+  it("a redelivered held message behind this generation's closed latch is withheld once, with a record — not called a duplicate", async () => {
+    relay.floorFree = () => true;
+    const cfg = { ...defaultConfig(), peerTurnBudget: 1 };
+    serve([{ messages: [heldPeer("p0")], peer_autoreply: true }]);
+    const b = await startCopy(cfg);
+    await poll(2); // p0 wakes the agent and spends held-conv's budget of 1
+    expect(relay.prompts).toHaveLength(1);
+
+    const m1 = heldPeer("m1");
+    await plant(b, cfg, [m1]); // a late deposit, after the latch closed
+    serve([{ messages: [structuredClone(m1)], peer_autoreply: true }]);
+    await poll(3);
+    expect(deliveredCount("held text m1")).toBe(0);
+    expect(records()).toEqual([["m1", "reload_withheld:peer_latch_closed"]]);
+  });
+
+  it("an operator message in the same batch reopens the latch BEFORE the hand-off decides: the held message is re-admitted once", async () => {
+    relay.floorFree = () => true;
+    const cfg = { ...defaultConfig(), peerTurnBudget: 1 };
+    serve([{ messages: [heldPeer("p0")], peer_autoreply: true }]);
+    const b = await startCopy(cfg);
+    await poll(2);
+
+    const m1 = heldPeer("m1");
+    await plant(b, cfg, [m1]);
+    serve([{ messages: [structuredClone(m1), operatorNudge()], operator_trusted: true, peer_autoreply: true }]);
+    await poll(3);
+    expect(deliveredCount("held text m1")).toBe(1);
+    expect(deliveredCount("operator nudge")).toBe(1);
+    expect(records()).toEqual([["m1", "reload_readmitted"]]);
+  });
+
+  for (const order of ["hostile first", "valid first"] as const) {
+    it(`a candidate that throws while being verified is withheld as malformed, and the rest of the taken batch is still decided (${order})`, async () => {
+      const op = await operatorKey(7);
+      const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+      serve([], { messages: [], fleet_id: FLEET, peer_autoreply: true });
+      relay.floorFree = () => true;
+      const b = await startCopy(cfg);
+      // JSON-shaped, nothing exotic: key_id "toString" resolves to an inherited
+      // function in the verifier's key map, which then throws decoding it.
+      const hostile = {
+        message_id: "bad",
+        conversation_id: "held-conv",
+        sender_kind: "operator",
+        sender_agent_id: "op",
+        message_type: "direct",
+        body: { text: "hostile" },
+        operator_sig: "c2ln",
+        key_id: "toString",
+        sig_canonical: { v: 1 },
+        deadline_at: hourAhead()
+      };
+      const valid = heldPeer("m1");
+      await plant(b, cfg, order === "hostile first" ? [hostile, valid] : [valid, hostile]);
+      await poll(3);
+      expect(deliveredCount("held text m1")).toBe(1);
+      expect(deliveredCount("hostile")).toBe(0);
+      expect(records()).toEqual([
+        ["bad", "reload_withheld:malformed"],
+        ["m1", "reload_readmitted"]
+      ]);
+      expect(warned(b.host)).toMatch(/candidate could not be processed/);
+      expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
+    });
+  }
+
+  it("a rejection the hand-off makes is terminal under an unchanged trust root: ekho_inbox stops showing the predecessor's pass", async () => {
+    const op = await operatorKey(7);
+    const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+    // Fresh when A holds it; past the freshness window by the time B looks.
+    const nearlyStale = new Date(Date.now() - (86_400 + 300) * 1000 + 60_000).toISOString();
+    // Held with a peer message, so the conversation waits for the floor.
+    serve(
+      [{ messages: [heldPeer("p1"), await signedOperator("o1", op, { sentAt: nearlyStale })], fleet_id: FLEET, peer_autoreply: true }],
+      { messages: [], fleet_id: FLEET }
+    );
+    const a = await startCopy(cfg);
+    await poll();
+    expect(await label(a, "signed text o1")).toBe("verified");
+    a.host.fire("gateway_stop", { reason: "plugin replacement" });
+    vi.setSystemTime(Date.now() + 120_000);
+
+    relay.floorFree = () => true;
+    const b = await startCopy(cfg);
+    await poll(3);
+    expect(deliveredCount("held text p1")).toBe(1);
+    expect(deliveredCount("signed text o1")).toBe(0);
+    expect(records().filter(([id]) => id === "o1")).toEqual([
+      ["o1", "deferred_loop_stopped"],
+      ["o1", "reload_withheld:verification:stale"]
+    ]);
+    expect(await label(b, "signed text o1")).toBe("failed");
+  });
+
+  it("a rejection the hand-off makes sticks for material no longer in the inbox ring: restoring the key does not admit the relay's identical redelivery", async () => {
+    const op = await operatorKey(7);
+    const other = await operatorKey(9);
+    const o1 = await signedOperator("o1", op);
+    // 26 non-trigger messages after o1 push it out of the 25-entry display ring.
+    const filler = Array.from({ length: 26 }, (_, i) => ({
+      message_id: `f${i}`,
+      conversation_id: "busy-conv",
+      sender_agent_id: "peer",
+      sender_kind: "agent",
+      message_type: "status",
+      body: { text: `filler ${i}` }
+    }));
+    serve(
+      [{ messages: [heldPeer("p1"), o1], fleet_id: FLEET, peer_autoreply: true }, { messages: filler, fleet_id: FLEET }],
+      { messages: [], fleet_id: FLEET }
+    );
+    const a = await startCopy({ ...defaultConfig(), operatorPubkey: op.pub });
+    await poll(2);
+    expect(await label(a, "signed text o1")).toBeUndefined(); // evicted from the ring
+    a.host.fire("gateway_stop", { reason: "plugin replacement" });
+
+    const idFile = join(stateDir, ".ekho-identity.json");
+    const pin = (keys: Record<string, string>) => {
+      const id = JSON.parse(readFileSync(idFile, "utf8"));
+      id.pinnedOperatorKeys = keys;
+      writeFileSync(idFile, JSON.stringify(id));
+    };
+    pin({ [other.kid]: other.pub }); // the key is removed across the reload
+    relay.floorFree = () => true;
+    const b = await startCopy();
+    await poll(2);
+    expect(records().filter(([id]) => id === "o1")).toEqual([
+      ["o1", "deferred_loop_stopped"],
+      ["o1", "reload_withheld:verification:unknown-operator-key"]
+    ]);
+    expect(deliveredCount("held text p1")).toBe(1);
+    b.host.fire("gateway_stop", { reason: "plugin replacement" });
+
+    // The key comes back and the relay redelivers the identical material.
+    pin({ [op.kid]: op.pub });
+    serve([{ messages: [structuredClone(o1)], fleet_id: FLEET }], { messages: [], fleet_id: FLEET });
+    const c = await startCopy();
+    await poll(3);
+    expect(deliveredCount("signed text o1")).toBe(0);
+    expect(await label(c, "signed text o1")).toBe("failed");
+  });
+
+  const lateFlushKinds = [
+    ["an unsigned exact copy", false],
+    ["an unchanged signed message", true]
+  ] as const;
+  for (const [name, signed] of lateFlushKinds) {
+    it(`an old producer's late flush cannot give a second turn to work a newer generation already served: three generations, ${name}`, async () => {
+      const op = await operatorKey(7);
+      const cfg = signed ? { ...defaultConfig(), operatorPubkey: op.pub } : defaultConfig();
+      const m1 = signed ? await signedOperator("m1", op, { text: "held text m1" }) : heldPeer("m1");
+      const nudge = signed ? await signedOperator("op1", op, { text: "operator nudge" }) : operatorNudge();
+      // p1 is held with m1 and is never redelivered: it is unserved work that
+      // must still reach a turn through the same late flush.
+      serve(
+        [
+          { messages: [heldPeer("p1"), m1], fleet_id: FLEET, peer_autoreply: true },
+          { messages: [nudge], fleet_id: FLEET, operator_trusted: true, peer_autoreply: true }
+        ],
+        { messages: [], fleet_id: FLEET }
+      );
+      const a = await startCopy(cfg);
+      await poll(); // p1 and m1 deferred and stashed
+      relay.failNextSpawns = 1;
+      await poll(); // the nudge's turn covers the stash; its spawn is undecided
+      a.host.fire("gateway_stop", { reason: "plugin replacement" });
+      expect(records()).toEqual([]); // A's covering turn still owns the stash
+
+      // A's ack failed, so the relay redelivers m1 to B, which serves it.
+      relay.floorFree = () => true;
+      serve([{ messages: [structuredClone(m1)], fleet_id: FLEET, peer_autoreply: true }], { messages: [], fleet_id: FLEET });
+      const b = await startCopy(cfg);
+      await poll(2);
+      expect(deliveredCount("held text m1")).toBe(2); // A's undecided covering prompt, and B's turn
+      b.host.fire("gateway_stop", { reason: "plugin replacement" });
+      expect(records()).toEqual([]); // B served it: nothing left to hand on
+
+      // C holds the agent when A's covering spawn finally fails.
+      const c = await startCopy(cfg);
+      await poll();
+      relay.heldFailures.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      await poll(3);
+      expect(deliveredCount("held text m1")).toBe(2);
+      expect(deliveredCount("held text p1")).toBe(2); // A's undecided prompt, then C's turn
+      expect(records()).toEqual([
+        ["p1", "deferred_loop_stopped"],
+        ["m1", "deferred_loop_stopped"],
+        ["m1", "reload_duplicate:already_served"],
+        ["p1", "reload_readmitted"]
+      ]);
+      expect(c.conn.runtimeGeneration()).toBeGreaterThan(b.conn.runtimeGeneration());
+      expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
+    });
+  }
+
+  it("messages acked in flight never inherit an overdue stash's clock: nothing in that conversation goes out without a floor attempt", async () => {
+    serve([{ messages: [heldPeer("m1", { deadline_at: dayAhead() })], peer_autoreply: true }]);
+    const a = await startCopy();
+    await poll(); // m1 deferred (the floor is held)
+    vi.setSystemTime(Date.now() + DEFERRED_RETRY_TTL_MS + 60_000); // its stash is now overdue
+    let release!: () => void;
+    relay.ackGate = new Promise<void>((r) => {
+      release = r;
+    });
+    serve([{ messages: [heldPeer("m2", { deadline_at: dayAhead() })], peer_autoreply: true }]);
+    await poll(); // m2 is acked (held): in flight, never floor-planned
+    a.host.fire("gateway_stop", { reason: "plugin replacement" });
+    expect(records()).toEqual([
+      ["m2", "inflight_loop_stopped"],
+      ["m1", "deferred_loop_stopped"]
+    ]);
+    relay.ackGate = null;
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    await startCopy(); // the floor is still held by the other agent
+    await poll(2);
+    expect(relay.prompts).toEqual([]);
+    relay.floorFree = () => true;
+    await poll(2);
+    expect(relay.prompts).toHaveLength(1);
+    expect(relay.prompts[0]).toContain("held text m1");
+    expect(relay.prompts[0]).toContain("held text m2");
+    expect(relay.prompts[0]).not.toContain("WITHOUT the floor");
+    expect(records().filter(([, r]) => String(r).startsWith("reload_"))).toEqual([
+      ["m2", "reload_readmitted"],
+      ["m1", "reload_readmitted"]
+    ]);
   });
 });

@@ -34,6 +34,8 @@ interface RuntimeRegistry {
   enrolOperatorKeys?: Map<string, unknown[]>;
   /** Acked work a stopping loop left for its same-process successor (#111). */
   reloadHandoffs?: Map<string, ReloadHandoffEntry[]>;
+  /** Which generation last took ownership of a message or signature (#111). */
+  reloadServed?: Map<string, ReloadServedLedger>;
 }
 
 function registry(): RuntimeRegistry {
@@ -267,6 +269,99 @@ export function takeReloadHandoff(
   if (left.length > 0) store.set(agentId, left);
   else store.delete(agentId);
   return { taken, dropped };
+}
+
+// ---- Served ledger (#111) ----------------------------------------------------
+// A loop's `seen` and nonce sets die with it, so a deposit can outlive every
+// generation that knew its message was already served: A's covering turn fails
+// after A was retired, B serves the relay's redelivery, B is replaced by C, and
+// A's late flush then lands in C. This ledger, scoped to one connection domain
+// (agent + owner), remembers the NEWEST generation that took ownership of a
+// message (its heldKey) or accepted a signature (its nonce). A hand-off entry
+// whose message a NEWER generation than its depositor already served is a
+// duplicate. The depositor's own ownership does not count against it, so
+// unserved work still carries B -> C.
+//
+// What it records is ownership, never trust: no verdict, no payload. It is
+// bounded and in memory only, like the hand-off itself; it is consulted by the
+// hand-off alone, not by fresh relay deliveries.
+
+/** Most keys (and, separately, nonces) remembered per connection domain. Four
+ *  times the most a hand-off can hold, so the evidence outlives the entries. */
+export const RELOAD_SERVED_CAP = 4 * RELOAD_HANDOFF_CAP;
+/** Connection domains remembered per process, oldest forgotten first. */
+const RELOAD_SERVED_DOMAINS = 64;
+
+interface ReloadServedLedger {
+  keys: Map<string, { generation: number; atMs: number }>;
+  nonces: Map<string, { generation: number; atMs: number }>;
+}
+
+function servedStore(): Map<string, ReloadServedLedger> {
+  const r = registry();
+  if (r.reloadServed instanceof Map) return r.reloadServed;
+  const store = new Map<string, ReloadServedLedger>();
+  r.reloadServed = store;
+  return store;
+}
+
+const servedDomain = (agentId: string, owner: string): string => `${agentId}\u0000${owner}`;
+
+function noteInto(map: ReloadServedLedger["keys"], values: string[], generation: number, nowMs: number): void {
+  for (const v of values) {
+    if (typeof v !== "string" || !v) continue;
+    const prior = map.get(v);
+    // Re-insert so iteration stays oldest-first; keep the newest owner.
+    map.delete(v);
+    map.set(v, { generation: Math.max(generation, prior?.generation ?? generation), atMs: nowMs });
+  }
+  for (const [v, e] of map) {
+    if (nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
+    map.delete(v);
+  }
+  while (map.size > RELOAD_SERVED_CAP) {
+    const oldest = map.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+/** Record that `generation` took ownership of these messages (heldKeys) and
+ *  accepted these signatures (nonces). Never throws. */
+export function noteReloadServed(
+  agentId: string,
+  owner: string,
+  generation: number,
+  served: { keys?: string[]; nonces?: string[] },
+  nowMs = Date.now()
+): void {
+  if (!agentId || !owner || !Number.isFinite(generation)) return;
+  const store = servedStore();
+  const domain = servedDomain(agentId, owner);
+  let ledger = store.get(domain);
+  if (!ledger) {
+    ledger = { keys: new Map(), nonces: new Map() };
+    store.set(domain, ledger);
+    while (store.size > RELOAD_SERVED_DOMAINS) {
+      const oldest = store.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      store.delete(oldest);
+    }
+  }
+  noteInto(ledger.keys, served.keys ?? [], generation, nowMs);
+  noteInto(ledger.nonces, served.nonces ?? [], generation, nowMs);
+}
+
+/** The newest generation that took ownership of `value` (a heldKey, or a
+ *  signature nonce) in this connection domain, if any is remembered. */
+export function reloadServedBy(
+  agentId: string,
+  owner: string,
+  kind: "key" | "nonce",
+  value: string
+): number | undefined {
+  const ledger = registry().reloadServed?.get(servedDomain(agentId, owner));
+  return (kind === "key" ? ledger?.keys : ledger?.nonces)?.get(value)?.generation;
 }
 
 /** Test seam: how many hand-off entries are held for `agentId`. */

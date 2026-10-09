@@ -25,8 +25,10 @@ import {
   claimAgentRuntime,
   depositReloadHandoff,
   nextRuntimeGeneration,
+  noteReloadServed,
   putEnrolOperatorKeys,
   releaseAgentRuntime,
+  reloadServedBy,
   runEnrolmentExclusive,
   takeEnrolOperatorKeys,
   takeReloadHandoff
@@ -652,7 +654,11 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
         depositReloadHandoff(
           entries.map((e) => ({ ...e, owner, agentId, fromGeneration: generation, depositedAtMs: Date.now() }))
         ),
-      take: (owner) => takeReloadHandoff(agentId, owner, generation)
+      take: (owner) => takeReloadHandoff(agentId, owner, generation),
+      // What this generation served, so a later one can refuse an older
+      // producer's late copy of it. Ownership only: no verdict, no payload.
+      noteServed: (owner, served) => noteReloadServed(agentId, owner, generation, served),
+      servedBy: (owner, kind, value) => reloadServedBy(agentId, owner, kind, value)
     }
   });
 }

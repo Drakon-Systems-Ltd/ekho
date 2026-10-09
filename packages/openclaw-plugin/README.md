@@ -316,20 +316,40 @@ re-admits each one on its own terms:
 
 - It re-checks the signature under its **current** trust root (the pinned
   operator keys and the relay's roster). Signed material this agent already
-  rejected stays rejected. The old copy's verdict is never reused.
+  rejected stays rejected. A rejection the new copy makes here is just as final:
+  it is recorded against the signed material whether or not `ekho_inbox` still
+  lists the message, the `ekho_inbox` label becomes `failed`, and a later
+  identical redelivery is refused even if the key comes back. The old copy's
+  verdict is never reused.
 - It applies its **current** policy: peer delegation on or off,
   `requireSigned`, operator trust, and a peer latch that is closed in the new
-  copy. The old admission already charged the per-peer rate limit and the
-  latch, so they are not charged again.
+  copy, after the same poll's operator messages and progress signals have
+  reopened what they reopen. The old admission already charged the per-peer
+  rate limit and the latch, so they are not charged again; those charges are
+  not carried over either, and the new copy's counters start from what it has
+  seen itself.
 - A message whose relay `deadline_at` has passed, or that has none, is not
   re-admitted.
-- A message the new copy already received another way is not admitted a second
-  time. This covers the relay redelivering it after a failed ack, and a message
-  already handled.
+- A message the relay redelivers after a failed ack is decided once, by the
+  hand-off, for both copies. The redelivered copy is not admitted separately
+  and cannot slip past the deadline, latch or signature checks, and the held
+  copy is not dropped just because a redelivery arrived.
+- A message a newer copy already served (handed to a turn or to the held-back
+  queue) is not admitted again, even when the copy that left it stopped two
+  reloads earlier. A small in-memory ledger per connection records which copy
+  served each message and signature nonce. It holds no verdicts and no message
+  bodies, keeps at most 2000 of each, and drops any older than 24 h 5 min the
+  next time it records something.
 - Re-admitted messages go into the held-back queue. They wait for the floor
   again, and are delivered late without the floor once the retry window has
   passed. That window is counted from when the message was **first** held back,
-  not from the reload.
+  not from the reload. A message caught between its ack and its turn never had
+  a floor attempt, so its conversation's window starts again at the reload:
+  nothing in that conversation goes out without the floor before it has been
+  tried. Messages joining a queue the new copy already holds for that
+  conversation take that queue's clock.
+- Each message is decided on its own. One that cannot be processed is withheld
+  as `malformed`, and the others are still decided.
 - Only the copy that currently holds the agent can take them, and only if it is
   a newer generation with the same relay, agent, fleet and signing key.
   Messages taken by one copy cannot be taken again.
@@ -339,8 +359,8 @@ Each outcome is appended to the dead-letter file next to the stop's own record:
 | Reason | Meaning |
 |---|---|
 | `reload_readmitted` | Re-admitted; the message waits for the floor like any held-back message. |
-| `reload_duplicate:redelivered` / `reload_duplicate:already_seen` | The new copy already has it another way; nothing was lost. |
-| `reload_withheld:<why>` | Not re-admitted: it gets no turn. `<why>` is `expired`, `no_deadline`, `verification:<reason>`, `unsigned-require-signed`, `unverifiable-require-signed`, `not_admissible:<reason>`, `peer_latch_closed`, `malformed`, `handoff_overflow` or `handoff_unclaimed_too_long`. |
+| `reload_duplicate:already_served` | A newer copy already handed this exact message to a turn or the held-back queue; nothing was lost. |
+| `reload_withheld:<why>` | Not re-admitted: it gets no turn. `<why>` is `expired`, `no_deadline`, `verification:<reason>`, `unsigned-require-signed`, `unverifiable-require-signed`, `not_admissible:<reason>`, `peer_latch_closed`, `malformed`, `stash_failed`, `handoff_overflow` or `handoff_unclaimed_too_long`. `not_admissible:seen` means this copy already received the relay's copy and gave it no turn (rate limit or closed latch). |
 
 The dead-letter file is evidence only. Nothing reads it back as work, and
 editing it re-admits nothing.
@@ -361,15 +381,21 @@ What this does **not** do:
   remains. When no new copy of the agent appears in the process (the plugin is
   disabled, or reconnects to a different relay, fleet or key), at most 500
   entries per agent are held. An entry nobody claims within 24 h 5 min is
-  dropped with a `reload_withheld:handoff_unclaimed_too_long` record, written
-  when the next copy for that agent looks.
+  dropped when the next copy for that agent looks. It gets a
+  `reload_withheld:handoff_unclaimed_too_long` record only when that copy is on
+  the same relay, agent, fleet and key. A copy on another connection logs the
+  drop and writes no record: another connection's messages do not belong in
+  its state directory.
 - **No exactly-once or lossless delivery.** Messages acknowledged before the
   turn can still be lost to a turn that started and then died, to a failed
   dead-letter write, or to the process exiting. When the relay redelivers an
   **unsigned** message and changes any field (`metadata` or attachment details,
   for example), the redelivered copy counts as a different message, so it can
-  get a second turn. A verified signed message cannot: its signature nonce is
-  burned.
+  get a second turn. The served ledger above is consulted only for handed-off
+  messages, and is bounded. A relay redelivery after a failed ack that reaches
+  a new copy holding no hand-off copy of it is checked against that copy's own
+  memory only, as before, so it can get a second turn whether or not it is
+  signed.
 - **A fresh message in a covering turn that failed to start** is still lost
   with only a log line, as in 0.6.0, and is not handed off. Only the held-back
   messages that turn was carrying are.

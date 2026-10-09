@@ -281,8 +281,9 @@ export const INFLIGHT_LOOP_STOPPED_REASON = "inflight_loop_stopped";
 export const RELOAD_READMITTED_REASON = "reload_readmitted";
 // Not re-admitted, and gets no turn: `reload_withheld:<why>`.
 export const RELOAD_WITHHELD_PREFIX = "reload_withheld:";
-// Not re-admitted because the successor already has it another way (a relay
-// redelivery, or it already handled it): `reload_duplicate:<why>`. Not lost.
+// Not re-admitted because a generation newer than the one that left it already
+// served that exact message (a turn or the stash took it):
+// `reload_duplicate:already_served`. Not lost.
 export const RELOAD_DUPLICATE_PREFIX = "reload_duplicate:";
 // How long a stop() waits for an in-flight tick to settle. Under OpenClaw's
 // 5 s budget for an unload hook, so the host never cuts the wait short.
@@ -498,8 +499,29 @@ function heldKeyId(key: HeldKey): string {
 
 /** A message's id for a log line, whatever shape it arrived in. */
 function idOf(message: unknown): string {
-  const id = (message as { message_id?: unknown } | null | undefined)?.message_id;
-  return typeof id === "string" && id ? id : "?";
+  try {
+    const id = (message as { message_id?: unknown } | null | undefined)?.message_id;
+    return typeof id === "string" && id ? id : "?";
+  } catch {
+    return "?";
+  }
+}
+
+/** A message as a forensic record can hold it: one that cannot be serialized
+ *  is replaced by a marker, so it cannot take its batch's records down too. */
+function recordable(message: unknown): unknown {
+  try {
+    JSON.stringify(message);
+    return message;
+  } catch {
+    return { unrecordable: true, message_id: idOf(message) };
+  }
+}
+
+/** The nonce a message's signature carries, if any. */
+function signatureNonce(m: InboxMessage): string | undefined {
+  const nonce = (m.sig_canonical as Record<string, unknown> | null | undefined)?.nonce;
+  return typeof nonce === "string" ? nonce : undefined;
 }
 
 /** What a stopping loop leaves for a same-process successor (#111); the
@@ -678,6 +700,36 @@ export function recordVerifications(
         if (!digest.startsWith(UNCOMPARABLE_PREFIX)) cache.rejects.set(digest, verdict);
       }
     }
+  }
+}
+
+/**
+ * Publish rejections decided OUTSIDE a fresh batch — the reload hand-off's
+ * re-verification (#111) — with the same authority as a fresh batch's.
+ *
+ * `recordVerifications` stores a terminal reject only when the display ring
+ * still holds that material, which is right for a batch it just recorded and
+ * wrong here: a held message can be long gone from the 25-entry ring, and a
+ * rejection that is only written to the forensic file decides nothing. A later,
+ * now-verifiable redelivery of the same material would then be admitted, and
+ * the ring could go on showing the predecessor's passing label. So every
+ * failure lands in the material-bound reject map unconditionally, and replaces
+ * the verdict on a ring entry holding the same material. Failures only: a
+ * passing verdict is never published from here.
+ */
+export function recordTerminalRejects(
+  rejects: Array<{ message: InboxMessage; verdict: VerifyResult }>,
+  agentId = "",
+  context = ""
+): void {
+  const cache = inboxCache(agentId, context);
+  for (const { message, verdict } of rejects) {
+    if (!verdict || verdict.verified) continue;
+    const digest = materialDigest(message);
+    if (digest.startsWith(UNCOMPARABLE_PREFIX)) continue;
+    cache.rejects.set(digest, verdict);
+    const entry = typeof message?.message_id === "string" ? cache.entries.get(message.message_id) : undefined;
+    if (entry && sameSignedMaterial(entry.message, message)) entry.verification = verdict;
   }
 }
 
@@ -884,11 +936,16 @@ export function stashDeferred(
   verifications: Record<string, VerifyResult | null>,
   nowMs: number,
   /** When these messages were FIRST deferred, if earlier than now: a stash
-   *  carried across a reload keeps its original clock (#111). */
-  firstDeferredAtMs?: number
+   *  carried across a reload keeps its original clock (#111). Only a NEW stash
+   *  takes it; an existing one keeps its own clock, as for any merge. */
+  firstDeferredAtMs?: number,
+  /** These messages have not had a floor attempt yet (#111: acked in flight
+   *  when the predecessor stopped). The conversation's clock restarts at
+   *  `nowMs`, so an overdue stash cannot carry them past the floor. */
+  restartClock = false
 ): DeferredDrop[] {
   const existing = state.deferredByConversation.get(conversationId);
-  const origin = firstDeferredAtMs ?? nowMs;
+  const origin = restartClock ? nowMs : firstDeferredAtMs ?? nowMs;
   const byKey = new Map<HeldKey, DeferredStashEntry>();
   for (const e of existing?.entries ?? []) {
     byKey.set(heldKey(e.message), { message: e.message, verification: e.verification ?? null });
@@ -920,12 +977,7 @@ export function stashDeferred(
   state.deferredByConversation.delete(conversationId);
   state.deferredByConversation.set(
     conversationId,
-    buildStash(
-      merged,
-      !existing ? origin
-        : firstDeferredAtMs === undefined ? existing.firstDeferredAtMs
-        : Math.min(existing.firstDeferredAtMs, origin)
-    )
+    buildStash(merged, existing && !restartClock ? existing.firstDeferredAtMs : origin)
   );
   while (state.deferredByConversation.size > DEFERRED_CONVERSATION_CAP) {
     const oldest = state.deferredByConversation.keys().next().value as string | undefined;
@@ -2206,9 +2258,17 @@ export function startAutoReply(opts: {
   // are keyed by `owner`, this loop's connection identity (relay, agent, fleet,
   // signing key). Wired to runtime-registry.ts by connection.ts. Without it
   // the loop behaves exactly as before.
+  //
+  // `noteServed` records that THIS generation took ownership of messages (by
+  // heldKey) and accepted signatures (by nonce); `servedBy` returns the newest
+  // generation that did, in this connection domain. Together they let a
+  // successor refuse an old producer's late deposit of work a newer
+  // generation already served. Without them the loop's own seen set is used.
   reloadHandoff?: {
     deposit: (owner: string, entries: ReloadHandoffDeposit[]) => ReloadHandoffDropped[] | void;
     take: (owner: string) => { taken: ReloadHandoffEntry[]; dropped: ReloadHandoffDropped[] };
+    noteServed?: (owner: string, served: { keys: string[]; nonces: string[] }) => void;
+    servedBy?: (owner: string, kind: "key" | "nonce", value: string) => number | undefined;
   };
 }): () => Promise<void> {
   const { client, api, selfAgentId, log } = opts;
@@ -2248,7 +2308,7 @@ export function startAutoReply(opts: {
     const at = new Date().toISOString();
     try {
       opts.onDeadLetter(
-        items.map((i) => ({ rejected_at: at, reason: i.reason, kind: "reload_handoff", key_id: i.keyId ?? null, message: i.message }))
+        items.map((i) => ({ rejected_at: at, reason: i.reason, kind: "reload_handoff", key_id: i.keyId ?? null, message: recordable(i.message) }))
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${String(err)}`);
@@ -2267,6 +2327,25 @@ export function startAutoReply(opts: {
       `[ekho-autoreply] reload hand-off dropped ${dropped.length} unclaimed msg(s) at its bounds ` +
         `(${dropped.map((d) => `${idOf(d.entry.message)}:${d.why}`).join(", ")}); they will get no turn`
     );
+  };
+
+  // This generation took ownership of these messages (#111): the served
+  // ledger lets a later generation refuse an old producer's late copy.
+  const noteServed = (messages: InboxMessage[], verdictOf: (m: InboxMessage) => VerifyResult | null | undefined): void => {
+    if (messages.length === 0 || !opts.reloadHandoff?.noteServed) return;
+    const owner = handoffOwner();
+    if (!owner) return;
+    try {
+      const keys = messages.map((m) => heldKey(m));
+      const nonces: string[] = [];
+      for (const m of messages) {
+        const nonce = signatureNonce(m);
+        if (nonce && verdictOf(m)?.verified) nonces.push(nonce);
+      }
+      opts.reloadHandoff.noteServed(owner, { keys, nonces });
+    } catch (err) {
+      quietly("warn", `[ekho-autoreply] reload hand-off served note failed: ${String(err)}`);
+    }
   };
 
   // Leave what stop() let go of for a same-process successor. Never throws:
@@ -2380,172 +2459,259 @@ export function startAutoReply(opts: {
   // late flush (its in-flight tick settling after stop) is picked up too.
   // Synchronous: nothing here awaits, so a stop() cannot land half-way.
   //
+  // One message, one decision. A candidate the relay ALSO redelivered in this
+  // batch (its ack failed) is decided HERE, for both copies: whatever the
+  // outcome, the fresh copy is marked seen so it takes no second route and
+  // cannot slip past this route's deadline, latch or verification checks. It is
+  // never retired just because the raw batch contains it — the fresh copy has
+  // survived nothing yet, and the rate gate or latch could still bin it.
+  //
   // Peer policy, re-evaluated rather than skipped: the authority gate (peer
   // delegation on/off, require-signed mode, operator trust) and a CLOSED latch
-  // in this generation both withhold, with a record. The latch is not charged
-  // again and the per-peer rate gate is not re-applied: both counted these
-  // messages when they were first admitted, and the rate gate has no record
-  // path — re-applying it would turn admitted work into a silent drop. The
-  // stash still serves at most one held-back turn per tick.
+  // in this generation both withhold, with a record. The latch is evaluated
+  // after this batch's operator messages and progress signals have reopened
+  // what they reopen — the same latch this batch's peers meet. The latch is not
+  // charged again and the per-peer rate gate is not re-applied: the
+  // predecessor counted these messages when it first admitted them, and the
+  // rate gate has no record path — re-applying it would turn admitted work into
+  // a silent drop. Those charges are not carried either: this generation's
+  // counters start from what it saw itself. The stash still serves at most one
+  // held-back turn per tick.
+  //
+  // A verification or require-signed failure here is terminal, exactly as on
+  // the fresh path: it is published to the material-bound reject map and the
+  // ekho_inbox label (recordTerminalRejects), not only to the forensic file.
+  //
+  // Each candidate is decided on its own. The take already removed the whole
+  // batch from the registry, so one that throws (a hostile shape the verifier
+  // trips over) is withheld as malformed and the rest are still decided.
   const admitReloadHandoff = (
     batch: InboxBatch,
     verifications: Record<string, VerifyResult | null>,
     operatorTrusted: boolean,
     eff: { peerEnabled: boolean; peerTurnBudget: number },
-    durableRejects: Map<string, VerifyResult>
+    durableRejects: Map<string, VerifyResult>,
+    cacheContext: string
   ): void => {
-    if (!opts.reloadHandoff) return;
+    const handoff = opts.reloadHandoff;
+    if (!handoff) return;
     const owner = handoffOwner();
     if (!owner) return;
     let got: { taken: ReloadHandoffEntry[]; dropped: ReloadHandoffDropped[] };
     try {
-      got = opts.reloadHandoff.take(owner);
+      got = handoff.take(owner);
     } catch (err) {
       log?.warn?.(`[ekho-autoreply] reload hand-off take failed: ${String(err)}`);
       return;
     }
-    reportHandoffDrops(got.dropped, owner);
-    if (!Array.isArray(got.taken) || got.taken.length === 0) return;
+    reportHandoffDrops(got?.dropped, owner);
+    const taken: unknown[] = Array.isArray(got?.taken) ? got.taken : [];
+    if (taken.length === 0) return;
     const nowMs = Date.now();
-    const freshKeys = new Set(
-      batch.messages.filter((m) => m && typeof m === "object").map((m) => heldKey(m))
-    );
-    // A signature this batch is about to accept fresh is the same signature:
-    // the fresh copy wins and the hand-off copy fails as a replay.
-    const nonceGuard = new Set(state.seenNonces);
+    // Served ledger (#111): the newest generation that took ownership of a
+    // message or accepted a signature. Without one, only this loop's own sets.
+    const ledger = typeof handoff.servedBy === "function";
+    const servedAfter = (kind: "key" | "nonce", value: string, generation: number): boolean => {
+      try {
+        const by = handoff.servedBy?.(owner, kind, value);
+        return typeof by === "number" && by > generation;
+      } catch {
+        return false;
+      }
+    };
+    const messageOf = (entry: unknown): unknown => {
+      try {
+        return (entry as { message?: unknown } | null | undefined)?.message ?? null;
+      } catch {
+        return null;
+      }
+    };
+    const fresh = new Set<HeldKey>();
     for (const m of batch.messages) {
-      const n = (m?.sig_canonical as Record<string, unknown> | null | undefined)?.nonce;
-      if (verifications[m?.message_id]?.verified && typeof n === "string") nonceGuard.add(n);
+      if (m && typeof m === "object" && typeof m.message_id === "string") fresh.add(heldKey(m));
+    }
+    const candidates = new Set<HeldKey>();
+    for (const entry of taken) {
+      try {
+        const m = messageOf(entry) as InboxMessage | null;
+        if (m && typeof m === "object" && typeof m.message_id === "string" && m.message_id) candidates.add(heldKey(m));
+      } catch {
+        /* decided as malformed below */
+      }
+    }
+    // A signature this batch accepts fresh is spent — unless the fresh copy IS
+    // the candidate, which this route decides for both.
+    const spent = new Set<string>();
+    for (const m of batch.messages) {
+      if (!m || typeof m !== "object") continue;
+      const nonce = signatureNonce(m);
+      if (nonce && verifications[m.message_id]?.verified && !candidates.has(heldKey(m))) spent.add(nonce);
     }
     const handled = new Set<HeldKey>();
-    const admitted = new Map<string, { messages: InboxMessage[]; verdicts: Record<HeldKey, VerifyResult | null>; firstAt: number }>();
+    const admitted = new Map<
+      string,
+      { messages: InboxMessage[]; verdicts: Record<HeldKey, VerifyResult | null>; firstAt: number; inflight: boolean }
+    >();
     const withheld: Array<{ message: unknown; reason: string; keyId?: string | null }> = [];
     const duplicates: Array<{ message: unknown; reason: string }> = [];
-    for (const entry of got.taken) {
-      const m = entry?.message as InboxMessage | undefined;
-      if (
-        !m || typeof m !== "object" ||
-        typeof m.message_id !== "string" || !m.message_id ||
-        typeof m.conversation_id !== "string" || m.conversation_id !== entry.conversationId
-      ) {
-        withheld.push({ message: entry?.message ?? null, reason: `${RELOAD_WITHHELD_PREFIX}malformed` });
-        continue;
-      }
-      const key = heldKey(m);
-      if (handled.has(key)) continue; // the same message twice in one hand-off: handled once
-      handled.add(key);
-      if (state.seen.has(key)) {
-        duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}already_seen` });
-        continue;
-      }
-      if (freshKeys.has(key)) {
-        // Its ack failed and the relay redelivered it: the fresh copy takes
-        // the ordinary path this tick.
-        duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}redelivered` });
-        continue;
-      }
-      // The relay's deadline, unsigned. Missing or unparseable fails closed:
-      // with no deadline there is nothing to say the message is still wanted.
-      const deadline = typeof m.deadline_at === "string" ? Date.parse(m.deadline_at) : Number.NaN;
-      if (Number.isNaN(deadline)) {
-        withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}no_deadline` });
-        continue;
-      }
-      if (deadline <= nowMs) {
-        withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}expired` });
-        continue;
-      }
-      let v: VerifyResult | null = null;
-      if (opts.identity) {
-        v = verifyBatch([m], {
-          identity: opts.identity,
-          selfAgentId,
-          fleetId: batch.fleet_id ?? null,
-          roster: batch.roster ?? [],
-          seenNonces: nonceGuard,
-          now: new Date(nowMs)
-        })[m.message_id] ?? null;
-      }
-      // Rejected signed material stays rejected, whatever verifies now (#115).
-      const digest = materialDigest(m);
-      if (!digest.startsWith(UNCOMPARABLE_PREFIX)) {
-        const rejected = durableRejects.get(digest);
-        if (rejected) v = rejected;
-      }
-      const signed = Boolean(m.sender_kind === "operator" ? m.operator_sig : m.agent_sig);
-      if (v && !v.verified && signed) {
-        withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}verification:${v.reason ?? "failed"}`, keyId: v.keyId });
-        continue;
-      }
-      if (requireSigned === "require") {
-        const [w] = collectRequireSignedWithheld([m], { [m.message_id]: v }, selfAgentId);
-        if (w) {
-          withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}${w.verdict.reason}`, keyId: w.verdict.keyId });
+    const terminal: Array<{ message: InboxMessage; verdict: VerifyResult }> = [];
+    const served: InboxMessage[] = [];
+    const servedVerdicts = new Map<InboxMessage, VerifyResult | null>();
+    for (const raw of taken) {
+      const entry = raw as Partial<ReloadHandoffEntry> | null | undefined;
+      try {
+        const m = messageOf(entry) as InboxMessage | null;
+        if (
+          !m || typeof m !== "object" ||
+          typeof m.message_id !== "string" || !m.message_id ||
+          typeof m.conversation_id !== "string" || m.conversation_id !== entry?.conversationId
+        ) {
+          withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}malformed` });
           continue;
         }
+        const key = heldKey(m);
+        if (handled.has(key)) continue; // the same message twice in one hand-off: handled once
+        handled.add(key);
+        const from = typeof entry?.fromGeneration === "number" ? entry.fromGeneration : Number.NEGATIVE_INFINITY;
+        // A generation newer than the depositor already took ownership of
+        // this exact message: the old producer's copy is the duplicate.
+        if (ledger ? servedAfter("key", key, from) : state.seen.has(key)) {
+          duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}already_served` });
+          continue;
+        }
+        const decision = ((): { withhold: string; keyId?: string | null } | { admit: VerifyResult | null } => {
+          // The relay's deadline, unsigned. Missing or unparseable fails
+          // closed: with no deadline nothing says the message is still wanted.
+          const deadline = typeof m.deadline_at === "string" ? Date.parse(m.deadline_at) : Number.NaN;
+          if (Number.isNaN(deadline)) return { withhold: "no_deadline" };
+          if (deadline <= nowMs) return { withhold: "expired" };
+          let v: VerifyResult | null = null;
+          if (opts.identity) {
+            const guard = new Set(spent);
+            if (!ledger) for (const n of state.seenNonces) guard.add(n);
+            v = verifyBatch([m], {
+              identity: opts.identity,
+              selfAgentId,
+              fleetId: batch.fleet_id ?? null,
+              roster: batch.roster ?? [],
+              seenNonces: guard,
+              now: new Date(nowMs)
+            })[m.message_id] ?? null;
+            // A signature a newer generation already accepted is a replay.
+            const nonce = signatureNonce(m);
+            if (v?.verified && nonce && ledger && servedAfter("nonce", nonce, from)) {
+              v = { verified: false, kind: v.kind, reason: "replay", keyId: v.keyId };
+            }
+          }
+          // Rejected signed material stays rejected, whatever verifies now (#115).
+          const digest = materialDigest(m);
+          if (!digest.startsWith(UNCOMPARABLE_PREFIX)) {
+            const rejected = durableRejects.get(digest);
+            if (rejected) v = rejected;
+          }
+          const signed = Boolean(m.sender_kind === "operator" ? m.operator_sig : m.agent_sig);
+          if (v && !v.verified && signed) {
+            terminal.push({ message: m, verdict: v });
+            return { withhold: `verification:${v.reason ?? "failed"}`, keyId: v.keyId };
+          }
+          if (requireSigned === "require") {
+            const [w] = collectRequireSignedWithheld([m], { [m.message_id]: v }, selfAgentId);
+            if (w) {
+              terminal.push(w);
+              return { withhold: String(w.verdict.reason), keyId: w.verdict.keyId };
+            }
+          }
+          const why = whyNotRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, v, requireSigned);
+          if (why) return { withhold: `not_admissible:${why}` };
+          if (
+            m.sender_kind !== "operator" &&
+            !peerLatchOpen(state, m.conversation_id, effectiveConversationBudget(batch, m.conversation_id, eff.peerTurnBudget))
+          ) {
+            return { withhold: "peer_latch_closed" };
+          }
+          return { admit: v };
+        })();
+        // Decided, either way: a fresh copy of it in this batch is not a second chance.
+        if (fresh.has(key)) markSeen(state, m);
+        if ("withhold" in decision) {
+          withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}${decision.withhold}`, keyId: decision.keyId });
+          continue;
+        }
+        const v = decision.admit;
+        markSeen(state, m);
+        const nonce = v?.verified ? signatureNonce(m) : undefined;
+        if (nonce) {
+          markNonceSeen(state, nonce);
+          spent.add(nonce);
+        }
+        served.push(m);
+        servedVerdicts.set(m, v);
+        const carried = entry?.firstDeferredAtMs;
+        const deferredAt =
+          typeof carried === "number" && Number.isFinite(carried) && carried <= nowMs ? carried : null;
+        const group = admitted.get(m.conversation_id) ?? { messages: [], verdicts: {}, firstAt: nowMs, inflight: false };
+        group.messages.push(m);
+        group.verdicts[key] = v;
+        // Never floor-tried (acked in flight when the predecessor stopped):
+        // the conversation's floor window restarts so they get their attempt.
+        if (deferredAt === null) group.inflight = true;
+        else group.firstAt = Math.min(group.firstAt, deferredAt);
+        admitted.set(m.conversation_id, group);
+      } catch (err) {
+        withheld.push({ message: messageOf(entry), reason: `${RELOAD_WITHHELD_PREFIX}malformed` });
+        quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${String(err)}`);
       }
-      const why = whyNotRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, v, requireSigned);
-      if (why) {
-        withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}not_admissible:${why}` });
-        continue;
-      }
-      if (
-        m.sender_kind !== "operator" &&
-        !peerLatchOpen(state, m.conversation_id, effectiveConversationBudget(batch, m.conversation_id, eff.peerTurnBudget))
-      ) {
-        withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}peer_latch_closed` });
-        continue;
-      }
-      markSeen(state, m);
-      const nonce = v?.verified ? (m.sig_canonical as Record<string, unknown> | null | undefined)?.nonce : undefined;
-      if (typeof nonce === "string") {
-        markNonceSeen(state, nonce);
-        nonceGuard.add(nonce);
-      }
-      const first =
-        typeof entry.firstDeferredAtMs === "number" && Number.isFinite(entry.firstDeferredAtMs) && entry.firstDeferredAtMs <= nowMs
-          ? entry.firstDeferredAtMs
-          : nowMs;
-      const group = admitted.get(m.conversation_id) ?? { messages: [], verdicts: {}, firstAt: first };
-      group.messages.push(m);
-      group.verdicts[key] = v;
-      group.firstAt = Math.min(group.firstAt, first);
-      admitted.set(m.conversation_id, group);
     }
+    try {
+      recordTerminalRejects(terminal, selfAgentId, cacheContext);
+    } catch (err) {
+      log?.warn?.(`[ekho-autoreply] reload hand-off reject publish failed: ${String(err)}`);
+    }
+    noteServed(served, (m) => servedVerdicts.get(m));
     if (duplicates.length > 0) {
       recordHandoff(duplicates);
-      log?.info?.(
-        `[ekho-autoreply] reload hand-off: ${duplicates.length} msg(s) already reached this generation ` +
-          `another way (${duplicates.map((d) => `${idOf(d.message)}:${d.reason.slice(RELOAD_DUPLICATE_PREFIX.length)}`).join(", ")}); not re-admitted`
+      quietly(
+        "info",
+        `[ekho-autoreply] reload hand-off: ${duplicates.length} msg(s) already served by a newer generation ` +
+          `(${duplicates.map((d) => idOf(d.message)).join(", ")}); not re-admitted`
       );
     }
     if (withheld.length > 0) {
       recordHandoff(withheld);
-      log?.warn?.(
+      quietly(
+        "warn",
         `[ekho-autoreply] reload hand-off withheld ${withheld.length} acked msg(s) ` +
           `(${withheld.map((w) => `${idOf(w.message)}:${w.reason.slice(RELOAD_WITHHELD_PREFIX.length)}`).join(", ")}); ` +
           `they will get no turn, and neither the sender nor the operator console is told`
       );
     }
     for (const [conv, group] of admitted) {
-      // Into the stash, like any held-back message: the floor is re-tried and
-      // the overrun clock runs from the ORIGINAL deferral, not from the reload.
-      const pushedOut = new Set<InboxMessage>();
-      for (const drop of stashDeferred(state, conv, group.messages, group.verdicts, nowMs, group.firstAt)) {
-        log?.warn?.(
-          `[ekho-autoreply] re-admitted conversation ${drop.conversationId} hit a stash cap (${drop.reason}) — ` +
-            `dead-lettering ${drop.messages.length} msg(s); they will get no turn`
-        );
-        deadLetterDeferred(drop.messages, drop.reason);
-        for (const m of drop.messages) pushedOut.add(m);
-      }
-      const kept = group.messages.filter((m) => !pushedOut.has(m));
-      recordHandoff(kept.map((m) => ({ message: m, reason: RELOAD_READMITTED_REASON })));
-      if (kept.length > 0) {
-        log?.info?.(
-          `[ekho-autoreply] reload hand-off: re-admitted ${kept.length} acked msg(s) for conversation ${conv}; ` +
-            `they wait for the floor like any held-back message`
-        );
+      try {
+        // Into the stash, like any held-back message: the floor is re-tried and
+        // the overrun clock runs from the ORIGINAL deferral, not from the
+        // reload — unless something in it never had a floor attempt.
+        const pushedOut = new Set<InboxMessage>();
+        for (const drop of stashDeferred(state, conv, group.messages, group.verdicts, nowMs, group.firstAt, group.inflight)) {
+          quietly(
+            "warn",
+            `[ekho-autoreply] re-admitted conversation ${drop.conversationId} hit a stash cap (${drop.reason}) — ` +
+              `dead-lettering ${drop.messages.length} msg(s); they will get no turn`
+          );
+          deadLetterDeferred(drop.messages, drop.reason);
+          for (const m of drop.messages) pushedOut.add(m);
+        }
+        const kept = group.messages.filter((m) => !pushedOut.has(m));
+        recordHandoff(kept.map((m) => ({ message: m, reason: RELOAD_READMITTED_REASON })));
+        if (kept.length > 0) {
+          quietly(
+            "info",
+            `[ekho-autoreply] reload hand-off: re-admitted ${kept.length} acked msg(s) for conversation ${conv}; ` +
+              `they wait for the floor like any held-back message`
+          );
+        }
+      } catch (err) {
+        recordHandoff(group.messages.map((m) => ({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}stash_failed` })));
+        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${String(err)}`);
       }
     }
   };
@@ -2683,7 +2849,25 @@ export function startAutoReply(opts: {
     reconcilePeerLatches(state, batch, eff.peerTurnBudget);
     // A quiet poll still reconciles the active producer's fresh latch.
     recordPeerUsage(state.peerTurnsByConversation, selfAgentId, cacheContext);
-    admitReloadHandoff(batch, verifications, operatorTrusted, eff, durableRejects);
+    // Progress signals refresh the budget (scan the FULL batch, BEFORE the latch
+    // gate). A peer handoff/claim/complete is real work-transfer, not chatter, so
+    // it re-energises its conversation's latch exactly like an operator message —
+    // a handoff lands on a fresh budget instead of silently stalling, and a
+    // `complete` (never a trigger type, so not in `real`) still refreshes the
+    // budget without waking. `direct`/`broadcast` keep consuming the latch.
+    refreshBudgetForProgressSignals(state, batch.messages, selfAgentId, verifications);
+    // Operator engagement re-energises the peer latch for its conversation.
+    // Both run before the reload hand-off is decided (#111), so a held message
+    // meets the latch exactly as this batch's own peer messages will.
+    for (const m of batch.messages) {
+      if (
+        m?.sender_kind === "operator" &&
+        isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
+      ) {
+        resetPeerLatch(state, m.conversation_id);
+      }
+    }
+    admitReloadHandoff(batch, verifications, operatorTrusted, eff, durableRejects, cacheContext);
     const real = batch.messages.filter((m) =>
       isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
@@ -2720,14 +2904,6 @@ export function startAutoReply(opts: {
         batch.messages.map((m) => `${m.sender_kind ?? "?"}/${m.message_type}`).join(", ") + "]"
       );
     }
-
-    // Progress signals refresh the budget (scan the FULL batch, BEFORE the latch
-    // gate). A peer handoff/claim/complete is real work-transfer, not chatter, so
-    // it re-energises its conversation's latch exactly like an operator message —
-    // a handoff lands on a fresh budget instead of silently stalling, and a
-    // `complete` (never a trigger type, so not in `real`) still refreshes the
-    // budget without waking. `direct`/`broadcast` keep consuming the latch.
-    refreshBudgetForProgressSignals(state, batch.messages, selfAgentId, verifications);
 
     // Deferred servicing: a conversation deferred to a floor holder is retried
     // on later ticks — its messages were consumed + acked, so the stash is their
@@ -2787,11 +2963,6 @@ export function startAutoReply(opts: {
       return;
     }
 
-    // Operator engagement re-energises the peer latch for its conversation.
-    for (const m of real) {
-      if (m.sender_kind === "operator") resetPeerLatch(state, m.conversation_id);
-    }
-
     // Per-peer rolling rate gate first (operator exempt), then the per-conversation
     // latch on the surviving teammate messages (the structural loop-breaker).
     const rateKept = applyPeerRateGate(real, state, log);
@@ -2834,6 +3005,9 @@ export function startAutoReply(opts: {
 
     // Mark every real message handled (dedupe defence — Part C, rule 3).
     for (const m of real) markSeen(state, m);
+    // Only `kept` is served (a turn or the stash takes it); the rest got no
+    // turn by policy. The ledger lets a successor refuse a late old copy (#111).
+    noteServed(kept, (m) => verifications[m.message_id]);
 
     // From the ack on, `kept` lives only in this tick until a turn or the
     // stash takes it; a stop() in that window dead-letters it (flushOnStop).
@@ -2973,6 +3147,10 @@ export function startAutoReply(opts: {
     tickRunning = true;
     try {
       await runTick();
+    } catch (err) {
+      // Nothing above may take the process down: the interval discards this
+      // promise, so a rejection here would be unhandled.
+      quietly("warn", `[ekho-autoreply] tick failed: ${String(err)}`);
     } finally {
       tickRunning = false;
       unhanded = [];
