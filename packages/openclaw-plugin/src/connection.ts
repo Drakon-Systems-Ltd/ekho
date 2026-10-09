@@ -23,11 +23,15 @@ import { appendDeadLetters } from "./dead-letter.js";
 import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./state-dir.js";
 import {
   claimAgentRuntime,
+  depositReloadHandoff,
   nextRuntimeGeneration,
+  noteReloadServed,
   putEnrolOperatorKeys,
   releaseAgentRuntime,
+  reloadServedBy,
   runEnrolmentExclusive,
-  takeEnrolOperatorKeys
+  takeEnrolOperatorKeys,
+  takeReloadHandoff
 } from "./runtime-registry.js";
 
 export interface EkhoPluginConfig {
@@ -605,10 +609,11 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     log?.info?.("[ekho-autoreply] disabled in this process (EKHO_AUTOREPLY_DISABLE)");
     return;
   }
+  const agentId = connection.credentials.agentId;
   stopAutoReply = startAutoReply({
     client: connection.client,
     api,
-    selfAgentId: connection.credentials.agentId,
+    selfAgentId: agentId,
     cacheContext: () => connectedInboxContext(connection!),
     log,
     peerEnabled: config?.peerAutoreply ?? true,
@@ -639,6 +644,21 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     onDeadLetter: (records) => {
       if (!identityConfigDir) return;
       appendDeadLetters(identityConfigDir, records);
+    },
+    // #111: acked work this generation lets go of at stop is left, in memory,
+    // for the next generation of the SAME agent in this process, which
+    // re-admits it under its own trust root (runtime-registry.ts). Bound to
+    // this copy's generation; the registry only lets the current holder take.
+    reloadHandoff: {
+      deposit: (owner, entries) =>
+        depositReloadHandoff(
+          entries.map((e) => ({ ...e, owner, agentId, fromGeneration: generation, depositedAtMs: Date.now() }))
+        ),
+      take: (owner) => takeReloadHandoff(agentId, owner, generation),
+      // What this generation served, so a later one can refuse an older
+      // producer's late copy of it. Ownership only: no verdict, no payload.
+      noteServed: (owner, served) => noteReloadServed(agentId, owner, generation, served),
+      servedBy: (owner, kind, value) => reloadServedBy(agentId, owner, kind, value)
     }
   });
 }

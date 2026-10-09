@@ -668,3 +668,37 @@ describe("#78 r4 held messages are keyed by id AND material", () => {
     expect(cover.deferred?.heldKeys).toEqual([heldKey(a), heldKey(b)]);
   });
 });
+
+// #111: a stash carried across a reload keeps its ORIGINAL clock, but messages
+// that never had a floor attempt (acked in flight when the predecessor stopped)
+// must not inherit an overdue clock and be delivered without the floor.
+describe("#111 carried and never-floor-tried clocks", () => {
+  const NOW = 1_800_000_000_000;
+  const overdue = NOW - DEFERRED_RETRY_TTL_MS - 60_000;
+
+  it("a NEW stash takes the carried clock: an overdue carried stash is delivered late", () => {
+    const state = createAutoReplyState();
+    stashDeferred(state, "c", [amsg("c", "m1")], {}, NOW, overdue);
+    expect(state.deferredByConversation.get("c")?.firstDeferredAtMs).toBe(overdue);
+    expect(listRetryableDeferred(state, NOW)).toEqual([]);
+    expect(takeExpiredDeferred(state, NOW).map((e) => e.conversationId)).toEqual(["c"]);
+  });
+
+  it("an EXISTING stash keeps its own clock when carried messages join it", () => {
+    const state = createAutoReplyState();
+    stashDeferred(state, "c", [amsg("c", "own")], {}, NOW - 1_000);
+    stashDeferred(state, "c", [amsg("c", "carried")], {}, NOW, overdue);
+    expect(state.deferredByConversation.get("c")?.firstDeferredAtMs).toBe(NOW - 1_000);
+  });
+
+  it("never-floor-tried messages restart the clock, even over an overdue stash", () => {
+    const state = createAutoReplyState();
+    stashDeferred(state, "c", [amsg("c", "old")], {}, overdue);
+    // Joined by messages that were acked in flight and never planned for the floor.
+    stashDeferred(state, "c", [amsg("c", "inflight")], {}, NOW, overdue, true);
+    expect(state.deferredByConversation.get("c")?.firstDeferredAtMs).toBe(NOW);
+    expect(takeExpiredDeferred(state, NOW)).toEqual([]);
+    expect(listRetryableDeferred(state, NOW)).toEqual(["c"]);
+    expect(state.deferredByConversation.get("c")?.messages.map((m) => m.message_id)).toEqual(["old", "inflight"]);
+  });
+});

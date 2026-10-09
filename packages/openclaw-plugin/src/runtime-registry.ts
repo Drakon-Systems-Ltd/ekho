@@ -32,6 +32,10 @@ interface RuntimeRegistry {
   enrolments?: Map<string, Promise<void>>;
   /** Operator keys from an enrolment, for whichever copy bootstraps identity. */
   enrolOperatorKeys?: Map<string, unknown[]>;
+  /** Acked work a stopping loop left for its same-process successor (#111). */
+  reloadHandoffs?: Map<string, ReloadHandoffEntry[]>;
+  /** Which generation last took ownership of a message or signature (#111). */
+  reloadServed?: Map<string, ReloadServedLedger>;
 }
 
 function registry(): RuntimeRegistry {
@@ -124,4 +128,243 @@ export function takeEnrolOperatorKeys(key: string): unknown[] | null {
   const keys = m?.get(key) ?? null;
   m?.delete(key);
   return keys;
+}
+
+// ---- Reload hand-off (#111) -------------------------------------------------
+// A stopping loop's acked-but-unserved messages, left for the NEXT generation
+// in this same process. The host's reload swaps generations seconds apart, and
+// before this the successor started with an empty stash: a message still well
+// inside its deadline was on disk as a dead-letter record and nowhere else.
+//
+// What this is NOT, on purpose:
+//  - Not a queue authority. An entry is a candidate the successor RE-ADMITS
+//    under its own trust root, policy, floor and deadline; it carries no
+//    verdict, and one written by any bundle version is treated as untrusted.
+//  - Not durable. It lives in this process's memory only. A gateway shutdown
+//    or a crash loses it exactly as before, and the dead-letter file (which is
+//    still written, unchanged) is never read back as work.
+//  - Not shared across connection domains. An entry is taken only by a holder
+//    with the same full ownership identity (relay, agent, fleet, agent signing
+//    key) and a strictly newer generation that currently holds the agent.
+
+/** Upper bound on entries held per agent. Matches the most a loop can hold in
+ *  its stash (autoreply.ts DEFERRED_CONVERSATION_CAP x DEFERRED_MESSAGES_PER_CONV). */
+export const RELOAD_HANDOFF_CAP = 500;
+/** An entry nobody claimed within this long is dropped (and reported). Same
+ *  bound as the signed-freshness window: past it a signed message is stale. */
+export const RELOAD_HANDOFF_MAX_AGE_MS = (86400 + 300) * 1000;
+
+export interface ReloadHandoffEntry {
+  /** Connection identity of the depositing loop (see autoreply.ts inboxCacheContext). */
+  owner: string;
+  agentId: string;
+  fromGeneration: number;
+  /** Why the stopping loop let go of it (deferred_loop_stopped / inflight_loop_stopped). */
+  reason: string;
+  conversationId: string;
+  /** The message as the depositor held it. Untrusted: re-verified on admission. */
+  message: unknown;
+  /** When the message was first deferred to a floor holder; null if never. */
+  firstDeferredAtMs: number | null;
+  depositedAtMs: number;
+}
+
+/** What a deposit or take could not keep, for the caller to report. */
+export interface ReloadHandoffDropped {
+  entry: ReloadHandoffEntry;
+  why: "overflow" | "unclaimed_too_long";
+}
+
+function handoffStore(): Map<string, ReloadHandoffEntry[]> {
+  const r = registry();
+  // Added after the first registry shape: an older copy may not have created it.
+  if (r.reloadHandoffs instanceof Map) return r.reloadHandoffs;
+  const store = new Map<string, ReloadHandoffEntry[]>();
+  r.reloadHandoffs = store;
+  return store;
+}
+
+function isHandoffEntry(e: unknown): e is ReloadHandoffEntry {
+  if (!e || typeof e !== "object") return false;
+  const x = e as Record<string, unknown>;
+  return (
+    typeof x.owner === "string" && x.owner !== "" &&
+    typeof x.agentId === "string" && x.agentId !== "" &&
+    typeof x.fromGeneration === "number" && Number.isFinite(x.fromGeneration) &&
+    typeof x.conversationId === "string" &&
+    typeof x.depositedAtMs === "number" && Number.isFinite(x.depositedAtMs)
+  );
+}
+
+/** Drop entries past the age bound or the per-agent cap (oldest first). */
+function pruneHandoffs(list: ReloadHandoffEntry[], nowMs: number): ReloadHandoffDropped[] {
+  const dropped: ReloadHandoffDropped[] = [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (nowMs - list[i].depositedAtMs > RELOAD_HANDOFF_MAX_AGE_MS) {
+      dropped.push({ entry: list[i], why: "unclaimed_too_long" });
+      list.splice(i, 1);
+    }
+  }
+  while (list.length > RELOAD_HANDOFF_CAP) {
+    const oldest = list.shift();
+    if (oldest) dropped.push({ entry: oldest, why: "overflow" });
+  }
+  return dropped;
+}
+
+/**
+ * Leave `entries` for a successor of the same agent. Synchronous, so a stop
+ * that deposits has done so before it returns. Never throws. Returns what the
+ * bounds pushed out (the oldest entries first), which the caller reports.
+ */
+export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date.now()): ReloadHandoffDropped[] {
+  const store = handoffStore();
+  const dropped: ReloadHandoffDropped[] = [];
+  const touched = new Set<string>();
+  for (const e of entries) {
+    if (!isHandoffEntry(e)) continue;
+    const list = store.get(e.agentId) ?? [];
+    list.push(e);
+    store.set(e.agentId, list);
+    touched.add(e.agentId);
+  }
+  for (const agentId of touched) {
+    const list = store.get(agentId) ?? [];
+    dropped.push(...pruneHandoffs(list, nowMs));
+    if (list.length === 0) store.delete(agentId);
+  }
+  return dropped;
+}
+
+/**
+ * Take, once, the entries left for `agentId` by OLDER generations with the
+ * same full ownership identity. Only the generation that currently holds the
+ * agent may take; a stale or retired copy gets nothing. Entries from another
+ * connection domain (a different relay, fleet or signing key) are left where
+ * they are, untouched, for their own owner or the bounds. Take-and-delete is
+ * one synchronous step, so two takers can never both receive an entry.
+ */
+export function takeReloadHandoff(
+  agentId: string,
+  owner: string,
+  takerGeneration: number,
+  nowMs = Date.now()
+): { taken: ReloadHandoffEntry[]; dropped: ReloadHandoffDropped[] } {
+  const r = registry();
+  if (!agentId || !owner) return { taken: [], dropped: [] };
+  if (r.byAgent.get(agentId)?.generation !== takerGeneration) return { taken: [], dropped: [] };
+  const store = handoffStore();
+  const list = store.get(agentId);
+  if (!list) return { taken: [], dropped: [] };
+  const dropped = pruneHandoffs(list, nowMs);
+  const taken: ReloadHandoffEntry[] = [];
+  const left: ReloadHandoffEntry[] = [];
+  for (const e of list) {
+    if (isHandoffEntry(e) && e.agentId === agentId && e.owner === owner && e.fromGeneration < takerGeneration) {
+      taken.push(e);
+    } else {
+      left.push(e);
+    }
+  }
+  if (left.length > 0) store.set(agentId, left);
+  else store.delete(agentId);
+  return { taken, dropped };
+}
+
+// ---- Served ledger (#111) ----------------------------------------------------
+// A loop's `seen` and nonce sets die with it, so a deposit can outlive every
+// generation that knew its message was already served: A's covering turn fails
+// after A was retired, B serves the relay's redelivery, B is replaced by C, and
+// A's late flush then lands in C. This ledger, scoped to one connection domain
+// (agent + owner), remembers the NEWEST generation that took ownership of a
+// message (its heldKey) or accepted a signature (its nonce). A hand-off entry
+// whose message a NEWER generation than its depositor already served is a
+// duplicate. The depositor's own ownership does not count against it, so
+// unserved work still carries B -> C.
+//
+// What it records is ownership, never trust: no verdict, no payload. It is
+// bounded and in memory only, like the hand-off itself; it is consulted by the
+// hand-off alone, not by fresh relay deliveries.
+
+/** Most keys (and, separately, nonces) remembered per connection domain. Four
+ *  times the most a hand-off can hold, so the evidence outlives the entries. */
+export const RELOAD_SERVED_CAP = 4 * RELOAD_HANDOFF_CAP;
+/** Connection domains remembered per process, oldest forgotten first. */
+const RELOAD_SERVED_DOMAINS = 64;
+
+interface ReloadServedLedger {
+  keys: Map<string, { generation: number; atMs: number }>;
+  nonces: Map<string, { generation: number; atMs: number }>;
+}
+
+function servedStore(): Map<string, ReloadServedLedger> {
+  const r = registry();
+  if (r.reloadServed instanceof Map) return r.reloadServed;
+  const store = new Map<string, ReloadServedLedger>();
+  r.reloadServed = store;
+  return store;
+}
+
+const servedDomain = (agentId: string, owner: string): string => `${agentId}\u0000${owner}`;
+
+function noteInto(map: ReloadServedLedger["keys"], values: string[], generation: number, nowMs: number): void {
+  for (const v of values) {
+    if (typeof v !== "string" || !v) continue;
+    const prior = map.get(v);
+    // Re-insert so iteration stays oldest-first; keep the newest owner.
+    map.delete(v);
+    map.set(v, { generation: Math.max(generation, prior?.generation ?? generation), atMs: nowMs });
+  }
+  for (const [v, e] of map) {
+    if (nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
+    map.delete(v);
+  }
+  while (map.size > RELOAD_SERVED_CAP) {
+    const oldest = map.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+/** Record that `generation` took ownership of these messages (heldKeys) and
+ *  accepted these signatures (nonces). Never throws. */
+export function noteReloadServed(
+  agentId: string,
+  owner: string,
+  generation: number,
+  served: { keys?: string[]; nonces?: string[] },
+  nowMs = Date.now()
+): void {
+  if (!agentId || !owner || !Number.isFinite(generation)) return;
+  const store = servedStore();
+  const domain = servedDomain(agentId, owner);
+  let ledger = store.get(domain);
+  if (!ledger) {
+    ledger = { keys: new Map(), nonces: new Map() };
+    store.set(domain, ledger);
+    while (store.size > RELOAD_SERVED_DOMAINS) {
+      const oldest = store.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      store.delete(oldest);
+    }
+  }
+  noteInto(ledger.keys, served.keys ?? [], generation, nowMs);
+  noteInto(ledger.nonces, served.nonces ?? [], generation, nowMs);
+}
+
+/** The newest generation that took ownership of `value` (a heldKey, or a
+ *  signature nonce) in this connection domain, if any is remembered. */
+export function reloadServedBy(
+  agentId: string,
+  owner: string,
+  kind: "key" | "nonce",
+  value: string
+): number | undefined {
+  const ledger = registry().reloadServed?.get(servedDomain(agentId, owner));
+  return (kind === "key" ? ledger?.keys : ledger?.nonces)?.get(value)?.generation;
+}
+
+/** Test seam: how many hand-off entries are held for `agentId`. */
+export function reloadHandoffCount(agentId: string): number {
+  return registry().reloadHandoffs?.get(agentId)?.length ?? 0;
 }
