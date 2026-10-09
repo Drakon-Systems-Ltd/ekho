@@ -6,12 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -19,6 +24,10 @@ jobs:
       - run: npm ci
       - run: npm run build -w @drakon-systems/ekho-sdk
       - run: npm run typecheck
+      # Root typecheck covers only the SDK and relay; the plugin's strict
+      # compile (src only, tests excluded by its tsconfig) runs here against
+      # the SDK built above.
+      - run: npm run typecheck -w @drakon-systems/ekho-openclaw-plugin
       - run: npx vitest run
 
   # The Hermes plugin's shadow check takes its verdict from Hermes' own
@@ -40,8 +49,11 @@ jobs:
       HERMES_AGENT_REF: de5bb705dbfba19bdbbfa293d67ba67712339ac5  # main, 2026-10-01
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v6
         with:
+          persist-credentials: false
           repository: NousResearch/hermes-agent
           ref: ${{ env.HERMES_AGENT_REF }}
           path: .hermes-agent
