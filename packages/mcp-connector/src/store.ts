@@ -34,7 +34,10 @@ export type VerificationStatus =
   /** Signed, but the signature or a binding failed (reason says which). */
   | "failed"
   /** Signed, but this connector holds no pinned operator keys yet. */
-  | "unverifiable";
+  | "unverifiable"
+  /** Our own outbound message: signed with this connector's key, but whether
+   *  that key is endorsed by the fleet is not checked here. */
+  | "self_signed";
 
 export interface StoredAttachment {
   id: string;

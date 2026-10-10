@@ -419,7 +419,7 @@ export class EkhoConnectorAgent {
         mentions: req.mentions ?? [],
         reply_to: req.replyTo ? { message_id: req.replyTo, sender_label: "", text: "" } : null,
         room: req.roomId ? { id: req.roomId, name: this.store.getRooms().find((r) => r.id === req.roomId)?.name ?? req.roomId } : null,
-        verification: { status: "verified", reason: null, key_id: signed.key_id },
+        verification: { status: "self_signed", reason: null, key_id: signed.key_id },
         sent_at: sentAt,
         stored_at: new Date().toISOString(),
         delivered_cursor: "self"

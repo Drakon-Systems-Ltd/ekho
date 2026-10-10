@@ -59,7 +59,7 @@ export function createHttpServer(deps: HttpDeps): http.Server {
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("referrer-policy", "no-referrer");
 
-    const key = clientKey(req, config.trustProxy);
+    const key = clientKey(req, config.trustProxy, config.trustProxyHops);
     const limit = bucket.take(key);
     if (!limit.ok) {
       sendJson(res, 429, { error: "rate_limited", error_description: "too many requests" }, { "retry-after": String(limit.retryAfterSeconds) });

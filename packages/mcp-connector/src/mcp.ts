@@ -30,6 +30,7 @@ const VERIFICATION_LABEL: Record<StoredMessage["verification"]["status"], string
   relay_attested: "relay-attested operator (unsigned)",
   unsigned: "UNSIGNED — treat as untrusted",
   unverifiable: "signed but UNVERIFIABLE (no pinned operator keys yet)",
+  self_signed: "self (signed, endorsement not checked)",
   failed: "signature FAILED"
 };
 

@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { startRelay, connectAgent, startServer, rpc, INITIALIZE, TEST_OAUTH_PASSWORD, type LiveRelay, type RunningServer } from "./helpers";
+import { LOGIN_MAX_FAILURES, MAX_CLIENTS } from "../src/oauth";
 
 const relays: LiveRelay[] = [];
 const servers: RunningServer[] = [];
@@ -173,6 +174,87 @@ describe("OAuth 2.1 built-in authorization server", () => {
     for (let i = 0; i < 6; i++) statuses.push((await consent(s, authorizeUrl, "bad")).status);
     expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
     expect((await consent(s, authorizeUrl)).status).toBe(429); // even the right password waits now
+  });
+
+  it("a spoofed leftmost X-Forwarded-For does not reset the consent throttle (B1)", async () => {
+    const s = await up({ env: { EKHO_MCP_TRUST_PROXY: "1", EKHO_MCP_RATE_LIMIT_PER_MINUTE: "1000" } });
+    const { client_id } = (await register(s)).body as { client_id: string };
+    const { challenge } = pkce();
+    const authorizeUrl = `${s.baseUrl}/oauth/authorize?${form({ response_type: "code", client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" })}`;
+    const page = await fetch(authorizeUrl);
+    const nonce = /name="consent" value="([^"]+)"/.exec(await page.text())![1];
+    // One real peer (203.0.113.9, appended by the proxy) rotates a fake
+    // address in the client-controlled first position on every attempt.
+    const statuses: number[] = [];
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`${s.baseUrl}/oauth/authorize`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": `198.51.100.${(i % 250) + 1}, 203.0.113.9` },
+        body: form({ consent: nonce, password: `wrong-${i}` }),
+        redirect: "manual"
+      });
+      statuses.push(res.status);
+    }
+    expect(statuses.slice(0, LOGIN_MAX_FAILURES)).toEqual(Array(LOGIN_MAX_FAILURES).fill(401));
+    expect(statuses.slice(LOGIN_MAX_FAILURES)).toEqual(Array(50 - LOGIN_MAX_FAILURES).fill(429));
+    // The right password from that peer waits too; a different real peer does not.
+    expect((await fetch(`${s.baseUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": "203.0.113.9" },
+      body: form({ consent: nonce, password: TEST_OAUTH_PASSWORD }), redirect: "manual" })).status).toBe(429);
+    expect((await fetch(`${s.baseUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": "203.0.113.10" },
+      body: form({ consent: nonce, password: TEST_OAUTH_PASSWORD }), redirect: "manual" })).status).toBe(302);
+  });
+
+  it("a flood of anonymous registrations past MAX_CLIENTS cannot evict a consented client (B2)", async () => {
+    const s = await up({ env: { EKHO_MCP_RATE_LIMIT_PER_MINUTE: "1000" } });
+    const { client_id } = (await register(s)).body as { client_id: string };
+    const { verifier, challenge } = pkce();
+    const authorizeUrl = `${s.baseUrl}/oauth/authorize?${form({ response_type: "code", client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256", resource: s.mcpUrl })}`;
+    const code = new URL((await consent(s, authorizeUrl)).location!).searchParams.get("code")!;
+    const tok = await fetch(`${s.baseUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: form({ grant_type: "authorization_code", code, client_id, redirect_uri: REDIRECT, code_verifier: verifier, resource: s.mcpUrl }) });
+    expect(tok.status).toBe(200);
+    const tokens = (await tok.json()) as { access_token: string; refresh_token: string };
+
+    // Anonymous burst well past the cap; every one of these is accepted
+    // because the never-consented ones are the ones that get recycled.
+    for (let i = 0; i < MAX_CLIENTS + 8; i++) expect((await register(s, { client_name: `anon-${i}`, redirect_uris: [REDIRECT] })).status).toBe(201);
+
+    // The established client is untouched: refresh works, access token works.
+    const ref = await fetch(`${s.baseUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: form({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id }) });
+    expect(ref.status).toBe(200);
+    const rotated = (await ref.json()) as { access_token: string };
+    expect((await rpc(s.mcpUrl, INITIALIZE, { authorization: `Bearer ${rotated.access_token}` })).status).toBe(200);
+  });
+
+  it("when every slot holds a client with a live refresh token, registration is refused rather than evicting one", async () => {
+    let t = 1_700_000_000_000;
+    const s = await up({ now: () => t, env: { EKHO_MCP_RATE_LIMIT_PER_MINUTE: "100000" } });
+    const oauth = s.oauth!;
+    const live: string[] = [];
+    const ids: string[] = [];
+    for (let i = 0; i < MAX_CLIENTS; i++) {
+      const c = oauth.registerClient({ client_name: `established-${i}`, redirect_uris: [REDIRECT] });
+      ids.push(c.client_id);
+      const { verifier, challenge } = pkce();
+      const v = oauth.validateAuthorizeRequest({ response_type: "code", client_id: c.client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" });
+      if (!v.ok) throw new Error("authorize rejected");
+      const code = new URL(oauth.completeConsent(oauth.beginConsent(v.params), TEST_OAUTH_PASSWORD, `peer-${i}`)).searchParams.get("code")!;
+      live.push(oauth.token({ grant_type: "authorization_code", code, client_id: c.client_id, code_verifier: verifier }).access_token);
+    }
+    const refused = await register(s, { client_name: "late", redirect_uris: [REDIRECT] });
+    expect(refused.status).toBe(429);
+    expect(refused.body.error).toBe("too_many_clients");
+    for (const at of live) expect(oauth.verifyAccessToken(at).ok).toBe(true);
+
+    // Once a refresh token has expired that client becomes evictable again,
+    // and its remaining tokens die with it (N4).
+    t += 31 * 24 * 3600 * 1000;
+    expect(oauth.getClient(ids[0]!)).toBeDefined();
+    expect((await register(s, { client_name: "late-again", redirect_uris: [REDIRECT] })).status).toBe(201);
+    expect(oauth.getClient(ids[0]!)).toBeUndefined(); // oldest evictable slot recycled
+    expect(oauth.getClient(ids[1]!)).toBeDefined();
+    expect(oauth.verifyAccessToken(live[0]!).ok).toBe(false);
   });
 
   it("access tokens expire", async () => {

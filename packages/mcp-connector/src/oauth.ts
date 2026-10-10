@@ -196,8 +196,16 @@ export class OAuthServer {
       response_types: ["code"],
       client_id_issued_at: Math.floor(this.now() / 1000)
     };
+    // Registration is unauthenticated, so it must never cost an established
+    // client its slot: only clients without a live refresh token (never
+    // consented, or long idle) are evicted, oldest first. When every slot is
+    // held by an established client the registration is refused instead.
+    if (this.clients.length >= MAX_CLIENTS) {
+      const idx = this.clients.findIndex((c) => !this.hasLiveRefreshToken(c.client_id));
+      if (idx < 0) throw new OAuthError(429, "too_many_clients", `client registry is full (${MAX_CLIENTS} authorized clients); revoke one before registering another`);
+      this.removeClientAt(idx);
+    }
     this.clients.push(client);
-    while (this.clients.length > MAX_CLIENTS) this.clients.shift();
     this.persist();
     this.opts.log?.info?.(`[ekho-mcp] registered OAuth client ${client.client_id} (${client.client_name ?? "unnamed"}) for ${uris.join(", ")}`);
     return client;
@@ -221,6 +229,21 @@ export class OAuthServer {
 
   getClient(clientId: string): RegisteredClient | undefined {
     return this.clients.find((c) => c.client_id === clientId);
+  }
+
+  /** True while the client can still refresh without going through consent. */
+  private hasLiveRefreshToken(clientId: string): boolean {
+    const t = this.now();
+    return this.tokens.some((x) => x.kind === "refresh" && x.client_id === clientId && x.expires_at > t);
+  }
+
+  /** Drop a client and every token it holds, so a removed client_id cannot
+   *  keep using an access token that outlives its registration. */
+  private removeClientAt(idx: number): void {
+    const [gone] = this.clients.splice(idx, 1);
+    if (!gone) return;
+    this.tokens = this.tokens.filter((x) => x.client_id !== gone.client_id);
+    this.opts.log?.info?.(`[ekho-mcp] evicted OAuth client ${gone.client_id} (${gone.client_name ?? "unnamed"}) to make room for a new registration`);
   }
 
   // ---- authorization ---------------------------------------------------

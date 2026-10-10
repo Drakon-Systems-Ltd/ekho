@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
-import { constantTimeEqual, StaticBearerAuthenticator, TokenBucket, bearerFromHeader } from "../src/auth";
+import type { IncomingMessage } from "node:http";
+import { constantTimeEqual, StaticBearerAuthenticator, TokenBucket, bearerFromHeader, clientKey } from "../src/auth";
 import { startRelay, connectAgent, startServer, rpc, INITIALIZE, TEST_BEARER, type LiveRelay, type RunningServer } from "./helpers";
 
 const relays: LiveRelay[] = [];
@@ -80,6 +81,36 @@ describe("limits", () => {
     expect(statuses).toEqual([200, 200, 200, 429, 429]);
     const last = await fetch(`${s.baseUrl}/healthz`);
     expect(last.headers.get("retry-after")).toMatch(/^\d+$/);
+  });
+
+  it("clientKey: with TRUST_PROXY the key is the entry the proxy appended (rightmost), never the client-supplied leftmost", () => {
+    const req = (xff: string | string[] | undefined) =>
+      ({ headers: xff === undefined ? {} : { "x-forwarded-for": xff }, socket: { remoteAddress: "127.0.0.1" } }) as unknown as IncomingMessage;
+    expect(clientKey(req("203.0.113.9"), false)).toBe("127.0.0.1");
+    expect(clientKey(req("203.0.113.9"), true)).toBe("203.0.113.9");
+    // A client that sends its own XFF has it prepended by the proxy: the spoof
+    // is on the left, the real peer on the right.
+    expect(clientKey(req("198.51.100.77, 203.0.113.9"), true)).toBe("203.0.113.9");
+    expect(clientKey(req("a, b, c , 203.0.113.9"), true)).toBe("203.0.113.9");
+    expect(clientKey(req(["198.51.100.77", "203.0.113.9"]), true)).toBe("203.0.113.9");
+    // Two trusted hops: the second from the right. Fewer entries than hops →
+    // the chain is not the one described, fall back to the socket.
+    expect(clientKey(req("spoof, 203.0.113.9, 10.0.0.2"), true, 2)).toBe("203.0.113.9");
+    expect(clientKey(req("203.0.113.9"), true, 2)).toBe("127.0.0.1");
+    expect(clientKey(req(""), true)).toBe("127.0.0.1");
+    expect(clientKey(req(undefined), true)).toBe("127.0.0.1");
+  });
+
+  it("a spoofed leftmost X-Forwarded-For does not buy a fresh rate-limit bucket", async () => {
+    const s = await up({ EKHO_MCP_RATE_LIMIT_PER_MINUTE: "3", EKHO_MCP_TRUST_PROXY: "1" });
+    const statuses: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      // Same real peer appended by the proxy, a different fake address in front each time.
+      statuses.push((await fetch(`${s.baseUrl}/healthz`, { headers: { "x-forwarded-for": `198.51.100.${i + 1}, 203.0.113.9` } })).status);
+    }
+    expect(statuses).toEqual([200, 200, 200, 429, 429]);
+    // A genuinely different peer (as appended by the proxy) has its own bucket.
+    expect((await fetch(`${s.baseUrl}/healthz`, { headers: { "x-forwarded-for": "203.0.113.10" } })).status).toBe(200);
   });
 
   it("token bucket refills continuously", () => {

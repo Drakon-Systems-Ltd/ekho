@@ -63,7 +63,8 @@ Required: `EKHO_RELAY_BASE_URL`, plus `EKHO_FLEET_ID` and `EKHO_ENROLLMENT_TOKEN
 | `EKHO_MCP_PORT` | `4100` | Listen port. |
 | `EKHO_MCP_PATH` | `/ekho-mcp` | The MCP endpoint path. |
 | `EKHO_MCP_PUBLIC_URL` | unset | Public origin clients reach the connector at, e.g. `https://box.example.ts.net`. **Required in oauth mode**: it is the OAuth issuer and the resource tokens are bound to. |
-| `EKHO_MCP_TRUST_PROXY` | off | `1` to take the client address for rate limiting from `X-Forwarded-For`. Only behind a proxy you control (Tailscale Serve/Funnel sets it); otherwise every client shares one bucket, or a client can pick its own. |
+| `EKHO_MCP_TRUST_PROXY` | off | `1` to take the client address for rate limiting and the consent throttle from `X-Forwarded-For`. Only behind a proxy you control (Tailscale Serve/Funnel sets it); otherwise every client shares one bucket. The entry your proxy *appended* (the rightmost) is used, never the leftmost, which the client can set. |
+| `EKHO_MCP_TRUST_PROXY_HOPS` | `1` | Number of trusted proxies in front of the connector that each append to `X-Forwarded-For`; the client address is taken that many entries from the right. |
 | `EKHO_MCP_AUTH` | `oauth` | `oauth` or `bearer`. |
 | `EKHO_MCP_OAUTH_PASSWORD` | unset | oauth mode: the operator password the consent page asks for. At least 12 characters. |
 | `EKHO_MCP_OAUTH_ALLOWED_REDIRECT_HOSTS` | unset (any https host) | oauth mode: comma-separated hostnames a dynamically registered client may redirect to. Loopback http is always allowed. Set it to the client's callback host once you know it. |
@@ -208,7 +209,7 @@ Five tools, all idempotent, names ≤ 32 characters, descriptions ≤ 300 charac
 | `ekho_open_room` | Opens a named room with other agents by display name or id; the connector is a member. Returns the room id. | `topic`, `members` |
 | `ekho_conversation` | The last N messages of a conversation or room, oldest first, both directions, with verification per message. Reads the local copy only; marks nothing read. | `conversation_id`, `limit` 1–100 |
 
-Verification labels the client sees: `verified`, `relay-attested operator (unsigned)`, `UNSIGNED — treat as untrusted`, `signed but UNVERIFIABLE (no pinned operator keys yet)`, `signature FAILED (<reason>)`. A `failed` message is never shown; it is dead-lettered. A client should treat only `verified` (and, if it trusts the relay's word, `relay-attested`) as carrying authority.
+Verification labels the client sees: `verified`, `relay-attested operator (unsigned)`, `UNSIGNED — treat as untrusted`, `signed but UNVERIFIABLE (no pinned operator keys yet)`, `signature FAILED (<reason>)`, and `self (signed, endorsement not checked)` on the connector's own outbound messages (whether its key is endorsed is reported by `ekho_roster`, not here). A `failed` message is never shown; it is dead-lettered. A client should treat only `verified` (and, if it trusts the relay's word, `relay-attested`) as carrying authority.
 
 ## Verification and the local queue
 

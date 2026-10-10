@@ -29,6 +29,9 @@ export interface ConnectorConfig {
   /** Trust X-Forwarded-For for the per-client rate limit. Off by default: the
    *  only safe setting unless a proxy you control sits in front. */
   trustProxy: boolean;
+  /** How many trusted proxies append to X-Forwarded-For; the key is the
+   *  entry that many from the right. 1 = a single proxy (Serve/Funnel). */
+  trustProxyHops: number;
 
   auth: AuthMode;
   bearer?: string;
@@ -158,6 +161,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConnectorConfi
     port: int(env, "EKHO_MCP_PORT", DEFAULTS.port, 0, 65535),
     publicUrl,
     trustProxy: bool(env, "EKHO_MCP_TRUST_PROXY"),
+    trustProxyHops: int(env, "EKHO_MCP_TRUST_PROXY_HOPS", 1, 1, 16),
 
     auth,
     bearer,

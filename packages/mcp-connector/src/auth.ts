@@ -139,13 +139,23 @@ export function readBodyCapped(req: IncomingMessage, cap: number): Promise<Buffe
   });
 }
 
-/** The client key the rate limiter buckets on. X-Forwarded-For is honoured
- *  only when the operator says a proxy they control sets it. */
-export function clientKey(req: IncomingMessage, trustProxy: boolean): string {
+/**
+ * The client key the rate limiter and the consent throttle bucket on.
+ * X-Forwarded-For is honoured only when the operator says a proxy they
+ * control sets it, and then only the entry that proxy appended is used: the
+ * `hops`-th value from the RIGHT. Proxies append the peer address to whatever
+ * XFF the client already sent, so the leftmost entries are client-controlled
+ * and must never be used as a key. If the header holds fewer than `hops`
+ * entries the chain is not the one the operator described and the socket
+ * address is used instead.
+ */
+export function clientKey(req: IncomingMessage, trustProxy: boolean, hops = 1): string {
   if (trustProxy) {
-    const xff = req.headers["x-forwarded-for"];
-    const first = (Array.isArray(xff) ? xff[0] : xff)?.split(",")[0]?.trim();
-    if (first) return first;
+    const raw = req.headers["x-forwarded-for"];
+    const joined = Array.isArray(raw) ? raw.join(",") : raw ?? "";
+    const parts = joined.split(",").map((s) => s.trim()).filter(Boolean);
+    const depth = Number.isInteger(hops) && hops >= 1 ? hops : 1;
+    if (parts.length >= depth) return parts[parts.length - depth]!;
   }
   return req.socket.remoteAddress ?? "unknown";
 }
