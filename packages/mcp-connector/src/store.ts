@@ -6,12 +6,13 @@
 // persisted atomically after every mutation and reloaded on start.
 //
 // Reads are at-least-once through cursors. `takeUnread` hands out a batch under
-// a fresh cursor and keeps an immutable copy of that batch. The batch is only
+// a fresh cursor and keeps a deep copy of that batch. The batch is only
 // marked read when the client confirms it by passing the cursor back as
 // `after` on its next read; until then every plain read returns those
 // messages again (plus anything newer), so a response lost on the wire can
-// never lose messages. A retry with the cursor itself returns exactly the
-// same batch. A bounded number of cursor copies is kept.
+// never lose messages. A message, once read, is never handed out again, even
+// if a newer unconfirmed batch also carried it. A retry with the cursor itself
+// returns exactly the same batch. A bounded number of cursor copies is kept.
 //
 // The ring never evicts an unread inbound message: past the bound it drops
 // delivered and outbound messages oldest first, and the agent stops polling
@@ -159,10 +160,14 @@ export class MessageStore {
       this.messages.push(m);
       if (m.direction === "in") this.markMessageSeen(m.message_id);
     }
+    // What was just added is kept even past the bound (an outbound message
+    // sent while the unread queue is full stays in the conversation history);
+    // it becomes evictable on the next add.
+    const added = new Set(messages);
     let excess = this.messages.length - this.max;
     if (excess > 0) {
       this.messages = this.messages.filter((m) => {
-        if (excess <= 0 || this.isUnread(m)) return true;
+        if (excess <= 0 || this.isUnread(m) || added.has(m)) return true;
         excess--;
         return false;
       });
@@ -180,23 +185,19 @@ export class MessageStore {
   }
 
   /**
-   * The next batch for the client, oldest first: every message in a batch the
-   * client has not confirmed yet, then unread messages, up to `limit`. Passing
-   * `after` (the cursor of the batch the client handled) confirms that batch,
-   * marks its messages read and leaves them out. The returned batch is copied
-   * under a new cursor so a retry with it is exact.
+   * The next batch for the client, oldest first: every inbound message not yet
+   * read, up to `limit`. A message handed out in a batch the client has not
+   * confirmed is still unread, so it comes back. Passing `after` (the cursor
+   * of the batch the client handled) confirms that batch, marks its messages
+   * read and leaves them out of this and every later batch, whatever other
+   * cursors also carried them. The returned batch is copied under a new
+   * cursor so a retry with it is exact.
    */
   takeUnread(limit: number, after?: string): { cursor: string; messages: StoredMessage[] } {
     if (after) this.confirm(after);
-    const pending = new Set<string>();
-    for (const c of this.cursors) if (!c.confirmed) for (const m of c.messages) pending.add(m.message_id);
-    const batch = this.messages
-      .filter((m) => m.direction === "in" && (m.delivered_cursor === null || pending.has(m.message_id)))
-      .slice(0, limit);
-    // Earlier unconfirmed cursors are superseded by this one; they stay replayable.
-    for (const c of this.cursors) if (!c.confirmed) c.confirmed = true;
+    const batch = structuredClone(this.messages.filter((m) => this.isUnread(m)).slice(0, limit));
     const cursor = this.cursorId();
-    this.cursors.push({ cursor, messages: batch.map((m) => ({ ...m })), created_at: new Date().toISOString(), confirmed: false });
+    this.cursors.push({ cursor, messages: structuredClone(batch), created_at: new Date().toISOString(), confirmed: false });
     while (this.cursors.length > CURSOR_CAP) this.cursors.shift();
     this.persist();
     return { cursor, messages: batch };
@@ -214,7 +215,7 @@ export class MessageStore {
   /** The exact batch a previous read returned, or null for an unknown/aged-out cursor. */
   replay(cursor: string): StoredMessage[] | null {
     const entry = this.cursors.find((c) => c.cursor === cursor);
-    return entry ? entry.messages.map((m) => ({ ...m })) : null;
+    return entry ? structuredClone(entry.messages) : null;
   }
 
   /** Inbound messages the client has not confirmed as read. */

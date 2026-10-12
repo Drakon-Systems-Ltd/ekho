@@ -106,6 +106,48 @@ describe("MessageStore", () => {
     expect(s.unreadCount()).toBe(0);
   });
 
+  it("a stale `after` never resurfaces a confirmed batch through a newer unconfirmed cursor", () => {
+    const s = new MessageStore(tmpDir(), 50);
+    s.add([msg("1"), msg("2")]);
+    const c1 = s.takeUnread(10); // (1,2)
+    s.add([msg("3")]);
+    const c2 = s.takeUnread(10); // (1,2,3), never confirmed
+    expect(c2.messages.map((m) => m.message_id)).toEqual(["1", "2", "3"]);
+    // The client confirms the older batch; 1 and 2 are read, 3 is still due.
+    const next = s.takeUnread(10, c1.cursor);
+    expect(next.messages.map((m) => m.message_id)).toEqual(["3"]);
+    expect(s.unreadCount()).toBe(1);
+    // Repeating the same stale `after` does not bring 1 and 2 back either.
+    for (let i = 0; i < 3; i++) expect(s.takeUnread(10, c1.cursor).messages.map((m) => m.message_id)).toEqual(["3"]);
+    // Old cursors still replay exactly, and 3 is read once its batch is confirmed.
+    expect(s.replay(c2.cursor)?.map((m) => m.message_id)).toEqual(["1", "2", "3"]);
+    expect(s.takeUnread(10, next.cursor).messages).toEqual([]);
+    expect(s.unreadCount()).toBe(0);
+  });
+
+  it("cursor copies are deep: mutating a returned or replayed message leaves later replays intact", () => {
+    const s = new MessageStore(tmpDir(), 50);
+    s.add([msg("1", { mentions: ["a"], attachments: [{ id: "att", filename: "f.txt", mime: "text/plain", size_bytes: 1 }] })]);
+    const { cursor, messages } = s.takeUnread(10);
+    messages[0].mentions.push("x");
+    messages[0].attachments[0].filename = "changed";
+    s.replay(cursor)![0].mentions.push("y");
+    const again = s.replay(cursor)![0];
+    expect(again.mentions).toEqual(["a"]);
+    expect(again.attachments[0].filename).toBe("f.txt");
+  });
+
+  it("an outbound message added while the unread queue is full stays in the conversation history", () => {
+    const s = new MessageStore(tmpDir(), 2);
+    s.add([msg("1"), msg("2")]);
+    expect(s.hasRoom()).toBe(false);
+    s.add([msg("o", { direction: "out", delivered_cursor: "self" })]);
+    expect(s.conversation("conv", 10).map((m) => m.message_id)).toEqual(["1", "2", "o"]);
+    // The next mutation takes the ring back towards its bound.
+    s.add([msg("o2", { direction: "out", delivered_cursor: "self" })]);
+    expect(s.conversation("conv", 10).map((m) => m.message_id)).toEqual(["1", "2", "o2"]);
+  });
+
   it("replay is exact after the batch's messages were evicted", () => {
     const s = new MessageStore(tmpDir(), 2);
     s.add([msg("1"), msg("2")]);

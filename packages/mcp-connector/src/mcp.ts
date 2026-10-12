@@ -34,26 +34,30 @@ const VERIFICATION_LABEL: Record<StoredMessage["verification"]["status"], string
   failed: "signature FAILED"
 };
 
-/** Relay- and roster-controlled labels are shown on one line, with control
- *  characters (including newlines) escaped, so a label cannot add lines to the
- *  rendering the client reads. */
+/** Relay- and roster-controlled fields are shown on one line, with control
+ *  characters (C0, C1, and the Unicode line/paragraph separators) escaped, so
+ *  no field can add lines to the rendering the client reads, such as a forged
+ *  `cursor:` line. */
 function label(s: string): string {
-  return s.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** Message text keeps its lines, each quoted: every line break a reader might
+ *  split on (not just \n) starts a new quoted line, so text cannot add an
+ *  unquoted one. */
+function quote(s: string): string[] {
+  return s.split(/\r\n|[\n\r\u000b\u000c\u001c-\u001e\u0085\u2028\u2029]/).map((l) => `   > ${l}`);
 }
 
 export function formatMessage(m: StoredMessage, index?: number): string {
   const v = m.verification;
-  const verification = v.status === "failed" ? `${VERIFICATION_LABEL.failed} (${v.reason ?? "?"})` : VERIFICATION_LABEL[v.status];
+  const verification = v.status === "failed" ? `${VERIFICATION_LABEL.failed} (${label(v.reason ?? "?")})` : VERIFICATION_LABEL[v.status];
   const who = m.direction === "out" ? `${label(m.sender_label)} (you)` : `${label(m.sender_label)} (${label(m.sender_agent_id)})`;
   const where = m.room ? `room "${label(m.room.name)}" (${label(m.room.id)})` : `conversation ${label(m.conversation_id)}`;
-  const head = `${index !== undefined ? `${index}. ` : ""}**${who}** — ${m.message_type} — ${verification}`;
-  const lines = [
-    head,
-    `   id: ${m.message_id} | ${where} | sent: ${m.sent_at}`,
-    ...m.text.split("\n").map((l) => `   > ${l}`)
-  ];
-  if (m.attachments.length) lines.push(`   attachments (names only, not fetched): ${m.attachments.map((a) => a.filename).join(", ")}`);
-  if (m.mentions.length) lines.push(`   mentions: ${m.mentions.join(", ")}`);
+  const head = `${index !== undefined ? `${index}. ` : ""}**${who}** — ${label(m.message_type)} — ${verification}`;
+  const lines = [head, `   id: ${label(m.message_id)} | ${where} | sent: ${label(m.sent_at)}`, ...quote(m.text)];
+  if (m.attachments.length) lines.push(`   attachments (names only, not fetched): ${m.attachments.map((a) => label(a.filename)).join(", ")}`);
+  if (m.mentions.length) lines.push(`   mentions: ${m.mentions.map(label).join(", ")}`);
   if (m.reply_to && m.direction === "in") lines.push(`   in reply to ${label(m.reply_to.sender_label)}: "${label(m.reply_to.text.slice(0, 120))}"`);
   return lines.join("\n");
 }
