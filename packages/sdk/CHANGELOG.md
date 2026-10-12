@@ -7,6 +7,11 @@ All notable changes to Ekho are documented here.
 ### Added
 - **`@drakon-systems/ekho-sdk/identity`**: the verifiable-identity layer (Ed25519 primitives with the frozen canonical form, the identity file with atomic save and refuse-to-mint rules, inbound verification, operator-key pin sync, outbound v2 signing), moved verbatim from the OpenClaw plugin so the plugin and the new MCP connector run the identical code. Published for both `import` (`dist/esm/identity`) and `require` (`dist/identity`). The root export is unchanged; nothing existing is removed or renamed, so this is not a breaking change.
 
+## [0.6.2] - 2026-10-08
+
+### Changed
+- `RosterEntry` gains an optional `quarantine_reason?: string | null`: the agent's current quarantine category (`heartbeat_timeout`, `rate_limit_abuse` or `operator`) when it is quarantined, `null` otherwise. Relays before 0.6.2 omit it. Types only; no client behaviour change. See the root [CHANGELOG](../../CHANGELOG.md).
+
 ## [0.5.0] - 2026-09-21
 
 ### Changed

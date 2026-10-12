@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-08
+
+### Fixed
+- **OpenClaw inbox stays current across plugin reloads (#115).** Poll results, roster, and room attachments share a process-wide cache across plugin copies for the same exact relay base URL, agent, fleet, and agent identity; distinct transport endpoints remain isolated. A retained tool closure with older operator pins reads the active producer's recorded verdicts and reports a stale verification generation. Previously rejected signed material remains rejected in both the inbox and turn admission after redelivery, even if keys are later endorsed. The inbox shows when the roster was fetched, only the current safe quarantine category, and peer usage from the active loop after quiet polls; operator status changes clear or replace old quarantine reasons.
+
 ## [0.6.1] - 2026-10-07
 
 No plugin changes. Version kept in step with the relay.

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
 
 /**
@@ -176,6 +176,19 @@ describe("A2A shares the native message gate (#59)", () => {
     // setup.ts pins EKHO_RATE_LIMIT_MAX_MESSAGES=5 for the test window.
     const LIMIT = 5;
 
+    // The limiter's buckets are fixed wall-clock windows (db.ts
+    // checkAndIncrementRateLimit), 5 s here. A boundary crossed between the
+    // budget sends and the over-budget attempt opens a fresh bucket that
+    // legitimately admits it — main CI runs 37410765690 and 37845636165 lost the
+    // stream test that way. Freeze only Date so every send lands in one bucket;
+    // timers and I/O stay real. afterEach restores it even when a test fails.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("counts A2A sends against the same per-agent budget and refuses over it", async () => {
       const sender = await relay.enrollAgent("rl-a2a-sender");
       const receiver = await relay.enrollAgent("rl-a2a-receiver");
@@ -215,15 +228,53 @@ describe("A2A shares the native message gate (#59)", () => {
       const receiver = await relay.enrollAgent("rl-stream-receiver");
 
       for (let i = 0; i < LIMIT; i++) {
-        await a2aSend(sender, receiver, `stream budget ${i}`);
+        const ok = await a2aSend(sender, receiver, `stream budget ${i}`);
+        expect(ok.body.error).toBeUndefined();
       }
+      expect(tasksFrom(sender.agent_id)).toBe(LIMIT);
 
-      const res = await rawA2a(sender, `/agents/${receiver.agent_id}/a2a`, {
+      const stream = rawA2a(sender, `/agents/${receiver.agent_id}/a2a`, {
         jsonrpc: "2.0",
         id: 3,
         method: "message/stream",
         params: sendParams("stream over budget"),
       });
+
+      // A refusal is plain JSON and returns at once. If the gate admits the call
+      // the relay opens SSE, which only ends on a final task event, so inject
+      // would wait out testTimeout and the failure would read as a hang. Race it
+      // on a real timer; on admission, end the stray stream with a final event
+      // so it cannot outlive the test, then fail naming the cause.
+      const ADMITTED = Symbol("admitted");
+      let guard: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        stream,
+        new Promise<typeof ADMITTED>((resolve) => {
+          guard = setTimeout(() => resolve(ADMITTED), 5_000);
+        }),
+      ]).finally(() => clearTimeout(guard));
+      if (outcome === ADMITTED) {
+        const { taskEventBus } = await import("../src/a2a/streaming");
+        const task = relay.db
+          .raw()
+          .prepare("SELECT id, context_id FROM a2a_tasks WHERE sender_agent_id = ? ORDER BY rowid DESC LIMIT 1")
+          .get(sender.agent_id) as { id: string; context_id: string } | undefined;
+        if (task) {
+          taskEventBus.emitStatus(task.id, {
+            taskId: task.id,
+            contextId: task.context_id,
+            status: { state: "canceled", timestamp: new Date().toISOString() },
+            final: true,
+            kind: "status-update",
+          });
+          await stream;
+        }
+        throw new Error(
+          `over-budget message/stream was admitted: SSE opened instead of a ${EKHO_RATE_LIMIT_EXCEEDED} refusal ` +
+            `(${tasksFrom(sender.agent_id)} tasks from sender, budget ${LIMIT})`
+        );
+      }
+      const res = outcome;
 
       expect(res.headers["content-type"]).not.toContain("text/event-stream");
       expect(JSON.parse(res.body).error.code).toBe(EKHO_RATE_LIMIT_EXCEEDED);
