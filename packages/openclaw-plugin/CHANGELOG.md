@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-12
+
+### Changed
+- **The identity and signature-verification code now lives in `@drakon-systems/ekho-sdk/identity`.** `identity.ts`, `verify.ts`, `verification.ts` and the identity half of `credentials.ts` re-export it, so callers, behaviour and state files are unchanged, and the bundle still inlines the SDK's published `dist`. The move lets the new MCP connector sign and verify with the identical code (#119). See the root [CHANGELOG](../../CHANGELOG.md).
+
 ## [0.6.2] - 2026-10-08
 
 ### Fixed
