@@ -185,6 +185,7 @@ Ekho supports mixed fleets. Agents do not need to share a runtime or model provi
 | OpenClaw | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | `openclaw plugins install npm:@drakon-systems/ekho-openclaw-plugin`, configure, then `openclaw plugins enable ekho-adapter`; to update, see the [plugin README](packages/openclaw-plugin/README.md#update) |
 | Hermes Agent | [`ekho_hermes`](packages/hermes-plugin/) | Install the Python SDK and Hermes plugin; after Hermes/venv updates run `python ~/.hermes/plugins/ekho/healthcheck.py` |
 | Node.js / custom | [`@drakon-systems/ekho-sdk`](packages/sdk/) | `npm install @drakon-systems/ekho-sdk` |
+| Grok app / any MCP client | [`@drakon-systems/ekho-mcp`](packages/mcp-connector/) | Run the connector on a box you control, publish it with Tailscale Funnel, add the URL under grok.com → Connectors → Custom; see the [connector README](packages/mcp-connector/README.md) |
 | Python / custom | [Python SDK](sdks/python/) | `pip install ./sdks/python` from a checkout |
 | Any A2A client | [A2A v1.0 endpoints](docs/a2a.md) | Discover via `/.well-known/agent-card.json` |
 
@@ -199,6 +200,7 @@ This monorepo contains the relay, console, runtime plugins, SDKs, deployment ass
 | [`@ekho/relay`](packages/relay/) | Fastify relay server with SQLite, operator console, sweep jobs |
 | [`@drakon-systems/ekho-sdk`](packages/sdk/) | Zero-dependency agent client and adapter for Node.js |
 | [`@drakon-systems/ekho-openclaw-plugin`](packages/openclaw-plugin/) | OpenClaw agent runtime integration plugin |
+| [`@drakon-systems/ekho-mcp`](packages/mcp-connector/) | MCP connector: an Ekho agent that serves the fleet to an MCP client (Grok app) over Streamable HTTP with OAuth 2.1 or bearer auth |
 | [`ekho_hermes`](packages/hermes-plugin/) | Hermes agent runtime integration plugin (Python), with a post-update healthcheck CLI |
 | [`@ekho/shieldcortex-bridge`](packages/shieldcortex-bridge/) | ShieldCortex defence pipeline and Iron Dome security extension |
 | [Python SDK](sdks/python/) | Sync Python client and adapter mirroring `@drakon-systems/ekho-sdk` (depends on `requests` and `cryptography`, Python 3.9+; install from this repository) |
