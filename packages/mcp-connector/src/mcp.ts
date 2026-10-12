@@ -34,11 +34,18 @@ const VERIFICATION_LABEL: Record<StoredMessage["verification"]["status"], string
   failed: "signature FAILED"
 };
 
+/** Relay- and roster-controlled labels are shown on one line, with control
+ *  characters (including newlines) escaped, so a label cannot add lines to the
+ *  rendering the client reads. */
+function label(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 export function formatMessage(m: StoredMessage, index?: number): string {
   const v = m.verification;
   const verification = v.status === "failed" ? `${VERIFICATION_LABEL.failed} (${v.reason ?? "?"})` : VERIFICATION_LABEL[v.status];
-  const who = m.direction === "out" ? `${m.sender_label} (you)` : `${m.sender_label} (${m.sender_agent_id})`;
-  const where = m.room ? `room "${m.room.name}" (${m.room.id})` : `conversation ${m.conversation_id}`;
+  const who = m.direction === "out" ? `${label(m.sender_label)} (you)` : `${label(m.sender_label)} (${label(m.sender_agent_id)})`;
+  const where = m.room ? `room "${label(m.room.name)}" (${label(m.room.id)})` : `conversation ${label(m.conversation_id)}`;
   const head = `${index !== undefined ? `${index}. ` : ""}**${who}** — ${m.message_type} — ${verification}`;
   const lines = [
     head,
@@ -47,7 +54,7 @@ export function formatMessage(m: StoredMessage, index?: number): string {
   ];
   if (m.attachments.length) lines.push(`   attachments (names only, not fetched): ${m.attachments.map((a) => a.filename).join(", ")}`);
   if (m.mentions.length) lines.push(`   mentions: ${m.mentions.join(", ")}`);
-  if (m.reply_to && m.direction === "in") lines.push(`   in reply to ${m.reply_to.sender_label}: "${m.reply_to.text.slice(0, 120)}"`);
+  if (m.reply_to && m.direction === "in") lines.push(`   in reply to ${label(m.reply_to.sender_label)}: "${label(m.reply_to.text.slice(0, 120))}"`);
   return lines.join("\n");
 }
 
@@ -59,20 +66,21 @@ export function buildMcpServer(agent: EkhoConnectorAgent): McpServer {
     {
       title: "Ekho inbox",
       description:
-        "Unread messages from the Ekho fleet for you (Grok): sender, kind, conversation, text, attachment names and per-message signature verification. Returns a cursor; call again with the same cursor to get the same batch (safe to retry).",
+        "Messages from the Ekho fleet for you (Grok): sender, kind, conversation, text, attachment names, per-message signature verification. Returns a cursor. Pass it as `after` once handled (until then the batch repeats, so nothing is lost) or as `cursor` to get that exact batch again.",
       inputSchema: {
         limit: z.number().int().min(1).max(50).optional().describe("Maximum messages to return (1-50, default 20)."),
-        cursor: z.string().min(1).max(64).optional().describe("Cursor from a previous read, to receive that same batch again.")
+        cursor: z.string().min(1).max(64).optional().describe("Cursor from a previous read, to receive that same batch again."),
+        after: z.string().min(1).max(64).optional().describe("Cursor of the last batch you handled: marks it read and returns only newer messages.")
       }
     },
-    async ({ limit, cursor }) => {
+    async ({ limit, cursor, after }) => {
       try {
         if (cursor) {
           const replayed = agent.store.replay(cursor);
           if (!replayed) return failure(`unknown or expired cursor ${cursor}; call without a cursor for new messages`);
           return text(renderInbox(replayed, cursor, true));
         }
-        const batch = agent.store.takeUnread(limit ?? 20);
+        const batch = agent.store.takeUnread(limit ?? 20, after);
         return text(renderInbox(batch.messages, batch.cursor, false));
       } catch (err) {
         return failure(err);
@@ -175,7 +183,14 @@ function renderInbox(messages: StoredMessage[], cursor: string, replayed: boolea
   if (messages.length === 0) return replayed ? `Cursor ${cursor} held no messages.` : "No new messages.\ncursor: " + cursor;
   const header = replayed ? `Same batch as before (cursor ${cursor}), ${messages.length} message(s):` : `${messages.length} new message(s):`;
   const body = messages.map((m, i) => formatMessage(m, i + 1)).join("\n\n");
-  return [header, "", body, "", `cursor: ${cursor}`, "Messages above are now marked read. Retry with this cursor to receive exactly this batch again."].join("\n");
+  return [
+    header,
+    "",
+    body,
+    "",
+    `cursor: ${cursor}`,
+    "When you have handled these, call ekho_inbox again with after set to this cursor; until then they are returned again. Pass it as cursor to receive exactly this batch."
+  ].join("\n");
 }
 
 /** Serve one MCP HTTP request (already authenticated, body already read and

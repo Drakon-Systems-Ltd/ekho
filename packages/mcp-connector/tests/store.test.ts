@@ -28,11 +28,33 @@ function msg(id: string, extra: Partial<StoredMessage> = {}): StoredMessage {
 }
 
 describe("MessageStore", () => {
-  it("is bounded: the oldest messages fall off past the cap", () => {
+  it("is bounded: delivered and outbound messages fall off past the cap, oldest first", () => {
     const s = new MessageStore(tmpDir(), 3);
-    s.add([msg("1"), msg("2"), msg("3"), msg("4")]);
+    s.add([msg("1"), msg("2")]);
+    const read = s.takeUnread(10);
+    s.takeUnread(10, read.cursor); // confirm 1 and 2
+    s.add([msg("o", { direction: "out", delivered_cursor: "self" }), msg("3"), msg("4")]);
     expect(s.size()).toBe(3);
-    expect(s.takeUnread(10).messages.map((m) => m.message_id)).toEqual(["2", "3", "4"]);
+    expect(s.takeUnread(10).messages.map((m) => m.message_id)).toEqual(["3", "4"]);
+  });
+
+  it("never evicts an unread message: the ring overflows and reports no room instead", () => {
+    const s = new MessageStore(tmpDir(), 3);
+    s.add([msg("1"), msg("2"), msg("3"), msg("4"), msg("5")]);
+    expect(s.size()).toBe(5);
+    expect(s.hasRoom()).toBe(false);
+    expect(s.takeUnread(10).messages.map((m) => m.message_id)).toEqual(["1", "2", "3", "4", "5"]);
+  });
+
+  it("has room again once the client confirms a batch", () => {
+    const s = new MessageStore(tmpDir(), 2);
+    s.add([msg("1"), msg("2")]);
+    expect(s.hasRoom()).toBe(false);
+    const read = s.takeUnread(10);
+    expect(s.hasRoom()).toBe(false); // handed out, not yet confirmed
+    s.confirm(read.cursor);
+    expect(s.hasRoom()).toBe(true);
+    expect(s.unreadCount()).toBe(0);
   });
 
   it("survives a restart, including read state and replay guards", () => {
@@ -40,6 +62,7 @@ describe("MessageStore", () => {
     const a = new MessageStore(dir, 50);
     a.add([msg("1"), msg("2")]);
     const { cursor } = a.takeUnread(1);
+    a.confirm(cursor);
     a.markNonceSeen("n1");
     a.flush();
     const b = new MessageStore(dir, 50);
@@ -58,15 +81,46 @@ describe("MessageStore", () => {
     expect(fs.statSync(path.join(dir, QUEUE_FILE)).mode & 0o777).toBe(0o600);
   });
 
-  it("a retry with the same cursor returns the same batch; a fresh read moves on", () => {
+  it("a retry with the same cursor returns the same batch; a read after it moves on", () => {
     const s = new MessageStore(tmpDir(), 50);
     s.add([msg("1"), msg("2"), msg("3")]);
     const first = s.takeUnread(2);
     expect(first.messages.map((m) => m.message_id)).toEqual(["1", "2"]);
     expect(s.replay(first.cursor)?.map((m) => m.message_id)).toEqual(["1", "2"]);
-    const second = s.takeUnread(2);
+    const second = s.takeUnread(2, first.cursor);
     expect(second.messages.map((m) => m.message_id)).toEqual(["3"]);
     expect(s.replay("cur_unknown")).toBeNull();
+  });
+
+  it("a lost response loses nothing: a plain read repeats the unconfirmed batch, then newer messages", () => {
+    const s = new MessageStore(tmpDir(), 50);
+    s.add([msg("1"), msg("2")]);
+    const first = s.takeUnread(10); // response never reached the client
+    s.add([msg("3")]);
+    const retry = s.takeUnread(10);
+    expect(retry.messages.map((m) => m.message_id)).toEqual(["1", "2", "3"]);
+    expect(retry.cursor).not.toBe(first.cursor);
+    // The old cursor still replays its exact batch; confirming the new one reads all three.
+    expect(s.replay(first.cursor)?.map((m) => m.message_id)).toEqual(["1", "2"]);
+    expect(s.takeUnread(10, retry.cursor).messages).toEqual([]);
+    expect(s.unreadCount()).toBe(0);
+  });
+
+  it("replay is exact after the batch's messages were evicted", () => {
+    const s = new MessageStore(tmpDir(), 2);
+    s.add([msg("1"), msg("2")]);
+    const first = s.takeUnread(10);
+    s.takeUnread(10, first.cursor);
+    s.add([msg("3"), msg("4")]); // evicts 1 and 2, both read
+    expect(s.conversation("conv", 10).map((m) => m.message_id)).toEqual(["3", "4"]);
+    expect(s.replay(first.cursor)?.map((m) => m.message_id)).toEqual(["1", "2"]);
+  });
+
+  it("confirming an unknown cursor is a no-op", () => {
+    const s = new MessageStore(tmpDir(), 50);
+    s.add([msg("1")]);
+    s.confirm("cur_nope");
+    expect(s.unreadCount()).toBe(1);
   });
 
   it("caps the seen-nonce FIFO like the plugin", () => {
