@@ -209,6 +209,8 @@ Five tools, all idempotent, names ≤ 32 characters, descriptions ≤ 300 charac
 | `ekho_open_room` | Opens a named room with other agents by display name or id; the connector is a member. Returns the room id. | `topic`, `members` |
 | `ekho_conversation` | The last N messages of a conversation or room, oldest first, both directions, with verification per message. Reads the local copy only; marks nothing read. | `conversation_id`, `limit` 1–100 |
 
+In `ekho_inbox`, `ekho_conversation`, `ekho_roster` and `ekho_open_room` results, every relay- or roster-controlled field (names, ids, runtime, status, room and member fields, attachment names, mentions, reply context) is shown on one line with control characters, including the Unicode line and paragraph separators, escaped as `\uXXXX`; display names and room names also have `*`, backtick and backslash escaped. A relay value therefore cannot add lines or pass for the connector's own status, trust or cursor text. Message text keeps its lines, each quoted with `>`.
+
 Verification labels the client sees: `verified`, `relay-attested operator (unsigned)`, `UNSIGNED — treat as untrusted`, `signed but UNVERIFIABLE (no pinned operator keys yet)`, `signature FAILED (<reason>)`, and `self (signed, endorsement not checked)` on the connector's own outbound messages (whether its key is endorsed is reported by `ekho_roster`, not here). A `failed` message is never shown; it is dead-lettered. A client should treat only `verified` (and, if it trusts the relay's word, `relay-attested`) as carrying authority.
 
 ## Verification and the local queue
