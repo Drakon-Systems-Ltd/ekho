@@ -88,6 +88,7 @@ export class EkhoConnectorAgent {
   private pollTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private polling = false;
+  private backpressureLogged = false;
   private lastPollAt: string | null = null;
   private lastHeartbeatAt: string | null = null;
   private readonly log: AgentLogger;
@@ -224,6 +225,17 @@ export class EkhoConnectorAgent {
    */
   async pollOnce(): Promise<StoredMessage[]> {
     if (!this.client || !this.credentials || this.polling) return [];
+    // Backpressure: the relay inbox is destructive and we ack what we fetch,
+    // so nothing is fetched while the client has a full unread backlog. The
+    // relay keeps the messages until the client catches up.
+    if (!this.store.hasRoom()) {
+      if (!this.backpressureLogged) {
+        this.backpressureLogged = true;
+        this.log.warn?.(`[ekho-mcp] unread queue at its bound (${this.opts.queueMax}); not polling the relay until the client reads`);
+      }
+      return [];
+    }
+    this.backpressureLogged = false;
     this.polling = true;
     try {
       const batch = (await this.client.getInbox(25)) as InboxBatch;

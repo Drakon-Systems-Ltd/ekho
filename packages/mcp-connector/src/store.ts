@@ -5,11 +5,19 @@
 // copy a slow or disconnected MCP client can still get is here. The ring is
 // persisted atomically after every mutation and reloaded on start.
 //
-// Reads are idempotent through cursors: `takeUnread` marks the batch delivered
-// under a fresh cursor and remembers exactly which ids it returned, so a client
-// that retries the same call with that cursor gets the same batch back instead
-// of an empty one (or, worse, the batch being lost). A bounded number of
-// cursors is kept.
+// Reads are at-least-once through cursors. `takeUnread` hands out a batch under
+// a fresh cursor and keeps a deep copy of that batch. The batch is only
+// marked read when the client confirms it by passing the cursor back as
+// `after` on its next read; until then every plain read returns those
+// messages again (plus anything newer), so a response lost on the wire can
+// never lose messages. A message, once read, is never handed out again, even
+// if a newer unconfirmed batch also carried it. A retry with the cursor itself
+// returns exactly the same batch. A bounded number of cursor copies is kept.
+//
+// The ring never evicts an unread inbound message: past the bound it drops
+// delivered and outbound messages oldest first, and the agent stops polling
+// the relay while the unread count is at the bound (backpressure), so an
+// acked message always has a local copy until the client has seen it.
 //
 // Replay guards persist too: the nonces of signatures this connector accepted
 // (the OpenClaw plugin keeps the same 500-entry FIFO in memory) and the relay
@@ -22,7 +30,7 @@ import { readJsonIfPresent, writeJsonAtomic } from "./files.js";
 export const QUEUE_FILE = "queue.json";
 /** Same bound the OpenClaw plugin uses for its seen-nonce FIFO. */
 export const SEEN_CAP = 500;
-export const CURSOR_CAP = 32;
+export const CURSOR_CAP = 16;
 
 export type VerificationStatus =
   /** Signed and verified against this connector's pinned trust root. */
@@ -76,10 +84,19 @@ export interface RosterSnapshot {
   endorsed: boolean;
 }
 
+/** One handed-out batch: an immutable copy, so replay is exact even after eviction. */
+export interface CursorRecord {
+  cursor: string;
+  messages: StoredMessage[];
+  created_at: string;
+  /** True once the client confirmed the batch with `after`; its messages are then read. */
+  confirmed: boolean;
+}
+
 interface QueueFile {
   v: 1;
   messages: StoredMessage[];
-  cursors: Array<{ cursor: string; ids: string[]; created_at: string }>;
+  cursors: CursorRecord[];
   seenNonces: string[];
   seenMessageIds: string[];
   roster: RosterSnapshot[];
@@ -89,7 +106,7 @@ interface QueueFile {
 
 export class MessageStore {
   private messages: StoredMessage[] = [];
-  private cursors: Array<{ cursor: string; ids: string[]; created_at: string }> = [];
+  private cursors: CursorRecord[] = [];
   private seenNonces: string[] = [];
   private seenMessageIds: string[] = [];
   private roster: RosterSnapshot[] = [];
@@ -106,7 +123,9 @@ export class MessageStore {
     const data = readJsonIfPresent<QueueFile>(this.filePath);
     if (data && data.v === 1) {
       this.messages = Array.isArray(data.messages) ? data.messages : [];
-      this.cursors = Array.isArray(data.cursors) ? data.cursors : [];
+      // Cursor records from before the at-least-once change carried ids, not
+      // copies; they cannot be replayed exactly, so they are dropped.
+      this.cursors = Array.isArray(data.cursors) ? data.cursors.filter((c) => Array.isArray(c?.messages)) : [];
       this.seenNonces = Array.isArray(data.seenNonces) ? data.seenNonces : [];
       this.seenMessageIds = Array.isArray(data.seenMessageIds) ? data.seenMessageIds : [];
       this.roster = Array.isArray(data.roster) ? data.roster : [];
@@ -129,38 +148,79 @@ export class MessageStore {
     writeJsonAtomic(this.filePath, file);
   }
 
-  /** Append messages (inbound or our own outbound), evicting the oldest past the bound. */
+  /**
+   * Append messages (inbound or our own outbound). Past the bound, delivered
+   * inbound and outbound messages are evicted oldest first; an unread inbound
+   * message is never evicted. The ring can therefore exceed `max` by the size
+   * of one poll while `hasRoom()` is false, which is what stops the next poll.
+   */
   add(messages: StoredMessage[]): void {
     if (messages.length === 0) return;
     for (const m of messages) {
       this.messages.push(m);
       if (m.direction === "in") this.markMessageSeen(m.message_id);
     }
-    while (this.messages.length > this.max) this.messages.shift();
+    // What was just added is kept even past the bound (an outbound message
+    // sent while the unread queue is full stays in the conversation history);
+    // it becomes evictable on the next add.
+    const added = new Set(messages);
+    let excess = this.messages.length - this.max;
+    if (excess > 0) {
+      this.messages = this.messages.filter((m) => {
+        if (excess <= 0 || this.isUnread(m) || added.has(m)) return true;
+        excess--;
+        return false;
+      });
+    }
     this.persist();
   }
 
-  /** Unread inbound messages, oldest first, marked delivered under a new cursor. */
-  takeUnread(limit: number): { cursor: string; messages: StoredMessage[] } {
-    const batch = this.messages.filter((m) => m.direction === "in" && m.delivered_cursor === null).slice(0, limit);
+  /** False while the unread backlog is at the bound: the agent must not poll the relay. */
+  hasRoom(): boolean {
+    return this.unreadCount() < this.max;
+  }
+
+  private isUnread(m: StoredMessage): boolean {
+    return m.direction === "in" && m.delivered_cursor === null;
+  }
+
+  /**
+   * The next batch for the client, oldest first: every inbound message not yet
+   * read, up to `limit`. A message handed out in a batch the client has not
+   * confirmed is still unread, so it comes back. Passing `after` (the cursor
+   * of the batch the client handled) confirms that batch, marks its messages
+   * read and leaves them out of this and every later batch, whatever other
+   * cursors also carried them. The returned batch is copied under a new
+   * cursor so a retry with it is exact.
+   */
+  takeUnread(limit: number, after?: string): { cursor: string; messages: StoredMessage[] } {
+    if (after) this.confirm(after);
+    const batch = structuredClone(this.messages.filter((m) => this.isUnread(m)).slice(0, limit));
     const cursor = this.cursorId();
-    for (const m of batch) m.delivered_cursor = cursor;
-    this.cursors.push({ cursor, ids: batch.map((m) => m.message_id), created_at: new Date().toISOString() });
+    this.cursors.push({ cursor, messages: structuredClone(batch), created_at: new Date().toISOString(), confirmed: false });
     while (this.cursors.length > CURSOR_CAP) this.cursors.shift();
     this.persist();
     return { cursor, messages: batch };
   }
 
+  /** Mark the batch under `cursor` read. Unknown cursors are ignored. */
+  confirm(cursor: string): void {
+    const entry = this.cursors.find((c) => c.cursor === cursor);
+    if (!entry) return;
+    entry.confirmed = true;
+    const ids = new Set(entry.messages.map((m) => m.message_id));
+    for (const m of this.messages) if (ids.has(m.message_id) && m.delivered_cursor === null) m.delivered_cursor = cursor;
+  }
+
   /** The exact batch a previous read returned, or null for an unknown/aged-out cursor. */
   replay(cursor: string): StoredMessage[] | null {
     const entry = this.cursors.find((c) => c.cursor === cursor);
-    if (!entry) return null;
-    const byId = new Map(this.messages.map((m) => [m.message_id, m] as const));
-    return entry.ids.map((id) => byId.get(id)).filter((m): m is StoredMessage => Boolean(m));
+    return entry ? structuredClone(entry.messages) : null;
   }
 
+  /** Inbound messages the client has not confirmed as read. */
   unreadCount(): number {
-    return this.messages.filter((m) => m.direction === "in" && m.delivered_cursor === null).length;
+    return this.messages.filter((m) => this.isUnread(m)).length;
   }
 
   /** Last `limit` messages of one conversation, oldest first, both directions. */
