@@ -140,3 +140,24 @@ describe("outbound", () => {
     await expect(agent.openRoom("x", ["Nobody"])).rejects.toThrow(/not an agent id or display name/);
   });
 });
+
+describe("backpressure", () => {
+  it("stops polling the relay while the unread backlog is at the bound, and resumes once the client confirms", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r, tmpDir(), { queueMax: 2 });
+    const peer = await r.enrollEndorsedPeer("Busy");
+    await peer.sendSigned({ to: agent.agentId!, text: "one" });
+    await peer.sendSigned({ to: agent.agentId!, text: "two" });
+    expect((await agent.pollOnce()).map((m) => m.text)).toEqual(["one", "two"]);
+    expect(agent.store.hasRoom()).toBe(false);
+    await peer.sendSigned({ to: agent.agentId!, text: "three" });
+    // Not fetched, so not acked: the relay still holds it.
+    expect(await agent.pollOnce()).toEqual([]);
+    expect(agent.store.unreadCount()).toBe(2);
+    const read = agent.store.takeUnread(10);
+    expect(read.messages.map((m) => m.text)).toEqual(["one", "two"]);
+    agent.store.confirm(read.cursor);
+    expect((await agent.pollOnce()).map((m) => m.text)).toEqual(["three"]);
+    expect(agent.store.takeUnread(10, read.cursor).messages.map((m) => m.text)).toEqual(["three"]);
+  });
+});

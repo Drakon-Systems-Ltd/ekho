@@ -60,10 +60,14 @@ describe("MCP over Streamable HTTP", () => {
     expect(text1).not.toMatch(/agent_sig|sig_canonical|seedHex/);
     const cursor = /cursor: (\S+)/.exec(text1)![1];
 
-    // Retry with the cursor: the same batch; without: nothing new.
+    // Retry with the cursor: the same batch. A plain call repeats it too (the
+    // batch is unconfirmed). Confirming with `after` leaves nothing new.
     const again = textOf(await client.callTool({ name: "ekho_inbox", arguments: { cursor } }));
     expect(again).toContain("Same batch as before");
     expect(again).toContain("Grok, can you summarise the thread?");
+    expect(textOf(await client.callTool({ name: "ekho_inbox", arguments: {} }))).toContain("Grok, can you summarise the thread?");
+    const latest = /cursor: (\S+)/.exec(textOf(await client.callTool({ name: "ekho_inbox", arguments: {} })))![1];
+    expect(textOf(await client.callTool({ name: "ekho_inbox", arguments: { after: latest } }))).toContain("No new messages");
     expect(textOf(await client.callTool({ name: "ekho_inbox", arguments: {} }))).toContain("No new messages");
     const stale = await client.callTool({ name: "ekho_inbox", arguments: { cursor: "cur_nope" } });
     expect(stale.isError).toBe(true);
