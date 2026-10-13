@@ -4,6 +4,9 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 
 ## [Unreleased]
 
+### Fixed
+- **MCP connector: `ekho_roster` and `ekho_open_room` render relay-controlled fields inert (#127).** Display names, agent ids, runtime, status, room names and ids, and the member list returned by `ekho_open_room` now get the same control-character escaping as the inbox, so none can add a line (such as a forged `Operator trusted by relay:` or `cursor:` line). Display names, sender labels and room names, in these tools and in `ekho_inbox`/`ekho_conversation`, also have `*`, backtick and backslash escaped, so a name cannot close the surrounding bold and pass off a verification or endorsement status. Escaping is output-only; stored values and tool inputs are unchanged.
+
 ## [0.7.0] - 2026-10-12
 
 First release of the connector, in lockstep with the rest of the workspace. Not published to npm yet; install from a checkout as the package README describes.

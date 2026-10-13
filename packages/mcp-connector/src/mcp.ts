@@ -42,6 +42,15 @@ function label(s: string): string {
   return s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
+/** Free-text names (display names, room names) also have `*`, backtick and
+ *  backslash escaped, so a name cannot close the surrounding `**…**` and pass
+ *  off a status such as `— verified` or `— key endorsed` as renderer text.
+ *  Underscores are kept so ordinary names read (and match) as written. Ids,
+ *  runtime and status get label() only: clients copy them back verbatim. */
+function name(s: string): string {
+  return label(s).replace(/[\\*`]/g, (c) => `\\${c}`);
+}
+
 /** Message text keeps its lines, each quoted: every line break a reader might
  *  split on (not just \n) starts a new quoted line, so text cannot add an
  *  unquoted one. */
@@ -52,13 +61,13 @@ function quote(s: string): string[] {
 export function formatMessage(m: StoredMessage, index?: number): string {
   const v = m.verification;
   const verification = v.status === "failed" ? `${VERIFICATION_LABEL.failed} (${label(v.reason ?? "?")})` : VERIFICATION_LABEL[v.status];
-  const who = m.direction === "out" ? `${label(m.sender_label)} (you)` : `${label(m.sender_label)} (${label(m.sender_agent_id)})`;
-  const where = m.room ? `room "${label(m.room.name)}" (${label(m.room.id)})` : `conversation ${label(m.conversation_id)}`;
+  const who = m.direction === "out" ? `${name(m.sender_label)} (you)` : `${name(m.sender_label)} (${label(m.sender_agent_id)})`;
+  const where = m.room ? `room "${name(m.room.name)}" (${label(m.room.id)})` : `conversation ${label(m.conversation_id)}`;
   const head = `${index !== undefined ? `${index}. ` : ""}**${who}** — ${label(m.message_type)} — ${verification}`;
   const lines = [head, `   id: ${label(m.message_id)} | ${where} | sent: ${label(m.sent_at)}`, ...quote(m.text)];
   if (m.attachments.length) lines.push(`   attachments (names only, not fetched): ${m.attachments.map((a) => label(a.filename)).join(", ")}`);
   if (m.mentions.length) lines.push(`   mentions: ${m.mentions.map(label).join(", ")}`);
-  if (m.reply_to && m.direction === "in") lines.push(`   in reply to ${label(m.reply_to.sender_label)}: "${label(m.reply_to.text.slice(0, 120))}"`);
+  if (m.reply_to && m.direction === "in") lines.push(`   in reply to ${name(m.reply_to.sender_label)}: "${label(m.reply_to.text.slice(0, 120))}"`);
   return lines.join("\n");
 }
 
@@ -129,8 +138,8 @@ export function buildMcpServer(agent: EkhoConnectorAgent): McpServer {
         const roster = agent.store.getRoster();
         const rooms = agent.store.getRooms();
         if (roster.length === 0) return text("Roster not received yet — it arrives with the first inbox poll.");
-        const lines = roster.map((r) => `- **${r.display_name}** — ${r.agent_id} — ${r.runtime} — ${r.status}${r.endorsed ? " — key endorsed" : " — key NOT endorsed"}`);
-        if (rooms.length) lines.push("", "Rooms you are in:", ...rooms.map((r) => `- ${r.name} — ${r.id}`));
+        const lines = roster.map((r) => `- **${name(r.display_name)}** — ${label(r.agent_id)} — ${label(r.runtime)} — ${label(r.status)}${r.endorsed ? " — key endorsed" : " — key NOT endorsed"}`);
+        if (rooms.length) lines.push("", "Rooms you are in:", ...rooms.map((r) => `- ${name(r.name)} — ${label(r.id)}`));
         lines.push("", `Operator trusted by relay: ${agent.store.isOperatorTrusted() ? "yes" : "no"}`);
         return text(lines.join("\n"));
       } catch (err) {
@@ -152,7 +161,7 @@ export function buildMcpServer(agent: EkhoConnectorAgent): McpServer {
     async ({ topic, members }) => {
       try {
         const room = await agent.openRoom(topic.trim(), members);
-        return text(`Opened room "${room.name}".\nroom_id: ${room.id}\nmembers: ${room.members.join(", ")}\nSend into it with ekho_send using room_id.`);
+        return text(`Opened room "${name(room.name)}".\nroom_id: ${label(room.id)}\nmembers: ${room.members.map(label).join(", ")}\nSend into it with ekho_send using room_id.`);
       } catch (err) {
         return failure(err);
       }
