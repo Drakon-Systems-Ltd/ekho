@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
 
 /**
@@ -20,6 +20,7 @@ import { createTestRelay, type TestRelay } from "./setup";
 const EKHO_SENDER_NOT_PERMITTED = -32050;
 const EKHO_RATE_LIMIT_EXCEEDED = -32051;
 const EKHO_BLOCKED_BY_POLICY = -32052;
+const EKHO_BLOCKED_BY_EXTENSION = -32053;
 
 type Agent = { agent_id: string; secret: string };
 
@@ -62,7 +63,7 @@ describe("A2A shares the native message gate (#59)", () => {
   }
 
   /** Raw (unparsed) A2A request, so we can inspect headers — SSE vs JSON. */
-  function rawA2a(caller: Agent, urlPath: string, payload: unknown) {
+  function rawA2a(caller: Agent, urlPath: string, payload: unknown, injectOpts: { payloadAsStream?: boolean } = {}) {
     const body = JSON.stringify(payload);
     const timestamp = new Date().toISOString();
     const nonce = crypto.randomUUID();
@@ -83,7 +84,76 @@ describe("A2A shares the native message gate (#59)", () => {
         "x-ekho-signature": signature,
       },
       payload: payload as Record<string, unknown>,
+      ...injectOpts,
     });
+  }
+
+  /** The parts of a payloadAsStream inject response the stream observer reads. */
+  type StreamedReply = {
+    headers: Record<string, string | string[] | number | undefined>;
+    stream(): AsyncIterable<Buffer | string>;
+    raw: { res: { req: { emit(event: "close"): boolean }; writableEnded: boolean } };
+  };
+
+  type StreamVerdict =
+    | { kind: "refused"; contentType: string; body: { error?: { code: number } } }
+    | { kind: "admitted"; ended: boolean };
+
+  function isEventStream(res: StreamedReply) {
+    return String(res.headers["content-type"] ?? "").includes("text/event-stream");
+  }
+
+  async function readStreamed(res: StreamedReply) {
+    let text = "";
+    for await (const chunk of res.stream()) text += chunk.toString();
+    return text;
+  }
+
+  /**
+   * Send a message/stream and classify it at header time, not at end of body:
+   * payloadAsStream resolves the inject on writeHead, so a refusal (plain JSON)
+   * and an admission (SSE) are told apart as soon as either is written, and an
+   * opened stream never has to end for the test to see it.
+   *
+   * `outcome` is "inconclusive" when no headers arrive within `deadlineMs` —
+   * a slow reply is not evidence of admission. `settled` resolves whenever the
+   * reply finally arrives, before or after the deadline. An SSE reply is ended
+   * through ITS OWN request's "close" event — what a disconnecting client emits
+   * and what openSseStream tears down on (keep-alive cleared, bus unsubscribed,
+   * reply ended) — never by emitting on a task looked up by recency, which
+   * could be another request's.
+   *
+   * No AbortController: light-my-request ignores abort once the request body
+   * has been read (before the handler runs), and with payloadAsStream an abort
+   * before headers errors a response stream nobody can listen on yet.
+   */
+  async function observeStream(caller: Agent, urlPath: string, payload: unknown, deadlineMs = 5_000) {
+    const pending = rawA2a(caller, urlPath, payload, { payloadAsStream: true }) as unknown as Promise<StreamedReply>;
+    const settled = pending.then<StreamVerdict>(async (res) => {
+      if (isEventStream(res)) {
+        res.raw.res.req.emit("close");
+        return { kind: "admitted", ended: res.raw.res.writableEnded };
+      }
+      return {
+        kind: "refused",
+        contentType: String(res.headers["content-type"] ?? ""),
+        body: JSON.parse(await readStreamed(res)),
+      };
+    });
+    // Rejections surface through `settled`; keep an unawaited one quiet.
+    settled.catch(() => {});
+
+    const DEADLINE = Symbol("deadline");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const first = await Promise.race([
+      settled,
+      new Promise<typeof DEADLINE>((resolve) => {
+        timer = setTimeout(() => resolve(DEADLINE), deadlineMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
+
+    const outcome: StreamVerdict | { kind: "inconclusive" } = first === DEADLINE ? { kind: "inconclusive" } : first;
+    return { outcome, settled };
   }
 
   function tasksFrom(agentId: string): number {
@@ -232,52 +302,41 @@ describe("A2A shares the native message gate (#59)", () => {
         expect(ok.body.error).toBeUndefined();
       }
       expect(tasksFrom(sender.agent_id)).toBe(LIMIT);
+      expect(messagesFrom(sender.agent_id)).toBe(LIMIT);
 
-      const stream = rawA2a(sender, `/agents/${receiver.agent_id}/a2a`, {
+      // A refusal is plain JSON; an admission opens SSE, which only ends on a
+      // final task event. observeStream tells them apart at header time and
+      // ends a stray stream through its own request, so neither outcome can
+      // outlive the test or read as a hang.
+      const { outcome } = await observeStream(sender, `/agents/${receiver.agent_id}/a2a`, {
         jsonrpc: "2.0",
         id: 3,
         method: "message/stream",
         params: sendParams("stream over budget"),
       });
-
-      // A refusal is plain JSON and returns at once. If the gate admits the call
-      // the relay opens SSE, which only ends on a final task event, so inject
-      // would wait out testTimeout and the failure would read as a hang. Race it
-      // on a real timer; on admission, end the stray stream with a final event
-      // so it cannot outlive the test, then fail naming the cause.
-      const ADMITTED = Symbol("admitted");
-      let guard: ReturnType<typeof setTimeout> | undefined;
-      const outcome = await Promise.race([
-        stream,
-        new Promise<typeof ADMITTED>((resolve) => {
-          guard = setTimeout(() => resolve(ADMITTED), 5_000);
-        }),
-      ]).finally(() => clearTimeout(guard));
-      if (outcome === ADMITTED) {
-        const { taskEventBus } = await import("../src/a2a/streaming");
-        const task = relay.db
-          .raw()
-          .prepare("SELECT id, context_id FROM a2a_tasks WHERE sender_agent_id = ? ORDER BY rowid DESC LIMIT 1")
-          .get(sender.agent_id) as { id: string; context_id: string } | undefined;
-        if (task) {
-          taskEventBus.emitStatus(task.id, {
-            taskId: task.id,
-            contextId: task.context_id,
-            status: { state: "canceled", timestamp: new Date().toISOString() },
-            final: true,
-            kind: "status-update",
-          });
-          await stream;
-        }
+      if (outcome.kind === "inconclusive") {
         throw new Error(
-          `over-budget message/stream was admitted: SSE opened instead of a ${EKHO_RATE_LIMIT_EXCEEDED} refusal ` +
+          `over-budget message/stream inconclusive: no response headers within 5000 ms, so neither the ` +
+            `${EKHO_RATE_LIMIT_EXCEEDED} refusal nor an SSE admission was observed ` +
             `(${tasksFrom(sender.agent_id)} tasks from sender, budget ${LIMIT})`
         );
       }
-      const res = outcome;
+      if (outcome.kind === "admitted") {
+        throw new Error(
+          `over-budget message/stream was admitted: SSE opened instead of a ${EKHO_RATE_LIMIT_EXCEEDED} refusal ` +
+            `(${tasksFrom(sender.agent_id)} tasks from sender, budget ${LIMIT}; stream ended: ${outcome.ended})`
+        );
+      }
 
-      expect(res.headers["content-type"]).not.toContain("text/event-stream");
-      expect(JSON.parse(res.body).error.code).toBe(EKHO_RATE_LIMIT_EXCEEDED);
+      expect(outcome.contentType).not.toContain("text/event-stream");
+      expect(outcome.body.error?.code).toBe(EKHO_RATE_LIMIT_EXCEEDED);
+
+      // The refusal left nothing behind: no task, no Ekho message, no delivery.
+      expect(tasksFrom(sender.agent_id)).toBe(LIMIT);
+      expect(messagesFrom(sender.agent_id)).toBe(LIMIT);
+      const inbox = await relay.agentRequest(receiver.agent_id, receiver.secret, "GET", "/v1/inbox");
+      expect(inbox.body.messages).toHaveLength(LIMIT);
+      expect(JSON.stringify(inbox.body.messages)).not.toContain("stream over budget");
     });
   });
 
@@ -399,6 +458,89 @@ describe("A2A shares the native message gate (#59)", () => {
         history_json: string;
       };
       expect(row.history_json).not.toContain("follow up after quarantine");
+    });
+  });
+
+  describe("message/stream observer under delayed admission", () => {
+    // The gate awaits every licensed extension's onBeforeMessage before any task
+    // or message exists — the one real async step in admission. A test extension
+    // holds that step for a single sender until the test settles it, so "slower
+    // than the deadline" is a fact of the test, not of CI load. The registry has
+    // no unregister: the hook is inert for every sender but the held one.
+    let held: { senderId: string; gate: Promise<void>; refuse(reason: Error): void } | null = null;
+
+    beforeAll(async () => {
+      const { registerExtension } = await import("../src/license");
+      registerExtension({
+        name: "test-admission-hold",
+        async onBeforeMessage(ctx) {
+          if (held && ctx.senderAgentId === held.senderId) await held.gate;
+        },
+      });
+    });
+    // A test that fails before settling its hold must not leave the request
+    // parked in the gate: refuse it, which writes JSON and mints nothing.
+    afterEach(() => {
+      held?.refuse(new Error("test ended with admission held"));
+      held = null;
+    });
+
+    function holdAdmission(sender: Agent) {
+      let admit!: () => void;
+      let refuse!: (reason: Error) => void;
+      const gate = new Promise<void>((resolve, reject) => {
+        admit = resolve;
+        refuse = reject;
+      });
+      // The extension may not be awaiting yet when the test refuses.
+      gate.catch(() => {});
+      held = { senderId: sender.agent_id, gate, refuse };
+      return { admit, refuse };
+    }
+
+    function streamTo(sender: Agent, receiver: Agent, text: string) {
+      return observeStream(
+        sender,
+        `/agents/${receiver.agent_id}/a2a`,
+        { jsonrpc: "2.0", id: 6, method: "message/stream", params: sendParams(text) },
+        50
+      );
+    }
+
+    it("reports a held admission as inconclusive, then ends that request's stream when it opens", async () => {
+      const sender = await relay.enrollAgent("hold-admit-sender");
+      const receiver = await relay.enrollAgent("hold-admit-receiver");
+      const hold = holdAdmission(sender);
+
+      const { outcome, settled } = await streamTo(sender, receiver, "held then admitted");
+      expect(outcome.kind).toBe("inconclusive");
+      expect(tasksFrom(sender.agent_id)).toBe(0);
+
+      hold.admit();
+      const late = await settled;
+      expect(late).toEqual({ kind: "admitted", ended: true });
+      expect(tasksFrom(sender.agent_id)).toBe(1);
+    });
+
+    it("reports a held refusal as inconclusive, never as an opened stream", async () => {
+      const sender = await relay.enrollAgent("hold-refuse-sender");
+      const receiver = await relay.enrollAgent("hold-refuse-receiver");
+      const hold = holdAdmission(sender);
+
+      const { outcome, settled } = await streamTo(sender, receiver, "held then refused");
+      expect(outcome.kind).toBe("inconclusive");
+
+      hold.refuse(new Error("held refusal"));
+      const late = await settled;
+      expect(late.kind).toBe("refused");
+      if (late.kind !== "refused") return;
+      expect(late.contentType).not.toContain("text/event-stream");
+      expect(late.body.error?.code).toBe(EKHO_BLOCKED_BY_EXTENSION);
+
+      expect(tasksFrom(sender.agent_id)).toBe(0);
+      expect(messagesFrom(sender.agent_id)).toBe(0);
+      const inbox = await relay.agentRequest(receiver.agent_id, receiver.secret, "GET", "/v1/inbox");
+      expect(inbox.body.messages).toHaveLength(0);
     });
   });
 });
