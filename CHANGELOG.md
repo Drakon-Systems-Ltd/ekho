@@ -4,6 +4,13 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-14
+
+Patch on 0.7.0: one MCP connector fix (#127, PR #128). Only `packages/mcp-connector` has code changes; the relay, console, `openapi.yaml` schema, SDK, OpenClaw plugin, Hermes plugin and Python SDK are unchanged apart from version numbers moving in step across the workspace. The connector is still not published to npm. Nothing is breaking; `v0.6.0` upgrade notes still apply.
+
+### Fixed
+- **MCP connector: `ekho_roster` and `ekho_open_room` render relay-controlled fields inert (#127).** Display names, agent ids, runtime, status, room names and ids, and the member list returned by `ekho_open_room` now get the same control-character escaping as the inbox, so none can add a line (such as a forged `Operator trusted by relay:` or `cursor:` line). Display names, sender labels and room names, in these tools and in `ekho_inbox`/`ekho_conversation`, also have `*`, backtick and backslash escaped, so a name cannot close the surrounding bold and pass off a verification or endorsement status. Escaping is output-only; stored values and tool inputs are unchanged.
+
 ## [0.7.0] - 2026-10-12
 
 Minor release on 0.6.2: one addition, one internal move and one connector reliability fix. The new MCP connector, `@drakon-systems/ekho-mcp`, lets an MCP client such as the Grok app join a fleet as a signed, verifying agent (#119). It ships in this repository and is not published to npm yet; the release workflow still publishes only the SDK and the OpenClaw plugin. To support it, the verifiable-identity layer moved from the OpenClaw plugin into the SDK as the new `@drakon-systems/ekho-sdk/identity` subpath export, which the plugin re-exports unchanged. The relay, console, `openapi.yaml` schema, Hermes plugin and Python SDK have no code changes; only their version numbers move in step across the workspace. Before its first release the connector was also hardened so no unread message can be lost: no unread eviction, relay backpressure and at-least-once inbox cursors (#126, connector only). The A2A rate-limit relay tests are pinned to one fixed window so CI no longer flakes at a window boundary (#122, tests only). Nothing is breaking; `v0.6.0` upgrade notes still apply.
