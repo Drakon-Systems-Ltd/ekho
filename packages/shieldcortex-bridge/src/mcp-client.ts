@@ -17,21 +17,36 @@ export class McpClient {
   async connect(): Promise<void> {
     if (this.process) return;
 
-    this.process = spawn("node", [this.binaryPath], {
+    const child = spawn("node", [this.binaryPath], {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env }
     });
+    this.process = child;
 
-    this.process.stdout?.on("data", (chunk: Buffer) => {
+    // A failed spawn can also emit an error on stdin after a write.
+    child.stdin?.on("error", () => {});
+
+    child.stdout?.on("data", (chunk: Buffer) => {
       this.buffer += chunk.toString();
       this.processBuffer();
     });
 
-    this.process.stderr?.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       // ShieldCortex logs to stderr — ignore for now
     });
 
-    this.process.on("exit", () => {
+    child.on("error", (error) => {
+      if (this.process !== child) return;
+      this.process = null;
+      this.initialized = false;
+      for (const req of this.pendingRequests.values()) {
+        req.reject(error);
+      }
+      this.pendingRequests.clear();
+    });
+
+    child.on("exit", () => {
+      if (this.process !== child) return;
       this.process = null;
       this.initialized = false;
       for (const req of this.pendingRequests.values()) {
@@ -68,17 +83,31 @@ export class McpClient {
   private sendRequest(method: string, params: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = randomUUID();
-      this.pendingRequests.set(id, { resolve, reject });
-
-      const message = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-      this.process?.stdin?.write(`Content-Length: ${Buffer.byteLength(message)}\r\n\r\n${message}`);
-
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`MCP request timed out: ${method}`));
         }
       }, 10_000);
+      this.pendingRequests.set(id, {
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
+
+      try {
+        const message = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+        this.process?.stdin?.write(`Content-Length: ${Buffer.byteLength(message)}\r\n\r\n${message}`);
+      } catch (error) {
+        this.pendingRequests.delete(id);
+        clearTimeout(timeout);
+        reject(error);
+      }
     });
   }
 
