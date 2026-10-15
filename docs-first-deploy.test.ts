@@ -539,6 +539,19 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(read("packages/relay/src/message-gate.ts")).toContain("`blocked by extension ${denial.extension}: ${denial.reason}`");
     expect(index).toContain('name: "shieldcortex-bridge"');
     expect(bridgeReadme).toContain("`blocked by extension shieldcortex-bridge: <reason>`");
+    // The bridge's own denial string only applies to messages the bridge itself
+    // rejects: the gate names whichever extension threw, and earlier sender checks
+    // answer with their own status and text.
+    const gate = read("packages/relay/src/message-gate.ts");
+    expect(gate).toContain("extension: ext.name,");
+    expect(gate).toContain('reply.code(429).send({ error: "rate limit exceeded"');
+    expect(read("packages/relay/src/a2a/methods.ts")).toContain("{ extension: denial.extension }");
+    const denialSentence = line(bridgeReadme, /^.*`blocked by extension shieldcortex-bridge: <reason>`.*$/m, "bridge README denial sentence");
+    expect(denialSentence).toMatch(/^A message rejected by the bridge itself \(its scan or action check\)/);
+    expect(denialSentence).not.toMatch(/^A rejected message is refused/);
+    expect(denialSentence).toContain("a bridge-rejected message gets a JSON-RPC error");
+    expect(denialSentence).toContain("`blocked by extension <name>: <reason>`");
+    expect(denialSentence).toContain("HTTP 429 `rate limit exceeded`");
   });
 
   it("bridge README states the failure handling, short-circuit order and reconnect that index.ts and mcp-client.ts implement", () => {
