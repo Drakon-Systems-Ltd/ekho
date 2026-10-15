@@ -210,7 +210,29 @@ describe("environment variable and command docs match the source (#130 slice A2)
   /** The default cell of a `| \`VAR\` | \`default\` | ...` row. */
   const tableDefault = (doc: string, envVar: string, label: string): string =>
     capture(doc, new RegExp(`^\\| \`${envVar}\`[^|]*\\| \`([^\`]+)\` \\|`, "m"), `${label} default for ${envVar}`);
-  const hermesTurnTimeout = () => capture(autoreplyPy, /^    return raw if raw >= 60 else ([0-9]+)(?:\.0)?$/m, "Hermes turn timeout default");
+  /** match[1] untrimmed, for source blocks where indentation is the structure. */
+  const block = (source: string, pattern: RegExp, label: string): string => {
+    const match = source.match(pattern);
+    expect(match, `${label} should match ${pattern}`).toBeTruthy();
+    return match![1];
+  };
+  /** Emphasis and line wraps normalised so checks read the words, not the Markdown. */
+  const plain = (text: string) => text.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+  /** Hermes turn-timeout default. _turn_timeout_s() in autoreply.py has two
+   *  fallback returns: the `except ValueError` branch, which is the path an
+   *  unset variable takes (the env read defaults to "" and float("") raises),
+   *  and the below-minimum else-branch. Both are read, both must agree, and
+   *  the docs state that one value. */
+  const hermesTurnTimeout = (): string => {
+    const parser = autoreplyPy.match(
+      /^def _turn_timeout_s\(\) -> float:\n(?:(?:[ \t].*)?\n)*?[ \t]+try:\n[ \t]+raw = float\(os\.environ\.get\("EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS", "([^"]*)"\)\)\n[ \t]+except ValueError:\n[ \t]+return ([0-9]+)(?:\.0)?\n[ \t]+return raw if raw >= 60 else ([0-9]+)(?:\.0)?\n/m
+    );
+    expect(parser, "_turn_timeout_s: try/except ValueError around the env read, then the >= 60 floor").toBeTruthy();
+    const [, envDefault, unsetFallback, belowMinimumFallback] = parser!;
+    expect(envDefault, 'the env read defaults to "", so an unset variable reaches the except ValueError return').toBe("");
+    expect(belowMinimumFallback, "both fallback returns are the one documented default").toBe(unsetFallback);
+    return unsetFallback;
+  };
 
   it("root README relay table lists the skew, sweep, rate-limit window and liveness settings with config.ts defaults", () => {
     for (const envVar of [
@@ -275,6 +297,52 @@ describe("environment variable and command docs match the source (#130 slice A2)
     }
   });
 
+  it("EKHO_REQUIRE_SIGNED docs say a failed signature is rejected in every mode, and the Hermes README describes the operator gate", () => {
+    const verificationPy = read("packages/hermes-plugin/ekho_hermes/verification.py");
+    const verificationTs = read("packages/sdk/src/identity/verification.ts");
+
+    // Operator branch, both implementations: a signed message that has a
+    // verification result is judged on that result, before and regardless of
+    // the operator-trusted toggle, which is only the fallback below it. The
+    // mode is never consulted for an operator message.
+    const operatorPy = block(verificationPy, /^def should_autowake\([\s\S]*?^    if is_operator:\n((?:        .*\n)+)/m, "should_autowake operator branch");
+    expect(operatorPy).toMatch(
+      /^        if signed and verification is not None:\n(?:            #.*\n)*            return bool\(verification\.verified\)\n(?:        #.*\n)*        return bool\(operator_trusted\)\n$/
+    );
+    expect(operatorPy).not.toContain("require_signed");
+    const operatorTs = block(verificationTs, /^export function shouldAutowake\([\s\S]*?^  if \(isOperator\) \{\n((?:    .*\n)+?)  \}\n/m, "shouldAutowake operator branch");
+    expect(operatorTs).toMatch(/^    if \(signed && verification\) return Boolean\(verification\.verified\);\n    return Boolean\(operatorTrusted\);\n$/);
+    expect(operatorTs).not.toContain("requireSigned");
+
+    // Peer branch: after the `require` block (so in warn and off) a signed
+    // message with a result returns that result, so a failed signature never
+    // wakes a turn in any mode. The MCP connector's own gate agrees.
+    expect(verificationPy).toMatch(
+      /^    if require_signed == "require":\n(?:        .*\n)+    if signed and verification is not None:\n        return bool\(verification\.verified\)\n    return True\n/m
+    );
+    expect(verificationTs).toMatch(
+      /^  if \(requireSigned === "require"\) \{\n(?:    .*\n)+  \}\n  if \(signed && verification\) return Boolean\(verification\.verified\);\n  return true;\n\}/m
+    );
+    expect(read("packages/mcp-connector/src/agent.ts")).toMatch(
+      /this\.opts\.requireSigned === "require"\n\s+\? v\.status === "verified" \|\| v\.status === "relay_attested"\n\s+: v\.status !== "failed";/
+    );
+
+    const rejected = /signed (?:peer|teammate) message whose signature fails verification is rejected in every mode, `off` included/;
+    const readmeRow = tableRow(rootReadme, "EKHO_REQUIRE_SIGNED", "README");
+    const pluginRow = tableRow(pluginReadme, "EKHO_REQUIRE_SIGNED", "plugin README");
+    const strictness = plain(capture(hermesReadme, /^### Peer message strictness\n([\s\S]*?)(?=^#{2,3} )/m, "Hermes strictness section"));
+    for (const [label, text] of [["README", readmeRow], ["plugin README", pluginRow], ["Hermes README", strictness]] as const) {
+      expect(text, label).toMatch(rejected);
+      expect(text, label).toMatch(/no pinned operator key/);
+      expect(text, label).not.toMatch(/unverifiable/);
+    }
+    expect(pluginRow).toContain("Operator messages are unaffected");
+    expect(strictness).toContain("Operator messages are unaffected by `EKHO_REQUIRE_SIGNED`");
+    expect(strictness).toMatch(/signed operator message is accepted or rejected on its verification result alone/);
+    expect(strictness).toMatch(/operator-trusted toggle decides only an unsigned operator message/);
+    expect(strictness).not.toMatch(/follow the console's operator-trusted toggle/);
+  });
+
   it("Hermes Configure block lists the env vars autoreply.py and connection.py read, with their defaults", () => {
     const connectionPy = read("packages/hermes-plugin/ekho_hermes/connection.py");
     const configure = capture(hermesReadme, /^## Configure\n([\s\S]*?)(?=^## )/m, "Hermes Configure section");
@@ -290,6 +358,14 @@ describe("environment variable and command docs match the source (#130 slice A2)
       expect(connectionPy).toContain(`os.environ.get("${envVar}")`);
       expect(configure, envVar).toMatch(new RegExp(`^# ${envVar}=`, "m"));
     }
+  });
+
+  it("Hermes turn-timeout default is the same in both autoreply.py fallback returns, and the docs state it", () => {
+    const timeout = hermesTurnTimeout();
+    expect(hermesReadme).toContain(`# EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS=${timeout} `);
+    const hermesNote = capture(hermesReadme, /^### Turn timeout and the conversation floor\n([\s\S]*?)(?=^#{2,3} )/m, "Hermes floor note");
+    expect(hermesNote).toContain(`(default \`${timeout}\`;`);
+    expect(tableDefault(pluginReadme, "EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS", "plugin README")).toBe(timeout);
   });
 
   it("turn-timeout docs say the relay caps the floor at EKHO_FLOOR_TTL_MAX_SECONDS and name the value to raise it to", () => {
@@ -355,13 +431,34 @@ describe("environment variable and command docs match the source (#130 slice A2)
     for (const check of checks) {
       expect(bullets.some((bullet) => keyword[check].test(bullet)), `doctor section lists the ${check} check`).toBe(true);
     }
+
+    // The secret check is inequality with the shipped default and nothing
+    // else: config.ts keeps an explicitly empty value (??), doctor passes it,
+    // and only the server's isInsecureSecret() refuses it.
+    expect(doctorBody).toContain('if (config.operatorSessionSecret !== "change-me") {');
+    expect(doctorBody).not.toMatch(/isInsecureSecret|!config\.operatorSessionSecret/);
+    expect(configTs).toContain('operatorSessionSecret: process.env.EKHO_OPERATOR_SESSION_SECRET ?? "change-me"');
+    expect(configTs).toMatch(/^export function isInsecureSecret\(secret: string\): boolean \{\n  return !secret \|\| secret === "change-me";\n\}/m);
+    expect(configTs).toMatch(/if \(isInsecureSecret\(secret\) && !allowInsecure\)/);
+    const secretBullet = bullets.find((bullet) => keyword.Secret.test(bullet))!;
+    expect(secretBullet).toContain("differs from the shipped `change-me` default");
+    expect(secretBullet).toMatch(/does not reject an explicitly empty value/);
+    expect(secretBullet).toMatch(/server refuses to start/);
+    expect(secretBullet).toContain("`EKHO_DEV_INSECURE`");
+    expect(secretBullet).not.toMatch(/something other than the default/);
     expect(doctorSection).not.toMatch(/connectivity/i);
     expect(read("packages/relay/README.md")).not.toMatch(/connectivity/i);
   });
 
   it("Helm first-operator step waits for the relay pod to be ready before kubectl exec", () => {
     expect(read("deploy/helm/ekho/templates/_helpers.tpl")).toMatch(/^app\.kubernetes\.io\/instance: \{\{ \.Release\.Name \}\}$/m);
-    expect(read("deploy/helm/ekho/templates/statefulset.yaml")).toContain("readinessProbe:");
+    const statefulSet = read("deploy/helm/ekho/templates/statefulset.yaml");
+    expect(statefulSet).toContain("readinessProbe:");
+    // The label the docs wait on must be on the pod template (what `-l`
+    // selects), not only on the StatefulSet's own metadata and selector.
+    expect(statefulSet).toMatch(/^  selector:\n    matchLabels:\n      \{\{- include "ekho\.selectorLabels" \. \| nindent 6 \}\}$/m);
+    const podLabels = block(statefulSet, /^  template:\n    metadata:\n      labels:\n((?:        .*\n)+)/m, "StatefulSet pod-template labels");
+    expect(podLabels).toMatch(/^        \{\{- include "ekho\.selectorLabels" \. \| nindent 8 \}\}$/m);
     const waitCmd = /kubectl (?:-n|--namespace) ekho wait --for=condition=ready pod -l app\.kubernetes\.io\/instance=ekho --timeout=\d+s/;
     const execCmd = "exec -it ekho-0 -- tsx packages/relay/src/setup.ts";
     for (const [label, text] of [["Helm README", helmReadme], ["operations", operations]] as const) {

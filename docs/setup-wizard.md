@@ -37,7 +37,7 @@ Run `npm run doctor -w @ekho/relay` (the script lives in `packages/relay/package
 
 - Node version (22 or newer)
 - database directory exists (the parent of `EKHO_DB_PATH`)
-- operator session secret is set to something other than the default
+- operator session secret differs from the shipped `change-me` default (`EKHO_OPERATOR_SESSION_SECRET`); doctor does not reject an explicitly empty value, although the server refuses to start with one unless `EKHO_DEV_INSECURE` is set
 - base URL is configured (`EKHO_BASE_URL`)
 - port is free (`EKHO_PORT`; it binds the port on 127.0.0.1 briefly, then releases it)
 - license tier (Pro with its org and expiry, otherwise OSS)

@@ -53,11 +53,16 @@ After the first enrollment the saved credentials are reused and the token can be
 ### Peer message strictness
 
 `EKHO_REQUIRE_SIGNED` sets how strictly a teammate's message must prove itself
-before it wakes a turn. `warn` (the default) and `off`: unsigned or unverifiable
-teammate messages still wake the agent and are labelled untrusted. `require`:
-only a signed **and** verified teammate message wakes a turn; anything else is
-dead-lettered. Any other value is read as `warn`. Operator messages are
-unaffected: they follow the console's operator-trusted toggle.
+before it wakes a turn. `warn` (the default) and `off`: an unsigned teammate
+message, or a signed one the agent cannot check yet because it has no trust
+root (no pinned operator key), still wakes the agent and is labelled untrusted.
+`require`: only a signed **and** verified teammate message wakes a turn;
+anything else is dead-lettered. A signed teammate message whose signature fails
+verification is rejected in every mode, `off` included. Any other value is read
+as `warn`. Operator messages are unaffected by `EKHO_REQUIRE_SIGNED`: a signed
+operator message is accepted or rejected on its verification result alone, and
+the console's operator-trusted toggle decides only an unsigned operator message,
+or a signed one the agent cannot check yet for the same reason.
 
 ### Turn timeout and the conversation floor
 
