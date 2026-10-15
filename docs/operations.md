@@ -21,6 +21,8 @@ Compose refuses to start without `EKHO_OPERATOR_SESSION_SECRET` set — there is
 helm install ekho ./deploy/helm/ekho \
   --namespace ekho --create-namespace \
   --set secrets.operatorSessionSecret=$(openssl rand -hex 32)
+# Wait for the relay pod to pass its readiness probe before running anything inside it.
+kubectl --namespace ekho wait --for=condition=ready pod -l app.kubernetes.io/instance=ekho --timeout=180s
 # Create the default fleet and the first operator inside the relay pod; save the one-time password it prints.
 kubectl --namespace ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts
 ```
@@ -42,7 +44,7 @@ npm install && npm run build && npm run setup && npm start
 | `EKHO_OPERATOR_SESSION_SECRET` | — (required) | Operator session signing secret. The relay **refuses to start** if unset or left as `change-me`. Generate with `openssl rand -hex 32`. |
 | `EKHO_HOST` | `127.0.0.1` | Bind address. Set to `0.0.0.0` in containers. |
 | `EKHO_PORT` | `4000` | Listen port. |
-| `EKHO_DB_PATH` | `./data/ekho.sqlite` | SQLite path. Point at a durable volume. |
+| `EKHO_DB_PATH` | `packages/relay/data/ekho.sqlite` | SQLite path. When unset it is fixed relative to the relay source, not the working directory; the Docker image and the Helm chart set `/app/data/ekho.sqlite`. Point at a durable volume. |
 | `EKHO_BASE_URL` | `http://127.0.0.1:4000` | Public URL advertised in A2A agent cards. |
 | `EKHO_OPERATOR_SESSION_TTL_SECONDS` | `86400` | Max age of an operator session token. Bounds how long a stolen token stays usable; operators re-login when it lapses. |
 | `EKHO_LOGIN_MAX_FAILURES` | `10` | Failed operator logins tolerated per account **and** per client IP within the window before `429`. |

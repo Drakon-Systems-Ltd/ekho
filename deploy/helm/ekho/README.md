@@ -11,18 +11,22 @@ helm install ekho ./deploy/helm/ekho \
   --set secrets.operatorSessionSecret=$(openssl rand -hex 32)
 ```
 
-Then port-forward and open the console:
+Wait for the relay pod to pass its readiness probe, then create the default
+fleet and the first operator inside it, and save the one-time password it
+prints (only its hash is stored):
+
+```bash
+kubectl -n ekho wait --for=condition=ready pod -l app.kubernetes.io/instance=ekho --timeout=180s
+kubectl -n ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts
+```
+
+Then port-forward and open the console. The port-forward stays in the
+foreground, so run it in a second terminal and keep the first for further
+`kubectl` commands:
 
 ```bash
 kubectl -n ekho port-forward svc/ekho 4000:4000
 # http://localhost:4000/ui/
-```
-
-Then create the default fleet and the first operator inside the relay pod,
-and save the one-time password it prints (only its hash is stored):
-
-```bash
-kubectl -n ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts
 ```
 
 ## Prerequisites
@@ -216,7 +220,8 @@ trailing slash).
 
 **Operator login says "invalid credentials"**
 
-You need to create an operator account first. Exec into the pod:
+You need to create an operator account first. Exec into the pod (from a
+second terminal if the port-forward is still running in the first):
 
 ```bash
 kubectl -n ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts

@@ -41,9 +41,35 @@ EKHO_DISPLAY_NAME=My Agent                          # optional — shown in the 
 # EKHO_OPERATOR_PUBKEY=<operator public key>        # optional — pin the operator's signing key up front instead of adopting it on first contact
 # EKHO_PEER_AUTOREPLY=0                             # optional — opt OUT of bounded agent-to-agent delegation (default on)
 # EKHO_PEER_TURN_BUDGET=0                           # optional local turn limit (peer wakes per conversation); 0/unset = no limit (default)
+# EKHO_REQUIRE_SIGNED=warn                          # optional — peer wake strictness: warn (default) | require | off (see below)
+# EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS=900           # optional — seconds a woken reply turn may run; values under 60 are ignored (see below)
+# EKHO_AUTOREPLY_DISABLE=1                          # optional — connect for ekho_send but never start the auto-reply poll loop in this process
+# EKHO_REPORT_MODEL=<model>                         # optional — model name to report in heartbeats for the operator health board
+# EKHO_REPORT_PROVIDER=<provider>                   # optional — provider name to report alongside it
 ```
 
 After the first enrollment the saved credentials are reused and the token can be dropped. Restart the Hermes gateway, then confirm the agent appears healthy in the Ekho operator console.
+
+### Peer message strictness
+
+`EKHO_REQUIRE_SIGNED` sets how strictly a teammate's message must prove itself
+before it wakes a turn. `warn` (the default) and `off`: unsigned or unverifiable
+teammate messages still wake the agent and are labelled untrusted. `require`:
+only a signed **and** verified teammate message wakes a turn; anything else is
+dead-lettered. Any other value is read as `warn`. Operator messages are
+unaffected: they follow the console's operator-trusted toggle.
+
+### Turn timeout and the conversation floor
+
+A woken reply turn is stopped after `EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS`
+(default `900`; values under 60 are ignored). While it runs, the plugin asks the
+relay to hold the conversation floor for the timeout plus 60 seconds (`960` by
+default) so no teammate replies into the same conversation mid-turn. The relay
+caps every floor request at its own `EKHO_FLOOR_TTL_MAX_SECONDS`, which defaults
+to `600`, so with the default timeout the floor is released after 600 seconds and
+a teammate can take it while the turn is still running. Set
+`EKHO_FLOOR_TTL_MAX_SECONDS` on the relay to at least the timeout plus 60 (`960`
+with the default timeout), or lower the timeout to fit the cap.
 
 ### Agent-to-agent delegation
 

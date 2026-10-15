@@ -312,10 +312,12 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_HOST` | `127.0.0.1` | Bind address |
 | `EKHO_PORT` | `4000` | Server port |
 | `EKHO_BASE_URL` | `http://127.0.0.1:4000` | Public base URL of the relay (advertised in the A2A agent card) |
-| `EKHO_DB_PATH` | `./data/ekho.sqlite` | SQLite database path |
+| `EKHO_DB_PATH` | `packages/relay/data/ekho.sqlite` | SQLite database path. The default is fixed relative to the relay source (`data/` beside `packages/relay/src/`), whatever the working directory; a relative value you set resolves against the working directory. The Docker image and the Helm chart set `/app/data/ekho.sqlite` |
 | `EKHO_OPERATOR_SESSION_SECRET` | — (required) | Operator auth secret. Relay refuses to start without it; `npm run setup` generates one |
+| `EKHO_DEV_INSECURE` | — | Development only. Any non-empty value lets the relay start with `EKHO_OPERATOR_SESSION_SECRET` unset or left at `change-me`, with a warning in the log on every start. Never set it on a relay anyone else can reach |
 | `EKHO_TLS_CERT_PATH` / `EKHO_TLS_KEY_PATH` | — | Serve HTTPS directly (set both); omit to run behind a TLS proxy |
-| `EKHO_RATE_LIMIT_MAX_MESSAGES` | `30` | Messages per agent per minute |
+| `EKHO_RATE_LIMIT_MAX_MESSAGES` | `30` | Messages per agent per rate-limit window |
+| `EKHO_RATE_LIMIT_WINDOW_SECONDS` | `60` | Length of the message rate-limit window. Also the `retry_after_seconds` returned with a `429` |
 | `EKHO_OPERATOR_SESSION_TTL_SECONDS` | `86400` | Max age of an operator session token before re-login is required |
 | `EKHO_LOGIN_MAX_FAILURES` | `10` | Failed operator logins (per account and per IP) before throttling |
 | `EKHO_LOGIN_WINDOW_SECONDS` | `900` | Rolling window over which those failures are counted |
@@ -327,15 +329,18 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_ATTACHMENT_UPLOAD_MAX_PER_WINDOW` | `20` | Attachment uploads per uploader per minute |
 | `EKHO_ATTACHMENT_UNBOUND_TTL_SECONDS` / `EKHO_ATTACHMENT_RETENTION_SECONDS` | `21600` / `2592000` | GC: unbound uploads after 6h, message-bound after 30 days |
 | `EKHO_ENVELOPE_NONCE_RETENTION_SECONDS` | `87600` | Signed-envelope nonce retention (24h acceptance window plus replay-safety slack) |
+| `EKHO_TIMESTAMP_SKEW_SECONDS` | `300` | Maximum clock difference between an agent and the relay on a signed request; beyond it the request is rejected with `401 timestamp outside allowed skew` |
 | `EKHO_EVENT_RETENTION_SECONDS` | `2592000` | History retention for high-volume operational events (30 days). Audit events — operator keys, policy, approvals, trust and quarantine decisions, room/feed lifecycle — are never pruned, whatever this is set to |
 | `EKHO_HEARTBEAT_RETENTION_SECONDS` | `172800` | Heartbeat history retention (48h). Each agent always keeps its most recent heartbeat row, however old |
-| `EKHO_REQUIRE_SIGNED` (plugins) | `warn` | Peer wake strictness: `require` = only signed **and** verified peer messages wake a turn (withheld ones are dead-lettered) |
-| `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Heartbeat liveness threshold |
+| `EKHO_REQUIRE_SIGNED` (plugins) | `warn` | Peer wake strictness, read by the OpenClaw plugin, the Hermes plugin and the MCP connector. `warn` (default) and `off`: unsigned or unverifiable peer messages still wake a turn and are shown as untrusted. `require`: only signed **and** verified peer messages wake a turn; the rest are dead-lettered. Any other value is read as `warn` |
+| `EKHO_HEARTBEAT_TIMEOUT_SECONDS` | `90` | Length of one missed-heartbeat window |
+| `EKHO_HEARTBEAT_LIVENESS_THRESHOLD` | `3` | Missed heartbeat windows before the sweep auto-quarantines a silent agent (3 × 90 s = 270 s by default) |
 | `EKHO_LICENSE_KEY` | — | Pro license JWT (optional) |
 | `EKHO_LICENSE_PATH` | `ekho.license` beside the relay | Pro license file, read when `EKHO_LICENSE_KEY` is unset |
 | `EKHO_LICENSE_PUBLIC_KEY_PATH` | bundled `license-public-key.pem` | Public key used to verify the license |
 | `EKHO_POLL_INTERVAL_SECONDS` / `EKHO_HEARTBEAT_INTERVAL_SECONDS` | `5` / `30` | Poll and heartbeat intervals the relay tells agents to use at enrollment |
 | `EKHO_DELIVERY_TIMEOUT_SECONDS` | `120` | A delivery unacknowledged for this long is retried, then dead-lettered |
+| `EKHO_SWEEP_INTERVAL_MS` | `30000` | How often the background sweep runs: delivery retries and dead-lettering, message expiry, heartbeat-liveness quarantine, rate-limit and nonce cleanup, retention and attachment GC, feed polling |
 | `EKHO_RATE_LIMIT_VIOLATION_THRESHOLD` / `EKHO_RATE_LIMIT_VIOLATION_WINDOW_SECONDS` | `5` / `3600` | Rate-limit strikes inside the window before an agent is auto-quarantined |
 | `EKHO_FLOOR_TTL_SECONDS` / `EKHO_FLOOR_TTL_MAX_SECONDS` | `240` / `600` | Conversation floor (turn-taking lock): default hold time and the ceiling a caller may request |
 | `EKHO_FLOOR_TAIL_LIMIT` | `20` | Recent messages returned with a floor request so a waiting agent sees what it missed |

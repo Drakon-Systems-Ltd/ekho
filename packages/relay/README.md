@@ -13,11 +13,13 @@ npm run dev            # relay with hot reload (tsx watch)
 npm run ui:dev         # operator console with Vite HMR
 ```
 
+Run these from `packages/relay`, or from the repo root with `-w @ekho/relay`.
+
 | Script | Purpose |
 |--------|---------|
 | `npm run start` | Run the relay |
 | `npm run setup` | Create your fleet and operator credentials |
-| `npm run doctor` | Diagnose configuration and connectivity |
+| `npm run doctor` | Check the Node version, database directory, operator session secret, base URL, port availability and license tier. Runs offline; it does not contact anything |
 | `npm run ui:build` | Build the operator console into `ui-dist/` |
 | `npm run build` | Build the console, then typecheck the relay |
 | `npm run test` | Run the relay test suite |
