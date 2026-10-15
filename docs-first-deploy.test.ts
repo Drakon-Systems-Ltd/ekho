@@ -606,8 +606,16 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(gateOrder).toEqual(gateOrder.slice().sort((a, b) => a - b));
     expect(bridgeReadme).toMatch(/never reaches the bridge/);
     expect(bridgeReadme).toMatch(/stops at the first step that rejects it/);
-    expect(bridgeReadme).toMatch(/only if neither step above rejected it/);
-    expect(bridgeReadme).toMatch(/A rejected message leaves no memory record/);
+    expect(bridgeReadme).toMatch(/only if neither of the bridge's own steps above rejected it/);
+    expect(bridgeReadme).toMatch(/A message rejected by the bridge's scan or action check leaves no memory record/);
+    expect(bridgeReadme).not.toMatch(/A rejected message leaves no memory record/);
+    // The no-record claim is bridge-local: the gate runs every extension in
+    // registration order and remember is fire-and-forget, so a later extension's
+    // rejection can follow an already-started memory record.
+    expect(read("packages/relay/src/license.ts")).toMatch(/export function registerExtension\(ext: EkhoExtension\) \{\n\s+extensions\.push\(ext\);/);
+    expect(gateFn).toMatch(/for \(const ext of getExtensions\(\)\) \{[\s\S]*?return \{\n\s+allowed: false,\n\s+kind: "extension"/);
+    expect(bridgeReadme).toMatch(/bridge-local behaviour, not a guarantee about the relay as a whole/);
+    expect(bridgeReadme).toMatch(/an extension registered after the bridge then rejects the message, the relay still refuses it with HTTP 403, but the memory record may already have been written/);
     expect(bridgeReadme).not.toMatch(/every message an agent submits/);
     expect(bridgeReadme).not.toMatch(/For each message the hook:/);
 
@@ -626,6 +634,8 @@ describe("bridge, connector, security policy, API spec scope and package changel
     const a3 = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
     expect(a3).not.toMatch(/runs on every agent-sent message/);
     expect(a3).toMatch(/stopping at the first step that rejects the message/);
+    expect(a3).not.toMatch(/so a rejected message is never recorded by `remember`\)/);
+    expect(a3).toMatch(/a message rejected by an extension registered after the bridge can already have been recorded/);
     expect(a3).toMatch(/not JSON is silently ignored/);
     for (const prefix of [scanPrefix, ...gatePrefixes]) expect(a3, prefix).toContain(`\`${prefix}\``);
     expect(a3).toMatch(/the next tool call, possibly for the same message, starts a new process/);

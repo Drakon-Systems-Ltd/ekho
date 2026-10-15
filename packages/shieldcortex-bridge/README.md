@@ -17,7 +17,9 @@ The bridge registers an `onBeforeMessage` hook. The relay's message gate (`packa
 
 1. **Scan the message body** with the `iron_dome_scan` tool. If the result's `riskLevel` is `HIGH` or `CRITICAL`, the `strict` profile rejects the message here, and the action check and the memory record below do not run; `balanced` and `permissive` log a warning and continue to the next step.
 2. **Check the action** with the `iron_dome_check` tool (action `send_message:<message_type>`, source = the sending agent). A `blocked` or `requires_approval` decision rejects the message in every profile, and the memory record below does not run.
-3. **Record the message** with the `remember` tool, only if neither step above rejected it: a title naming sender, recipient and message type, the first 2000 characters of the body, category `pattern`, tags `ekho`, `agent-communication` and the message type. This call is fire-and-forget; its result never affects delivery. A rejected message leaves no memory record.
+3. **Record the message** with the `remember` tool, only if neither of the bridge's own steps above rejected it: a title naming sender, recipient and message type, the first 2000 characters of the body, category `pattern`, tags `ekho`, `agent-communication` and the message type. This call is fire-and-forget; its result never affects delivery. A message rejected by the bridge's scan or action check leaves no memory record.
+
+This is bridge-local behaviour, not a guarantee about the relay as a whole. The relay's message gate runs every registered extension in turn, in registration order (`packages/relay/src/message-gate.ts`, `packages/relay/src/license.ts`), and the bridge starts the `remember` call before its hook returns. If an extension registered after the bridge then rejects the message, the relay still refuses it with HTTP 403, but the memory record may already have been written.
 
 A rejected message is refused by the relay with HTTP 403 and `blocked by extension shieldcortex-bridge: <reason>`; on the A2A path the same denial is returned as a JSON-RPC error.
 
