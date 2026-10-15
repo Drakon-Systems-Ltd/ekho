@@ -121,6 +121,16 @@ describe("first-deployment docs match the source (#130)", () => {
       /- name: EKHO_PEER_AUTOREPLY\n\s+description: "([^"]+)"/,
       "EKHO_PEER_AUTOREPLY description"
     );
+    // The README states the default in two places: the Configure env example
+    // and the "Agent-to-agent delegation" section. Emphasis and line wraps are
+    // normalised so the checks read the words, not the Markdown.
+    const plain = (text: string) => text.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+    const envLine = plain(
+      capture(hermesReadme, /^(?:#\s*)?(EKHO_PEER_AUTOREPLY=[^\n]+)$/m, "README EKHO_PEER_AUTOREPLY env example")
+    );
+    const delegationSection = plain(
+      capture(hermesReadme, /^### Agent-to-agent delegation\n([\s\S]*?)(?=^#{2,3} )/m, "README delegation section")
+    );
     if (parser === "_truthy_default_true") {
       const falsey = capture(configPy, /^_FALSEY = \{([^}]+)\}$/m, "_FALSEY")
         .split(",")
@@ -129,9 +139,24 @@ describe("first-deployment docs match the source (#130)", () => {
       expect(autoreplyDescription).toContain("default on");
       expect(autoreplyDescription).not.toContain("default off");
       expect(autoreplyDescription).toContain(`${falsey.join("/")} to disable`);
+
+      expect(envLine).toContain("(default on)");
+      expect(envLine).not.toContain("default off");
+      expect(falsey).toContain(capture(envLine, /^EKHO_PEER_AUTOREPLY=(\S+)/, "README env example value"));
+
+      expect(delegationSection).toMatch(/^By default the agent auto-replies/);
+      expect(delegationSection).toMatch(/agent-to-agent delegation is on\b/);
+      const optOut = capture(delegationSection, /Set `EKHO_PEER_AUTOREPLY=([^`]+)` to opt out/, "README delegation opt-out");
+      expect(optOut).toBe("0");
+      expect(falsey).toContain(optOut);
+      expect(delegationSection).not.toMatch(/off by default|default off|delegation is off/);
     } else {
       expect(parser).toBe("_truthy");
       expect(autoreplyDescription).toContain("default off");
+      expect(envLine).toContain("(default off)");
+      expect(envLine).not.toContain("default on");
+      expect(delegationSection).toMatch(/delegation is off\b|off by default/);
+      expect(delegationSection).not.toMatch(/delegation is on\b|on by default|default on/);
     }
 
     const pluginPy = read("packages/hermes-plugin/ekho_hermes/plugin.py");
