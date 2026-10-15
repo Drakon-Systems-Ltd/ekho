@@ -541,6 +541,96 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(bridgeReadme).toContain("`blocked by extension shieldcortex-bridge: <reason>`");
   });
 
+  it("bridge README states the failure handling, short-circuit order and reconnect that index.ts and mcp-client.ts implement", () => {
+    const index = read("packages/shieldcortex-bridge/src/index.ts");
+    const client = read("packages/shieldcortex-bridge/src/mcp-client.ts");
+    const bridgeReadme = read("packages/shieldcortex-bridge/README.md");
+    const hook = block(index, /async onBeforeMessage\(ctx: BeforeMessageContext\): Promise<void> \{\n([\s\S]*?)\n    \}\n  \};/, "onBeforeMessage body");
+    const at = (needle: string): number => {
+      const i = hook.indexOf(needle);
+      expect(i, `onBeforeMessage contains ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+
+    // A tool result that is not JSON is swallowed by an empty inner catch, so it
+    // never reaches the outer catch that logs the warning; only a failed request does.
+    expect(hook).toContain("try { parsed = JSON.parse(scanText); } catch {}");
+    expect(hook).toContain("try { gateParsed = JSON.parse(gateText); } catch {}");
+    expect(hook).toContain("console.warn(`[shieldcortex-bridge] scan failed: ${err instanceof Error ? err.message : err}`);");
+    expect(hook).toContain("console.warn(`[shieldcortex-bridge] action gate failed: ${err instanceof Error ? err.message : err}`);");
+    expect(bridgeReadme).toContain("`[shieldcortex-bridge] scan failed:`");
+    expect(bridgeReadme).toContain("`[shieldcortex-bridge] action gate failed:`");
+    expect(bridgeReadme).toMatch(/not valid JSON is silently ignored/);
+    expect(bridgeReadme).not.toMatch(/cannot be parsed, the scan and the action check log a warning/);
+
+    // Rejection is by error-message prefix. The prefixes are read from the two
+    // rethrow lines; the bridge builds errors with them, and mcp-client.ts turns a
+    // JSON-RPC error into an Error carrying the server's message, so the README
+    // must name every prefix and may not say only a parsed decision rejects.
+    const scanPrefix = capture(hook, /if \(err instanceof Error && err\.message\.startsWith\(("[^"]+")\)\) throw err;/, "scan rethrow");
+    const gateRethrow = line(hook, /^\s*if \(err instanceof Error && \(err\.message\.startsWith\("[^"]+"\) \|\| err\.message\.startsWith\("[^"]+"\)\)\) throw err;$/m, "gate rethrow");
+    const gatePrefixes = [...gateRethrow.matchAll(/startsWith\("([^"]+)"\)/g)].map((m) => m[1]);
+    expect(gatePrefixes).toHaveLength(2);
+    expect(hook).toContain(`throw new Error(\`${scanPrefix} `);
+    for (const prefix of gatePrefixes) expect(hook, prefix).toMatch(new RegExp(`throw new Error\\(\`${escapeRe(prefix)}`));
+    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(bridgeReadme, prefix).toContain(`\`${prefix}\``);
+    expect(client).toContain("req.reject(new Error(msg.error.message));");
+    expect(bridgeReadme).toMatch(/JSON-RPC error returned by the server/);
+    expect(bridgeReadme).not.toContain("Only an explicit high-risk scan result");
+
+    // Each rethrow sits before the next tool call and nothing wraps the hook, so a
+    // strict scan denial never reaches iron_dome_check and a denial of either kind
+    // never reaches remember. Five try blocks: scan, its parse, gate, its parse, remember.
+    const scanCall = at('callTool("iron_dome_scan"');
+    const strictThrow = at(`if (config.defenceProfile === "strict") {\n            throw new Error(\`${scanPrefix} `);
+    const scanRethrow = at(`startsWith("${scanPrefix}")) throw err;`);
+    const gateCall = at('callTool("iron_dome_check"');
+    const gateRethrowAt = hook.indexOf(gateRethrow);
+    const rememberCall = at('callTool("remember"');
+    expect([scanCall, strictThrow, scanRethrow, gateCall, gateRethrowAt, rememberCall]).toEqual(
+      [scanCall, strictThrow, scanRethrow, gateCall, gateRethrowAt, rememberCall].slice().sort((a, b) => a - b)
+    );
+    expect(hook.match(/\btry \{/g)).toHaveLength(5);
+    expect(hook).toMatch(/if \(config\.enableMemoryExtraction\) \{\n\s+void \(async \(\) => \{\n\s+try \{\n\s+await mcp\.callTool\("remember"/);
+    // The relay enables both optional steps, so the README describes them unconditionally.
+    const server = read("packages/relay/src/server.ts");
+    expect(server).toContain("enableMemoryExtraction: true");
+    expect(server).toContain("enableIronDome: true");
+    // The relay gate refuses by status, rate limit and policy before any extension runs.
+    const gateFn = block(read("packages/relay/src/message-gate.ts"), /export async function evaluateMessageGate\([^)]*\): Promise<MessageGateVerdict> \{\n([\s\S]*?)\n\}\n/, "evaluateMessageGate body");
+    const gateOrder = ['agent.status === "quarantined"', "db.checkAndIncrementRateLimit(", "db.evaluateMessagePolicies(", "for (const ext of getExtensions())"].map((needle) => {
+      const i = gateFn.indexOf(needle);
+      expect(i, `evaluateMessageGate contains ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    });
+    expect(gateOrder).toEqual(gateOrder.slice().sort((a, b) => a - b));
+    expect(bridgeReadme).toMatch(/never reaches the bridge/);
+    expect(bridgeReadme).toMatch(/stops at the first step that rejects it/);
+    expect(bridgeReadme).toMatch(/only if neither step above rejected it/);
+    expect(bridgeReadme).toMatch(/A rejected message leaves no memory record/);
+    expect(bridgeReadme).not.toMatch(/every message an agent submits/);
+    expect(bridgeReadme).not.toMatch(/For each message the hook:/);
+
+    // The exit handler clears the client and callTool reconnects, whichever
+    // message's tool call comes next, so the restart is not tied to a message boundary.
+    expect(client).toMatch(/this\.process\.on\("exit", \(\) => \{\n\s+this\.process = null;\n\s+this\.initialized = false;\n[\s\S]*?req\.reject\(new Error\("MCP process exited"\)\);/);
+    expect(client).toMatch(/async callTool\([^)]*\): Promise<McpToolResult> \{\n\s+if \(!this\.initialized\) await this\.connect\(\);/);
+    expect(bridgeReadme).toContain("`MCP process exited`");
+    expect(bridgeReadme).toMatch(/the next tool call starts a new process/);
+    expect(bridgeReadme).toMatch(/can belong to the same message/);
+    expect(bridgeReadme).toMatch(/on the first tool call/);
+    expect(bridgeReadme).not.toMatch(/the next message starts a new process/);
+    expect(bridgeReadme).not.toMatch(/on the first message after the relay starts/);
+
+    // The root CHANGELOG bullet carries the same qualifications.
+    const a3 = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
+    expect(a3).not.toMatch(/runs on every agent-sent message/);
+    expect(a3).toMatch(/stopping at the first step that rejects the message/);
+    expect(a3).toMatch(/not JSON is silently ignored/);
+    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(a3, prefix).toContain(`\`${prefix}\``);
+    expect(a3).toMatch(/the next tool call, possibly for the same message, starts a new process/);
+  });
+
   it("MCP connector README states the store's queue-full rule, which tools are idempotent, the relay floor and the version placeholder", () => {
     const readme = read("packages/mcp-connector/README.md");
     // store.ts: an unread inbound message is never evicted, and polling stops at the bound.
@@ -552,6 +642,13 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(queueRow).toContain("an unread message is never evicted");
     expect(queueRow).toContain("stops polling the relay");
     expect(readme).not.toMatch(/drops? the oldest|oldest (?:are|is) dropped/i);
+    // agent.ts: pollOnce is the caller that honours hasRoom(); it returns before the inbox fetch.
+    const pollOnce = block(read("packages/mcp-connector/src/agent.ts"), /\n  async pollOnce\(\): Promise<StoredMessage\[\]> \{\n([\s\S]*?)\n  \}\n/, "agent.pollOnce");
+    const roomGuard = pollOnce.indexOf("if (!this.store.hasRoom()) {");
+    const inboxFetch = pollOnce.indexOf("await this.client.getInbox(");
+    expect(roomGuard, "pollOnce checks hasRoom()").toBeGreaterThanOrEqual(0);
+    expect(inboxFetch, "pollOnce fetches the inbox").toBeGreaterThan(roomGuard);
+    expect(pollOnce.slice(roomGuard, inboxFetch)).toContain("return [];");
 
     // mcp.ts: ekho_send and ekho_open_room call the relay on every invocation,
     // and db.createRoom inserts a new row per call (no lookup by name).
