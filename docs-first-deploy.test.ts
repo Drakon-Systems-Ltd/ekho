@@ -305,23 +305,31 @@ describe("environment variable and command docs match the source (#130 slice A2)
     // verification result is judged on that result, before and regardless of
     // the operator-trusted toggle, which is only the fallback below it. The
     // mode is never consulted for an operator message.
-    const operatorPy = block(verificationPy, /^def should_autowake\([\s\S]*?^    if is_operator:\n((?:        .*\n)+)/m, "should_autowake operator branch");
+    // Bound every gate assertion to the named function's own body: from its
+    // `def`/`export function` line to the next top-level line (Python: the
+    // first column-0 line that is not the signature's closing paren; TS: the
+    // first column-0 closing brace).
+    const autowakePy = block(verificationPy, /^(def should_autowake\([\s\S]*?\n)(?=[^\s)])/m, "should_autowake body");
+    const autowakeTs = block(verificationTs, /^(export function shouldAutowake\([\s\S]*?\n\}\n)/m, "shouldAutowake body");
+    const operatorPy = block(autowakePy, /^    if is_operator:\n((?:        .*\n)+)/m, "should_autowake operator branch");
     expect(operatorPy).toMatch(
       /^        if signed and verification is not None:\n(?:            #.*\n)*            return bool\(verification\.verified\)\n(?:        #.*\n)*        return bool\(operator_trusted\)\n$/
     );
     expect(operatorPy).not.toContain("require_signed");
-    const operatorTs = block(verificationTs, /^export function shouldAutowake\([\s\S]*?^  if \(isOperator\) \{\n((?:    .*\n)+?)  \}\n/m, "shouldAutowake operator branch");
+    const operatorTs = block(autowakeTs, /^  if \(isOperator\) \{\n((?:    .*\n)+?)  \}\n/m, "shouldAutowake operator branch");
     expect(operatorTs).toMatch(/^    if \(signed && verification\) return Boolean\(verification\.verified\);\n    return Boolean\(operatorTrusted\);\n$/);
     expect(operatorTs).not.toContain("requireSigned");
 
-    // Peer branch: after the `require` block (so in warn and off) a signed
+    // Peer branch: the `require` block returns true only for a signed message
+    // whose verification result is present and verified (comments aside, its
+    // whole body is that one return); after it (so in warn and off) a signed
     // message with a result returns that result, so a failed signature never
     // wakes a turn in any mode. The MCP connector's own gate agrees.
-    expect(verificationPy).toMatch(
-      /^    if require_signed == "require":\n(?:        .*\n)+    if signed and verification is not None:\n        return bool\(verification\.verified\)\n    return True\n/m
+    expect(autowakePy).toMatch(
+      /^    if require_signed == "require":\n(?:        #.*\n)*        return bool\(signed and verification is not None and verification\.verified\)\n    if signed and verification is not None:\n        return bool\(verification\.verified\)\n    return True\n$/m
     );
-    expect(verificationTs).toMatch(
-      /^  if \(requireSigned === "require"\) \{\n(?:    .*\n)+  \}\n  if \(signed && verification\) return Boolean\(verification\.verified\);\n  return true;\n\}/m
+    expect(autowakeTs).toMatch(
+      /^  if \(requireSigned === "require"\) \{\n(?:    \/\/.*\n)*    return Boolean\(signed && verification && verification\.verified\);\n  \}\n  if \(signed && verification\) return Boolean\(verification\.verified\);\n  return true;\n\}\n$/m
     );
     expect(read("packages/mcp-connector/src/agent.ts")).toMatch(
       /this\.opts\.requireSigned === "require"\n\s+\? v\.status === "verified" \|\| v\.status === "relay_attested"\n\s+: v\.status !== "failed";/
