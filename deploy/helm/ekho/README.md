@@ -18,6 +18,13 @@ kubectl -n ekho port-forward svc/ekho 4000:4000
 # http://localhost:4000/ui/
 ```
 
+Then create the default fleet and the first operator inside the relay pod,
+and save the one-time password it prints (only its hash is stored):
+
+```bash
+kubectl -n ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts
+```
+
 ## Prerequisites
 
 - Kubernetes 1.23+
@@ -42,7 +49,7 @@ Create a `values.prod.yaml`:
 ```yaml
 image:
   repository: ghcr.io/drakon-systems-ltd/ekho
-  tag: "0.3.2"
+  tag: "<version>"   # a published release, e.g. the chart appVersion; no leading "v"
 
 persistence:
   enabled: true
@@ -108,7 +115,7 @@ helm upgrade ekho ./deploy/helm/ekho \
   -n ekho \
   -f values.prod.yaml \
   --reuse-values \
-  --set image.tag=0.3.2
+  --set image.tag=<version>   # the release number without the leading "v"
 ```
 
 The StatefulSet rolls pods one at a time, terminating the old pod before
@@ -158,7 +165,7 @@ networked backend.
 | Key | Default | Description |
 |---|---|---|
 | `image.repository` | `ghcr.io/drakon-systems-ltd/ekho` | Container image |
-| `image.tag` | `0.3.2` | Image tag |
+| `image.tag` | `0.7.1` (the chart `appVersion`; an empty value falls back to it) | Image tag, without a leading `v` |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `replicaCount` | `1` | Must stay 1 — see above |
 | `service.type` | `ClusterIP` | Service type |
@@ -212,7 +219,7 @@ trailing slash).
 You need to create an operator account first. Exec into the pod:
 
 ```bash
-kubectl -n ekho exec -it ekho-0 -- tsx packages/relay/src/scripts/create-operator.ts
+kubectl -n ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts
 ```
 
 ## Support

@@ -1,6 +1,6 @@
 # A2A Protocol Support
 
-Ekho speaks [A2A v1.0](https://a2a-protocol.org/latest/specification/) natively alongside its proprietary `/v1/*` API. Any A2A-compliant client can discover and message agents in an Ekho fleet without writing custom code.
+Ekho speaks [A2A](https://a2a-protocol.org/) **0.3** natively, as JSON-RPC 2.0 over HTTP, alongside its proprietary `/v1/*` API. An A2A 0.3 client can discover and message agents in an Ekho fleet without writing custom code. The relay's agent cards report `protocolVersion` `0.3.0`, and its JSON-RPC hub handles exactly the 0.3 method names listed below; any other method name, including the names used by later A2A versions, gets a JSON-RPC method-not-found error.
 
 ## What's supported
 

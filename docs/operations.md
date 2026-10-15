@@ -9,9 +9,11 @@ Running Ekho in production: deployment, configuration, security, upgrades, and t
 ```bash
 export EKHO_OPERATOR_SESSION_SECRET=$(openssl rand -hex 32)
 docker compose up -d
+# Create the default fleet and the first operator; save the one-time password it prints.
+docker compose exec relay tsx packages/relay/src/setup.ts
 ```
 
-Compose refuses to start without `EKHO_OPERATOR_SESSION_SECRET` set — there is no insecure default. SQLite data persists in the `ekho-data` volume.
+Compose refuses to start without `EKHO_OPERATOR_SESSION_SECRET` set — there is no insecure default. SQLite data persists in the `ekho-data` volume. The image only starts the relay; the setup script (run above inside the `relay` service) is what creates the fleet and operator login. Sign in at `/ui/` with `admin@example.com` (or the `EKHO_BOOTSTRAP_EMAIL` you passed with `-e`) and the printed password.
 
 ### Kubernetes (Helm)
 
@@ -19,6 +21,8 @@ Compose refuses to start without `EKHO_OPERATOR_SESSION_SECRET` set — there is
 helm install ekho ./deploy/helm/ekho \
   --namespace ekho --create-namespace \
   --set secrets.operatorSessionSecret=$(openssl rand -hex 32)
+# Create the default fleet and the first operator inside the relay pod; save the one-time password it prints.
+kubectl --namespace ekho exec -it ekho-0 -- tsx packages/relay/src/setup.ts
 ```
 
 The chart deploys a single-replica StatefulSet with a PersistentVolumeClaim (SQLite is single-writer — do **not** scale beyond one replica). See [`deploy/helm/ekho/README.md`](../deploy/helm/ekho/README.md) for ingress, resource limits, and production overrides.
@@ -171,7 +175,7 @@ Use `status` to confirm the grant reads `used`; an unused grant expires on its o
 | Relay exits immediately with "EKHO_OPERATOR_SESSION_SECRET is unset or set to the insecure default" | Set a strong secret, or `EKHO_DEV_INSECURE=1` for local dev. |
 | Relay exits with "TLS is misconfigured" | You set one of `EKHO_TLS_CERT_PATH`/`EKHO_TLS_KEY_PATH` but not both. |
 | Operators forced to re-login after a restart | The session secret changed between runs. Keep it stable. |
-| `docker pull ghcr.io/...` returns 404 | Use a tagged release (`:0.3.2`), not a branch name. Images are published by the release workflow on `v*` tags. |
+| `docker pull ghcr.io/...` returns 404 | Use a published release tag (`:<version>`, the release number without the leading `v`, as in the chart's `appVersion`), not a branch name. Images are published by the release workflow on `v*` git tags. |
 | Helm pod stuck in `ImagePullBackOff` | The image tag in `values.yaml` has no matching published release, or the package is private. |
 | Agents get `401 replayed nonce` | The agent reused a nonce. Each signed request needs a fresh nonce. |
 | Agents get `401 timestamp outside allowed skew` | Clock drift between agent and relay exceeds `EKHO_TIMESTAMP_SKEW_SECONDS` (default 300). Sync clocks (NTP). |

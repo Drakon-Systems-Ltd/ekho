@@ -8,10 +8,10 @@
   <a href="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml"><img src="https://github.com/Drakon-Systems-Ltd/ekho/actions/workflows/ci.yml/badge.svg" alt="CI"/></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-2dd4bf" alt="MIT License"/></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A522-0d9488" alt="Node 22+"/>
-  <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-v1.0-2dd4bf" alt="A2A v1.0 compliant"/></a>
+  <a href="./docs/a2a.md"><img src="https://img.shields.io/badge/A2A-0.3-2dd4bf" alt="A2A 0.3 (JSON-RPC)"/></a>
 </p>
 
-Ekho is a **self-hosted coordination layer for AI agent fleets**: a one-binary relay, operator console, runtime plugins, and SDKs that give every agent a verifiable identity, a durable inbox, and bounded agent-to-agent conversations. It works without a public broker and speaks [A2A v1.0](https://a2a-protocol.org/latest/specification/) natively, so standard A2A clients can discover and message agents on your network.
+Ekho is a **self-hosted coordination layer for AI agent fleets**: a one-binary relay, operator console, runtime plugins, and SDKs that give every agent a verifiable identity, a durable inbox, and bounded agent-to-agent conversations. It works without a public broker and speaks [A2A](https://a2a-protocol.org/) 0.3 natively over JSON-RPC (`message/send`, `message/stream`, `tasks/get`, `tasks/list`, `tasks/cancel`, `tasks/resubscribe`), so A2A 0.3 clients can discover and message agents on your network.
 
 Use Ekho when agents live on different machines or runtimes and must keep coordinating through restarts, sleeping laptops, transient network loss, or operator intervention. The relay stores messages until recipients collect and acknowledge them; runtime adapters add heartbeats, trusted-operator framing, signed peer verification, attachment handling, and bounded auto-reply turns.
 
@@ -41,7 +41,7 @@ Ekho is **not** a model proxy, shared prompt, remote shell, or replacement for a
 | Retry + dead-letter visibility | ✓ | partial | — |
 | Operator console included | ✓ | — | — |
 | Policy + approval controls | ✓ | — | — |
-| A2A v1.0 native | ✓ | — | ✓ |
+| A2A 0.3 (JSON-RPC) native | ✓ | — | ✓ |
 | Open source core | ✓ (MIT) | ✓ | ✓ |
 | Paid tier pricing | $99 one-time Pro | infra cost / Enterprise quotes | — |
 
@@ -56,9 +56,12 @@ cp packages/relay/.env.example .env
 # Set EKHO_OPERATOR_SESSION_SECRET in .env (the Compose file reads it for substitution).
 # Add any additional EKHO_* variables you need under relay.environment in docker-compose.yml.
 docker compose up -d
+# Create the default fleet and the first operator inside the running relay container.
+# Save the one-time password it prints; only its hash is stored.
+docker compose exec relay tsx packages/relay/src/setup.ts
 ```
 
-Open [http://localhost:4000/ui/](http://localhost:4000/ui/) — the operator console is waiting for you. Docker stores relay state in the named `ekho-data` volume.
+Open [http://localhost:4000/ui/](http://localhost:4000/ui/) and sign in with the operator email (`admin@example.com` unless you passed `-e EKHO_BOOTSTRAP_EMAIL=...` to the setup command) and the password the setup script printed. Docker stores relay state in the named `ekho-data` volume.
 
 ### From source
 
@@ -162,7 +165,7 @@ Runnable end-to-end demos live in [`examples/`](./examples).
 - **Approval workflows** — gate high-risk agent actions behind operator review
 - **Attachments with lifecycle controls** — per-file and fleet quotas, upload throttling, and retention sweeps prevent unbounded storage growth
 - **Extension hooks** — plugin system for custom message scanning, memory extraction, security gates
-- **A2A v1.0 native** — [A2A protocol](https://a2a-protocol.org/latest/specification/) endpoints alongside the proprietary API ([docs](./docs/a2a.md))
+- **A2A 0.3 native** — [A2A protocol](https://a2a-protocol.org/) 0.3 JSON-RPC endpoints (`message/send`, `message/stream`, `tasks/get`, `tasks/list`, `tasks/cancel`, `tasks/resubscribe`) alongside the proprietary API; the agent card reports `protocolVersion` `0.3.0`, and other method names get a JSON-RPC method-not-found error ([docs](./docs/a2a.md))
 - **Prometheus metrics** — scrapeable `/metrics` endpoint for agents, messages, deliveries, dead letters, rate violations, and A2A tasks
 - **Open-core licensing** — free OSS relay with Pro tier for multi-fleet, advanced policies, analytics
 
@@ -187,7 +190,7 @@ Ekho supports mixed fleets. Agents do not need to share a runtime or model provi
 | Node.js / custom | [`@drakon-systems/ekho-sdk`](packages/sdk/) | `npm install @drakon-systems/ekho-sdk` |
 | Grok app / any MCP client | [`@drakon-systems/ekho-mcp`](packages/mcp-connector/) | Run the connector on a box you control, publish it with Tailscale Funnel, add the URL under grok.com → Connectors → Custom; see the [connector README](packages/mcp-connector/README.md) |
 | Python / custom | [Python SDK](sdks/python/) | `pip install ./sdks/python` from a checkout |
-| Any A2A client | [A2A v1.0 endpoints](docs/a2a.md) | Discover via `/.well-known/agent-card.json` |
+| Any A2A 0.3 client | [A2A 0.3 endpoints](docs/a2a.md) | Discover via `/.well-known/agent-card.json` |
 
 Runtime plugins expose three core agent tools: `ekho_send`, `ekho_open_room`, and `ekho_inbox`. Enrollment secrets stay local to each agent. Message bodies and quoted conversation history are delivered as data; each runtime remains responsible for deciding which principals may issue instructions and which actions require human approval.
 

@@ -1,6 +1,6 @@
 # Ekho by Drakon Systems — Relay
 
-The `@ekho/relay` package is the one-binary Fastify server at the heart of **Ekho by Drakon Systems**: a private, signed, store-and-forward messaging layer for distributed AI agent fleets. It bundles the agent and operator APIs, the SQLite-backed message store with retry and dead-letter lifecycle, the policy and approval engine, A2A v1.0 endpoints, Prometheus metrics, and the React operator console.
+The `@ekho/relay` package is the one-binary Fastify server at the heart of **Ekho by Drakon Systems**: a private, signed, store-and-forward messaging layer for distributed AI agent fleets. It bundles the agent and operator APIs, the SQLite-backed message store with retry and dead-letter lifecycle, the policy and approval engine, A2A 0.3 (JSON-RPC) endpoints, Prometheus metrics, and the React operator console.
 
 For the full project overview, architecture, and SDK usage, see the [repository README](../../README.md).
 
