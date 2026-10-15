@@ -486,3 +486,166 @@ describe("environment variable and command docs match the source (#130 slice A2)
     }
   });
 });
+
+// #130 slice A3: the ShieldCortex bridge path, the MCP connector README, the
+// security policy, the API spec's scope and the changelogs shipped inside the
+// npm packages. As above, every value is read from the source that defines it;
+// versions come from package.json, never from a literal in this file.
+
+describe("bridge, connector, security policy, API spec scope and package changelogs match the source (#130 slice A3)", () => {
+  const rootReadme = read("README.md");
+  const readJson = (rel: string) => JSON.parse(read(rel)) as { version: string };
+  const relayVersion = readJson("packages/relay/package.json").version;
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  /** One Markdown line (a table row, a bullet, a sentence) matched by `pattern`. */
+  const line = (doc: string, pattern: RegExp, label: string): string => {
+    const match = doc.match(pattern);
+    expect(match, `${label} should match ${pattern}`).toBeTruthy();
+    return match![0];
+  };
+  /** match[1] untrimmed, for source blocks where indentation is the structure. */
+  const block = (source: string, pattern: RegExp, label: string): string => {
+    const match = source.match(pattern);
+    expect(match, `${label} should match ${pattern}`).toBeTruthy();
+    return match![1];
+  };
+
+  it("EKHO_SHIELDCORTEX_PATH is a Node entry script the bridge spawns with node, and the bridge README says so", () => {
+    const client = read("packages/shieldcortex-bridge/src/mcp-client.ts");
+    expect(client).toContain('spawn("node", [this.binaryPath]');
+    expect(read("packages/relay/src/config.ts")).toContain("shieldcortexPath: process.env.EKHO_SHIELDCORTEX_PATH");
+    expect(read("packages/relay/src/server.ts")).toContain('await import("@ekho/shieldcortex-bridge")');
+
+    const row = line(rootReadme, /^\| `EKHO_SHIELDCORTEX_PATH` \|.*$/m, "README EKHO_SHIELDCORTEX_PATH row");
+    expect(row).not.toMatch(/binary/i);
+    expect(row).toContain("Node entry script");
+    expect(row).toContain("`node <path>`");
+    expect(row).toContain("](packages/shieldcortex-bridge/)");
+
+    const bridgeReadme = read("packages/shieldcortex-bridge/README.md");
+    expect(bridgeReadme).toMatch(/^# @ekho\/shieldcortex-bridge$/m);
+    expect(bridgeReadme).toContain("`EKHO_SHIELDCORTEX_PATH`");
+    expect(bridgeReadme).toContain("`EKHO_SHIELDCORTEX_PROFILE`");
+    expect(bridgeReadme).toContain("`node <path>`");
+    expect(bridgeReadme).not.toMatch(/binary/i);
+    // The tool names, the timeout and the denial text it quotes are the code's.
+    const index = read("packages/shieldcortex-bridge/src/index.ts");
+    for (const tool of ["iron_dome_scan", "iron_dome_check", "remember"]) {
+      expect(index, tool).toContain(`callTool("${tool}"`);
+      expect(bridgeReadme, tool).toContain(`\`${tool}\``);
+    }
+    expect(client).toContain("}, 10_000);");
+    expect(bridgeReadme).toMatch(/10 seconds/);
+    expect(read("packages/relay/src/message-gate.ts")).toContain("`blocked by extension ${denial.extension}: ${denial.reason}`");
+    expect(index).toContain('name: "shieldcortex-bridge"');
+    expect(bridgeReadme).toContain("`blocked by extension shieldcortex-bridge: <reason>`");
+  });
+
+  it("MCP connector README states the store's queue-full rule, which tools are idempotent, the relay floor and the version placeholder", () => {
+    const readme = read("packages/mcp-connector/README.md");
+    // store.ts: an unread inbound message is never evicted, and polling stops at the bound.
+    const store = read("packages/mcp-connector/src/store.ts");
+    expect(store).toContain("if (excess <= 0 || this.isUnread(m) || added.has(m)) return true;");
+    expect(store).toMatch(/hasRoom\(\): boolean \{\n\s+return this\.unreadCount\(\) < this\.max;/);
+    const queueRow = line(readme, /^\| `EKHO_MCP_QUEUE_MAX` \|.*$/m, "connector README EKHO_MCP_QUEUE_MAX row");
+    expect(queueRow).not.toMatch(/oldest are dropped/i);
+    expect(queueRow).toContain("an unread message is never evicted");
+    expect(queueRow).toContain("stops polling the relay");
+    expect(readme).not.toMatch(/drops? the oldest|oldest (?:are|is) dropped/i);
+
+    // mcp.ts: ekho_send and ekho_open_room call the relay on every invocation,
+    // and db.createRoom inserts a new row per call (no lookup by name).
+    const mcp = read("packages/mcp-connector/src/mcp.ts");
+    const sendTool = block(mcp, /server\.registerTool\(\n\s+"ekho_send",([\s\S]*?)\n  \);/, "ekho_send registration");
+    expect(sendTool).toContain("await agent.send(");
+    expect(sendTool).not.toMatch(/idempot/i);
+    const openRoomTool = block(mcp, /server\.registerTool\(\n\s+"ekho_open_room",([\s\S]*?)\n  \);/, "ekho_open_room registration");
+    expect(openRoomTool).toContain("await agent.openRoom(");
+    const createRoom = block(read("packages/relay/src/db.ts"), /\n  createRoom\(([\s\S]*?)\n  \}\n/, "db.createRoom");
+    expect(createRoom).toContain('const roomId = id("room");');
+    expect(createRoom).toContain("INSERT INTO rooms");
+    expect(createRoom).not.toMatch(/SELECT[^\n]*FROM rooms/);
+    const toolsIntro = line(readme, /^Five tools,.*$/m, "connector README tools intro");
+    expect(toolsIntro).not.toMatch(/all idempotent/);
+    expect(toolsIntro).toContain("`ekho_roster` and `ekho_conversation` are read-only");
+    expect(toolsIntro).toContain("`ekho_send` signs and sends a new message on every call");
+    expect(toolsIntro).toContain("`ekho_open_room` creates a new room on every call");
+
+    // Relay floor: 0.6.0 or later, not "0.6.x" (the connector is at the relay's version).
+    expect(readJson("packages/mcp-connector/package.json").version).toBe(relayVersion);
+    expect(readme).toMatch(/Ekho relay, 0\.6\.0 or later/);
+    expect(readme).not.toMatch(/relay \(0\.6\.x\)/);
+
+    // cli.ts logs the package's own version, so the sample log shows a placeholder.
+    expect(read("packages/mcp-connector/src/cli.ts")).toContain("log.info(`[ekho-mcp] v${pkg.version} agent=");
+    expect(readme).toContain("[ekho-mcp] v<version> agent=agent_");
+    expect(readme).not.toMatch(/\[ekho-mcp\] v\d+\.\d+\.\d+/);
+  });
+
+  it("SECURITY.md supports the current major.minor line and names both native TLS variables", () => {
+    const security = read("SECURITY.md");
+    const [major, minor] = relayVersion.split(".");
+    const table = block(security, /## Supported Versions\n([\s\S]*?)\n## /, "SECURITY.md supported-versions section");
+    expect(table).toMatch(new RegExp(`^\\| ${major}\\.${minor}\\.x\\s+\\| Yes\\s+\\|$`, "m"));
+    expect(table).toMatch(new RegExp(`^\\| < ${major}\\.${minor}\\s+\\| No\\s+\\|$`, "m"));
+    const rows = table.split("\n").filter((l) => /^\| \d|^\| </.test(l));
+    expect(rows).toHaveLength(2);
+
+    const configTs = read("packages/relay/src/config.ts");
+    expect(configTs).toContain("tlsCertPath: process.env.EKHO_TLS_CERT_PATH");
+    expect(configTs).toContain("tlsKeyPath: process.env.EKHO_TLS_KEY_PATH");
+    const tls = read("packages/relay/src/tls.ts");
+    expect(tls).toContain("if (!certPath && !keyPath) return null;");
+    expect(tls).toContain("set BOTH EKHO_TLS_CERT_PATH and EKHO_TLS_KEY_PATH, or neither.");
+    const tlsBullet = line(security, /^- Terminate TLS at a reverse proxy.*$/m, "SECURITY.md TLS bullet");
+    expect(tlsBullet).toContain("`EKHO_TLS_CERT_PATH`");
+    expect(tlsBullet).toContain("`EKHO_TLS_KEY_PATH`");
+    expect(tlsBullet).toMatch(/setting only one is a start-up error/);
+    expect(tlsBullet).toMatch(/plain HTTP/);
+    expect(tlsBullet).not.toMatch(/the relay itself speaks plain HTTP/);
+    expect(read("docs/operations.md")).toMatch(/^## TLS$/m);
+  });
+
+  it("README API section names the routes openapi.yaml leaves out and points to docs/a2a.md for A2A", () => {
+    const specPaths = new Set([...read("openapi.yaml").matchAll(/^  (\/[^\s:]*):$/gm)].map((m) => m[1]));
+    expect(specPaths.has("/")).toBe(true);
+    expect(specPaths.has("/healthz")).toBe(true);
+    expect(read("packages/relay/src/health.ts")).toContain('app.get("/readyz"');
+    expect(read("packages/relay/src/metrics.ts")).toContain('app.get("/metrics"');
+    expect(read("packages/relay/src/ui-routes.ts")).toContain('prefix: "/ui/"');
+    const a2aRoutes = read("packages/relay/src/a2a/routes.ts");
+    const a2aDoc = read("docs/a2a.md");
+    for (const route of ["/.well-known/agent-card.json", "/agents/:agentId/.well-known/agent-card.json", "/a2a", "/agents/:agentId/a2a"]) {
+      expect(a2aRoutes, route).toContain(`"${route}"`);
+      const specForm = route.replace(/:([A-Za-z]+)/g, "{$1}");
+      expect(specPaths.has(specForm), `${specForm} is not in openapi.yaml`).toBe(false);
+      expect(a2aDoc, route).toContain(specForm);
+    }
+    for (const missing of ["/readyz", "/metrics", "/ui", "/ui/"]) {
+      expect(specPaths.has(missing), `${missing} is not in openapi.yaml`).toBe(false);
+    }
+    const apiIntro = block(rootReadme, /\n## API\n\n([\s\S]*?)\n\n### Agent API\n/, "README API intro");
+    expect(apiIntro).not.toMatch(/full specification/i);
+    expect(apiIntro).toContain("[openapi.yaml](openapi.yaml)");
+    expect(apiIntro).toContain("`GET /readyz`");
+    expect(apiIntro).toContain("`GET /metrics`");
+    expect(apiIntro).toContain("`/ui/`");
+    expect(apiIntro).toContain("[docs/a2a.md](docs/a2a.md)");
+  });
+
+  it("shipped package changelogs have no relative docs/ link and carry a dated heading for their package.json version", () => {
+    const rootDate = capture(
+      read("CHANGELOG.md"),
+      new RegExp(`^## \\[${escapeRe(relayVersion)}\\] - (\\d{4}-\\d{2}-\\d{2})$`, "m"),
+      `root CHANGELOG ${relayVersion} heading`
+    );
+    for (const pkg of ["sdk", "openclaw-plugin"]) {
+      const changelog = read(`packages/${pkg}/CHANGELOG.md`);
+      const version = readJson(`packages/${pkg}/package.json`).version;
+      expect(version, `${pkg} is in lockstep`).toBe(relayVersion);
+      expect(changelog, `${pkg} CHANGELOG has no relative docs/ link`).not.toMatch(/\]\(docs\//);
+      expect(changelog, `${pkg} CHANGELOG has a ${version} heading`).toContain(`\n## [${version}] - ${rootDate}\n`);
+    }
+    expect(read("packages/sdk/CHANGELOG.md")).toContain("[Operations Guide](https://github.com/Drakon-Systems-Ltd/ekho/blob/main/docs/operations.md)");
+  });
+});
