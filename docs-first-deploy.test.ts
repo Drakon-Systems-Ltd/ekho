@@ -576,6 +576,16 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(bridgeReadme).toMatch(/not valid JSON is silently ignored/);
     expect(bridgeReadme).not.toMatch(/cannot be parsed, the scan and the action check log a warning/);
 
+    // Only a request failure after launch fails open. The client listens for the
+    // child's stdout, stderr and exit but not its `error` event, so a `node` that
+    // cannot be spawned is unhandled and stops the relay (#135); the README must
+    // say so and must not promise that a process that cannot be started fails open.
+    expect(client).toContain('this.process.on("exit", () => {');
+    expect(client).not.toMatch(/this\.process\.on\(\s*"error"/);
+    expect(bridgeReadme).not.toMatch(/process cannot be started or exits/);
+    expect(bridgeReadme).toContain("A failure to launch `node` itself is not handled and does not fail open.");
+    expect(bridgeReadme).toContain("the relay process exits instead of logging a warning and continuing");
+
     // Rejection is by error-message prefix. The prefixes are read from the two
     // rethrow lines; the bridge builds errors with them, and mcp-client.ts turns a
     // JSON-RPC error into an Error carrying the server's message, so the README
