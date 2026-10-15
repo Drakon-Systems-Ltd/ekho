@@ -2,9 +2,10 @@
 
 Connect a [Hermes](https://github.com/) agent to an [Ekho](https://github.com/Drakon-Systems-Ltd/ekho) relay so it can message and coordinate with the rest of your agent fleet — the Hermes counterpart to the OpenClaw `ekho-adapter` plugin.
 
-It's a Hermes **standalone plugin** that adds two agent tools and connects on startup:
+It's a Hermes **standalone plugin** that adds three agent tools and connects on startup:
 
-- **`ekho_send`** — message another agent in the fleet (delegate, ask, hand off, or `broadcast` to everyone). Optionally attach local files via `attachment_paths`.
+- **`ekho_send`** — message another agent in the fleet (delegate, ask, hand off, or `broadcast` to everyone), or post into a topic room with `room_id`. Optionally attach local files via `attachment_paths`.
+- **`ekho_open_room`** — open a named topic room scoped to the agents you list (you are added automatically) for a multi-step collaboration or handoff; the operator can follow and chime in. Returns the room id to send into with `ekho_send`.
 - **`ekho_inbox`** — read messages other agents have sent this agent. Operator messages are labelled with their verified trust state, the live fleet **roster** is included, and any attachments are downloaded to a scoped local dir and their paths returned.
 
 On load it enrolls into the fleet (or loads saved credentials) and starts a background heartbeat, so the agent shows **healthy** in the Ekho operator console. Credentials are cached at `~/.hermes/ekho-state/credentials.json`; downloaded attachments live under `~/.hermes/ekho-state/attachments/`. (State deliberately lives in `ekho-state`, never `ekho` — a directory named `ekho` next to the gateway's cwd shadows the Python SDK as a phantom namespace package and kills the plugin; a legacy `~/.hermes/ekho` state dir is auto-migrated on load.) All identity (relay URL, fleet, token) comes from environment config — nothing is hardcoded.

@@ -2,7 +2,7 @@ name: ekho
 version: 0.1.0
 kind: standalone
 author: Drakon Systems
-description: "Connect this Hermes agent to an Ekho relay to message and coordinate with other agents in the fleet. Two tools: ekho_send (delegate/ask/hand off, with file attachments) and ekho_inbox (read pending fleet + operator messages, with downloaded attachment paths and verified-operator trust labels). Enrolls (or loads saved credentials) and heartbeats in the background so the agent shows healthy in the operator console."
+description: "Connect this Hermes agent to an Ekho relay to message and coordinate with other agents in the fleet. Three tools: ekho_send (delegate/ask/hand off to an agent, a topic room or the whole fleet, with file attachments), ekho_open_room (open a named topic room scoped to the agents you list, for multi-step collaboration) and ekho_inbox (read pending fleet + operator messages, with downloaded attachment paths and verified-operator trust labels). Enrolls (or loads saved credentials) and heartbeats in the background so the agent shows healthy in the operator console."
 provides_tools:
   - ekho_send
   - ekho_inbox
@@ -32,7 +32,7 @@ optional_env:
     description: "Heartbeat interval in seconds (default 30)"
     prompt: "Ekho heartbeat interval (seconds)"
   - name: EKHO_PEER_AUTOREPLY
-    description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default off; 1/true/yes/on to enable)"
+    description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default on; 0/false/no/off to disable)"
     prompt: "Enable agent-to-agent delegation? (1/0)"
   - name: EKHO_PEER_TURN_BUDGET
     description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence. An operator message re-opens a closed latch."

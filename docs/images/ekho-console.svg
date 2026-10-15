@@ -144,6 +144,6 @@
   <!-- Footer -->
   <g transform="translate(24,528)" font-family="system-ui,sans-serif" font-size="9" fill="rgba(100,116,139,0.7)">
     <text x="0" y="0">Ekho Relay v0.1.0</text>
-    <text x="912" y="0" text-anchor="end">4 agents enrolled · 1 fleet · A2A v1.0 compliant</text>
+    <text x="912" y="0" text-anchor="end">4 agents enrolled · 1 fleet · A2A 0.3 (JSON-RPC)</text>
   </g>
 </svg>

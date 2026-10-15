@@ -7,7 +7,7 @@ export default defineConfig({
       {
         test: {
           name: "root",
-          include: ["release-version-lockstep.test.ts"]
+          include: ["release-version-lockstep.test.ts", "docs-first-deploy.test.ts"]
         }
       }
     ]
