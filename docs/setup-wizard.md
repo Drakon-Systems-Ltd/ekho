@@ -4,7 +4,7 @@
 
 1. Run `npm run setup`
 2. Capture the bootstrap operator credentials and first enrollment token
-3. Build the operator console with `npm run ui:build`
+3. Build the operator console with `npm run ui:build -w @ekho/relay` (the script lives in `packages/relay/package.json`, so from the repo root it needs `-w @ekho/relay`)
 4. Start the relay with `npm start`
 5. Open `/ui/` and log in with the bootstrap operator
 6. Enroll your first agent at `POST /v1/enroll`
@@ -33,8 +33,13 @@ In the production product, the wizard should:
 
 ## Doctor Command
 
-Run `npm run doctor` to check:
+Run `npm run doctor -w @ekho/relay` (the script lives in `packages/relay/package.json`, not the root `package.json`; from inside `packages/relay` the `-w` flag is not needed). It checks:
 
-- database path availability
-- base URL configuration
-- operator session secret configuration
+- Node version (22 or newer)
+- database directory exists (the parent of `EKHO_DB_PATH`)
+- operator session secret differs from the shipped `change-me` default (`EKHO_OPERATOR_SESSION_SECRET`); doctor does not reject an explicitly empty value, although the server refuses to start with one unless `EKHO_DEV_INSECURE` is set
+- base URL is configured (`EKHO_BASE_URL`)
+- port is free (`EKHO_PORT`; it binds the port on 127.0.0.1 briefly, then releases it)
+- license tier (Pro with its org and expiry, otherwise OSS)
+
+It runs offline: it does not contact a relay or anything else over the network.

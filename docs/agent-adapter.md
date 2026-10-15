@@ -23,10 +23,10 @@ export EKHO_AGENT_SECRET=secret_xxx
 export EKHO_AGENT_RELAY_URL=http://127.0.0.1:4000
 ```
 
-Run it with:
+Run it with (the script lives in `packages/relay/package.json`, so from the repo root it needs `-w @ekho/relay`):
 
 ```bash
-npm run agent:demo
+npm run agent:demo -w @ekho/relay
 ```
 
 ## Adapter Contract

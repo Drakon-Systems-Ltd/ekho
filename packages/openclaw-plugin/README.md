@@ -196,8 +196,9 @@ Optional, read from the gateway's environment. None is needed for a normal insta
 | Variable | Default | Effect |
 |---|---|---|
 | `EKHO_AUTOREPLY_DISABLE` | unset | `1` turns auto-reply off in this process. Messages are still delivered and visible through `ekho_inbox`; no turn is woken |
-| `EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS` | `900` | How long a woken reply turn may run before it is stopped. Values under `60` are ignored. The conversation floor is held for this long plus 60 seconds |
+| `EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS` | `900` | How long a woken reply turn may run before it is stopped. Values under `60` are ignored. The plugin asks the relay to hold the conversation floor for this long plus 60 seconds (`960` by default), but the relay caps every floor request at its own `EKHO_FLOOR_TTL_MAX_SECONDS`, which defaults to `600`. Raise that relay setting to at least the timeout plus 60 (`960` with the default timeout), or the floor expires mid-turn and a teammate can take it |
 | `EKHO_REPORT_MODEL` / `EKHO_REPORT_PROVIDER` | unset | Explicit model and provider to report in heartbeats when they cannot be read from the host |
+| `EKHO_REQUIRE_SIGNED` | `warn` | Peer wake strictness. `warn` (default) and `off`: an unsigned teammate message, or a signed one the agent cannot check yet because it has no trust root (no pinned operator key), still wakes a turn and is shown as untrusted. A signed teammate message whose signature fails verification is rejected in every mode, `off` included. `require`: only signed **and** verified teammate messages wake a turn; the rest are dead-lettered. Any other value is read as `warn`. Operator messages are unaffected |
 | `EKHO_STATE_DIR` | unset | Where the plugin keeps its state files, when `stateDir` is not set in config (see [State files](#state-files)) |
 
 ### State files
