@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-16
+
+Patch on 0.7.1: one relay-side fix and documentation corrections. The ShieldCortex bridge now handles a failed launch of ShieldCortex (for example `node` missing from the relay's `PATH`) as a scan failure instead of letting it stop the relay (#135, PR #136). Only `packages/shieldcortex-bridge` has shipped code changes; the relay server, console, `openapi.yaml` schema, SDK, OpenClaw plugin, MCP connector, Hermes plugin code and Python SDK are unchanged apart from version numbers moving in step across the workspace. The Hermes plugin manifest's description text changes (#130), and an A2A relay test now classifies stream admission at header time (#123, tests only). Nothing is breaking; `v0.6.0` upgrade notes still apply.
+
 ### Fixed
 - **ShieldCortex bridge: the relay no longer exits when `node` cannot be started (#135).** If the bridge could not launch ShieldCortex, for example because `node` is not on the relay's `PATH`, the unhandled spawn error stopped the relay process. The launch error is now handled like any other scan failure. The pending request is rejected with the spawn error (for example `ENOENT`), the hook logs its `[shieldcortex-bridge]` warning and lets the message through, and the next message tries to launch again. A late exit or error event from an old child process no longer resets a newer one. A settled request also clears its 10-second timeout timer.
 
