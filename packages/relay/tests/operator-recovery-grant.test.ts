@@ -15,6 +15,7 @@ import {
 } from "../src/operator-identity";
 import { applyMigration } from "../src/db";
 import { run as runCli } from "../src/recovery-grant-cli";
+import { isHelpRequest, USAGE } from "../src/recovery-grant-usage";
 import { endorseAuthority, rescueGuard } from "../frontend/src/operatorTrust.js";
 
 /**
@@ -499,6 +500,34 @@ describe("#93 one-off operator recovery grant (relay)", () => {
       expect(s.lines.join("\n")).toMatch(new RegExp(`${origin.id} -> ${successor.id} \\| ARMED`));
       endorseOperator(origin, successor);
       expect(() => endorseOperator(origin, successor)).toThrow(/already used/);
+    });
+
+    // #139: a help flag anywhere is help; the word help only as the subcommand.
+    it("treats --help and -h anywhere as help, the word help only first", () => {
+      for (const argv of [
+        ["--help"],
+        ["-h"],
+        ["help"],
+        ["status", "--help"],
+        ["status", "-h"],
+        ["status", "--fleet", relay.fleetId, "--help"],
+        ["arm", "--fleet", relay.fleetId, "-h", "--endorser", origin.id]
+      ]) {
+        expect(isHelpRequest(argv), argv.join(" ")).toBe(true);
+      }
+      for (const argv of [[], ["status"], ["status", "--fleet", "help"], ["status", "help"], ["--fleet", relay.fleetId]]) {
+        expect(isHelpRequest(argv), argv.join(" ")).toBe(false);
+      }
+
+      const o = capture();
+      const e = capture();
+      expect(runCli(["status", "--help"], relay.db, o.out, e.out)).toBe(0);
+      expect(o.lines).toEqual([USAGE]);
+      expect(e.lines).toEqual([]);
+      // Not a help request: the word help after the subcommand still fails as before.
+      const f = capture();
+      expect(runCli(["status", "help"], relay.db, f.out, f.out)).toBe(1);
+      expect(f.lines[0]).toBe("recovery-grant: unexpected argument: help");
     });
 
     it("refuses to arm without --confirmed-by, and cancels", () => {

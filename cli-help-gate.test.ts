@@ -92,6 +92,17 @@ describe("--help never runs the command (#130)", () => {
     expect(listFiles(tmp)).toEqual([]);
   });
 
+  // #139: a help flag after the subcommand is help too, not a run of it.
+  for (const flag of ["--help", "-h"]) {
+    it(`recovery-grant status ${flag} prints usage, exits 0 and creates nothing`, () => {
+      const r = spawn("packages/relay/src/recovery-grant.ts", ["status", flag]);
+      expect(r.signal, r.stderr).toBeNull();
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout.startsWith("Usage (on the relay host, from packages/relay):"), r.stdout).toBe(true);
+      expect(listFiles(tmp)).toEqual([]);
+    });
+  }
+
   it("recovery-grant help (the word) is gated too", () => {
     const r = spawn("packages/relay/src/recovery-grant.ts", ["help"]);
     expect(r.status, r.stderr).toBe(0);
