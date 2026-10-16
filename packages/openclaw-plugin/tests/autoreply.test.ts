@@ -59,6 +59,17 @@ vi.mock("node:child_process", async () => {
   };
 });
 
+async function importAutoReplyWithTurnTimeout(seconds: string | undefined) {
+  vi.resetModules();
+  vi.stubEnv("EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS", seconds);
+  try {
+    return await import("../src/autoreply");
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
+}
+
 // Loose factory — the autoreply functions read these fields structurally.
 function msg(over: Record<string, unknown> = {}): any {
   return {
@@ -768,20 +779,30 @@ describe("deferred-retry (a deferred floor must not drop messages)", () => {
   });
 
   // #78: default TURN_TIMEOUT 900s -> floor TTL 960s -> retry TTL 1080s.
-  it("retry TTL is derived from (and outlives) the floor TTL", () => {
-    expect(DEFERRED_RETRY_TTL_MS).toBe((900 + 60 + 120) * 1000);
+  it("uses the default floor and retry TTLs when the turn timeout is unset", async () => {
+    const { FLOOR_TTL_SECONDS, DEFERRED_RETRY_TTL_MS } = await importAutoReplyWithTurnTimeout(undefined);
+    expect(FLOOR_TTL_SECONDS).toBe(960);
+    expect(DEFERRED_RETRY_TTL_MS).toBe(1_080_000);
+  });
+
+  it("derives the floor and retry TTLs from a configured turn timeout", async () => {
+    const { FLOOR_TTL_SECONDS, DEFERRED_RETRY_TTL_MS } = await importAutoReplyWithTurnTimeout("3600");
+    expect(FLOOR_TTL_SECONDS).toBe(3660);
+    expect(DEFERRED_RETRY_TTL_MS).toBe(3_780_000);
   });
 
   // Adapted from #79: listRetryableDeferred no longer takes a dead-letter sink
   // (it is read-only now), so "no trace written" is asserted as "nothing has
   // expired yet, so takeExpiredDeferred has nothing to hand over".
-  it("a stash survives past the old 600s TTL while the floor can still be held (#78)", () => {
+  it("a stash survives past the old 600s TTL while the default floor can still be held (#78)", async () => {
+    const { createAutoReplyState, stashDeferred, listRetryableDeferred, takeExpiredDeferred, FLOOR_TTL_SECONDS } =
+      await importAutoReplyWithTurnTimeout(undefined);
     const s = createAutoReplyState();
     stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: null }, 0);
     expect(listRetryableDeferred(s, 700_000)).toEqual(["c1"]);
-    expect(listRetryableDeferred(s, 960_000)).toEqual(["c1"]); // floor TTL
+    expect(listRetryableDeferred(s, FLOOR_TTL_SECONDS * 1000)).toEqual(["c1"]);
     expect(s.deferredByConversation.has("c1")).toBe(true);
-    expect(takeExpiredDeferred(s, 960_000)).toEqual([]);
+    expect(takeExpiredDeferred(s, FLOOR_TTL_SECONDS * 1000)).toEqual([]);
     expect(s.deferredByConversation.has("c1")).toBe(true);
   });
 
