@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.7.1` — a patch on `v0.7.0` for the Ekho MCP connector (`@drakon-systems/ekho-mcp`): `ekho_roster` and `ekho_open_room` now escape relay-controlled names and ids, so a crafted display name or room name cannot add a forged line or pass off a verification status. `v0.7.0` added the connector, so the Grok app or any other MCP client can join a fleet as a signed, verifying agent; it installs from this repository (not on npm yet). No relay, SDK or plugin code changes in `v0.7.1`; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.7.2` — a patch on `v0.7.1`: the relay's ShieldCortex bridge no longer takes the relay down when it cannot start `node`; the scan fails open with a warning and the next message tries again. `--help` on `setup`, `load-test`, `ekho-mcp` and `recovery-grant` now prints usage instead of running the command. First-deployment, environment-variable, Helm, bridge, connector and security docs now match the source. `v0.7.0` added the Ekho MCP connector (`@drakon-systems/ekho-mcp`), so the Grok app or any other MCP client can join a fleet as a signed, verifying agent; it installs from this repository (not on npm yet). No SDK or plugin code changes in `v0.7.2`, and the connector's only change is its `--help` handling; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -380,7 +380,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packa
 
 ## Project Status
 
-Ekho `v0.7.1` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.7.2` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 

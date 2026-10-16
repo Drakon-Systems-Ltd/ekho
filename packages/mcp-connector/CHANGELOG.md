@@ -4,6 +4,13 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-16
+
+Patch on 0.7.1, in lockstep with the rest of the workspace. Still not published to npm; install from a checkout as the package README describes.
+
+### Fixed
+- **`ekho-mcp --help` no longer starts the connector (#130, slice C).** `--help` and `-h` now print usage to stdout and exit 0 before configuration is read or anything is started. Every other invocation behaves as before; `--version` is still an ignored argument.
+
 ## [0.7.1] - 2026-10-14
 
 Patch on 0.7.0, in lockstep with the rest of the workspace. Still not published to npm; install from a checkout as the package README describes.
