@@ -169,7 +169,7 @@ networked backend.
 | Key | Default | Description |
 |---|---|---|
 | `image.repository` | `ghcr.io/drakon-systems-ltd/ekho` | Container image |
-| `image.tag` | `0.7.2` (the chart `appVersion`; an empty value falls back to it) | Image tag, without a leading `v` |
+| `image.tag` | `0.7.3` (the chart `appVersion`; an empty value falls back to it) | Image tag, without a leading `v` |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `replicaCount` | `1` | Must stay 1 — see above |
 | `service.type` | `ClusterIP` | Service type |
