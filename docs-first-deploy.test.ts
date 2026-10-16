@@ -576,15 +576,26 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(bridgeReadme).toMatch(/not valid JSON is silently ignored/);
     expect(bridgeReadme).not.toMatch(/cannot be parsed, the scan and the action check log a warning/);
 
-    // Only a request failure after launch fails open. The client listens for the
-    // child's stdout, stderr and exit but not its `error` event, so a `node` that
-    // cannot be spawned is unhandled and stops the relay (#135); the README must
-    // say so and must not promise that a process that cannot be started fails open.
-    expect(client).toContain('this.process.on("exit", () => {');
-    expect(client).not.toMatch(/this\.process\.on\(\s*"error"/);
-    expect(bridgeReadme).not.toMatch(/process cannot be started or exits/);
-    expect(bridgeReadme).toContain("A failure to launch `node` itself is not handled and does not fail open.");
-    expect(bridgeReadme).toContain("the relay process exits instead of logging a warning and continuing");
+    // A `node` that cannot be spawned fails open too (#135, PR #136): the child's
+    // `error` listener releases it like an exit, rejecting the pending requests
+    // with the spawn error and resetting the client, so the hook's catch blocks
+    // log and continue. The README and the root changelog must say so and must no
+    // longer say the relay exits or stops.
+    const changelog = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
+    expect(client).toMatch(/child\.on\("error", \(error\) => \{\n\s+this\.releaseChild\(child, error\);/);
+    expect(client).toMatch(/child\.on\("exit", \(\) => \{\n\s+this\.releaseChild\(child, new Error\("MCP process exited"\)\);/);
+    expect(bridgeReadme).toContain("A failure to launch `node` itself also fails open.");
+    expect(bridgeReadme).toContain("The client listens for the child process's `error` event (`src/mcp-client.ts`)");
+    expect(bridgeReadme).toMatch(/every pending request is rejected with that error \(for example one with code `ENOENT`\), and the client resets, so the next tool call tries to start a new process/);
+    expect(bridgeReadme).toMatch(/a failed `remember` call is silently ignored/);
+    expect(bridgeReadme).toContain("The relay no longer exits in this case");
+    expect(bridgeReadme).not.toMatch(/registers no `error` listener/);
+    expect(bridgeReadme).not.toMatch(/not handled and does not fail open/);
+    expect(bridgeReadme).not.toMatch(/the relay process exits instead of logging a warning/);
+    expect(changelog).toContain("a failure to launch `node` itself fails open the same way since #135 (PR #136)");
+    expect(changelog).toContain("the relay no longer exits");
+    expect(changelog).not.toMatch(/a failure to launch `node` itself is not handled and stops the relay/);
+    expect(changelog).not.toMatch(/the missing `error` listener on the spawned process/);
 
     // Rejection is by error-message prefix. The prefixes are read from the two
     // rethrow lines; the bridge builds errors with them, and mcp-client.ts turns a
@@ -642,9 +653,10 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(bridgeReadme).not.toMatch(/every message an agent submits/);
     expect(bridgeReadme).not.toMatch(/For each message the hook:/);
 
-    // The exit handler clears the client and callTool reconnects, whichever
-    // message's tool call comes next, so the restart is not tied to a message boundary.
-    expect(client).toMatch(/this\.process\.on\("exit", \(\) => \{\n\s+this\.process = null;\n\s+this\.initialized = false;\n[\s\S]*?req\.reject\(new Error\("MCP process exited"\)\);/);
+    // The exit handler releases the child, which clears the client and rejects
+    // the pending requests, and callTool reconnects, whichever message's tool call
+    // comes next, so the restart is not tied to a message boundary.
+    expect(client).toMatch(/private releaseChild\(child: ChildProcess, error: Error\) \{\n\s+if \(this\.process !== child\) return;\n\s+this\.process = null;\n\s+this\.initialized = false;\n[\s\S]*?req\.reject\(error\);/);
     expect(client).toMatch(/async callTool\([^)]*\): Promise<McpToolResult> \{\n\s+if \(!this\.initialized\) await this\.connect\(\);/);
     expect(bridgeReadme).toContain("`MCP process exited`");
     expect(bridgeReadme).toMatch(/the next tool call starts a new process/);
