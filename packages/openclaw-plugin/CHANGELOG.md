@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-14
+
+No plugin changes. Version kept in step with the relay: the 0.7.1 release carries one MCP connector fix (#127) and nothing else. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.0] - 2026-10-12
 
 ### Changed

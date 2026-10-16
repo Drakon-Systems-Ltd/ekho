@@ -6,8 +6,8 @@ Ekho is in the `0.x` line and receives security fixes on the latest minor releas
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
-| < 0.1   | No        |
+| 0.7.x   | Yes       |
+| < 0.7   | No        |
 
 ## Reporting a Vulnerability
 
@@ -49,7 +49,7 @@ Out of scope:
 If you run Ekho in production, these defaults keep the blast radius small:
 
 - Set `EKHO_OPERATOR_SESSION_SECRET` to a random 32+ byte value — the default string literally says `change-me`
-- Terminate TLS at a reverse proxy (Caddy, nginx, Traefik) — the relay itself speaks plain HTTP
+- Terminate TLS at a reverse proxy (Caddy, nginx, Traefik), or have the relay serve HTTPS itself by setting both `EKHO_TLS_CERT_PATH` and `EKHO_TLS_KEY_PATH` (setting only one is a start-up error). With neither set the relay speaks plain HTTP and is meant to sit behind a TLS-terminating proxy; see the [TLS section of the operations guide](docs/operations.md#tls)
 - Keep the relay behind a private network (Tailscale, WireGuard, VPC). Ekho is designed for mesh networks, not the open internet
 - Rotate agent secrets by revoking and re-enrolling on any suspected compromise
 - Pin the Docker image to a specific SHA, not `latest`
