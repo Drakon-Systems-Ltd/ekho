@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-14
+
+No SDK changes. Version bumped in lockstep with the workspace: the 0.7.1 release carries one MCP connector fix (#127) and nothing else. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.0] - 2026-10-12
 
 ### Added
@@ -178,7 +182,7 @@ Deploy-readiness and production hardening.
 
 ### Deployment & Release
 - Release workflow now builds and publishes the relay container image to GHCR (`ghcr.io/drakon-systems-ltd/ekho`)
-- New [Operations Guide](docs/operations.md): deployment, secrets, TLS, backups, upgrades, troubleshooting
+- New [Operations Guide](https://github.com/Drakon-Systems-Ltd/ekho/blob/main/docs/operations.md): deployment, secrets, TLS, backups, upgrades, troubleshooting
 
 ### Security & Runtime Hardening
 - Relay refuses to start with an unset or default operator session secret (`EKHO_DEV_INSECURE=1` opt-out for local dev); `npm run setup` now generates and persists a strong secret

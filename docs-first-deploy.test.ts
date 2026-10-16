@@ -486,3 +486,319 @@ describe("environment variable and command docs match the source (#130 slice A2)
     }
   });
 });
+
+// #130 slice A3: the ShieldCortex bridge path, the MCP connector README, the
+// security policy, the API spec's scope and the changelogs shipped inside the
+// npm packages. As above, every value is read from the source that defines it;
+// versions come from package.json, never from a literal in this file.
+
+describe("bridge, connector, security policy, API spec scope and package changelogs match the source (#130 slice A3)", () => {
+  const rootReadme = read("README.md");
+  const readJson = (rel: string) => JSON.parse(read(rel)) as { version: string };
+  const relayVersion = readJson("packages/relay/package.json").version;
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  /** One Markdown line (a table row, a bullet, a sentence) matched by `pattern`. */
+  const line = (doc: string, pattern: RegExp, label: string): string => {
+    const match = doc.match(pattern);
+    expect(match, `${label} should match ${pattern}`).toBeTruthy();
+    return match![0];
+  };
+  /** match[1] untrimmed, for source blocks where indentation is the structure. */
+  const block = (source: string, pattern: RegExp, label: string): string => {
+    const match = source.match(pattern);
+    expect(match, `${label} should match ${pattern}`).toBeTruthy();
+    return match![1];
+  };
+
+  it("EKHO_SHIELDCORTEX_PATH is a Node entry script the bridge spawns with node, and the bridge README says so", () => {
+    const client = read("packages/shieldcortex-bridge/src/mcp-client.ts");
+    expect(client).toContain('spawn("node", [this.binaryPath]');
+    expect(read("packages/relay/src/config.ts")).toContain("shieldcortexPath: process.env.EKHO_SHIELDCORTEX_PATH");
+    expect(read("packages/relay/src/server.ts")).toContain('await import("@ekho/shieldcortex-bridge")');
+
+    const row = line(rootReadme, /^\| `EKHO_SHIELDCORTEX_PATH` \|.*$/m, "README EKHO_SHIELDCORTEX_PATH row");
+    expect(row).not.toMatch(/binary/i);
+    expect(row).toContain("Node entry script");
+    expect(row).toContain("`node <path>`");
+    expect(row).toContain("](packages/shieldcortex-bridge/)");
+
+    const bridgeReadme = read("packages/shieldcortex-bridge/README.md");
+    expect(bridgeReadme).toMatch(/^# @ekho\/shieldcortex-bridge$/m);
+    expect(bridgeReadme).toContain("`EKHO_SHIELDCORTEX_PATH`");
+    expect(bridgeReadme).toContain("`EKHO_SHIELDCORTEX_PROFILE`");
+    expect(bridgeReadme).toContain("`node <path>`");
+    expect(bridgeReadme).not.toMatch(/binary/i);
+    // The tool names, the timeout and the denial text it quotes are the code's.
+    const index = read("packages/shieldcortex-bridge/src/index.ts");
+    for (const tool of ["iron_dome_scan", "iron_dome_check", "remember"]) {
+      expect(index, tool).toContain(`callTool("${tool}"`);
+      expect(bridgeReadme, tool).toContain(`\`${tool}\``);
+    }
+    expect(client).toContain("}, 10_000);");
+    expect(bridgeReadme).toMatch(/10 seconds/);
+    expect(read("packages/relay/src/message-gate.ts")).toContain("`blocked by extension ${denial.extension}: ${denial.reason}`");
+    expect(index).toContain('name: "shieldcortex-bridge"');
+    expect(bridgeReadme).toContain("`blocked by extension shieldcortex-bridge: <reason>`");
+    // The bridge's own denial string only applies to messages the bridge itself
+    // rejects: the gate names whichever extension threw, and earlier sender checks
+    // answer with their own status and text.
+    const gate = read("packages/relay/src/message-gate.ts");
+    expect(gate).toContain("extension: ext.name,");
+    expect(gate).toContain('reply.code(429).send({ error: "rate limit exceeded"');
+    expect(read("packages/relay/src/a2a/methods.ts")).toContain("{ extension: denial.extension }");
+    const denialSentence = line(bridgeReadme, /^.*`blocked by extension shieldcortex-bridge: <reason>`.*$/m, "bridge README denial sentence");
+    expect(denialSentence).toMatch(/^A message rejected by the bridge itself \(its scan or action check\)/);
+    expect(denialSentence).not.toMatch(/^A rejected message is refused/);
+    expect(denialSentence).toContain("a bridge-rejected message gets a JSON-RPC error");
+    expect(denialSentence).toContain("`blocked by extension <name>: <reason>`");
+    expect(denialSentence).toContain("HTTP 429 `rate limit exceeded`");
+  });
+
+  it("bridge README states the failure handling, short-circuit order and reconnect that index.ts and mcp-client.ts implement", () => {
+    const index = read("packages/shieldcortex-bridge/src/index.ts");
+    const client = read("packages/shieldcortex-bridge/src/mcp-client.ts");
+    const bridgeReadme = read("packages/shieldcortex-bridge/README.md");
+    const hook = block(index, /async onBeforeMessage\(ctx: BeforeMessageContext\): Promise<void> \{\n([\s\S]*?)\n    \}\n  \};/, "onBeforeMessage body");
+    const at = (needle: string): number => {
+      const i = hook.indexOf(needle);
+      expect(i, `onBeforeMessage contains ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+
+    // A tool result that is not JSON is swallowed by an empty inner catch, so it
+    // never reaches the outer catch that logs the warning; only a failed request does.
+    expect(hook).toContain("try { parsed = JSON.parse(scanText); } catch {}");
+    expect(hook).toContain("try { gateParsed = JSON.parse(gateText); } catch {}");
+    expect(hook).toContain("console.warn(`[shieldcortex-bridge] scan failed: ${err instanceof Error ? err.message : err}`);");
+    expect(hook).toContain("console.warn(`[shieldcortex-bridge] action gate failed: ${err instanceof Error ? err.message : err}`);");
+    expect(bridgeReadme).toContain("`[shieldcortex-bridge] scan failed:`");
+    expect(bridgeReadme).toContain("`[shieldcortex-bridge] action gate failed:`");
+    expect(bridgeReadme).toMatch(/not valid JSON is silently ignored/);
+    expect(bridgeReadme).not.toMatch(/cannot be parsed, the scan and the action check log a warning/);
+
+    // A `node` that cannot be spawned fails open too (#135, PR #136): the child's
+    // `error` listener releases it like an exit, rejecting the pending requests
+    // with the spawn error and resetting the client, so the hook's catch blocks
+    // log and continue. The README and the root changelog must say so and must no
+    // longer say the relay exits or stops.
+    const changelog = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
+    expect(client).toMatch(/child\.on\("error", \(error\) => \{\n\s+this\.releaseChild\(child, error\);/);
+    expect(client).toMatch(/child\.on\("exit", \(\) => \{\n\s+this\.releaseChild\(child, new Error\("MCP process exited"\)\);/);
+    expect(bridgeReadme).toContain("A failure to launch `node` itself also fails open.");
+    expect(bridgeReadme).toContain("The client listens for the child process's `error` event (`src/mcp-client.ts`)");
+    expect(bridgeReadme).toMatch(/every pending request is rejected with that error \(for example one with code `ENOENT`\), and the client resets, so the next tool call tries to start a new process/);
+    expect(bridgeReadme).toMatch(/a failed `remember` call is silently ignored/);
+    expect(bridgeReadme).toContain("The relay no longer exits in this case");
+    expect(bridgeReadme).not.toMatch(/registers no `error` listener/);
+    expect(bridgeReadme).not.toMatch(/not handled and does not fail open/);
+    expect(bridgeReadme).not.toMatch(/the relay process exits instead of logging a warning/);
+    expect(changelog).toContain("a failure to launch `node` itself fails open the same way since #135 (PR #136)");
+    expect(changelog).toContain("the relay no longer exits");
+    expect(changelog).not.toMatch(/a failure to launch `node` itself is not handled and stops the relay/);
+    expect(changelog).not.toMatch(/the missing `error` listener on the spawned process/);
+
+    // Rejection is by error-message prefix. The prefixes are read from the two
+    // rethrow lines; the bridge builds errors with them, and mcp-client.ts turns a
+    // JSON-RPC error into an Error carrying the server's message, so the README
+    // must name every prefix and may not say only a parsed decision rejects.
+    const scanPrefix = capture(hook, /if \(err instanceof Error && err\.message\.startsWith\(("[^"]+")\)\) throw err;/, "scan rethrow");
+    const gateRethrow = line(hook, /^\s*if \(err instanceof Error && \(err\.message\.startsWith\("[^"]+"\) \|\| err\.message\.startsWith\("[^"]+"\)\)\) throw err;$/m, "gate rethrow");
+    const gatePrefixes = [...gateRethrow.matchAll(/startsWith\("([^"]+)"\)/g)].map((m) => m[1]);
+    expect(gatePrefixes).toHaveLength(2);
+    expect(hook).toContain(`throw new Error(\`${scanPrefix} `);
+    for (const prefix of gatePrefixes) expect(hook, prefix).toMatch(new RegExp(`throw new Error\\(\`${escapeRe(prefix)}`));
+    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(bridgeReadme, prefix).toContain(`\`${prefix}\``);
+    expect(client).toContain("req.reject(new Error(msg.error.message));");
+    expect(bridgeReadme).toMatch(/JSON-RPC error returned by the server/);
+    expect(bridgeReadme).not.toContain("Only an explicit high-risk scan result");
+
+    // Each rethrow sits before the next tool call and nothing wraps the hook, so a
+    // strict scan denial never reaches iron_dome_check and a denial of either kind
+    // never reaches remember. Five try blocks: scan, its parse, gate, its parse, remember.
+    const scanCall = at('callTool("iron_dome_scan"');
+    const strictThrow = at(`if (config.defenceProfile === "strict") {\n            throw new Error(\`${scanPrefix} `);
+    const scanRethrow = at(`startsWith("${scanPrefix}")) throw err;`);
+    const gateCall = at('callTool("iron_dome_check"');
+    const gateRethrowAt = hook.indexOf(gateRethrow);
+    const rememberCall = at('callTool("remember"');
+    expect([scanCall, strictThrow, scanRethrow, gateCall, gateRethrowAt, rememberCall]).toEqual(
+      [scanCall, strictThrow, scanRethrow, gateCall, gateRethrowAt, rememberCall].slice().sort((a, b) => a - b)
+    );
+    expect(hook.match(/\btry \{/g)).toHaveLength(5);
+    expect(hook).toMatch(/if \(config\.enableMemoryExtraction\) \{\n\s+void \(async \(\) => \{\n\s+try \{\n\s+await mcp\.callTool\("remember"/);
+    // The relay enables both optional steps, so the README describes them unconditionally.
+    const server = read("packages/relay/src/server.ts");
+    expect(server).toContain("enableMemoryExtraction: true");
+    expect(server).toContain("enableIronDome: true");
+    // The relay gate refuses by status, rate limit and policy before any extension runs.
+    const gateFn = block(read("packages/relay/src/message-gate.ts"), /export async function evaluateMessageGate\([^)]*\): Promise<MessageGateVerdict> \{\n([\s\S]*?)\n\}\n/, "evaluateMessageGate body");
+    const gateOrder = ['agent.status === "quarantined"', "db.checkAndIncrementRateLimit(", "db.evaluateMessagePolicies(", "for (const ext of getExtensions())"].map((needle) => {
+      const i = gateFn.indexOf(needle);
+      expect(i, `evaluateMessageGate contains ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    });
+    expect(gateOrder).toEqual(gateOrder.slice().sort((a, b) => a - b));
+    expect(bridgeReadme).toMatch(/never reaches the bridge/);
+    expect(bridgeReadme).toMatch(/stops at the first step that rejects it/);
+    expect(bridgeReadme).toMatch(/only if neither of the bridge's own steps above rejected it/);
+    expect(bridgeReadme).toMatch(/A message rejected by the bridge's scan or action check leaves no memory record/);
+    expect(bridgeReadme).not.toMatch(/A rejected message leaves no memory record/);
+    // The no-record claim is bridge-local: the gate runs every extension in
+    // registration order and remember is fire-and-forget, so a later extension's
+    // rejection can follow an already-started memory record.
+    expect(read("packages/relay/src/license.ts")).toMatch(/export function registerExtension\(ext: EkhoExtension\) \{\n\s+extensions\.push\(ext\);/);
+    expect(gateFn).toMatch(/for \(const ext of getExtensions\(\)\) \{[\s\S]*?return \{\n\s+allowed: false,\n\s+kind: "extension"/);
+    expect(bridgeReadme).toMatch(/bridge-local behaviour, not a guarantee about the relay as a whole/);
+    expect(bridgeReadme).toMatch(/an extension registered after the bridge then rejects the message, the relay still refuses it with HTTP 403, but the memory record may already have been written/);
+    expect(bridgeReadme).not.toMatch(/every message an agent submits/);
+    expect(bridgeReadme).not.toMatch(/For each message the hook:/);
+
+    // The exit handler releases the child, which clears the client and rejects
+    // the pending requests, and callTool reconnects, whichever message's tool call
+    // comes next, so the restart is not tied to a message boundary.
+    expect(client).toMatch(/private releaseChild\(child: ChildProcess, error: Error\) \{\n\s+if \(this\.process !== child\) return;\n\s+this\.process = null;\n\s+this\.initialized = false;\n[\s\S]*?req\.reject\(error\);/);
+    expect(client).toMatch(/async callTool\([^)]*\): Promise<McpToolResult> \{\n\s+if \(!this\.initialized\) await this\.connect\(\);/);
+    expect(bridgeReadme).toContain("`MCP process exited`");
+    expect(bridgeReadme).toMatch(/the next tool call starts a new process/);
+    expect(bridgeReadme).toMatch(/can belong to the same message/);
+    expect(bridgeReadme).toMatch(/on the first tool call/);
+    expect(bridgeReadme).not.toMatch(/the next message starts a new process/);
+    expect(bridgeReadme).not.toMatch(/on the first message after the relay starts/);
+
+    // The root CHANGELOG bullet carries the same qualifications.
+    const a3 = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
+    expect(a3).not.toMatch(/runs on every agent-sent message/);
+    expect(a3).toMatch(/stopping at the first step that rejects the message/);
+    expect(a3).not.toMatch(/so a rejected message is never recorded by `remember`\)/);
+    expect(a3).toMatch(/a message rejected by an extension registered after the bridge can already have been recorded/);
+    expect(a3).toMatch(/not JSON is silently ignored/);
+    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(a3, prefix).toContain(`\`${prefix}\``);
+    expect(a3).toMatch(/the next tool call, possibly for the same message, starts a new process/);
+    // Failure handling is per step: the scan and action-check catches warn and
+    // continue, the remember catch is empty, and each rethrow honours only its
+    // own step's prefixes, so the bullet must not state one rule for all requests.
+    expect(hook).toMatch(/\} catch \{\n\s+\/\/ Fire-and-forget — don't block message delivery\n\s+\}/);
+    expect(a3).not.toMatch(/a request that fails because the ShieldCortex process exited, or that times out \(10 seconds per request\), is logged and fails open/);
+    expect(a3).toMatch(/a scan or action-check request that fails because the ShieldCortex process exited, or that times out \(10 seconds per request\), is logged as a warning and the hook continues/);
+    expect(a3).toMatch(/any failed `remember` request is silently ignored, not logged, and never rejects the message/);
+    expect(a3).toContain(`the scan step rejects the message on an error whose message starts with \`${scanPrefix}\``);
+    expect(a3).toContain(`the action check on one that starts with \`${gatePrefixes[0]}\` or \`${gatePrefixes[1]}\``);
+    expect(a3).toMatch(/an error with the other step's prefix is logged as a warning and the hook continues/);
+    expect(a3).not.toMatch(/an error whose message starts with `[^`]+`, `[^`]+` or `[^`]+` rejects the message/);
+  });
+
+  it("MCP connector README states the store's queue-full rule, which tools are idempotent, the relay floor and the version placeholder", () => {
+    const readme = read("packages/mcp-connector/README.md");
+    // store.ts: an unread inbound message is never evicted, and polling stops at the bound.
+    const store = read("packages/mcp-connector/src/store.ts");
+    expect(store).toContain("if (excess <= 0 || this.isUnread(m) || added.has(m)) return true;");
+    expect(store).toMatch(/hasRoom\(\): boolean \{\n\s+return this\.unreadCount\(\) < this\.max;/);
+    const queueRow = line(readme, /^\| `EKHO_MCP_QUEUE_MAX` \|.*$/m, "connector README EKHO_MCP_QUEUE_MAX row");
+    expect(queueRow).not.toMatch(/oldest are dropped/i);
+    expect(queueRow).toContain("an unread message is never evicted");
+    expect(queueRow).toContain("stops polling the relay");
+    expect(readme).not.toMatch(/drops? the oldest|oldest (?:are|is) dropped/i);
+    // agent.ts: pollOnce is the caller that honours hasRoom(); it returns before the inbox fetch.
+    const pollOnce = block(read("packages/mcp-connector/src/agent.ts"), /\n  async pollOnce\(\): Promise<StoredMessage\[\]> \{\n([\s\S]*?)\n  \}\n/, "agent.pollOnce");
+    const roomGuard = pollOnce.indexOf("if (!this.store.hasRoom()) {");
+    const inboxFetch = pollOnce.indexOf("await this.client.getInbox(");
+    expect(roomGuard, "pollOnce checks hasRoom()").toBeGreaterThanOrEqual(0);
+    expect(inboxFetch, "pollOnce fetches the inbox").toBeGreaterThan(roomGuard);
+    expect(pollOnce.slice(roomGuard, inboxFetch)).toContain("return [];");
+
+    // mcp.ts: ekho_send and ekho_open_room call the relay on every invocation,
+    // and db.createRoom inserts a new row per call (no lookup by name).
+    const mcp = read("packages/mcp-connector/src/mcp.ts");
+    const sendTool = block(mcp, /server\.registerTool\(\n\s+"ekho_send",([\s\S]*?)\n  \);/, "ekho_send registration");
+    expect(sendTool).toContain("await agent.send(");
+    expect(sendTool).not.toMatch(/idempot/i);
+    const openRoomTool = block(mcp, /server\.registerTool\(\n\s+"ekho_open_room",([\s\S]*?)\n  \);/, "ekho_open_room registration");
+    expect(openRoomTool).toContain("await agent.openRoom(");
+    const createRoom = block(read("packages/relay/src/db.ts"), /\n  createRoom\(([\s\S]*?)\n  \}\n/, "db.createRoom");
+    expect(createRoom).toContain('const roomId = id("room");');
+    expect(createRoom).toContain("INSERT INTO rooms");
+    expect(createRoom).not.toMatch(/SELECT[^\n]*FROM rooms/);
+    const toolsIntro = line(readme, /^Five tools,.*$/m, "connector README tools intro");
+    expect(toolsIntro).not.toMatch(/all idempotent/);
+    expect(toolsIntro).toContain("`ekho_roster` and `ekho_conversation` are read-only");
+    expect(toolsIntro).toContain("`ekho_send` signs and sends a new message on every call");
+    expect(toolsIntro).toContain("`ekho_open_room` creates a new room on every call");
+
+    // Relay floor: 0.6.0 or later, not "0.6.x" (the connector is at the relay's version).
+    expect(readJson("packages/mcp-connector/package.json").version).toBe(relayVersion);
+    expect(readme).toMatch(/Ekho relay, 0\.6\.0 or later/);
+    expect(readme).not.toMatch(/relay \(0\.6\.x\)/);
+
+    // cli.ts logs the package's own version, so the sample log shows a placeholder.
+    expect(read("packages/mcp-connector/src/cli.ts")).toContain("log.info(`[ekho-mcp] v${pkg.version} agent=");
+    expect(readme).toContain("[ekho-mcp] v<version> agent=agent_");
+    expect(readme).not.toMatch(/\[ekho-mcp\] v\d+\.\d+\.\d+/);
+  });
+
+  it("SECURITY.md supports the current major.minor line and names both native TLS variables", () => {
+    const security = read("SECURITY.md");
+    const [major, minor] = relayVersion.split(".");
+    const table = block(security, /## Supported Versions\n([\s\S]*?)\n## /, "SECURITY.md supported-versions section");
+    expect(table).toMatch(new RegExp(`^\\| ${major}\\.${minor}\\.x\\s+\\| Yes\\s+\\|$`, "m"));
+    expect(table).toMatch(new RegExp(`^\\| < ${major}\\.${minor}\\s+\\| No\\s+\\|$`, "m"));
+    const rows = table.split("\n").filter((l) => /^\| \d|^\| </.test(l));
+    expect(rows).toHaveLength(2);
+
+    const configTs = read("packages/relay/src/config.ts");
+    expect(configTs).toContain("tlsCertPath: process.env.EKHO_TLS_CERT_PATH");
+    expect(configTs).toContain("tlsKeyPath: process.env.EKHO_TLS_KEY_PATH");
+    const tls = read("packages/relay/src/tls.ts");
+    expect(tls).toContain("if (!certPath && !keyPath) return null;");
+    expect(tls).toContain("set BOTH EKHO_TLS_CERT_PATH and EKHO_TLS_KEY_PATH, or neither.");
+    const tlsBullet = line(security, /^- Terminate TLS at a reverse proxy.*$/m, "SECURITY.md TLS bullet");
+    expect(tlsBullet).toContain("`EKHO_TLS_CERT_PATH`");
+    expect(tlsBullet).toContain("`EKHO_TLS_KEY_PATH`");
+    expect(tlsBullet).toMatch(/setting only one is a start-up error/);
+    expect(tlsBullet).toMatch(/plain HTTP/);
+    expect(tlsBullet).not.toMatch(/the relay itself speaks plain HTTP/);
+    expect(read("docs/operations.md")).toMatch(/^## TLS$/m);
+  });
+
+  it("README API section names the routes openapi.yaml leaves out and points to docs/a2a.md for A2A", () => {
+    const specPaths = new Set([...read("openapi.yaml").matchAll(/^  (\/[^\s:]*):$/gm)].map((m) => m[1]));
+    expect(specPaths.has("/")).toBe(true);
+    expect(specPaths.has("/healthz")).toBe(true);
+    expect(read("packages/relay/src/health.ts")).toContain('app.get("/readyz"');
+    expect(read("packages/relay/src/metrics.ts")).toContain('app.get("/metrics"');
+    expect(read("packages/relay/src/ui-routes.ts")).toContain('prefix: "/ui/"');
+    const a2aRoutes = read("packages/relay/src/a2a/routes.ts");
+    const a2aDoc = read("docs/a2a.md");
+    for (const route of ["/.well-known/agent-card.json", "/agents/:agentId/.well-known/agent-card.json", "/a2a", "/agents/:agentId/a2a"]) {
+      expect(a2aRoutes, route).toContain(`"${route}"`);
+      const specForm = route.replace(/:([A-Za-z]+)/g, "{$1}");
+      expect(specPaths.has(specForm), `${specForm} is not in openapi.yaml`).toBe(false);
+      expect(a2aDoc, route).toContain(specForm);
+    }
+    for (const missing of ["/readyz", "/metrics", "/ui", "/ui/"]) {
+      expect(specPaths.has(missing), `${missing} is not in openapi.yaml`).toBe(false);
+    }
+    const apiIntro = block(rootReadme, /\n## API\n\n([\s\S]*?)\n\n### Agent API\n/, "README API intro");
+    expect(apiIntro).not.toMatch(/full specification/i);
+    expect(apiIntro).toContain("[openapi.yaml](openapi.yaml)");
+    expect(apiIntro).toContain("`GET /readyz`");
+    expect(apiIntro).toContain("`GET /metrics`");
+    expect(apiIntro).toContain("`/ui/`");
+    expect(apiIntro).toContain("[docs/a2a.md](docs/a2a.md)");
+  });
+
+  it("shipped package changelogs have no relative docs/ link and carry a dated heading for their package.json version", () => {
+    const rootDate = capture(
+      read("CHANGELOG.md"),
+      new RegExp(`^## \\[${escapeRe(relayVersion)}\\] - (\\d{4}-\\d{2}-\\d{2})$`, "m"),
+      `root CHANGELOG ${relayVersion} heading`
+    );
+    for (const pkg of ["sdk", "openclaw-plugin"]) {
+      const changelog = read(`packages/${pkg}/CHANGELOG.md`);
+      const version = readJson(`packages/${pkg}/package.json`).version;
+      expect(version, `${pkg} is in lockstep`).toBe(relayVersion);
+      expect(changelog, `${pkg} CHANGELOG has no relative docs/ link`).not.toMatch(/\]\(docs\//);
+      expect(changelog, `${pkg} CHANGELOG has a ${version} heading`).toContain(`\n## [${version}] - ${rootDate}\n`);
+    }
+    expect(read("packages/sdk/CHANGELOG.md")).toContain("[Operations Guide](https://github.com/Drakon-Systems-Ltd/ekho/blob/main/docs/operations.md)");
+  });
+});

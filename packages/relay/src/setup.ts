@@ -2,10 +2,28 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import crypto from "node:crypto";
-import { config } from "./config";
-import { db } from "./db";
+import type { config as Config } from "./config";
+import type { EkhoDb } from "./db";
 import { loadLicense, assertFleetCreationAllowed, getLoadedLicense } from "./license";
 import { resolveBootstrapPassword } from "./bootstrap-credentials";
+
+// Loaded in the dispatch at the bottom, after the help check: importing ./db
+// opens (and creates) the database, and ./config loads .env, neither of which
+// `--help` may do (#130).
+let config: typeof Config;
+let db: EkhoDb;
+
+const USAGE = `Usage: tsx src/setup.ts [--doctor | --help]
+  (no flag)    create the default fleet and first operator, and save a generated
+               EKHO_OPERATOR_SESSION_SECRET to ./.env if none is configured
+               (npm run setup)
+  --doctor     check the Node version, database directory, session secret,
+               base URL, port and license tier (npm run doctor)
+  --help, -h   print this message and exit; nothing is created or written
+
+Setup reads EKHO_BOOTSTRAP_EMAIL (default admin@example.com) and
+EKHO_BOOTSTRAP_PASSWORD (generated and shown once if unset). The database is
+EKHO_DB_PATH, default packages/relay/data/ekho.sqlite.`;
 
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
@@ -172,8 +190,16 @@ function runSetup() {
   console.log("");
 }
 
-if (process.argv.includes("--doctor")) {
-  runDoctor();
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(USAGE);
 } else {
-  runSetup();
+  void Promise.all([import("./config"), import("./db")]).then(([loadedConfig, loadedDb]) => {
+    config = loadedConfig.config;
+    db = loadedDb.db;
+    if (process.argv.includes("--doctor")) {
+      runDoctor();
+    } else {
+      runSetup();
+    }
+  });
 }

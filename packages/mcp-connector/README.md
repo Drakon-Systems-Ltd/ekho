@@ -24,7 +24,7 @@ The connector is a small Node service that is itself an Ekho agent. It enrols in
 
 ## Install
 
-Requires Node 22 or later and a reachable Ekho relay (0.6.x).
+Requires Node 22 or later and a reachable Ekho relay, 0.6.0 or later: every relay route the connector calls, and the signed operator-key revocation its verification honours, exist from relay 0.6.0. The connector is versioned in lockstep with the relay.
 
 From npm, once the package is published (it ships in lockstep with the relay):
 
@@ -42,7 +42,7 @@ npm run build -w @drakon-systems/ekho-mcp
 node packages/mcp-connector/dist/cli.js
 ```
 
-There is no command line: every setting is an environment variable, so a systemd `EnvironmentFile` is the whole configuration.
+There is no command line: every setting is an environment variable, so a systemd `EnvironmentFile` is the whole configuration. `ekho-mcp --help` prints usage only and does not read the configuration, enrol or listen.
 
 ## Configuration
 
@@ -58,7 +58,7 @@ Required: `EKHO_RELAY_BASE_URL`, plus `EKHO_FLEET_ID` and `EKHO_ENROLLMENT_TOKEN
 | `EKHO_REQUIRE_SIGNED` | `warn` | Inbound admission: `warn` keeps unsigned messages (labelled), drops signed-but-failed ones; `require` keeps only verified messages and relay-attested operator messages; `off` behaves as `warn` for admission. Same modes as the OpenClaw plugin. |
 | `EKHO_MCP_POLL_INTERVAL_SECONDS` | relay's value | Inbox poll interval (1–3600). Leave unset to follow the relay. |
 | `EKHO_MCP_HEARTBEAT_INTERVAL_SECONDS` | relay's value | Heartbeat interval (5–3600). Leave unset to follow the relay. |
-| `EKHO_MCP_QUEUE_MAX` | `500` | Messages kept locally (10–100000). Oldest are dropped first once full. |
+| `EKHO_MCP_QUEUE_MAX` | `500` | Bound on the local message ring (10–100000). Past it, read and outbound messages are evicted oldest first; an unread message is never evicted, and while the unread backlog is at the bound the connector stops polling the relay until the client confirms a batch. See [State files](#state-files). |
 | `EKHO_MCP_BIND` | `127.0.0.1` | Listen address. Keep loopback and publish through a proxy you control. |
 | `EKHO_MCP_PORT` | `4100` | Listen port. |
 | `EKHO_MCP_PATH` | `/ekho-mcp` | The MCP endpoint path. |
@@ -92,11 +92,11 @@ EKHO_REQUIRE_SIGNED=warn
 
 1. In the Ekho console, open your fleet and click **Mint enrollment token**. Note the fleet id.
 2. Put `EKHO_RELAY_BASE_URL`, `EKHO_FLEET_ID` and `EKHO_ENROLLMENT_TOKEN` in the environment and start the connector once.
-3. It mints an Ed25519 identity key, enrols as `Grok` (runtime `custom`), registers the key with the relay and logs:
+3. It mints an Ed25519 identity key, enrols as `Grok` (runtime `custom`), registers the key with the relay and logs (`<version>` is the connector's own package version):
 
    ```
    [ekho-mcp] enrolled as agent_…
-   [ekho-mcp] v0.6.1 agent=agent_… identity key_id=… public_key=…
+   [ekho-mcp] v<version> agent=agent_… identity key_id=… public_key=…
    [ekho-mcp] endorse this key from the operator console so peers verify this connector's messages
    ```
 
@@ -199,7 +199,7 @@ To use the connector inside a Grok automation, mention it (`@<connector name>`) 
 
 ## Tools
 
-Five tools, all idempotent, names ≤ 32 characters, descriptions ≤ 300 characters, JSON-Schema inputs. Results are plain markdown and never include signatures, secrets or raw message envelopes.
+Five tools, names ≤ 32 characters, descriptions ≤ 300 characters, JSON-Schema inputs. Results are plain markdown and never include signatures, secrets or raw message envelopes. `ekho_roster` and `ekho_conversation` are read-only. `ekho_inbox` is safe to retry: a call without `after` returns the same unread messages again, `cursor` replays an exact earlier batch, and confirming a batch with `after` twice is harmless. `ekho_send` signs and sends a new message on every call and `ekho_open_room` creates a new room on every call; neither takes an idempotency key, so a retried call sends or creates twice.
 
 | Tool | Does | Input |
 |---|---|---|

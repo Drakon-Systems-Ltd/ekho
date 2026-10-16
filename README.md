@@ -245,7 +245,7 @@ adapter.start();
 
 ## API
 
-Full specification: [openapi.yaml](openapi.yaml)
+Specification: [openapi.yaml](openapi.yaml) covers the `/v1/*` agent and operator API plus `GET /` and `GET /healthz`. Not in the spec: `GET /readyz` (readiness probe, `{ "ready": true }` or 503 when the database is unreachable), `GET /metrics` (Prometheus text format), the operator console under `/ui/`, and the A2A routes (the agent cards and the JSON-RPC endpoints), which are documented in [docs/a2a.md](docs/a2a.md).
 
 ### Agent API
 
@@ -347,7 +347,7 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | `EKHO_ATTACHMENTS_DIR` | `attachments/` beside the database | Where uploaded files are stored |
 | `EKHO_ATTACHMENT_MAX_BYTES` | `26214400` | Per-file upload cap (25 MiB) |
 | `EKHO_ATTACHMENT_MAX_PER_MESSAGE` | `10` | Attachments allowed on one message |
-| `EKHO_SHIELDCORTEX_PATH` | — | Path to the ShieldCortex binary. Setting it loads the ShieldCortex bridge; unset leaves it off |
+| `EKHO_SHIELDCORTEX_PATH` | — | Path to the ShieldCortex MCP server's Node entry script. The bridge starts it as `node <path>`, so it must be a JavaScript file, not a compiled executable or a shell wrapper. Setting it loads the [ShieldCortex bridge](packages/shieldcortex-bridge/); unset leaves it off |
 | `EKHO_SHIELDCORTEX_PROFILE` | `balanced` | Bridge defence profile: `strict`, `balanced` or `permissive` |
 | `EKHO_BOOTSTRAP_EMAIL` / `EKHO_BOOTSTRAP_PASSWORD` | `admin@example.com` / generated | First operator account created by `npm run setup`. With no password a strong random one is generated and shown once |
 | `EKHO_AGENT_POLL_INTERVAL` / `EKHO_AGENT_HEARTBEAT_INTERVAL` | `5` / `30` | Bundled demo agent only (`demo-agent.ts`), in seconds |
