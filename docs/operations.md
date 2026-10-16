@@ -35,7 +35,9 @@ The chart deploys a single-replica StatefulSet with a PersistentVolumeClaim (SQL
 npm install && npm run build && npm run setup && npm start
 ```
 
-`npm run setup` generates a strong operator secret into `.env` automatically and bootstraps the default fleet.
+`npm run setup` generates a strong operator secret into `packages/relay/.env` automatically (unless one is already configured) and bootstraps the default fleet.
+
+**Which `.env`:** from source, the relay reads `packages/relay/.env`, and that is where `npm run setup` saves a generated operator secret. The root `start`, `dev` and `setup` scripts run the relay's scripts with `-w @ekho/relay`, npm runs a workspace script from that workspace's own directory, and the relay loads `.env` from its working directory (`dotenv.config()` with no path). A `.env` at the repository root is not read when you start or set up the relay through these npm scripts; it is for Docker Compose, which reads it only to fill in `${EKHO_OPERATOR_SESSION_SECRET}` in `docker-compose.yml` (other variables in it do not reach the container).
 
 ## Required configuration
 
@@ -91,9 +93,9 @@ The relay handles `SIGTERM` and `SIGINT`: it stops the background sweep job, clo
 
 ## Persistence & backups
 
-Ekho stores everything in a single SQLite database (WAL mode).
+Ekho keeps its data in a single SQLite database (WAL mode). Uploaded attachment files are the exception: their bytes are written to `EKHO_ATTACHMENTS_DIR` (default `attachments/` beside the database), and the database holds only their metadata.
 
-- **Back up** by copying the DB file (and `-wal`/`-shm` siblings) while the relay is stopped, or use `sqlite3 ekho.sqlite ".backup backup.sqlite"` for a hot backup.
+- **Back up** by copying the DB file (and `-wal`/`-shm` siblings) while the relay is stopped, or use `sqlite3 ekho.sqlite ".backup backup.sqlite"` for a hot backup. The database backup does not include attachment files, so copy the attachments directory as well.
 - **Volume.** Mount `EKHO_DB_PATH`'s directory on durable storage (the compose volume / Helm PVC do this).
 - Migrations apply automatically on startup; no manual migration step is needed.
 - **Retention.** The sweep prunes heartbeat history after 48h
@@ -113,7 +115,7 @@ The relay has two parts that must move together: the server, and the operator co
 1. **Back up the database** (see [Persistence & backups](#persistence--backups)). Back up the file `EKHO_DB_PATH` points at, which is not necessarily `packages/relay/data/`: from source the default is `packages/relay/data/ekho.sqlite` and a relative path resolves against the relay's working directory; in the Docker image it is `/app/data/ekho.sqlite` in the `ekho-data` volume.
 2. **Get the new version and build it.**
    - **From source:** `git pull`, `npm install`, then `npm run build`. The root `build` builds the SDK and then the relay, whose `build` runs `ui:build` before the type check — so it rebuilds the console. If you only run part of the build, run `npm run ui:build -w @ekho/relay` yourself.
-   - **Docker Compose:** the Compose file builds the image from the checkout, and the Dockerfile runs `ui:build` inside the image build, so a rebuilt image carries the matching console. `git pull`, then `docker compose up -d --build`. Restarting without `--build` keeps the old image. Up to and including 0.5.6 the image build ignored a failed console build and could ship a stale `packages/relay/ui-dist` left in the checkout; on `main` since 0.5.6 a failed console build fails the image build, and the checkout's `ui-dist` is excluded from the build context.
+   - **Docker Compose:** the Compose file builds the image from the checkout, and the Dockerfile runs `ui:build` inside the image build, so a rebuilt image carries the matching console. `git pull`, then `docker compose up -d --build`. Restarting without `--build` keeps the old image. Up to and including 0.5.6 the image build ignored a failed console build and could ship a stale `packages/relay/ui-dist` left in the checkout; since 0.6.0 a failed console build fails the image build, and the checkout's `ui-dist` is excluded from the build context.
    - **Image / Helm:** pull the new tagged image (`ghcr.io/drakon-systems-ltd/ekho:<version>`); it already contains the matching console. For Helm: `helm upgrade ekho ./deploy/helm/ekho --set image.tag=<version> ...`.
 3. **Restart the relay.** Schema migrations in `packages/relay/migrations/` apply automatically and idempotently on boot; there is no manual migration step.
 4. **Verify.** `GET /readyz` returns `{"ready":true}`; reload the console in the browser (the relay serves `index.html` with revalidation, so a reload picks up the new build) and check that agents report healthy.

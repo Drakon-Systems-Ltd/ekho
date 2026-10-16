@@ -1,6 +1,8 @@
-# @ekho/hermes-plugin
+# Ekho Hermes plugin (`ekho_hermes`)
 
-Connect a [Hermes](https://github.com/) agent to an [Ekho](https://github.com/Drakon-Systems-Ltd/ekho) relay so it can message and coordinate with the rest of your agent fleet — the Hermes counterpart to the OpenClaw `ekho-adapter` plugin.
+The plugin's source is the `ekho_hermes` package in this directory; Hermes loads it under the plugin name `ekho` (the `name:` in its `plugin.yaml`). It is not published to npm or PyPI.
+
+Connect a [Hermes](https://github.com/NousResearch/hermes-agent) agent to an [Ekho](https://github.com/Drakon-Systems-Ltd/ekho) relay so it can message and coordinate with the rest of your agent fleet — the Hermes counterpart to the OpenClaw `ekho-adapter` plugin.
 
 It's a Hermes **standalone plugin** that adds three agent tools and connects on startup:
 
@@ -184,8 +186,11 @@ mv ~/.hermes/plugins/ekho ~/.hermes/backups/ekho.bak-$(date +%Y%m%d%H%M%S)
 cp -R packages/hermes-plugin/ekho_hermes ~/.hermes/plugins/ekho
 find ~/.hermes/plugins/ekho -name __pycache__ -type d -prune -exec rm -r {} +
 
-# 3. after restarting the gateway, the `[ekho] bundle version=... observed=<sha>`
-#    log line must match the hash of the installed directory:
+# 3. after restarting the gateway, the `observed=<sha>` in the
+#    `[ekho] bundle version=... observed=<sha>` log line must match the hash of
+#    the installed directory. Compare the hash, not `version=`: that is the
+#    `version:` line of the plugin's own plugin.yaml, which does not follow the
+#    Ekho release number, so two different builds can print the same version.
 python -c "from pathlib import Path; import runpy; \
   bi = runpy.run_path(str(Path.home() / '.hermes/plugins/ekho/bundle_identity.py')); \
   print(bi['observed_sha256'](Path.home() / '.hermes/plugins/ekho'))"

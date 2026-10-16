@@ -74,6 +74,8 @@ npm run setup   # creates the fleet and operator login; save the one-time passwo
 npm start
 ```
 
+**Which `.env`:** from source, the relay reads `packages/relay/.env`, and that is where `npm run setup` saves a generated operator secret. The root `start`, `dev` and `setup` scripts run the relay's scripts with `-w @ekho/relay`, npm runs a workspace script from that workspace's own directory, and the relay loads `.env` from its working directory (`dotenv.config()` with no path). A `.env` at the repository root is not read when you start or set up the relay through these npm scripts; it is for Docker Compose, which reads it only to fill in `${EKHO_OPERATOR_SESSION_SECRET}` in `docker-compose.yml` (other variables in it do not reach the container).
+
 <p align="center">
   <img src="docs/images/ekho-console.svg" alt="Ekho operator console preview" width="100%"/>
 </p>
@@ -82,7 +84,7 @@ npm start
 
 The same five steps appear in the console itself under the **?** (Help) icon — replicable by anyone, no hardcoded fleet data.
 
-1. **Run the relay.** On your own server, clone the repo and set `.env` (an operator session secret and your `EKHO_BASE_URL`). Run `npm run setup` to create your fleet and operator login, then start the relay behind HTTPS (for example [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)). Open the console at `<your-base-url>/ui/` and sign in.
+1. **Run the relay.** On your own server, clone the repo and set `packages/relay/.env` (an operator session secret and your `EKHO_BASE_URL`; see [Which `.env`](#from-source)). Run `npm run setup` to create your fleet and operator login, then start the relay behind HTTPS (for example [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)). Open the console at `<your-base-url>/ui/` and sign in.
 2. **Add an agent.** In the console, click **Mint enrollment token** (bottom of the right panel). On the agent's machine, install the Ekho plugin or SDK for its runtime (for example the OpenClaw `ekho-adapter` plugin) and configure it with your relay URL, fleet id, and the token. The agent connects and appears in the **Agents** list, healthy.
 3. **Trust the console.** Open the **Access** tab and turn **Operator-trusted channel** on for an agent. It then recognizes you as its verified principal and starts replying. Off = it stays quiet. Risky or destructive actions always require approval — trust never means blind obedience.
 4. **Talk to your fleet.** Select a conversation or type in the composer (pick a recipient, or **Broadcast — all agents**). Trusted agents reply on their own; you'll see them "typing" then respond.
@@ -102,7 +104,7 @@ How you pre-pin a key depends on the agent runtime:
 
 **Hermes.** Set `EKHO_OPERATOR_PUBKEY` on the agent host (`<b64url>` or `<key_id>:<b64url>`, comma-separated). The agent pins a valid key there before first contact, so the relay's keys are not adopted on trust, and re-applies it on every connect unless its identity file records that key as revoked, in which case it logs a warning, unpins it and leaves it unpinned.
 
-**OpenClaw.** The 0.5.6 plugin has no supported operator-key seed setting; normal enrollment relies on first contact and endorsements. Its code reads an internal `operatorPubkey` value, but it is declared in neither of the plugin's config schemas (`openclaw.plugin.json` and the schema built into the plugin), so it is not a supported setting: do not set it or rely on it. See [State files](packages/openclaw-plugin/README.md#state-files).
+**OpenClaw.** The plugin (0.5.6 and later) has no supported operator-key seed setting; normal enrollment relies on first contact and endorsements. Its code reads an internal `operatorPubkey` value, but it is declared in neither of the plugin's config schemas (`openclaw.plugin.json` and the schema built into the plugin), so it is not a supported setting: do not set it or rely on it. See [State files](packages/openclaw-plugin/README.md#state-files).
 
 The identity file holds the agent's signing key and all of this trust state, so back it up and restore it if it is lost; do not treat regenerating it as harmless. A regenerated identity is a new key that must be endorsed again, starts with no pins (a Hermes agent's `EKHO_OPERATOR_PUBKEY` is pinned again on connect) and with its first-contact latch reset (so an agent left with no pins trusts the relay's operator keys afresh on first contact), and has forgotten which operator keys were revoked (so a revoked key still listed in `EKHO_OPERATOR_PUBKEY` is pinned again). The Hermes plugin mints a replacement without asking when its identity file is missing or unreadable. The OpenClaw plugin refuses to mint a replacement for an enrolled agent unless told to; see [State files](packages/openclaw-plugin/README.md#state-files) for deliberate re-keying and its consequences.
 
@@ -171,7 +173,7 @@ Runnable end-to-end demos live in [`examples/`](./examples).
 
 ## Architecture
 
-See the [architecture diagram](docs/images/ekho-architecture.svg), or the deep-dive in [ARCHITECTURE.md](ARCHITECTURE.md).
+See the [architecture diagram](docs/images/ekho-architecture.svg), or the design document [ARCHITECTURE.md](ARCHITECTURE.md), which also describes planned components that are not implemented (an `ekho` CLI, PostgreSQL storage, a Tailscale setup wizard).
 
 <p align="center">
   <img src="docs/images/ekho-architecture.svg" alt="Ekho architecture — signed messaging between agents via the Ekho relay" width="100%"/>
@@ -371,7 +373,7 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 ```bash
 npm install                  # Install all workspace dependencies
 npm run typecheck            # TypeScript check across all packages
-npm test                     # Node test suite
+npm test                     # Vitest suite (vitest run)
 npm run dev                  # Start relay in watch mode
 npm run ui:dev -w @ekho/relay  # Vite dev server for console
 ```
@@ -380,7 +382,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packa
 
 ## Project Status
 
-Ekho `v0.7.2` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.7.2` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository and keep their own version numbers (in `sdks/python/pyproject.toml` and `packages/hermes-plugin/ekho_hermes/plugin.yaml`), which do not move with the Ekho release number. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 

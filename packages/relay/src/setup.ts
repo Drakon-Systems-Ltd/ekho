@@ -35,7 +35,7 @@ function pass(label: string, msg: string) { console.log(`  ${green("✓")} ${bol
 function warn(label: string, msg: string) { console.log(`  ${yellow("!")} ${bold(label.padEnd(12))} ${msg}`); }
 function fail(label: string, msg: string) { console.log(`  ${red("✗")} ${bold(label.padEnd(12))} ${msg}`); }
 
-/** Write or replace a single KEY=value line in the repo-root .env file. */
+/** Write or replace a single KEY=value line in the .env file in the working directory (packages/relay/.env under `npm run setup`). */
 function upsertEnv(key: string, value: string): string {
   const envPath = path.join(process.cwd(), ".env");
   const lines = fs.existsSync(envPath)
