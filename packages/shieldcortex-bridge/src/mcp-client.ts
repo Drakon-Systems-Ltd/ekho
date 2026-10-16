@@ -23,8 +23,15 @@ export class McpClient {
     });
     this.process = child;
 
-    // A failed spawn can also emit an error on stdin after a write.
-    child.stdin?.on("error", () => {});
+    // EPIPE means the child is gone (it exited, or never started): its exit or
+    // error handler rejects the pending requests, so that error is ignored here.
+    // Any other stdin error fails this child's pending requests at once with the
+    // real cause instead of leaving them to the request timeout.
+    child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EPIPE" || this.process !== child) return;
+      this.releaseChild(child, error);
+      child.kill();
+    });
 
     child.stdout?.on("data", (chunk: Buffer) => {
       if (this.process !== child) return;

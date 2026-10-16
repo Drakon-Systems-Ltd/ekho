@@ -18,8 +18,11 @@ export const USAGE = `Usage (on the relay host, from packages/relay):
 A grant lets <endorser> endorse <successor> (an operator key, never an agent key)
 exactly once, within --ttl-minutes (default ${USAGE_DEFAULT_TTL_MINUTES}, max ${USAGE_MAX_TTL_MINUTES}).`;
 
-/** True when argv (after the script name) asks for help: the first word is help, --help or -h. */
+/**
+ * True when argv (after the script name) asks for help: --help or -h anywhere,
+ * so `status --help` prints usage instead of running status (#139), or the word
+ * help as the first word (the subcommand position).
+ */
 export function isHelpRequest(argv: string[]): boolean {
-  const command = argv[0];
-  return command === "help" || command === "--help" || command === "-h";
+  return argv[0] === "help" || argv.some((a) => a === "--help" || a === "-h");
 }
