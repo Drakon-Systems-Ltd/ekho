@@ -15,16 +15,7 @@
  * This module has no side effects on import; the entry file calls run().
  */
 import type { EkhoDb } from "./db";
-import { RECOVERY_GRANT_DEFAULT_TTL_MINUTES, RECOVERY_GRANT_MAX_TTL_MINUTES } from "./db";
-
-const USAGE = `Usage (on the relay host, from packages/relay):
-  npm run recovery-grant -- status --fleet <fleet id or name>
-  npm run recovery-grant -- arm --fleet <fleet id or name> --endorser <key id> --successor <key id> \\
-      --confirmed-by "<who confirmed, how, when>" [--ttl-minutes ${RECOVERY_GRANT_DEFAULT_TTL_MINUTES}]
-  npm run recovery-grant -- cancel --fleet <fleet id or name> --grant <grant id>
-
-A grant lets <endorser> endorse <successor> (an operator key, never an agent key)
-exactly once, within --ttl-minutes (default ${RECOVERY_GRANT_DEFAULT_TTL_MINUTES}, max ${RECOVERY_GRANT_MAX_TTL_MINUTES}).`;
+import { isHelpRequest, USAGE } from "./recovery-grant-usage";
 
 function parseFlags(args: string[]): Record<string, string> {
   const flags: Record<string, string> = {};
@@ -81,7 +72,7 @@ function printStatus(db: EkhoDb, fleetId: string, out: (s: string) => void) {
 export function run(argv: string[], db: EkhoDb, out: (s: string) => void = console.log, err: (s: string) => void = console.error): number {
   const [command, ...rest] = argv;
   try {
-    if (!command || command === "help" || command === "--help") {
+    if (!command || isHelpRequest(argv)) {
       out(USAGE);
       return command ? 0 : 2;
     }

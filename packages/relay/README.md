@@ -18,7 +18,7 @@ Run these from `packages/relay`, or from the repo root with `-w @ekho/relay`.
 | Script | Purpose |
 |--------|---------|
 | `npm run start` | Run the relay |
-| `npm run setup` | Create your fleet and operator credentials |
+| `npm run setup` | Create your fleet and operator credentials. `npm run setup -- --help` prints usage only: no database, `.env` or fleet is created |
 | `npm run doctor` | Check the Node version, database directory, operator session secret, base URL, port availability and license tier. Runs offline; it does not contact anything |
 | `npm run ui:build` | Build the operator console into `ui-dist/` |
 | `npm run build` | Build the console, then typecheck the relay |

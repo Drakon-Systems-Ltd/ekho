@@ -74,9 +74,25 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
-main().catch((err) => {
-  if (err instanceof ConfigError) console.error(`[ekho-mcp] configuration: ${err.message}`);
-  else if (err instanceof IdentityUnavailableError || err instanceof CredentialsUnavailableError) console.error(`[ekho-mcp] REFUSING TO START: ${err.message}`);
-  else console.error(`[ekho-mcp] fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  process.exit(1);
-});
+const USAGE = `Usage: ekho-mcp [--help | --version]
+
+Runs the Ekho MCP connector. Every setting is an EKHO_* / EKHO_MCP_*
+environment variable (EKHO_RELAY_BASE_URL is required; see the package README);
+other arguments are ignored.
+  --help, -h   print this message and exit
+  --version    print the connector version and exit`;
+
+// Answered before main(): no config is read, nothing enrols, connects or listens (#130).
+const argv = process.argv.slice(2);
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(USAGE);
+} else if (argv.includes("--version")) {
+  console.log(pkg.version);
+} else {
+  main().catch((err) => {
+    if (err instanceof ConfigError) console.error(`[ekho-mcp] configuration: ${err.message}`);
+    else if (err instanceof IdentityUnavailableError || err instanceof CredentialsUnavailableError) console.error(`[ekho-mcp] REFUSING TO START: ${err.message}`);
+    else console.error(`[ekho-mcp] fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(1);
+  });
+}
