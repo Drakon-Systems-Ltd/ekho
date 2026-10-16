@@ -27,6 +27,7 @@ export class McpClient {
     child.stdin?.on("error", () => {});
 
     child.stdout?.on("data", (chunk: Buffer) => {
+      if (this.process !== child) return;
       this.buffer += chunk.toString();
       this.processBuffer();
     });
@@ -36,23 +37,11 @@ export class McpClient {
     });
 
     child.on("error", (error) => {
-      if (this.process !== child) return;
-      this.process = null;
-      this.initialized = false;
-      for (const req of this.pendingRequests.values()) {
-        req.reject(error);
-      }
-      this.pendingRequests.clear();
+      this.releaseChild(child, error);
     });
 
     child.on("exit", () => {
-      if (this.process !== child) return;
-      this.process = null;
-      this.initialized = false;
-      for (const req of this.pendingRequests.values()) {
-        req.reject(new Error("MCP process exited"));
-      }
-      this.pendingRequests.clear();
+      this.releaseChild(child, new Error("MCP process exited"));
     });
 
     // Send initialize request
@@ -74,9 +63,24 @@ export class McpClient {
   }
 
   close() {
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
+    const child = this.process;
+    if (!child) return;
+    // Tear down while this client still owns the child: the stale-child guard
+    // makes the later exit event a no-op, so close() must do the cleanup itself.
+    this.releaseChild(child, new Error("MCP process exited"));
+    child.kill();
+  }
+
+  /** Release the current child and fail its pending requests. No-op for a stale child. */
+  private releaseChild(child: ChildProcess, error: Error) {
+    if (this.process !== child) return;
+    this.process = null;
+    this.initialized = false;
+    this.buffer = "";
+    const pending = [...this.pendingRequests.values()];
+    this.pendingRequests.clear();
+    for (const req of pending) {
+      req.reject(error);
     }
   }
 
