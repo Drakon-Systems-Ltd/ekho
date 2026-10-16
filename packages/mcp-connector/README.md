@@ -42,7 +42,7 @@ npm run build -w @drakon-systems/ekho-mcp
 node packages/mcp-connector/dist/cli.js
 ```
 
-There is no command line: every setting is an environment variable, so a systemd `EnvironmentFile` is the whole configuration.
+There is no command line: every setting is an environment variable, so a systemd `EnvironmentFile` is the whole configuration. `ekho-mcp --help` prints usage only and does not read the configuration, enrol or listen.
 
 ## Configuration
 

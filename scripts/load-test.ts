@@ -15,6 +15,20 @@ import fs from "node:fs";
 import os from "node:os";
 import crypto from "node:crypto";
 
+const USAGE = `Usage: npx tsx scripts/load-test.ts [--agents <n>] [--messages <n>]
+  --agents <n>     agents to enrol (default 20)
+  --messages <n>   messages each agent sends (default 100)
+  --help, -h       print this message and exit; no relay is started
+
+Starts a relay in-process on a temp database under the OS temp directory,
+runs the benchmarks, prints the results, then deletes the temp directory.`;
+
+// Help is decided before anything is created: no temp dir, no relay (#130).
+if (process.argv.slice(2).some((a) => a === "--help" || a === "-h")) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
 // Parse args
 const args: Record<string, string> = {};
 for (let i = 2; i < process.argv.length; i++) {
