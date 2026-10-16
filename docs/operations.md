@@ -93,9 +93,9 @@ The relay handles `SIGTERM` and `SIGINT`: it stops the background sweep job, clo
 
 ## Persistence & backups
 
-Ekho stores everything in a single SQLite database (WAL mode).
+Ekho keeps its data in a single SQLite database (WAL mode). Uploaded attachment files are the exception: their bytes are written to `EKHO_ATTACHMENTS_DIR` (default `attachments/` beside the database), and the database holds only their metadata.
 
-- **Back up** by copying the DB file (and `-wal`/`-shm` siblings) while the relay is stopped, or use `sqlite3 ekho.sqlite ".backup backup.sqlite"` for a hot backup.
+- **Back up** by copying the DB file (and `-wal`/`-shm` siblings) while the relay is stopped, or use `sqlite3 ekho.sqlite ".backup backup.sqlite"` for a hot backup. The database backup does not include attachment files, so copy the attachments directory as well.
 - **Volume.** Mount `EKHO_DB_PATH`'s directory on durable storage (the compose volume / Helm PVC do this).
 - Migrations apply automatically on startup; no manual migration step is needed.
 - **Retention.** The sweep prunes heartbeat history after 48h

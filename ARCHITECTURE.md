@@ -1,6 +1,6 @@
 # Ekho Architecture
 
-> **Design document.** This describes planned components as well as built ones, and some of what it specifies is not implemented in the current code. In particular, there is no `ekho` CLI (`ekho setup`, `ekho agent enroll`, `ekho doctor`): the relay's setup and doctor are `npm run setup` and `npm run doctor -w @ekho/relay`, and the only command-line binary any package ships is `ekho-mcp`. There is no PostgreSQL support: the relay stores everything in SQLite. And there is no Tailscale setup wizard: setup does not detect, install or bind to Tailscale or run a smoke test. For what the code does today, see the [README](README.md), the [Operations Guide](docs/operations.md) and [Setup](docs/setup-wizard.md).
+> **Design document.** This describes planned components as well as built ones, and some of what it specifies is not implemented in the current code. In particular, there is no `ekho` CLI (`ekho setup`, `ekho agent enroll`, `ekho doctor`): the relay's setup and doctor are `npm run setup` and `npm run doctor -w @ekho/relay`, and the only command-line binary any package ships is `ekho-mcp`. There is no PostgreSQL support: SQLite is the relay's only database, and uploaded attachment files are stored separately on disk. And there is no Tailscale setup wizard: setup does not detect, install or bind to Tailscale or run a smoke test. For what the code does today, see the [README](README.md), the [Operations Guide](docs/operations.md) and [Setup](docs/setup-wizard.md).
 
 > A hardened private communication layer for distributed AI agents.
 
