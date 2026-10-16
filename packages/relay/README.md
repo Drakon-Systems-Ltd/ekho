@@ -8,12 +8,14 @@ For the full project overview, architecture, and SDK usage, see the [repository 
 
 ```bash
 npm install            # from the repo root
-npm run setup          # create your fleet + operator login (writes to .env / data/)
+npm run setup          # create your fleet + operator login (writes packages/relay/.env and data/)
 npm run dev            # relay with hot reload (tsx watch)
 npm run ui:dev         # operator console with Vite HMR
 ```
 
 Run these from `packages/relay`, or from the repo root with `-w @ekho/relay`.
+
+**Which `.env`:** from source, the relay reads `packages/relay/.env`, and that is where `npm run setup` saves a generated operator secret. The root `start`, `dev` and `setup` scripts run the relay's scripts with `-w @ekho/relay`, npm runs a workspace script from that workspace's own directory, and the relay loads `.env` from its working directory (`dotenv.config()` with no path). A `.env` at the repository root is not read when you start or set up the relay through these npm scripts; it is for Docker Compose, which reads it only to fill in `${EKHO_OPERATOR_SESSION_SECRET}` in `docker-compose.yml` (other variables in it do not reach the container).
 
 | Script | Purpose |
 |--------|---------|
@@ -30,7 +32,7 @@ The console is served from `ui-dist/` at `/ui/` once built. During development, 
 
 These steps are generic and replicable by anyone — no fleet ids, hosts, or secrets are baked in. The same flow is available in-console under the **?** (Help) icon.
 
-1. **Run the relay.** On your own server, clone the repo and set `.env` (an operator session secret and your `EKHO_BASE_URL`). Run `npm run setup` to create your fleet and operator login, then start the relay behind HTTPS (for example [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)). Open the console at `<your-base-url>/ui/` and sign in.
+1. **Run the relay.** On your own server, clone the repo and set `packages/relay/.env` (an operator session secret and your `EKHO_BASE_URL`). Run `npm run setup` to create your fleet and operator login, then start the relay behind HTTPS (for example [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve)). Open the console at `<your-base-url>/ui/` and sign in.
 2. **Add an agent.** In the console, click **Mint enrollment token** (bottom of the right panel). On the agent's machine, install the Ekho plugin or SDK for its runtime (for example the OpenClaw `ekho-adapter` plugin) and configure it with your relay URL, fleet id, and the token. The agent connects and appears in the **Agents** list, healthy.
 3. **Trust the console.** Open the **Access** tab and turn **Operator-trusted channel** on for an agent. It then recognizes you as its verified principal and starts replying. Off = it stays quiet. Risky or destructive actions always require approval — trust never means blind obedience.
 4. **Talk to your fleet.** Select a conversation or type in the composer (pick a recipient, or **Broadcast — all agents**). Trusted agents reply on their own; you'll see them "typing" then respond.

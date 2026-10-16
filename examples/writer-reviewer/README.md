@@ -22,13 +22,13 @@ not part of the SDK.
 ────────────────────────────────────────────────────────────────────
 
 [run]      starting reviewer...
-[reviewer] enrolled as agt_9c...
-[run]      reviewer ready as agt_9c...
+[reviewer] enrolled as agent_9c1e4b7a2d0f
+[run]      reviewer ready as agent_9c1e4b7a2d0f
 [run]      starting writer...
-[writer]   enrolled as agt_7b...
-[writer]   will review via agt_9c...
+[writer]   enrolled as agent_7b3a90c5e1d2
+[writer]   will review via agent_9c1e4b7a2d0f
 [writer]   sending draft "Why AI Agent Messaging Matters" for review...
-[reviewer] draft received: "Why AI Agent Messaging Matters" from agt_7b...
+[reviewer] draft received: "Why AI Agent Messaging Matters" from agent_7b3a90c5e1d2
 [reviewer] verdict: APPROVE — Clear thesis, covers identity and delivery...
 [reviewer] review sent. exiting.
 [writer]   review received: APPROVE
@@ -59,7 +59,8 @@ The whole thing takes under 30 seconds.
    - **Operator console:** open [http://localhost:4000/ui/](http://localhost:4000/ui/),
      sign in as `admin@example.com` with the password `npm run setup` printed
      (it is shown once, at setup time), then
-     **Agents → Enroll Agent**, copy the token.
+     click **Mint enrollment token** (bottom of the right panel) and copy
+     the token.
    - **API:**
      ```bash
      # Log in, then call the enrollment-tokens endpoint:
@@ -98,7 +99,7 @@ export EKHO_RELAY_URL=http://my-relay.tailnet:4000
 | `reviewer.ts` | Reviewer agent — enrolls, receives drafts, replies with a verdict. |
 | `shared.ts` | `DraftMessage` / `ReviewMessage` types, demo article, colours. |
 | `enroll.ts` | One-shot `POST /v1/enroll` helper (the only raw HTTP call). |
-| `package.json` | Local workspace package with an `@drakon-systems/ekho-sdk` dependency. |
+| `package.json` | Package manifest declaring the `@drakon-systems/ekho-sdk` dependency. It is not an npm workspace (the root `workspaces` covers only `packages/*`); the import resolves to the workspace SDK that `npm install` links into the root `node_modules`. |
 
 ## Running the agents separately
 
@@ -107,10 +108,10 @@ If you'd rather run each agent in its own terminal (useful for debugging):
 ```bash
 # Terminal 1 — reviewer
 EKHO_FLEET_ID=... EKHO_REVIEWER_TOKEN=... npx tsx examples/writer-reviewer/reviewer.ts
-# note the agt_... it prints
+# note the agent id it prints (agent_ followed by 12 hex characters)
 
 # Terminal 2 — writer (uses the agent id from Terminal 1)
-EKHO_FLEET_ID=... EKHO_WRITER_TOKEN=... EKHO_REVIEWER_AGENT_ID=agt_... \
+EKHO_FLEET_ID=... EKHO_WRITER_TOKEN=... EKHO_REVIEWER_AGENT_ID=agent_... \
   npx tsx examples/writer-reviewer/writer.ts
 ```
 

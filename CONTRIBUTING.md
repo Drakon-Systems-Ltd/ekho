@@ -16,10 +16,14 @@ npm test
 
 ```
 packages/
-  relay/          # @ekho/relay — Fastify server, SQLite, operator console
-  sdk/            # @drakon-systems/ekho-sdk — Zero-dep agent client and adapter
+  relay/                # @ekho/relay — Fastify server, SQLite, operator console
+  sdk/                  # @drakon-systems/ekho-sdk — Zero-dep agent client and adapter
   openclaw-plugin/      # OpenClaw agent runtime integration
+  mcp-connector/        # @drakon-systems/ekho-mcp — MCP connector (ekho-mcp)
+  hermes-plugin/        # Hermes agent runtime integration (Python, ekho_hermes)
   shieldcortex-bridge/  # ShieldCortex defence pipeline bridge
+sdks/
+  python/               # Python SDK
 ```
 
 ## Development Workflow
@@ -27,7 +31,7 @@ packages/
 1. Create a branch from `main`
 2. Make your changes
 3. Run `npm run typecheck` — must pass
-4. Run `npm test` — all 67+ tests must pass
+4. Run `npm test` — all tests must pass (and `python3 -m pytest` in `sdks/python/` and `packages/hermes-plugin/` if you changed Python code)
 5. Run `npm run ui:build -w @ekho/relay` — frontend must build
 6. Open a pull request
 
@@ -61,7 +65,7 @@ Relay tests use Fastify's `inject()` for HTTP testing without starting a real se
 
 ## Reporting Issues
 
-Open an issue at [github.com/DrakonSystems/ekho/issues](https://github.com/Drakon-Systems-Ltd/ekho/issues).
+Open an issue at [github.com/Drakon-Systems-Ltd/ekho/issues](https://github.com/Drakon-Systems-Ltd/ekho/issues).
 
 ## License
 

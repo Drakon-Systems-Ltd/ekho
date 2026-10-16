@@ -220,7 +220,7 @@ operator keys, an agent left with no pins trusts the relay's operator keys
 afresh on first contact, and it forgets which keys were revoked. Only a first
 enrollment mints a key without being told to.
 
-The 0.5.6 code also reads `allowNewIdentity` and `operatorPubkey` from the
+The plugin code (0.5.6 and later) also reads `allowNewIdentity` and `operatorPubkey` from the
 plugin config, but neither key is declared in the plugin's config schema, so
 neither is a supported setting: do not set them. If an existing
 `operatorPubkey` seed does reach the plugin, it is re-pinned on connect (unless

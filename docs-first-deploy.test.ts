@@ -802,3 +802,183 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(read("packages/sdk/CHANGELOG.md")).toContain("[Operations Guide](https://github.com/Drakon-Systems-Ltd/ekho/blob/main/docs/operations.md)");
   });
 });
+
+describe("source .env location, design-doc label, and version and naming nits match the source (#130 slice A4)", () => {
+  const rootReadme = read("README.md");
+  const operations = read("docs/operations.md");
+  const relayReadme = read("packages/relay/README.md");
+  const setupWizard = read("docs/setup-wizard.md");
+  const setupTs = read("packages/relay/src/setup.ts");
+  const hermesReadme = read("packages/hermes-plugin/README.md");
+  const rootPkg = JSON.parse(read("package.json")) as { workspaces: string[]; scripts: Record<string, string> };
+
+  it("docs name packages/relay/.env for a source install because dotenv reads the cwd and the root scripts run with -w", () => {
+    // dotenv.config() with no path reads .env from process.cwd().
+    const configTs = read("packages/relay/src/config.ts");
+    expect(configTs.match(/dotenv\.config\(/g)).toHaveLength(1);
+    expect(configTs).toMatch(/^dotenv\.config\(\);$/m);
+    // setup.ts writes the generated secret to .env in its cwd.
+    expect(setupTs).toContain('const envPath = path.join(process.cwd(), ".env");');
+    expect(setupTs).not.toMatch(/repo-root/);
+    // npm runs a workspace script from the workspace directory, so the root
+    // scripts land in packages/relay.
+    expect(rootPkg.workspaces).toEqual(["packages/*"]);
+    expect(JSON.parse(read("packages/relay/package.json")).name).toBe("@ekho/relay");
+    for (const script of ["start", "dev", "setup"]) {
+      expect(rootPkg.scripts[script], `root ${script} script`).toBe(`npm run ${script} -w @ekho/relay`);
+    }
+    // Compose reads the root .env only for interpolation: no env_file.
+    const compose = read("docker-compose.yml");
+    expect(compose).toContain("${EKHO_OPERATOR_SESSION_SECRET");
+    expect(compose).not.toMatch(/env_file/);
+
+    for (const [label, doc] of [["README", rootReadme], ["operations.md", operations], ["relay README", relayReadme]] as const) {
+      const note = capture(doc, /^\*\*Which `\.env`:\*\*(.*)$/m, `${label} .env note`);
+      expect(note, label).toContain("from source, the relay reads `packages/relay/.env`");
+      expect(note, label).toContain("`npm run setup` saves a generated operator secret");
+      expect(note, label).toContain("`-w @ekho/relay`");
+      expect(note, label).toContain("`dotenv.config()` with no path");
+      expect(note, label).toContain("it is for Docker Compose");
+      expect(note, label).toContain("`${EKHO_OPERATOR_SESSION_SECRET}`");
+    }
+    expect(rootReadme).toContain("set `packages/relay/.env` (an operator session secret");
+    expect(relayReadme).toContain("set `packages/relay/.env` (an operator session secret");
+    expect(setupWizard).toContain("`packages/relay/.env` under `npm run setup`");
+  });
+
+  it("ARCHITECTURE.md is labelled a design document naming the unbuilt CLI, PostgreSQL and Tailscale wizard", () => {
+    // The claims in the label, checked against the code.
+    const bins = fs
+      .readdirSync(path.join(root, "packages"))
+      .filter((dir) => fs.existsSync(path.join(root, "packages", dir, "package.json")))
+      .flatMap((dir) => Object.keys((JSON.parse(read(`packages/${dir}/package.json`)).bin ?? {}) as Record<string, string>));
+    expect(bins).toEqual(["ekho-mcp"]);
+    for (const dir of fs.readdirSync(path.join(root, "packages"))) {
+      const manifest = path.join("packages", dir, "package.json");
+      if (!fs.existsSync(path.join(root, manifest))) continue;
+      expect(read(manifest), manifest).not.toMatch(/"(?:pg|postgres|pg-promise)"/);
+    }
+    expect(setupTs).not.toMatch(/tailscale/i);
+
+    const architecture = read("ARCHITECTURE.md");
+    const label = capture(architecture, /^# Ekho Architecture\n\n> (\*\*Design document\.\*\*.*)$/m, "ARCHITECTURE.md label");
+    expect(label).toContain("not implemented in the current code");
+    expect(label).toContain("there is no `ekho` CLI");
+    expect(label).toContain("`ekho-mcp`");
+    expect(label).toContain("There is no PostgreSQL support");
+    expect(label).toContain("there is no Tailscale setup wizard");
+
+    expect(rootReadme).toContain("the design document [ARCHITECTURE.md](ARCHITECTURE.md), which also describes planned components that are not implemented");
+    expect(rootReadme).not.toMatch(/deep-dive/);
+
+    expect(setupWizard).toContain("## What `npm run setup` does");
+    expect(setupWizard).toContain("## Not implemented: Tailscale-aware setup");
+    expect(setupWizard).toContain("**None of that is implemented**");
+    expect(setupWizard).not.toMatch(/the wizard should/);
+    // The setup steps the doc lists are the ones runSetup() performs.
+    const runSetup = capture(setupTs, /function runSetup\(\) \{([\s\S]*?)\n\}/, "runSetup");
+    for (const step of ["loadLicense()", "ensureOperatorSecret()", 'db.findFleetByName("default")', "assertFleetCreationAllowed(", "db.createBootstrap(", "db.issueEnrollmentToken("]) {
+      expect(runSetup, step).toContain(step);
+    }
+    expect(setupWizard).toContain("a fleet named `default` already exists");
+    expect(setupWizard).toContain("Issues one enrollment token");
+  });
+
+  it("version nits: 0.5.6-and-later wording and the Dockerfile fix version from the CHANGELOG", () => {
+    const pluginReadme = read("packages/openclaw-plugin/README.md");
+    expect(rootReadme).not.toMatch(/The 0\.5\.6 plugin/);
+    expect(pluginReadme).not.toMatch(/The 0\.5\.6 code/);
+    expect(rootReadme).toContain("The plugin (0.5.6 and later) has no supported operator-key seed setting");
+    expect(pluginReadme).toContain("The plugin code (0.5.6 and later) also reads `allowNewIdentity`");
+
+    const changelog = read("CHANGELOG.md");
+    const fixVersion = capture(
+      changelog,
+      /^## \[([0-9.]+)\] - [0-9-]+\n(?:(?!^## \[)[\s\S])*?The Docker image build fails when the console build fails/m,
+      "CHANGELOG release with the Dockerfile ui:build fix"
+    );
+    expect(operations).toContain(`since ${fixVersion} a failed console build fails the image build`);
+    expect(operations).not.toMatch(/since 0\.5\.6 a failed console build/);
+  });
+
+  it("Hermes README uses the real plugin name and link, and the docs do not claim the Python packages version in lockstep", () => {
+    expect(rootReadme).toContain("[`ekho_hermes`](packages/hermes-plugin/)");
+    expect(fs.existsSync(path.join(root, "packages/hermes-plugin/ekho_hermes"))).toBe(true);
+    const manifest = read("packages/hermes-plugin/ekho_hermes/plugin.yaml");
+    expect(capture(manifest, /^name:\s*(.+)$/m, "plugin.yaml name")).toBe("ekho");
+    expect(hermesReadme.split("\n")[0]).toBe("# Ekho Hermes plugin (`ekho_hermes`)");
+    expect(hermesReadme).toContain("under the plugin name `ekho`");
+    expect(hermesReadme).not.toContain("](https://github.com/)");
+    const hermesRepo = capture(read(".github/workflows/ci.yml"), /^\s*repository:\s*(\S*hermes-agent)$/m, "CI hermes-agent repository");
+    expect(hermesReadme).toContain(`[Hermes](https://github.com/${hermesRepo})`);
+
+    // plugin.yaml and pyproject.toml carry their own versions; the release
+    // number is the relay's. The README must not imply they move together.
+    const relayVersion = JSON.parse(read("packages/relay/package.json")).version as string;
+    const pluginVersion = capture(manifest, /^version:\s*(.+)$/m, "plugin.yaml version");
+    const pythonVersion = capture(read("sdks/python/pyproject.toml"), /^version\s*=\s*(.+)$/m, "pyproject version");
+    const status = capture(rootReadme, /^## Project Status\n\n(.*)$/m, "Project Status");
+    if (pluginVersion !== relayVersion || pythonVersion !== relayVersion) {
+      expect(status).toContain("keep their own version numbers");
+      expect(status).toContain("do not move with the Ekho release number");
+    }
+
+    // The bundle log line's version= is plugin.yaml's version: line.
+    const bundleIdentity = read("packages/hermes-plugin/ekho_hermes/bundle_identity.py");
+    expect(bundleIdentity).toContain('yaml_path = root / "plugin.yaml"');
+    expect(bundleIdentity).toContain('if stripped.startswith("version:"):');
+    expect(bundleIdentity).toContain("version=plugin_version(root),");
+    expect(hermesReadme).toContain("Compare the hash, not `version=`");
+    expect(hermesReadme).toContain("does not follow the\n#    Ekho release number");
+  });
+
+  it("Python SDK README says the methods are snake_case equivalents", () => {
+    const pyClient = read("sdks/python/ekho/client.py");
+    const nodeClient = read("packages/sdk/src/client.ts");
+    expect(pyClient).toContain("def send_message(");
+    expect(nodeClient).toMatch(/^  sendMessage\(/m);
+    expect(pyClient).toContain("def get_inbox(");
+    expect(nodeClient).toMatch(/^  getInbox\(/m);
+    const pyReadme = read("sdks/python/README.md");
+    expect(pyReadme).not.toMatch(/same method names/);
+    expect(pyReadme).toContain("snake_case equivalents");
+    expect(pyReadme).toContain("`send_message` for `sendMessage`");
+  });
+
+  it("writer-reviewer example uses the real agent id format, console button label and package status", () => {
+    expect(read("packages/relay/src/db.ts")).toContain('const agentId = `agent_${id("agt").slice(-12)}`;');
+    expect(read("packages/relay/src/utils.ts")).toContain('return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;');
+    expect(read("packages/relay/frontend/src/App.jsx")).toContain(">Mint enrollment token</button>");
+
+    const example = read("examples/writer-reviewer/README.md");
+    expect(example).not.toMatch(/agt_/);
+    const ids = [...example.matchAll(/\bagent_[0-9a-z]+/g)].map((m) => m[0]).filter((id) => id !== "agent_");
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) expect(id).toMatch(/^agent_[0-9a-f]{12}$/);
+    expect(example).toContain("**Mint enrollment token**");
+    expect(example).not.toMatch(/Enroll Agent/);
+
+    expect(rootPkg.workspaces).toEqual(["packages/*"]);
+    expect(example).not.toMatch(/workspace package/i);
+    expect(example).toContain("It is not an npm workspace");
+  });
+
+  it("CONTRIBUTING lists every package directory, has no drifting test count and links the real repo; README names Vitest", () => {
+    const contributing = read("CONTRIBUTING.md");
+    const structure = capture(contributing, /^## Project Structure\n\n```\n([\s\S]*?)```/m, "CONTRIBUTING structure");
+    const packageDirs = fs
+      .readdirSync(path.join(root, "packages"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    for (const dir of packageDirs) expect(structure, dir).toMatch(new RegExp(`^  ${dir}/ `, "m"));
+    expect(fs.existsSync(path.join(root, "sdks/python/pyproject.toml"))).toBe(true);
+    expect(structure).toMatch(/^sdks\/\n  python\/ /m);
+    expect(contributing).not.toMatch(/\d+\+? tests/);
+    expect(contributing).not.toContain("DrakonSystems/ekho");
+    expect(contributing).toContain("[github.com/Drakon-Systems-Ltd/ekho/issues](https://github.com/Drakon-Systems-Ltd/ekho/issues)");
+
+    expect(rootPkg.scripts.test).toBe("vitest run");
+    expect(rootReadme).not.toMatch(/Node test suite/);
+    expect(rootReadme).toMatch(/^npm test +# Vitest suite/m);
+  });
+});
