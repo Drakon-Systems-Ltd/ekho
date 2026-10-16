@@ -662,6 +662,17 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(a3).toMatch(/not JSON is silently ignored/);
     for (const prefix of [scanPrefix, ...gatePrefixes]) expect(a3, prefix).toContain(`\`${prefix}\``);
     expect(a3).toMatch(/the next tool call, possibly for the same message, starts a new process/);
+    // Failure handling is per step: the scan and action-check catches warn and
+    // continue, the remember catch is empty, and each rethrow honours only its
+    // own step's prefixes, so the bullet must not state one rule for all requests.
+    expect(hook).toMatch(/\} catch \{\n\s+\/\/ Fire-and-forget — don't block message delivery\n\s+\}/);
+    expect(a3).not.toMatch(/a request that fails because the ShieldCortex process exited, or that times out \(10 seconds per request\), is logged and fails open/);
+    expect(a3).toMatch(/a scan or action-check request that fails because the ShieldCortex process exited, or that times out \(10 seconds per request\), is logged as a warning and the hook continues/);
+    expect(a3).toMatch(/any failed `remember` request is silently ignored, not logged, and never rejects the message/);
+    expect(a3).toContain(`the scan step rejects the message on an error whose message starts with \`${scanPrefix}\``);
+    expect(a3).toContain(`the action check on one that starts with \`${gatePrefixes[0]}\` or \`${gatePrefixes[1]}\``);
+    expect(a3).toMatch(/an error with the other step's prefix is logged as a warning and the hook continues/);
+    expect(a3).not.toMatch(/an error whose message starts with `[^`]+`, `[^`]+` or `[^`]+` rejects the message/);
   });
 
   it("MCP connector README states the store's queue-full rule, which tools are idempotent, the relay floor and the version placeholder", () => {
