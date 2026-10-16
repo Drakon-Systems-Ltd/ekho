@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-16
+
+No SDK changes. Version kept in step with the relay: the 0.7.3 release carries a ShieldCortex bridge stdin-error fix and a `recovery-grant` `--help` fix (#139), and documentation corrections (#130). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.2] - 2026-10-16
 
 No SDK changes. Version bumped in lockstep with the workspace: the 0.7.2 release carries a ShieldCortex bridge fix (#135), a `--help` fix for four command-line entry points (#130) and documentation corrections. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
