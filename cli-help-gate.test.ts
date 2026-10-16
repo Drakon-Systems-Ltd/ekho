@@ -99,11 +99,13 @@ describe("--help never runs the command (#130)", () => {
     expect(listFiles(tmp)).toEqual([]);
   });
 
-  it("ekho-mcp --version prints the package version and nothing else happens", () => {
-    const r = spawn("packages/mcp-connector/src/cli.ts", ["--version"], MCP_ENV);
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout.trim()).toBe(JSON.parse(read("packages/mcp-connector/package.json")).version);
-    expect(listFiles(tmp)).toEqual([]);
+  // --help is the only new flag: --version is an ignored argument, as on main,
+  // so without configuration it refuses exactly like a plain start.
+  it("ekho-mcp --version is not a flag: without configuration it still refuses with a configuration error", () => {
+    const r = spawn("packages/mcp-connector/src/cli.ts", ["--version"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("[ekho-mcp] configuration: EKHO_RELAY_BASE_URL is required");
+    expect(r.stdout).not.toContain(JSON.parse(read("packages/mcp-connector/package.json")).version);
   });
 
   // Controls: the throwaway env really does point the commands' data here, so
@@ -134,9 +136,17 @@ describe("--help never runs the command (#130)", () => {
   it("the recovery-grant usage TTL figures match db.ts", () => {
     const db = read("packages/relay/src/db.ts");
     const usage = read("packages/relay/src/recovery-grant-usage.ts");
-    const num = (src: string, name: string) => Number(src.match(new RegExp(`export const ${name} = (\\d+);`))?.[1]);
+    // A missing capture would be NaN on both sides, and toBe(NaN) passes, so
+    // each figure must be extracted and positive before the comparison.
+    const num = (src: string, name: string) => {
+      const capture = src.match(new RegExp(`export const ${name} = (\\d+);`))?.[1];
+      expect(capture, `${name} not found as a numeric literal`).toBeDefined();
+      const n = Number(capture);
+      expect(Number.isFinite(n), `${name} is not finite`).toBe(true);
+      expect(n, `${name} is not positive`).toBeGreaterThan(0);
+      return n;
+    };
     expect(num(usage, "USAGE_DEFAULT_TTL_MINUTES")).toBe(num(db, "RECOVERY_GRANT_DEFAULT_TTL_MINUTES"));
     expect(num(usage, "USAGE_MAX_TTL_MINUTES")).toBe(num(db, "RECOVERY_GRANT_MAX_TTL_MINUTES"));
-    expect(num(db, "RECOVERY_GRANT_DEFAULT_TTL_MINUTES")).toBeGreaterThan(0);
   });
 });
