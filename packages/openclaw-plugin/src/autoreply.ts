@@ -719,15 +719,22 @@ export function getCachedInbox(agentId = "", context = ""): {
   const cache = inboxCache(agentId, context, true);
   const lastBatch = cache.entries;
   const lastBatchMeta = cache.meta;
-  const entries = Array.from(lastBatch.values());
+  const verificationGeneration = !lastBatchMeta.recorded_at ? "unavailable" : cache.verificationGeneration === contextParts(context)[1] ? "current" : "stale";
+  // #146: a reader may follow another producer's snapshot, but its passing
+  // verdicts and operator attestation cannot cross a trust-pin generation.
+  const entries = Array.from(lastBatch.values(), (entry) =>
+    verificationGeneration === "stale" && entry.verification?.verified
+      ? { ...entry, verification: null }
+      : entry
+  );
   return {
-    verification_generation: !lastBatchMeta.recorded_at ? "unavailable" : cache.verificationGeneration === contextParts(context)[1] ? "current" : "stale",
+    verification_generation: verificationGeneration,
     entries,
     recorded_at: lastBatchMeta.recorded_at ?? null,
     // Kept as a positional mirror of `entries` for callers that only need the
     // message (attachment resolution). Index i of one IS index i of the other.
     messages: entries.map((e) => e.message),
-    operator_trusted: lastBatchMeta.operator_trusted,
+    operator_trusted: verificationGeneration === "stale" ? false : lastBatchMeta.operator_trusted,
     roster: lastBatchMeta.roster,
     controls: lastBatchMeta.controls,
     conversation_history: lastBatchMeta.conversation_history,

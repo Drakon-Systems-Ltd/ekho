@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Inbox reads across a change to pinned or revoked operator keys no longer show old verified signatures or operator attestation (#146).
+
 ## [0.7.3] - 2026-10-16
 
 No plugin code changes; the README now says the plugin code reads `allowNewIdentity` and `operatorPubkey` from 0.5.6 and later. Version kept in step with the relay: the 0.7.3 release carries a ShieldCortex bridge stdin-error fix and a `recovery-grant` `--help` fix (#139), and documentation corrections (#130). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
