@@ -1017,6 +1017,49 @@ describe("Pro tier copy and OpenAPI licence match the source (#130 slice A5)", (
     }
   });
 
+  it("the README's fleet-creation path, default fleet name and tier-gate scope match the relay source", () => {
+    const relaySrc = path.join(root, "packages/relay/src");
+    const production = fs
+      .readdirSync(relaySrc, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
+      .map((entry) => {
+        const full = path.join(entry.parentPath, entry.name);
+        return { file: path.relative(relaySrc, full).split(path.sep).join("/"), text: fs.readFileSync(full, "utf8") };
+      });
+    const filesMatching = (pattern: RegExp) => production.filter(({ text }) => pattern.test(text)).map(({ file }) => file);
+    const setup = read("packages/relay/src/setup.ts");
+
+    // The README names one fleet-creation path and the fleet it creates.
+    const pricing = rootReadme.slice(rootReadme.indexOf("## Pricing"), rootReadme.indexOf("## Development"));
+    const readmeFleet = capture(pricing, /only fleet-creation path is `npm run setup`, which creates the `([^`]+)` fleet/, "README fleet-creation sentence");
+
+    // npm run setup runs setup.ts, which creates exactly that fleet through createBootstrap.
+    expect(JSON.parse(read("packages/relay/package.json")).scripts.setup).toMatch(/\bsrc\/setup\.ts$/);
+    const createdFleet = capture(setup, /\bdb\.createBootstrap\(\s*"([^"]+)"\s*,/, "setup.ts createBootstrap fleet name");
+    expect(createdFleet).toBe("default");
+    expect(readmeFleet).toBe(createdFleet);
+    expect(setup).toContain(`db.findFleetByName("${createdFleet}")`);
+
+    // createBootstrap is the only production fleet insert, and setup.ts its only caller.
+    const fleetInserts = production.flatMap(({ file, text }) => (text.match(/INSERT INTO fleets\b/g) ?? []).map(() => file));
+    expect(fleetInserts).toEqual(["db.ts"]);
+    expect(read("packages/relay/src/db.ts")).toMatch(/createBootstrap\(fleetName: string[^)]*\) \{[^}]*INSERT INTO fleets\b/);
+    expect(filesMatching(/\bcreateBootstrap\(/).sort()).toEqual(["db.ts", "setup.ts"]);
+    expect(setup.match(/\bcreateBootstrap\(/g)).toHaveLength(1);
+
+    // The fleet limit is the only tier gate: the one OSS check in assertFleetCreationAllowed,
+    // called only from setup.ts. setup.ts's other tier comparison is the doctor's License line.
+    const gate = capture(read("packages/relay/src/license.ts"), /export function assertFleetCreationAllowed\([^)]*\) \{([\s\S]*?)\n\}/, "assertFleetCreationAllowed");
+    expect(gate).toMatch(/currentFleetCount >= loadedLicense\.max_fleets && loadedLicense\.tier === "oss"/);
+    const tierComparisons = production.flatMap(({ file, text }) => (text.match(/\.tier\s*[!=]==?\s*"[^"]+"/g) ?? []).map((m) => `${file}: ${m.replace(/\s+/g, " ")}`));
+    expect(tierComparisons.sort()).toEqual(['license.ts: .tier === "oss"', 'setup.ts: .tier === "pro"']);
+    const doctorBody = capture(setup, /async function runDoctor\(\) \{([\s\S]*?)\n\}/, "runDoctor");
+    expect(doctorBody).toMatch(/if \(license\.tier === "pro"\) \{\s*pass\("License"/);
+    expect(filesMatching(/\bassertFleetCreationAllowed\(/).sort()).toEqual(["license.ts", "setup.ts"]);
+    expect(filesMatching(/\.features\b/)).toEqual(["license.ts"]);
+    expect(filesMatching(/\bmax_fleets\b/)).toEqual(["license.ts"]);
+  });
+
   it("openapi.yaml info.license is MIT, matching LICENSE", () => {
     expect(read("LICENSE").split("\n")[0].trim()).toBe("MIT License");
     const spec = read("openapi.yaml");
