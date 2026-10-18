@@ -982,3 +982,47 @@ describe("source .env location, design-doc label, and version and naming nits ma
     expect(rootReadme).toMatch(/^npm test +# Vitest suite/m);
   });
 });
+
+// #130 slice A5: Pro is described as the code implements it today (the fleet
+// limit in license.ts), and the OpenAPI licence matches the repo LICENSE.
+describe("Pro tier copy and OpenAPI licence match the source (#130 slice A5)", () => {
+  const rootReadme = read("README.md");
+
+  it("Pro copy names only the fleet limit the licence gates; planned features are marked planned", () => {
+    const license = read("packages/relay/src/license.ts");
+    expect(capture(license, /const OSS_LICENSE[^}]*?max_fleets:\s*(\d+)/s, "OSS max_fleets")).toBe("1");
+    expect(license).toContain("Upgrade to Pro for multi-fleet support.");
+    expect(read("packages/relay/src/setup.ts")).toContain("assertFleetCreationAllowed(fleetCount)");
+
+    const openCore = capture(rootReadme, /^- \*\*Open-core licensing\*\* — (.+)$/m, "README open-core bullet");
+    expect(openCore).toContain("Pro tier for multi-fleet");
+    expect(openCore).toContain("`max_fleets` 1");
+    expect(openCore).not.toMatch(/Pro tier for[^.]*(advanced polic|analytics)/i);
+    expect(openCore).toMatch(/Advanced policies and an analytics dashboard are planned, not available today/);
+
+    const pricing = rootReadme.slice(rootReadme.indexOf("## Pricing"), rootReadme.indexOf("## Development"));
+    expect(pricing).toMatch(/^\| \*\*Multi-fleet \/ multi-tenant\*\* \| — \| Yes \|$/m);
+    expect(pricing).toMatch(/^\| \*\*Advanced policies\*\* \| — \| Planned \|$/m);
+    expect(pricing).toMatch(/^\| \*\*Analytics dashboard\*\* \| — \| Planned \|$/m);
+    expect(pricing).toMatch(/^\| Policy engine \| Basic \(deny\/allow\) \| Basic \(deny\/allow\) \|$/m);
+    expect(pricing).toContain("The fleet limit is the only thing the licence tier gates");
+
+    const performance = read("docs/performance.md");
+    expect(performance).not.toMatch(/PostgreSQL \(Pro/);
+    expect(performance).toContain("PostgreSQL support is planned, not available in any tier");
+    expect(read("packages/relay/src/db.ts")).toContain('from "better-sqlite3"');
+
+    for (const [name, text] of [["README.md", rootReadme], ["docs/performance.md", performance]] as const) {
+      expect(text, name).not.toMatch(/Pro tier for[^.\n]*(postgres|advanced polic|analytics)/i);
+    }
+  });
+
+  it("openapi.yaml info.license is MIT, matching LICENSE", () => {
+    expect(read("LICENSE").split("\n")[0].trim()).toBe("MIT License");
+    const spec = read("openapi.yaml");
+    const license = capture(spec, /^info:\n(?:[ \t].+\n)*?([ \t]+license:\n(?:[ \t]{4,}.+\n)+)/m, "OpenAPI info.license");
+    expect(license).toMatch(/^\s+name: MIT$/m);
+    expect(license).toMatch(/url: https:\/\/opensource\.org\/licenses\/MIT$/m);
+    expect(spec).not.toMatch(/Proprietary/);
+  });
+});

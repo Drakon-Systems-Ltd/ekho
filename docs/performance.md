@@ -103,7 +103,7 @@ exclusive lock for the duration, so the relay never runs it automatically.
 
 ## When to Scale Beyond SQLite
 
-Consider PostgreSQL (Pro tier) when:
+SQLite is the relay's only database today; PostgreSQL support is planned, not available in any tier. These are the signs you have outgrown a single SQLite relay:
 
 - You need **multi-instance relay** (SQLite is single-writer)
 - Your database exceeds **2 GB** and backup windows become problematic
