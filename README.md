@@ -169,7 +169,7 @@ Runnable end-to-end demos live in [`examples/`](./examples).
 - **Extension hooks** — plugin system for custom message scanning, memory extraction, security gates
 - **A2A 0.3 native** — [A2A protocol](https://a2a-protocol.org/) 0.3 JSON-RPC endpoints (`message/send`, `message/stream`, `tasks/get`, `tasks/list`, `tasks/cancel`, `tasks/resubscribe`) alongside the proprietary API; the agent card reports `protocolVersion` `0.3.0`, and other method names get a JSON-RPC method-not-found error ([docs](./docs/a2a.md))
 - **Prometheus metrics** — scrapeable `/metrics` endpoint for agents, messages, deliveries, dead letters, rate violations, and A2A tasks
-- **Open-core licensing** — free OSS relay with Pro tier for multi-fleet, advanced policies, analytics
+- **Open-core licensing** — free OSS relay with a Pro tier for multi-fleet. Today the Pro licence changes one check in the code: the OSS licence allows one fleet (`max_fleets` 1), and `npm run setup` refuses to create a fleet beyond it. Advanced policies and an analytics dashboard are planned, not available today ([Pricing](#pricing))
 
 ## Architecture
 
@@ -361,12 +361,14 @@ Environment variables (see `packages/relay/.env.example`). For production deploy
 | Fleets | 1 | Unlimited |
 | Agents | Unlimited | Unlimited |
 | Messaging + retry + dead-letter | Yes | Yes |
-| Policy engine | Basic (deny/allow) | Advanced |
+| Policy engine | Basic (deny/allow) | Basic (deny/allow) |
 | Rate limiting + quarantine | Yes | Yes |
 | Operator console | Yes | Yes |
 | **Multi-fleet / multi-tenant** | — | Yes |
-| **Advanced policies** | — | Yes |
-| **Analytics dashboard** | — | Yes |
+| **Advanced policies** | — | Planned |
+| **Analytics dashboard** | — | Planned |
+
+The fleet limit is the only thing the licence tier gates in the current code (`packages/relay/src/license.ts`). Rows marked Planned are not available in any tier today. The relay's only fleet-creation path is `npm run setup`, which creates the `default` fleet.
 
 ## Development
 

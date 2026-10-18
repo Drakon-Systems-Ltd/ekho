@@ -982,3 +982,90 @@ describe("source .env location, design-doc label, and version and naming nits ma
     expect(rootReadme).toMatch(/^npm test +# Vitest suite/m);
   });
 });
+
+// #130 slice A5: Pro is described as the code implements it today (the fleet
+// limit in license.ts), and the OpenAPI licence matches the repo LICENSE.
+describe("Pro tier copy and OpenAPI licence match the source (#130 slice A5)", () => {
+  const rootReadme = read("README.md");
+
+  it("Pro copy names only the fleet limit the licence gates; planned features are marked planned", () => {
+    const license = read("packages/relay/src/license.ts");
+    expect(capture(license, /const OSS_LICENSE[^}]*?max_fleets:\s*(\d+)/s, "OSS max_fleets")).toBe("1");
+    expect(license).toContain("Upgrade to Pro for multi-fleet support.");
+    expect(read("packages/relay/src/setup.ts")).toContain("assertFleetCreationAllowed(fleetCount)");
+
+    const openCore = capture(rootReadme, /^- \*\*Open-core licensing\*\* — (.+)$/m, "README open-core bullet");
+    expect(openCore).toContain("Pro tier for multi-fleet");
+    expect(openCore).toContain("`max_fleets` 1");
+    expect(openCore).not.toMatch(/Pro tier for[^.]*(advanced polic|analytics)/i);
+    expect(openCore).toMatch(/Advanced policies and an analytics dashboard are planned, not available today/);
+
+    const pricing = rootReadme.slice(rootReadme.indexOf("## Pricing"), rootReadme.indexOf("## Development"));
+    expect(pricing).toMatch(/^\| \*\*Multi-fleet \/ multi-tenant\*\* \| — \| Yes \|$/m);
+    expect(pricing).toMatch(/^\| \*\*Advanced policies\*\* \| — \| Planned \|$/m);
+    expect(pricing).toMatch(/^\| \*\*Analytics dashboard\*\* \| — \| Planned \|$/m);
+    expect(pricing).toMatch(/^\| Policy engine \| Basic \(deny\/allow\) \| Basic \(deny\/allow\) \|$/m);
+    expect(pricing).toContain("The fleet limit is the only thing the licence tier gates");
+
+    const performance = read("docs/performance.md");
+    expect(performance).not.toMatch(/PostgreSQL \(Pro/);
+    expect(performance).toContain("PostgreSQL support is planned, not available in any tier");
+    expect(read("packages/relay/src/db.ts")).toContain('from "better-sqlite3"');
+
+    for (const [name, text] of [["README.md", rootReadme], ["docs/performance.md", performance]] as const) {
+      expect(text, name).not.toMatch(/Pro tier for[^.\n]*(postgres|advanced polic|analytics)/i);
+    }
+  });
+
+  it("the README's fleet-creation path, default fleet name and tier-gate scope match the relay source", () => {
+    const relaySrc = path.join(root, "packages/relay/src");
+    const production = fs
+      .readdirSync(relaySrc, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"))
+      .map((entry) => {
+        const full = path.join(entry.parentPath, entry.name);
+        return { file: path.relative(relaySrc, full).split(path.sep).join("/"), text: fs.readFileSync(full, "utf8") };
+      });
+    const filesMatching = (pattern: RegExp) => production.filter(({ text }) => pattern.test(text)).map(({ file }) => file);
+    const setup = read("packages/relay/src/setup.ts");
+
+    // The README names one fleet-creation path and the fleet it creates.
+    const pricing = rootReadme.slice(rootReadme.indexOf("## Pricing"), rootReadme.indexOf("## Development"));
+    const readmeFleet = capture(pricing, /only fleet-creation path is `npm run setup`, which creates the `([^`]+)` fleet/, "README fleet-creation sentence");
+
+    // npm run setup runs setup.ts, which creates exactly that fleet through createBootstrap.
+    expect(JSON.parse(read("packages/relay/package.json")).scripts.setup).toMatch(/\bsrc\/setup\.ts$/);
+    const createdFleet = capture(setup, /\bdb\.createBootstrap\(\s*"([^"]+)"\s*,/, "setup.ts createBootstrap fleet name");
+    expect(createdFleet).toBe("default");
+    expect(readmeFleet).toBe(createdFleet);
+    expect(setup).toContain(`db.findFleetByName("${createdFleet}")`);
+
+    // createBootstrap is the only production fleet insert, and setup.ts its only caller.
+    const fleetInserts = production.flatMap(({ file, text }) => (text.match(/INSERT INTO fleets\b/g) ?? []).map(() => file));
+    expect(fleetInserts).toEqual(["db.ts"]);
+    expect(read("packages/relay/src/db.ts")).toMatch(/createBootstrap\(fleetName: string[^)]*\) \{[^}]*INSERT INTO fleets\b/);
+    expect(filesMatching(/\bcreateBootstrap\(/).sort()).toEqual(["db.ts", "setup.ts"]);
+    expect(setup.match(/\bcreateBootstrap\(/g)).toHaveLength(1);
+
+    // The fleet limit is the only tier gate: the one OSS check in assertFleetCreationAllowed,
+    // called only from setup.ts. setup.ts's other tier comparison is the doctor's License line.
+    const gate = capture(read("packages/relay/src/license.ts"), /export function assertFleetCreationAllowed\([^)]*\) \{([\s\S]*?)\n\}/, "assertFleetCreationAllowed");
+    expect(gate).toMatch(/currentFleetCount >= loadedLicense\.max_fleets && loadedLicense\.tier === "oss"/);
+    const tierComparisons = production.flatMap(({ file, text }) => (text.match(/\.tier\s*[!=]==?\s*"[^"]+"/g) ?? []).map((m) => `${file}: ${m.replace(/\s+/g, " ")}`));
+    expect(tierComparisons.sort()).toEqual(['license.ts: .tier === "oss"', 'setup.ts: .tier === "pro"']);
+    const doctorBody = capture(setup, /async function runDoctor\(\) \{([\s\S]*?)\n\}/, "runDoctor");
+    expect(doctorBody).toMatch(/if \(license\.tier === "pro"\) \{\s*pass\("License"/);
+    expect(filesMatching(/\bassertFleetCreationAllowed\(/).sort()).toEqual(["license.ts", "setup.ts"]);
+    expect(filesMatching(/\.features\b/)).toEqual(["license.ts"]);
+    expect(filesMatching(/\bmax_fleets\b/)).toEqual(["license.ts"]);
+  });
+
+  it("openapi.yaml info.license is MIT, matching LICENSE", () => {
+    expect(read("LICENSE").split("\n")[0].trim()).toBe("MIT License");
+    const spec = read("openapi.yaml");
+    const license = capture(spec, /^info:\n(?:[ \t].+\n)*?([ \t]+license:\n(?:[ \t]{4,}.+\n)+)/m, "OpenAPI info.license");
+    expect(license).toMatch(/^\s+name: MIT$/m);
+    expect(license).toMatch(/url: https:\/\/opensource\.org\/licenses\/MIT$/m);
+    expect(spec).not.toMatch(/Proprietary/);
+  });
+});
