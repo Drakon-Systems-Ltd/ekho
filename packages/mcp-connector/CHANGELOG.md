@@ -4,6 +4,10 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-20
+
+Patch on 0.7.3, in lockstep with the rest of the workspace. No connector changes. Still not published to npm; install from a checkout as the package README describes.
+
 ## [0.7.3] - 2026-10-16
 
 Patch on 0.7.2, in lockstep with the rest of the workspace. No connector changes. Still not published to npm; install from a checkout as the package README describes.
