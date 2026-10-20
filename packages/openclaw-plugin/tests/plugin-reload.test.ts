@@ -294,6 +294,59 @@ describe("plugin reload in one process", () => {
     expect((await hostC.inbox()).count).toBe(0);
   });
 
+  it("downgrades stale tool authority in both reload directions, including revoked pins and failed polls (#146)", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(false);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    a.conn.getEkhoIdentity()!.pinnedOperatorKeys.old = "old-public-key";
+    const cacheA = await import("../src/autoreply");
+    const contextA = a.conn.connectedInboxContext(await a.conn.ensureConnected(defaultConfig() as never));
+    const oldMessages = [
+      { message_id: "passed", conversation_id: "c", sender_agent_id: "op", sender_kind: "operator" as const, message_type: "direct", body: { text: "signed" } },
+      { message_id: "attested", conversation_id: "c", sender_agent_id: "op", sender_kind: "operator" as const, message_type: "direct", body: { text: "unsigned" } },
+      { message_id: "failed", conversation_id: "c", sender_agent_id: "op", sender_kind: "operator" as const, message_type: "direct", body: { text: "bad signature" } }
+    ];
+    cacheA.recordBatch({ messages: oldMessages, operator_trusted: true }, {}, "agent_reload", contextA);
+    cacheA.recordVerifications({
+      passed: { verified: true, kind: "operator", reason: null, keyId: "old" },
+      failed: { verified: false, kind: "operator", reason: "invalid-signature", keyId: "old" }
+    }, [], oldMessages, "agent_reload", contextA);
+    expect((await hostA.inbox()).messages.map((m: any) => m.trust)).toEqual([
+      "verified-operator", "attested-operator", "rejected-signature"
+    ]);
+
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(false);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    b.conn.getEkhoIdentity()!.pinnedOperatorKeys.old = "old-public-key";
+    b.conn.getEkhoIdentity()!.revokedOperatorKeys = { old: new Date().toISOString() };
+    const beforePoll = await hostB.inbox();
+    expect(beforePoll).toMatchObject({ verification_generation: "stale", degraded: true, operator_trusted: false });
+    expect(beforePoll.messages.map((m: any) => [m.trust, m.signature.status])).toEqual([
+      ["unverified-operator", "unchecked"], ["unverified-operator", "unchecked"], ["rejected-signature", "failed"]
+    ]);
+    relay.inbox = async () => { throw new Error("relay unavailable"); };
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(relay.polls).toContain(2);
+    expect((await hostB.inbox()).messages.map((m: any) => m.trust)).toEqual([
+      "unverified-operator", "unverified-operator", "rejected-signature"
+    ]);
+    // A reader's downgrade must leave the producer's cache intact.
+    expect((await hostA.inbox()).messages[0].trust).toBe("verified-operator");
+
+    const cacheB = await import("../src/autoreply");
+    const contextB = b.conn.connectedInboxContext(await b.conn.ensureConnected(defaultConfig() as never));
+    const successor = { message_id: "successor", conversation_id: "c", sender_agent_id: "op", sender_kind: "operator" as const, message_type: "direct", body: { text: "new snapshot" } };
+    cacheB.recordBatch({ messages: [successor], operator_trusted: true }, {}, "agent_reload", contextB);
+    cacheB.recordVerifications({ successor: { verified: true, kind: "operator", reason: null, keyId: "new" } }, [], [successor], "agent_reload", contextB);
+    expect((await hostB.inbox()).messages[0]).toMatchObject({ body: { text: "new snapshot" }, trust: "verified-operator" });
+    const retained = await hostA.inbox();
+    expect(retained).toMatchObject({ count: 1, verification_generation: "stale", degraded: true, operator_trusted: false });
+    expect(retained.messages[0]).toMatchObject({ body: { text: "new snapshot" }, trust: "unverified-operator", signature: { status: "unchecked" } });
+  });
+
   it("registered inbox reports the new producer's latch after a quiet poll", async () => {
     const a = await loadPluginCopy();
     const hostA = fakeApi(false);
@@ -337,7 +390,7 @@ describe("plugin reload in one process", () => {
     const newer = await hostB.inbox();
     const retained = await hostA.inbox();
     expect(newer).toMatchObject({ count: 1, verification_generation: "current", degraded: false, operator_trusted: true });
-    expect(retained).toMatchObject({ count: 1, verification_generation: "stale", degraded: true, operator_trusted: true });
+    expect(retained).toMatchObject({ count: 1, verification_generation: "stale", degraded: true, operator_trusted: false });
     expect(retained.messages[0].body).toEqual({ text: "evidence" });
     expect(retained.messages[0].signature.status).not.toBe("verified");
     expect(retained.roster).toHaveLength(1);
