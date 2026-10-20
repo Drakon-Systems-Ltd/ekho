@@ -4,6 +4,13 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-20
+
+Patch on 0.7.3: one OpenClaw plugin fix and documentation corrections. Shipped code changes are limited to `getCachedInbox` in `packages/openclaw-plugin/src/autoreply.ts`; the relay server, console, SDK, MCP connector, ShieldCortex bridge, Hermes plugin and Python SDK have no code changes apart from version numbers moving in step across the workspace. `openapi.yaml` changes only its `info.license` metadata and version. Nothing is breaking; `v0.6.0` upgrade notes still apply.
+
+### Fixed
+- **OpenClaw plugin: inbox reads no longer carry verified signatures or operator attestation across a trust-pin change (#146, PR #148).** When the cached inbox snapshot was recorded under a different verification generation (the agent's pinned or revoked operator keys changed since), `getCachedInbox` now drops passing verdicts on its entries and reports `operator_trusted: false`, so a reader cannot show an old "verified" result after the key it was verified against was revoked. Failed verdicts are unchanged.
+
 ### Changed
 - **Docs: Pro is described as it is today, and the OpenAPI licence is MIT (#130, slice A5).** The README's open-core bullet and Pricing table now say the licence tier gates one thing in the code, the fleet limit: the OSS licence allows one fleet (`max_fleets` 1 in `packages/relay/src/license.ts`) and `npm run setup` refuses to create a fleet beyond it. Advanced policies and an analytics dashboard are marked planned, and the Pricing table notes that `npm run setup`, which creates the `default` fleet, is the relay's only fleet-creation path. `docs/performance.md` no longer offers PostgreSQL as a Pro feature; it says SQLite is the only database and PostgreSQL support is planned. `openapi.yaml` `info.license` changes from `Proprietary` to `MIT` (with the opensource.org URL), matching `LICENSE`. `docs-first-deploy.test.ts` checks each of these against the source. No prices, plan names or code change.
 

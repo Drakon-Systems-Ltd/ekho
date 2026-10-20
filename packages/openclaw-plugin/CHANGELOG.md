@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-20
+
 ### Fixed
 - Inbox reads across a change to pinned or revoked operator keys no longer show old verified signatures or operator attestation (#146).
 
