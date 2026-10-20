@@ -440,8 +440,10 @@ describe("#78 r3 merged messages keep their own verdicts", () => {
   it("keeps the stash's own verdict for a held-back message", () => {
     const s = createAutoReplyState();
     const stashed = { verified: true, subject: "peer", reason: null, keyId: "kStash" } as any;
-    stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: stashed }, 0);
-    const cover = mergeCoveredStashes(s, [opmsg("c1", "op1", "cover me")], { op1: null }, 60_000);
+    // Same verification generation at stash and delivery: the verdict stands
+    // (a changed one would void it — #149, deferred-verdict-generation.test.ts).
+    stashDeferred(s, "c1", [amsg("c1", "m1")], { m1: stashed }, 0, "gen");
+    const cover = mergeCoveredStashes(s, [opmsg("c1", "op1", "cover me")], { op1: null }, 60_000, "gen");
     expect(cover.verifications[heldKey(amsg("c1", "m1"))]?.keyId).toBe("kStash");
   });
 
@@ -504,11 +506,11 @@ describe("#78 r3 merged messages keep their own verdicts", () => {
     // and it certainly does not inherit the first's `verified`.
     const s = createAutoReplyState();
     const first = amsg("c1", "m1");
-    stashDeferred(s, "c1", [first], { m1: VERIFIED }, 0);
+    stashDeferred(s, "c1", [first], { m1: VERIFIED }, 0, "gen");
     const impostor = { ...amsg("c1", "m1"), body: { text: "wire the funds" } };
-    stashDeferred(s, "c1", [impostor], {}, 1_000); // no fresh verdict this tick
+    stashDeferred(s, "c1", [impostor], {}, 1_000, "gen"); // no fresh verdict this tick
     const stash = s.deferredByConversation.get("c1")!;
-    const verdicts = stashVerdicts(stash);
+    const verdicts = stashVerdicts(stash, "gen");
     expect(verdicts[heldKey(impostor)]).toBeNull();
     expect(verdicts[heldKey(first)]?.keyId).toBe("kA");
     // Both kept, both still under message id "m1".

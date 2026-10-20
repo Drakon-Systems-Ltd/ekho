@@ -6,7 +6,7 @@ All notable changes to Ekho are documented here.
 
 ## [0.7.4] - 2026-10-20
 
-No SDK changes. Version kept in step with the relay: the 0.7.4 release carries an OpenClaw plugin inbox-read fix (#146) and documentation corrections (#130). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+No SDK changes. Version kept in step with the relay: the 0.7.4 release carries two OpenClaw plugin fixes, for inbox reads (#146) and held-back message verdicts (#149), and documentation corrections (#130). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
 
 ## [0.7.3] - 2026-10-16
 
