@@ -319,9 +319,15 @@ const INBOX_CACHE_KEY = Symbol.for("ekho-adapter.inbox-cache");
 /** Hash the exact base string concatenated by the SDK. The digest never exposes URL userinfo. */
 export function inboxCacheContext(relayBaseUrl: string, agentId: string, fleetId: string | undefined, identity?: EkhoIdentity): string {
   const connectionIdentity = createHash("sha256").update(JSON.stringify([relayBaseUrl, agentId, fleetId ?? "", identity ? identityPublicKey(identity) : null])).digest("hex");
+  return `${connectionIdentity}.${verificationGeneration(identity)}`;
+}
+/** Digest of everything a verdict's authority rests on: the pinned operator
+ *  keys, the revocation tombstones and the TOFU moment. Any pin sync,
+ *  revocation or TOFU changes it, and a passing verdict computed under one
+ *  value has no authority under another (#146, #149). */
+export function verificationGeneration(identity?: EkhoIdentity | null): string {
   const keys = Object.entries(identity?.pinnedOperatorKeys ?? {}).sort(([a], [b]) => a.localeCompare(b));
-  const verificationGeneration = createHash("sha256").update(JSON.stringify([keys, identity?.revokedOperatorKeys ?? {}, identity?.tofuAt ?? null])).digest("hex");
-  return `${connectionIdentity}.${verificationGeneration}`;
+  return createHash("sha256").update(JSON.stringify([keys, identity?.revokedOperatorKeys ?? {}, identity?.tofuAt ?? null])).digest("hex");
 }
 function contextParts(context: string): [string, string] {
   const dot = context.indexOf(".");
@@ -764,10 +770,15 @@ export interface AutoReplyState {
   progressRefreshesByConversation: Map<string, number[]>;
 }
 
-/** One held-back message together with the verdict computed for THAT object. */
+/** One held-back message together with the verdict computed for THAT object,
+ *  and the verification generation it was computed under (#149). */
 export interface DeferredStashEntry {
   message: InboxMessage;
   verification: VerifyResult | null;
+  /** `verificationGeneration` at the moment `verification` was computed. A
+   *  passing verdict is only honoured while it still matches — see
+   *  `entryVerdict`. Absent (a legacy entry) never matches. */
+  generation?: string;
 }
 
 export interface DeferredStash {
@@ -786,15 +797,32 @@ export interface DeferredStash {
  *  message came to wear a signed replacement's verdict. Read verdicts with
  *  `stashVerdicts`. */
 export function buildStash(entries: DeferredStashEntry[], firstDeferredAtMs: number): DeferredStash {
-  const listed = entries.map((e) => ({ message: e.message, verification: e.verification ?? null }));
+  const listed = entries.map((e) => ({ message: e.message, verification: e.verification ?? null, generation: e.generation }));
   return { entries: listed, messages: listed.map((e) => e.message), firstDeferredAtMs };
 }
 
+/** A stash entry's verdict as it may be rendered under `generation` (#149).
+ *
+ *  A stash outlives the tick that verified it, and a later tick's pin sync can
+ *  revoke or unpin the very key a verdict was checked against. A passing
+ *  verdict from another generation is therefore downgraded to null, so the
+ *  prompt falls back to the relay-attested wording instead of "CRYPTOGRAPHICALLY
+ *  VERIFIED". It is not re-verified: the nonce was burned when it was admitted,
+ *  so the replay guard would reject it anyway. A FAILED verdict stays failed —
+ *  no trust change makes a bad signature good. */
+function entryVerdict(entry: DeferredStashEntry, generation: string | undefined): VerifyResult | null {
+  const v = entry.verification ?? null;
+  if (v?.verified && (entry.generation === undefined || entry.generation !== generation)) return null;
+  return v;
+}
+
 /** A stash's verdicts keyed by `heldKey` — the shape `buildPrompt` reads, and
- *  the only one that stays correct when two entries share an id. */
-export function stashVerdicts(stash: DeferredStash): Record<HeldKey, VerifyResult | null> {
+ *  the only one that stays correct when two entries share an id. Pass the
+ *  CURRENT `verificationGeneration`: a passing verdict from any other one is
+ *  rendered as null (#149). */
+export function stashVerdicts(stash: DeferredStash, generation?: string): Record<HeldKey, VerifyResult | null> {
   const out: Record<HeldKey, VerifyResult | null> = {};
-  for (const e of stash.entries) out[heldKey(e.message)] = e.verification ?? null;
+  for (const e of stash.entries) out[heldKey(e.message)] = entryVerdict(e, generation);
   return out;
 }
 
@@ -850,32 +878,40 @@ export interface DeferredDrop {
  *  messages past `DEFERRED_MESSAGES_PER_CONV` within this conversation
  *  (`deferred_overflow_per_conv`) and whole stashes the FIFO conversation cap
  *  pushed out (`deferred_evicted_cap`). Both used to vanish without a turn, a
- *  log or a record — the per-conversation one silently, in the slice below. */
+ *  log or a record — the per-conversation one silently, in the slice below.
+ *
+ *  `generation` is the `verificationGeneration` `verifications` was computed
+ *  under. It is stamped on every incoming verdict, so delivery can tell a
+ *  verdict a later pin change has invalidated (#149). */
 export function stashDeferred(
   state: AutoReplyState,
   conversationId: string,
   messages: InboxMessage[],
   verifications: Record<string, VerifyResult | null>,
-  nowMs: number
+  nowMs: number,
+  generation?: string
 ): DeferredDrop[] {
   const existing = state.deferredByConversation.get(conversationId);
   const byKey = new Map<HeldKey, DeferredStashEntry>();
   for (const e of existing?.entries ?? []) {
-    byKey.set(heldKey(e.message), { message: e.message, verification: e.verification ?? null });
+    byKey.set(heldKey(e.message), { message: e.message, verification: e.verification ?? null, generation: e.generation });
   }
   for (const m of messages) {
     const key = heldKey(m);
     const prior = byKey.get(key);
     let v = verdictFor(verifications, m);
+    let g = generation;
     if (v === null && prior !== undefined) {
       // The key matched, so the signed material is unchanged BY CONSTRUCTION
       // (heldKey carries its digest) — the stored verdict still describes this
-      // object, exactly as `recordBatch` allows.
+      // object, exactly as `recordBatch` allows. It keeps the generation it was
+      // computed under: carrying it forward must not refresh it (#149).
       v = prior.verification;
+      g = prior.generation;
     }
     // Map.set on an existing key keeps its insertion position, so the newest
     // object lands in the stash's older slot and oldest-first order is kept.
-    byKey.set(key, { message: m, verification: v });
+    byKey.set(key, { message: m, verification: v, generation: g });
   }
   const ordered = Array.from(byKey.values());
   const merged = ordered.slice(-DEFERRED_MESSAGES_PER_CONV);
@@ -1000,12 +1036,17 @@ export interface CoveredStashes {
  *  because the covering turn clears every stash it covers, the skipped one was
  *  then dropped for good. A fresh batch message reusing a held id is simply a
  *  different `heldKey`: it is delivered as itself, with its own verdict and
- *  without the `[HELD BACK]` marker. */
+ *  without the `[HELD BACK]` marker.
+ *
+ *  A held entry's stored verdict is honoured only under the `generation` it
+ *  was computed in: pass the CURRENT `verificationGeneration`, and a passing
+ *  verdict from before a pin sync, revocation or TOFU renders as null (#149). */
 export function mergeCoveredStashes(
   state: AutoReplyState,
   floored: InboxMessage[],
   verifications: Record<string, VerifyResult | null>,
-  nowMs: number
+  nowMs: number,
+  generation?: string
 ): CoveredStashes {
   const covered: Array<{ conv: string; stash: DeferredStash }> = [];
   for (const conv of new Set(floored.map((m) => m.conversation_id))) {
@@ -1043,10 +1084,11 @@ export function mergeCoveredStashes(
         continue;
       }
       // Otherwise nothing in this batch is this message: it keeps the verdict
-      // stored beside it in the stash. A batch message reusing its id is handled
-      // below, as the separate message it is.
+      // stored beside it in the stash — if the trust pins it was checked against
+      // still stand (#149). A batch message reusing its id is handled below, as
+      // the separate message it is.
       ordered.push(m);
-      merged[key] = entry.verification ?? null;
+      merged[key] = entryVerdict(entry, generation);
     }
   }
   const freshSeen = new Set<HeldKey>();
@@ -2307,6 +2349,10 @@ export function startAutoReply(opts: {
         now: new Date()
       });
     }
+    // The generation `verifications` was computed under. Stashed verdicts are
+    // stamped with it, and checked against the generation current at delivery
+    // (#149).
+    const tickGeneration = verificationGeneration(opts.identity);
     const cacheContext = opts.cacheContext?.() ?? "";
     // Pin sync can change verification authority on this tick. Publish only
     // under the resulting context, including when the batch is empty.
@@ -2452,8 +2498,10 @@ export function startAutoReply(opts: {
         api,
         log,
         // heldKey-keyed, so a stash holding two messages under one id labels
-        // each of them correctly (#78 r4).
-        stashVerdicts(stash),
+        // each of them correctly (#78 r4). Judged against the pins as they are
+        // NOW: a pin sync since the stash was filled (this very tick, even)
+        // voids its passing verdicts (#149).
+        stashVerdicts(stash, verificationGeneration(opts.identity)),
         selfAgentId,
         eff.peerTurnBudget,
         // No limit -> no countdown: the prompt only carries a budget line for a cap.
@@ -2576,7 +2624,7 @@ export function startAutoReply(opts: {
     for (const [conv, msgs] of Object.entries(plan.deferred)) {
       // Neither cap drops anything silently (#78): whatever a stash cannot keep
       // was acked, so it leaves a dead-letter record and a WARNING behind it.
-      for (const drop of stashDeferred(state, conv, msgs, batchVerdicts, nowMs)) {
+      for (const drop of stashDeferred(state, conv, msgs, batchVerdicts, nowMs, tickGeneration)) {
         log?.warn?.(
           drop.reason === DEFERRED_OVERFLOW_REASON
             ? `[ekho-autoreply] deferred conversation ${drop.conversationId} overflowed the ` +
@@ -2591,7 +2639,7 @@ export function startAutoReply(opts: {
     }
     // A conversation that gets a turn ABSORBS its stash: the held-back messages
     // are delivered BY this turn rather than cleared unread (#78).
-    const cover = mergeCoveredStashes(state, plan.floored, batchVerdicts, nowMs);
+    const cover = mergeCoveredStashes(state, plan.floored, batchVerdicts, nowMs, verificationGeneration(opts.identity));
     // Every kept message is now in the stash or in `cover`, whose turn is
     // spawned below without another await.
     unhanded = [];
