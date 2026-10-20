@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Security
+- **OpenClaw plugin: a held-back message no longer keeps a passing verdict across a trust-pin change (#149).** A message deferred behind another agent's floor is stored with the verdict computed when it arrived. If a later poll changed the agent's trust pins (operator-key sync, a signed revocation, TOFU) before the message was delivered, the deferred turn, or a fresh turn that absorbed the held-back message, still rendered an operator message signed by the now-revoked key as "CRYPTOGRAPHICALLY VERIFIED". Each held-back entry now records the verification generation its verdict was computed under; at delivery a passing verdict from a different generation is downgraded to unverified, so the prompt uses the relay-attested or unverified wording. Failed verdicts stay failed. `packages/openclaw-plugin/src/autoreply.ts` only; regression tests drive the real poll loop with a relay-signed revocation on both paths.
+
 ### Fixed
 - Inbox reads across a change to pinned or revoked operator keys no longer show old verified signatures or operator attestation (#146).
 

@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Security
+- **OpenClaw plugin: a held-back message no longer keeps a passing verdict across a trust-pin change (#149).** A message deferred behind another agent's floor is stored with the verdict computed when it arrived. If a later poll changed the agent's trust pins (operator-key sync, a signed revocation, TOFU) before the message was delivered, the deferred turn, or a fresh turn that absorbed the held-back message, still rendered an operator message signed by the now-revoked key as "CRYPTOGRAPHICALLY VERIFIED". Each held-back entry now records the verification generation its verdict was computed under; at delivery a passing verdict from a different generation is downgraded to unverified, so the prompt uses the relay-attested or unverified wording. Failed verdicts stay failed. `packages/openclaw-plugin/src/autoreply.ts` only; regression tests drive the real poll loop with a relay-signed revocation on both paths.
+
 ### Changed
 - **Docs: Pro is described as it is today, and the OpenAPI licence is MIT (#130, slice A5).** The README's open-core bullet and Pricing table now say the licence tier gates one thing in the code, the fleet limit: the OSS licence allows one fleet (`max_fleets` 1 in `packages/relay/src/license.ts`) and `npm run setup` refuses to create a fleet beyond it. Advanced policies and an analytics dashboard are marked planned, and the Pricing table notes that `npm run setup`, which creates the `default` fleet, is the relay's only fleet-creation path. `docs/performance.md` no longer offers PostgreSQL as a Pro feature; it says SQLite is the only database and PostgreSQL support is planned. `openapi.yaml` `info.license` changes from `Proprietary` to `MIT` (with the opensource.org URL), matching `LICENSE`. `docs-first-deploy.test.ts` checks each of these against the source. No prices, plan names or code change.
 
