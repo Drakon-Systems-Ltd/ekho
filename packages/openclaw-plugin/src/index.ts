@@ -7,10 +7,12 @@ import {
   activateRuntime,
   connectedInboxContext,
   ensureConnected,
+  listenerUp,
   getEkhoIdentity,
   noteObservedModel,
   noteModelCallEnded,
   seedConfigModelFromOpenClawConfig,
+  rebindAutoReply,
   shutdown,
   type EkhoPluginConfig
 } from "./connection.js";
@@ -20,6 +22,7 @@ import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
 import { inboxMessageView } from "./inbox-trust.js";
 import { buildStatusField, logBuildIdentity } from "./build-info.js";
+
 import {
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_MAX_PER_MESSAGE,
@@ -243,6 +246,16 @@ async function executeEkhoSend(
  * in the operator console without having to call a tool first. All identity
  * (relay URL, fleet, token) comes from per-agent config — nothing is hardcoded.
  */
+// #152: one entry per register() on THIS module copy. A host lifecycle
+// re-apply can register a new plugin instance on the same module copy and only
+// then dispose the old one; the old instance's unload hooks must not stop the
+// runtime the newer registration now owns.
+let registrationEpoch = 0;
+let currentRegistration: { epoch: number; api: Parameters<typeof plugin.register>[0] } | null = null;
+const staleUnloads = new Map<number, Promise<void>>();
+const LISTENER_WARNING =
+  "The heartbeat/listener is not running in this process; roster and messages are a stale cache, and sends may be refused if the relay quarantines the agent.";
+
 const plugin = defineToolPlugin({
   id: "ekho-adapter",
   name: "Ekho Relay Adapter",
@@ -345,6 +358,8 @@ const plugin = defineToolPlugin({
           // error says so — but `build` is local and stays answerable.
           return {
             build,
+            listener: "down" as const,
+            warning: LISTENER_WARNING,
             count: 0,
             messages: [],
             verification_generation: "unavailable",
@@ -353,6 +368,7 @@ const plugin = defineToolPlugin({
           };
         }
         const cached = getCachedInbox(agentId, cacheContext);
+        const listener = listenerUp(agentId) ? "up" : "down";
         // Entries pair each message with ITS OWN verdict. `messages` is a
         // positional mirror (index i matches) used only for attachment resolution.
         const entries = cached.entries;
@@ -378,9 +394,11 @@ const plugin = defineToolPlugin({
           count: messages.length,
           // Which bundle is answering (ekho#33), without needing the journal.
           build,
+          listener,
+          ...(listener === "down" ? { warning: LISTENER_WARNING } : {}),
           roster_fetched_at: cached.recorded_at,
           verification_generation: cached.verification_generation,
-          degraded: cached.verification_generation !== "current",
+          degraded: listener === "down" || cached.verification_generation !== "current",
           // When ON, the relay vouches that the console operator is this agent's
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.
@@ -494,12 +512,18 @@ plugin.register = (api) => {
   // shutdown() is idempotent. A host with neither is covered by the
   // process-wide registry: the next copy stops this one when it connects
   // (runtime-registry.ts).
+  const epoch = ++registrationEpoch;
+  currentRegistration = { epoch, api };
   activateRuntime();
-  wireUnload(api);
+  wireUnload(api, epoch);
 
   const config = api.pluginConfig as EkhoPluginConfig | undefined;
   if (config?.relayBaseUrl) {
-    void ensureConnected(config, api.logger, api).catch((err) => {
+    void ensureConnected(config, api.logger, api).then(async () => {
+      // A connect already in flight can have captured an earlier registration's
+      // api. Bind the completed listener to the newest registration instead.
+      if (currentRegistration?.epoch === epoch) await rebindAutoReply(api, api.logger, config);
+    }).catch((err) => {
       api.logger?.warn?.(`[ekho-adapter] startup connect failed: ${String(err)}`);
     });
   }
@@ -513,10 +537,26 @@ plugin.register = (api) => {
  * gateway_stop handlers via awaitHook (src/plugins/hooks.ts:636, budget :103).
  * The drain is bounded below that (autoreply.ts STOP_DRAIN_MS).
  */
-function wireUnload(api: Parameters<typeof plugin.register>[0]): void {
+function wireUnload(api: Parameters<typeof plugin.register>[0], epoch: number): void {
+  const unload = (reason: string): Promise<void> => {
+    const current = currentRegistration;
+    if (current && current.epoch !== epoch) {
+      const previous = staleUnloads.get(epoch);
+      if (previous) return previous;
+      try {
+        api.logger?.info?.(`[ekho] ignored dispose of registration ${epoch}; registration ${current.epoch} is current`);
+      } catch { /* a host logger must not block the hand-off */ }
+      // The old loop holds the old api. Its stop drains and dead-letters
+      // in-flight work before the replacement starts polling.
+      const drain = rebindAutoReply(current.api, current.api.logger, current.api.pluginConfig as unknown as EkhoPluginConfig);
+      staleUnloads.set(epoch, drain);
+      return drain;
+    }
+    return shutdown(reason, api.logger);
+  };
   const routes: string[] = [];
   try {
-    const off = api.lifecycle?.onDispose?.(() => shutdown("plugin dispose", api.logger));
+    const off = api.lifecycle?.onDispose?.(() => unload("plugin dispose"));
     if (off !== undefined) routes.push("lifecycle.onDispose");
   } catch (err) {
     api.logger?.debug?.(`[ekho-adapter] lifecycle.onDispose unavailable: ${String(err)}`);
@@ -525,7 +565,7 @@ function wireUnload(api: Parameters<typeof plugin.register>[0]): void {
     if (typeof api.on === "function") {
       api.on("gateway_stop", (event: unknown) => {
         const reason = (event as { reason?: unknown } | undefined)?.reason;
-        return shutdown(`gateway_stop: ${typeof reason === "string" && reason ? reason : "unspecified"}`, api.logger);
+        return unload(`gateway_stop: ${typeof reason === "string" && reason ? reason : "unspecified"}`);
       });
       routes.push("gateway_stop");
     }

@@ -237,6 +237,91 @@ afterEach(() => {
 });
 
 describe("plugin reload in one process", () => {
+  it("marks the inbox listener down when connecting fails", async () => {
+    const copy = await loadPluginCopy();
+    const host = fakeApi(false, { relayBaseUrl: "http://relay.invalid", stateDir });
+    copy.plugin.register(host.api);
+    expect(await host.inbox()).toMatchObject({ listener: "down", degraded: true, warning: expect.stringContaining("stale cache"), error: expect.stringContaining("not connected") });
+  });
+
+  for (const route of ["dispose", "gateway_stop"] as const) {
+    it(`keeps one heartbeat and rebinds the poller after stale ${route}`, async () => {
+      const copy = await loadPluginCopy();
+      const oldHost = fakeApi(true);
+      copy.plugin.register(oldHost.api);
+      await untilConnected(copy.conn);
+      const newHost = fakeApi(true);
+      copy.plugin.register(newHost.api);
+      await untilConnected(copy.conn);
+      const unloads = route === "dispose" ? oldHost.dispose() : oldHost.fire("gateway_stop", { reason: "plugin replacement" });
+      await Promise.all(unloads);
+      await Promise.all(oldHost.dispose()); // both unload signals may fire
+      const after = await producersOver(POLL_MS * 2);
+      expect(after.heartbeat).toEqual([1]);
+      expect(after.poll).toEqual([1]);
+      expect(after.beats).toBe(POLL_MS * 2 / HEARTBEAT_MS);
+      expect(newHost.log.info.mock.calls.some((c) => String(c[0]).includes("listening for inbound"))).toBe(true);
+      expect(oldHost.log.info.mock.calls.filter((c) => String(c[0]).includes("ignored dispose of registration"))).toHaveLength(1);
+      expect(await newHost.inbox()).toMatchObject({ listener: "up" });
+    });
+  }
+
+  it("starts again when the old registration is disposed before its replacement registers", async () => {
+    const copy = await loadPluginCopy();
+    const oldHost = fakeApi(true);
+    copy.plugin.register(oldHost.api);
+    await untilConnected(copy.conn);
+    await Promise.all(oldHost.dispose());
+    expect(await oldHost.inbox()).toMatchObject({ listener: "down", degraded: true, warning: expect.stringContaining("stale cache") });
+    const newHost = fakeApi(true);
+    copy.plugin.register(newHost.api);
+    await untilConnected(copy.conn);
+    expect(await producersOver(POLL_MS * 2)).toMatchObject({ heartbeat: [1], poll: [1] });
+    expect(await newHost.inbox()).toMatchObject({ listener: "up" });
+  });
+
+  it("binds the live api when a replacement registers during the first connect", async () => {
+    const enrol = stubEnrolment();
+    const copy = await loadPluginCopy();
+    const config = enrolConfig();
+    const oldHost = fakeApi(true, config);
+    copy.plugin.register(oldHost.api);
+    const newHost = fakeApi(true, config);
+    copy.plugin.register(newHost.api);
+    await Promise.all(oldHost.dispose());
+    enrol.release();
+    await copy.conn.ensureConnected(config as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await producersOver(POLL_MS * 2)).heartbeat).toHaveLength(1);
+    expect((await producersOver(POLL_MS)).poll).toHaveLength(1);
+    expect(newHost.log.info.mock.calls.some((c) => String(c[0]).includes("listening for inbound"))).toBe(true);
+  });
+
+  it("reports an orphan once after the grace period, but stays quiet after takeover", async () => {
+    const copy = await loadPluginCopy();
+    copy.conn.setOrphanCheckMs(100);
+    const host = fakeApi(true);
+    copy.plugin.register(host.api);
+    await untilConnected(copy.conn);
+    await Promise.all(host.dispose());
+    await vi.advanceTimersByTimeAsync(100);
+    expect(host.log.error.mock.calls).toHaveLength(1);
+    expect(String(host.log.error.mock.calls[0][0])).toContain("no ekho-adapter generation is heartbeating for agent_reload");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(host.log.error.mock.calls).toHaveLength(1);
+
+    const second = await loadPluginCopy();
+    second.conn.setOrphanCheckMs(100);
+    const host2 = fakeApi(true);
+    second.plugin.register(host2.api);
+    await untilConnected(second.conn);
+    await Promise.all(host2.dispose());
+    const third = await loadPluginCopy();
+    third.plugin.register(fakeApi(true).api);
+    await untilConnected(third.conn);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(host2.log.error).not.toHaveBeenCalled();
+  });
   it("registered inbox isolates transport-distinct base paths", async () => {
     const edge = { ...defaultConfig(), relayBaseUrl: "http://relay.invalid/edge" };
     const a = await loadPluginCopy();

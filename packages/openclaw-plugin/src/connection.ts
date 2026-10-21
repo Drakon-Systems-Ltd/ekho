@@ -23,6 +23,7 @@ import { appendDeadLetters } from "./dead-letter.js";
 import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./state-dir.js";
 import {
   claimAgentRuntime,
+  agentRuntimeGeneration,
   nextRuntimeGeneration,
   putEnrolOperatorKeys,
   releaseAgentRuntime,
@@ -75,6 +76,8 @@ let connection: EkhoConnection | null = null;
 let connecting: Promise<EkhoConnection> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let stopAutoReply: (() => Promise<void>) | null = null;
+let autoReplyApi: PluginApi | null = null;
+let rebindInFlight: Promise<void> | null = null;
 // The last stop's drain (see shutdown), handed to every later shutdown call:
 // the host may fire more than one unload signal and await each.
 let stopDrain: Promise<void> = Promise.resolve();
@@ -92,6 +95,17 @@ const generation = nextRuntimeGeneration();
 let retired = false;
 // The agent this copy holds in the registry, for release on shutdown.
 let claimedAgentId: string | null = null;
+let orphanCheckMs = 60_000;
+
+/** Test seam for the delayed missing-heartbeat alarm. */
+export function setOrphanCheckMs(ms: number): void {
+  orphanCheckMs = ms;
+}
+
+/** Whether any live module copy currently owns this agent's listener. */
+export function listenerUp(agentId: string): boolean {
+  return agentRuntimeGeneration(agentId) !== undefined;
+}
 
 // After the relay refuses an enrolment token (400: spent), how long to wait
 // before looking once more for credentials someone saved meanwhile.
@@ -641,6 +655,24 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
       appendDeadLetters(identityConfigDir, records);
     }
   });
+  autoReplyApi = api;
+}
+
+/** Drain the disposed registration's loop before binding a loop to the live api. */
+export function rebindAutoReply(api: PluginApi, log?: Logger, config?: EkhoPluginConfig): Promise<void> {
+  if (rebindInFlight) return rebindInFlight.then(() => rebindAutoReply(api, log, config));
+  if (stopAutoReply && autoReplyApi === api) return Promise.resolve();
+  const stop = stopAutoReply;
+  stopAutoReply = null;
+  autoReplyApi = null;
+  const drain = stop ? stop() : Promise.resolve();
+  if (stop) stopDrain = drain;
+  const pending = drain.then(() => {
+    if (rebindInFlight === pending) rebindInFlight = null;
+    maybeStartAutoReply(api, log, config);
+  });
+  rebindInFlight = pending;
+  return pending;
 }
 
 /**
@@ -658,6 +690,9 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
  */
 export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
   retired = true;
+  const stoppedAgentId = claimedAgentId;
+  const stoppedAt = new Date().toISOString();
+  const stoppedHeartbeat = Boolean(heartbeatTimer);
   const hadWork = Boolean(heartbeatTimer || stopAutoReply);
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
@@ -666,6 +701,7 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
   if (stopAutoReply) {
     stopDrain = stopAutoReply();
     stopAutoReply = null;
+    autoReplyApi = null;
   }
   if (claimedAgentId) {
     releaseAgentRuntime(claimedAgentId, generation);
@@ -679,6 +715,14 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
     } catch {
       /* swallowed on purpose */
     }
+  }
+  if (stoppedHeartbeat && stoppedAgentId && !reason.startsWith("superseded by generation ")) {
+    const check = setTimeout(() => {
+      if (listenerUp(stoppedAgentId)) return;
+      const message = `[ekho] no ekho-adapter generation is heartbeating for ${stoppedAgentId} since ${stoppedAt} (generation ${generation} stopped: ${reason}); the relay will quarantine this agent after its liveness window. Run \`openclaw plugins reload ekho-adapter\` or restart the gateway.`;
+      try { (log?.error ?? log?.warn)?.(message); } catch { /* logging cannot affect shutdown */ }
+    }, orphanCheckMs);
+    if (typeof check === "object" && "unref" in check) check.unref?.();
   }
   return stopDrain;
 }
