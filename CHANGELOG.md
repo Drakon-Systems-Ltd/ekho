@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw plugin: lifecycle re-apply keeps the agent listening (#152).** Each registration owns its unload hooks, so disposing an older registration on the same module copy leaves the heartbeat running and moves the inbox poller to the live host API. A missing successor now produces a delayed error, and `ekho_inbox` reports when this process has no listener.
+- **Relay: operator Resume lasts for a full heartbeat liveness window (#152).** The liveness sweep uses the newer of the last heartbeat and the latest active operator Resume, without changing the recorded heartbeat time.
+
 ## [0.7.4] - 2026-10-20
 
 Patch on 0.7.3: two OpenClaw plugin fixes and documentation corrections. Shipped code changes are limited to `packages/openclaw-plugin/src/autoreply.ts`: `getCachedInbox` (#146) and the held-back (deferred) message stash (#149); the relay server, console, SDK, MCP connector, ShieldCortex bridge, Hermes plugin and Python SDK have no code changes apart from version numbers moving in step across the workspace. `openapi.yaml` changes only its `info.license` metadata and version. Nothing is breaking; `v0.6.0` upgrade notes still apply.

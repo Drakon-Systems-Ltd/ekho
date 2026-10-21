@@ -70,6 +70,23 @@ describe("auto-quarantine attributes control actions to a real operator", () => 
 // Jarvis polling two quarantine controls weeks after recovering). Restoring an
 // agent must retire the controls that announced the state it left.
 describe("stale quarantine controls are retired on restore", () => {
+  it("gives an operator-resumed agent a full heartbeat window before quarantine returns", async () => {
+    const relay = await createTestRelay();
+    const { agent_id } = await relay.enrollAgent("ResumedBot");
+    const db = relay.db.raw();
+    const oldBeat = new Date(Date.now() - 30_000).toISOString();
+    db.prepare("UPDATE agents SET last_seen_at = ? WHERE id = ?").run(oldBeat, agent_id);
+    relay.db.controlAgent(relay.fleetId, agent_id, relay.operatorId, "resume", {});
+    expect(relay.db.sweepHeartbeatLiveness()).toBe(0);
+    expect(db.prepare("SELECT status, last_seen_at FROM agents WHERE id = ?").get(agent_id)).toMatchObject({ status: "healthy", last_seen_at: oldBeat });
+
+    // Move only the resume's timestamp beyond the test's 3s × 2 window.
+    db.prepare("UPDATE control_actions SET created_at = ? WHERE target_id = ? AND action = 'resume'")
+      .run(new Date(Date.now() - 7_000).toISOString(), agent_id);
+    expect(relay.db.sweepHeartbeatLiveness()).toBe(1);
+    expect(db.prepare("SELECT status FROM agents WHERE id = ?").get(agent_id)).toMatchObject({ status: "quarantined" });
+  });
+
   it("heartbeat-resume expires the agent's standing quarantine controls", async () => {
     const relay = await createTestRelay();
     const { agent_id } = await relay.enrollAgent("SleepyBot");
