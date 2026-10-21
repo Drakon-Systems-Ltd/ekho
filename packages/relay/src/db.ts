@@ -3907,7 +3907,7 @@ export class EkhoDb {
     const agents = this.db.prepare(
       `SELECT a.id, a.fleet_id, a.last_seen_at,
               (SELECT MAX(ca.created_at) FROM control_actions ca
-               WHERE ca.target_kind = 'agent' AND ca.target_id = a.id
+               WHERE ca.fleet_id = a.fleet_id AND ca.target_kind = 'agent' AND ca.target_id = a.id
                  AND ca.action = 'resume' AND ca.issued_by_operator_id IS NOT NULL
                  AND (ca.expires_at IS NULL OR ca.expires_at > ? OR ca.created_at > ?)) AS resumed_at
        FROM agents a WHERE a.status IN ('healthy', 'degraded') AND a.last_seen_at IS NOT NULL`

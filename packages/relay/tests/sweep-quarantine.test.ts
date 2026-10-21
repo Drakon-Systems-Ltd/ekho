@@ -87,6 +87,38 @@ describe("stale quarantine controls are retired on restore", () => {
     expect(db.prepare("SELECT status FROM agents WHERE id = ?").get(agent_id)).toMatchObject({ status: "quarantined" });
   });
 
+  it("only a resume from the agent's own fleet grants the grace window", async () => {
+    const relay = await createTestRelay();
+    const { agent_id } = await relay.enrollAgent("ForeignResumeBot");
+    const db = relay.db.raw();
+    const oldBeat = new Date(Date.now() - 30_000).toISOString();
+    db.prepare("UPDATE agents SET last_seen_at = ? WHERE id = ?").run(oldBeat, agent_id);
+    // A resume row naming this agent id but filed under another fleet must not count.
+    const otherFleet = "flt_other_resume";
+    const created = new Date().toISOString();
+    db.prepare("INSERT INTO fleets (id, name, created_at) VALUES (?, ?, ?)").run(otherFleet, "other-resume-fleet", created);
+    const otherOp = relay.db.ensureSystemOperator(otherFleet);
+    db.prepare(
+      "INSERT INTO control_actions (id, fleet_id, target_kind, target_id, action, payload_json, issued_by_operator_id, created_at) VALUES (?, ?, 'agent', ?, 'resume', '{}', ?, ?)"
+    ).run("ctl_foreign_resume", otherFleet, agent_id, otherOp, created);
+
+    expect(relay.db.sweepHeartbeatLiveness()).toBe(1);
+    expect(db.prepare("SELECT status FROM agents WHERE id = ?").get(agent_id)).toMatchObject({ status: "quarantined" });
+  });
+
+  it("the resume lookup uses the full idx_controls_target prefix", async () => {
+    const relay = await createTestRelay();
+    const db = relay.db.raw();
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN SELECT MAX(ca.created_at) FROM control_actions ca
+       WHERE ca.fleet_id = ? AND ca.target_kind = 'agent' AND ca.target_id = ? AND ca.action = 'resume'`
+    ).all("f", "a") as Array<{ detail: string }>;
+    expect(plan.map((r) => r.detail).join("\n")).toMatch(/idx_controls_target \(fleet_id=\? AND target_kind=\? AND target_id=\?/);
+    // The sweep's SQL must carry the fleet predicate that unlocks that prefix.
+    const src = relay.db.sweepHeartbeatLiveness.toString();
+    expect(src).toContain("ca.fleet_id = a.fleet_id");
+  });
+
   it("heartbeat-resume expires the agent's standing quarantine controls", async () => {
     const relay = await createTestRelay();
     const { agent_id } = await relay.enrollAgent("SleepyBot");
