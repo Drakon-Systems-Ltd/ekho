@@ -17,7 +17,7 @@ Use Ekho when agents live on different machines or runtimes and must keep coordi
 
 Built for [Tailscale](https://tailscale.com) meshes, homelabs, edge nodes, and any private environment where agents need to coordinate securely.
 
-**Current release:** `v0.7.4` — a patch on `v0.7.3`: the OpenClaw plugin's inbox reads no longer show an old "verified" signature or operator attestation after the agent's pinned or revoked operator keys change; those messages read as unverified. The same now holds for a message held back behind another agent's turn and delivered after the key change (#149). The docs now describe Pro as it is today (the licence tier gates the fleet limit) and `openapi.yaml` states the MIT licence. `v0.7.3` made the relay's ShieldCortex bridge fail a scan at once with the real cause when a write to ShieldCortex fails, instead of waiting for the 10-second timeout. `v0.7.0` added the Ekho MCP connector (`@drakon-systems/ekho-mcp`), so the Grok app or any other MCP client can join a fleet as a signed, verifying agent; it installs from this repository (not on npm yet). No SDK, connector or relay code changes in `v0.7.4`; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
+**Current release:** `v0.7.5` — a patch on `v0.7.4`: an OpenClaw agent keeps listening when the host re-applies the Ekho plugin (a lifecycle re-apply no longer lets the old plugin instance stop the heartbeat and inbox poller that the new one owns), and `ekho_inbox` now says when this process has no listener. On the relay, an operator Resume now gives the agent a full heartbeat liveness window before the liveness sweep can quarantine it again. `v0.7.4` stopped OpenClaw inbox reads and held-back messages from showing an old "verified" signature after the agent's operator keys change. `v0.7.0` added the Ekho MCP connector (`@drakon-systems/ekho-mcp`), so the Grok app or any other MCP client can join a fleet as a signed, verifying agent; it installs from this repository (not on npm yet). No SDK or connector code changes in `v0.7.5`; `v0.6.0` upgrade notes (relay first, signed revocation) still apply. See [CHANGELOG.md](CHANGELOG.md).
 
 ## How it works
 
@@ -384,7 +384,7 @@ Python suites: `python3 -m pytest` in [`sdks/python/`](sdks/python/) and [`packa
 
 ## Project Status
 
-Ekho `v0.7.4` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository and keep their own version numbers (in `sdks/python/pyproject.toml` and `packages/hermes-plugin/ekho_hermes/plugin.yaml`), which do not move with the Ekho release number. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
+Ekho `v0.7.5` is released and in active development. The relay ships as a multi-architecture (`linux/amd64`, `linux/arm64`) container image; the Node SDK and OpenClaw plugin publish to npm; the Python SDK and Hermes plugin ship from this repository and keep their own version numbers (in `sdks/python/pyproject.toml` and `packages/hermes-plugin/ekho_hermes/plugin.yaml`), which do not move with the Ekho release number. The full stack is used by a mixed OpenClaw/Hermes fleet in daily operation. See [CHANGELOG.md](CHANGELOG.md) for release and upgrade notes.
 
 ## Brand assets
 

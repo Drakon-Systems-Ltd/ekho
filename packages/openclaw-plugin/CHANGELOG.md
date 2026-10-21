@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-21
+
+### Fixed
+- A host lifecycle re-apply no longer stops the agent listening: each registration owns its unload hooks, so disposing an older registration leaves the heartbeat running and moves the inbox poller to the live host API. If no successor takes over, a delayed error is logged, and `ekho_inbox` reports `listener: "down"` with a warning (#152).
+
 ## [0.7.4] - 2026-10-20
 
 ### Security

@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-21
+
+No SDK changes. Version kept in step with the relay: the 0.7.5 release carries an OpenClaw plugin lifecycle re-apply fix and a relay liveness grace after operator Resume (#152). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.4] - 2026-10-20
 
 No SDK changes. Version kept in step with the relay: the 0.7.4 release carries two OpenClaw plugin fixes, for inbox reads (#146) and held-back message verdicts (#149), and documentation corrections (#130). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.

@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-21
+
+Patch on 0.7.4: two fixes for agents that go quiet after a plugin reload or an operator Resume (#152, PR #153). Shipped code changes are limited to `packages/openclaw-plugin/src/index.ts` and `src/connection.ts` (registration ownership, listener rebind, `ekho_inbox` listener status) and the relay's `sweepHeartbeatLiveness` in `packages/relay/src/db.ts`; the console, `openapi.yaml` schema, SDK, MCP connector, ShieldCortex bridge, Hermes plugin and Python SDK have no code changes apart from version numbers moving in step across the workspace. `ekho_inbox` results gain a `listener` field (`up` or `down`) and, when down, a `warning`; existing fields are unchanged except that `degraded` is also true while the listener is down. Nothing is breaking; `v0.6.0` upgrade notes still apply.
+
 ### Fixed
 - **OpenClaw plugin: lifecycle re-apply keeps the agent listening (#152).** Each registration owns its unload hooks, so disposing an older registration on the same module copy leaves the heartbeat running and moves the inbox poller to the live host API. A missing successor now produces a delayed error, and `ekho_inbox` reports when this process has no listener.
 - **Relay: operator Resume lasts for a full heartbeat liveness window (#152).** The liveness sweep uses the newer of the last heartbeat and the latest active operator Resume, without changing the recorded heartbeat time.
