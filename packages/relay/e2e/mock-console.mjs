@@ -58,7 +58,9 @@ export function startMock(port = 0) {
     }
     let rel = u.pathname.replace(/^\/ui\/?/, "") || "index.html";
     let f = path.join(dist, rel);
-    if (!f.startsWith(dist) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(dist, "index.html");
+    const relToDist = path.relative(dist, f);
+    const inside = relToDist && !relToDist.startsWith("..") && !path.isAbsolute(relToDist);
+    if (!inside || !fs.existsSync(f) || fs.statSync(f).isDirectory()) f = path.join(dist, "index.html");
     res.setHeader("content-type", mime[path.extname(f)] || "application/octet-stream");
     res.end(fs.readFileSync(f));
   });

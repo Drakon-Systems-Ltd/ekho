@@ -687,13 +687,14 @@ code,.code-block{font-family:ui-monospace,Menlo,monospace}
   .fleet-pill{display:none}
   /* Seven 38px buttons + brand + fleet id measured ~444px, wider than a phone:
      the topbar was clipped and the page could be panned sideways. Compact it so
-     it always fits 360px (the Command Deck is a desktop surface; reachable at /ui/#deck). */
-  .topbar{padding:8px 12px;gap:8px}
-  .brand small,.tb-deck{display:none}
-  .tb-right{gap:4px;min-width:0}
-  .tbbtn{width:36px;height:36px}
+     it always fits 360px with every control (Command Deck included) still reachable. */
+  .topbar{padding:8px 10px;gap:6px}
+  .brand small{display:none}
+  .tb-right{gap:3px;min-width:0}
+  .tbbtn{width:34px;height:34px;border-radius:10px}
   /* Long ids/hashes/urls/code must wrap or scroll inside their bubble, never widen the page. */
-  .bubble,.btext,.feeditem,.irow,.apr{max-width:100%;overflow-wrap:anywhere}
+  .btext,.feeditem,.irow,.apr{max-width:100%;overflow-wrap:anywhere}
+  .bubble{overflow-wrap:anywhere}
   .bubble pre,.btext pre,.btext table{max-width:100%;overflow-x:auto}
   .ops{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}
   .ops-nav{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:8px}
@@ -705,7 +706,8 @@ code,.code-block{font-family:ui-monospace,Menlo,monospace}
 }
 
 /* iOS Safari zooms the whole page when a focused field is < 16px and never
-   zooms back out. Keep every text control at 16px on touch / phone widths. */
-@media (max-width:760px),(pointer:coarse){
+   zooms back out. Keep text controls at 16px on phones and touch tablets only
+   (no input in the console is larger than 16px, so this never shrinks one). */
+@media (max-width:760px),(pointer:coarse) and (max-width:1024px){
   input:not([type=checkbox]):not([type=radio]):not([type=range]),textarea,select{font-size:16px !important}
 }

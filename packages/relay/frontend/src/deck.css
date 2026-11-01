@@ -35,6 +35,10 @@
 .cmd-deck .nanofield i.c { background: var(--crim); box-shadow: 0 0 6px var(--crim); }
 
 .cmd-deck .deck { position: relative; z-index: 2; height: 100vh; height: 100dvh; display: grid; grid-template-rows: 62px 1fr 40px; }
+/* The grid's implicit auto column sized itself to the widest content (the ~1700px
+   footer ticker), pushing the topbar status and EXIT off-screen below ~1730px. */
+.cmd-deck .deck { grid-template-columns: minmax(0, 1fr); }
+.cmd-deck .deck > * { min-width: 0; }
 
 /* top bar */
 .cmd-deck .topbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 22px; border-bottom: 1px solid var(--hair); background: linear-gradient(180deg, rgba(255,40,40,0.06), transparent); }
@@ -158,20 +162,21 @@
 }
 
 @media (max-width: 760px) {
-  /* The deck grid had an implicit auto column sized to its widest content
-     (a ~1700px marquee/ticker), stretching every row past the phone width. */
-  .cmd-deck .deck { grid-template-columns: minmax(0, 1fr); }
-  .cmd-deck .deck > * { min-width: 0; }
-  /* The 3-column topbar (brand | modes | status) measured ~1726px; stack it into
-     a brand + horizontally scrollable mode strip that fits the phone width. */
-  .cmd-deck .topbar { grid-template-columns: auto minmax(0, 1fr); padding: 0 10px; gap: 10px; }
-  .cmd-deck .topbar > :nth-child(n+3) { display: none; }
+  .cmd-deck .deck { grid-template-rows: auto 1fr 40px; }
+  /* The 3-column topbar (brand | modes | status) measured ~1726px. On phones:
+     row 1 = brand + alerts + exit, row 2 = full-width scrollable mode strip.
+     Only the fleet pill and clock are dropped; alert count and EXIT stay. */
+  .cmd-deck .topbar { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; padding: 6px 10px; gap: 6px 10px; }
+  .cmd-deck .topbar > .modes { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; }
+  .cmd-deck .topbar > .status { grid-column: 2; grid-row: 1; min-width: 0; gap: 6px; }
+  .cmd-deck .status .pill--fleet, .cmd-deck .status .clock { display: none; }
+  .cmd-deck .status .pill { padding: 5px 8px; letter-spacing: 0.1em; }
   .cmd-deck .brand__sub { display: none; }
   .cmd-deck .brand__name { font-size: 15px; letter-spacing: 0.2em; }
-  .cmd-deck .modes { min-width: 0; overflow-x: auto; justify-self: end; max-width: 100%; }
+  .cmd-deck .modes { min-width: 0; overflow-x: auto; max-width: 100%; }
   .cmd-deck .mode { padding: 7px 10px; letter-spacing: 0.12em; white-space: nowrap; }
 }
-@media (max-width: 760px), (pointer: coarse) {
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1024px) {
   .cmd-deck input:not([type=checkbox]):not([type=radio]), .cmd-deck textarea, .cmd-deck select { font-size: 16px !important; }
 }
 
