@@ -2,9 +2,13 @@
 
 - **Issue:** Drakon-Systems-Ltd/ekho#155
 - **Date:** 2026-11-01. **Base:** `origin/main` 0a2ebe8 (v0.7.5)
-- **Revision:** round 2, folding review round 1. It covers covering-turn
+- **Revision:** round 3, folding review round 2. Round 2 covered covering-turn
   absorption (§4.3), mixed-version lane conflicts (§4.2), attempt-aware turn
-  records (§2.4) and the honest "turn sent output" wording (§3.3).
+  records (§2.4) and the honest "turn sent output" wording (§3.3). Round 3 adds
+  a rollback that keeps live pair leases (§4.2 (e)), merging of slices that
+  collapse onto one floor key (§4.2 adapters), the Python inbox model in
+  Phase 6a, a validated floor holder in phase reports (§2.2), the reason for
+  the attempt cap (§2.4), and a plainer I7 (§4.1).
 - **This pass:** a design doc plus deterministic characterisation tests. It
   changes **no product behaviour**: nothing under `packages/*/src` or
   `packages/hermes-plugin/ekho_hermes`, no version bump, no CHANGELOG entry.
@@ -47,7 +51,7 @@ a conversation-wide lease and a pair lane on the same conversation exclude each
 other, so old and new adapters sharing one relay still take turns (§4.2). Every
 peer turn still takes a floor. A covering turn absorbs only the stashes whose
 exact floor it holds (§4.3). No signed field changes. A new adapter on an old
-relay degrades to today's behaviour. Instrumentation (§2) and honest console
+relay degrades to today's floor scope (§4.1 I7). Instrumentation (§2) and honest console
 states (§3) ship first, so the improvement can be measured (§5).
 
 ---
@@ -244,15 +248,26 @@ the relay or on an adapter, after signing.**
 | `first_reply_at`, `first_reply_turn_id` (new) | `message_deliveries` | `createMessage` or a later `turn_started` report (§2.4) | relay time of the earliest send by the recipient from **any** turn attempt that covered this delivery, and which attempt it was. Labelled "turn sent output" (§2.1) |
 
 **Adapter-reported** through a new `POST /v1/delivery-phases`. Body:
-`{ phases: [{ message_id, phase, at, turn_id?, attempt?, outcome?, category? }] }`.
+`{ phases: [{ message_id, phase, at, turn_id?, attempt?, outcome?, category?, holder_agent_id? }] }`.
 `turn_id` and `attempt` are required for `turn_started` and `turn_ended`.
+`holder_agent_id` is required for `floor_wait` and rejected on every other
+phase. The adapter copies it from the refusal's `holder_agent_id`
+(`routes-agent.ts:344`). It is validated like `message_id` (§2.5), and the
+relay stores it only if it names an agent in the caller's own fleet. Any other
+value is stored as null and counted on the agent, and the response is the same
+either way. The console labels it adapter-reported.
+Relay-side derivation was considered and rejected. The phase record does not
+carry the lane, and the report lands at least one tick after the refusal (§2.5
+flushes once per tick, later if the ring is backed up). By then the holder may
+have released, or another agent may hold the floor. A holder read from the
+floor table at report time would be wrong in exactly the cases worth showing.
 At most 100 entries, strict zod, and each update touches **only the caller's own
 delivery row** (`WHERE message_id = ? AND recipient_agent_id = <auth agent>`,
 the same scoping as `ackMessages`, `db.ts:2521-2527`):
 
 | `phase` | What it writes | Emitted where |
 |---|---|---|
-| `floor_wait` | delivery `floor_wait_started_at`, `floor_holder_agent_id` (first write wins) | when `plan_floor_turn` defers (`autoreply.py:1840-1847`; `autoreply.ts:1934-1936`) |
+| `floor_wait` | delivery `floor_wait_started_at`, `floor_holder_agent_id` from the validated `holder_agent_id` (first write wins) | when `plan_floor_turn` defers (`autoreply.py:1840-1847`; `autoreply.ts:1934-1936`) |
 | `floor_granted` | delivery `floor_granted_at` (first write wins) | deferred retry granted (`autoreply.py:2113-2116`), or first-try grant |
 | `floor_overrun` | delivery `floor_overrun_at` (first write wins) | late, floorless delivery (`autoreply.py:2181-2260`) |
 | `turn_started` | an **attempt row** `(delivery, turn_id)`: `attempt`, `started_at`; then the delivery summary under §2.4 rule R1 | just before each spawn attempt (`autoreply.py:2431`; `autoreply.ts:2663`) for every message that attempt covers, held-back ones included |
@@ -320,8 +335,20 @@ canonicals (§1.6), so no signed field changes.
 **Relay storage.**
 - `delivery_turn_attempts`, keyed `(message_id, recipient_agent_id, turn_id)`:
   `attempt`, `started_at`, `ended_at`, `outcome`, `category`,
-  `phase_recorded_at`. At most 8 rows per delivery. A ninth is refused and
-  counted on the agent. Retries are already bounded by `DEFERRED_RETRY_TTL`.
+  `phase_recorded_at`. At most 8 rows per delivery. The cap bounds storage,
+  not retries, and `DEFERRED_RETRY_TTL` does not justify it: at defaults
+  that TTL allows about 216 ticks. The adapter spawns at most one turn per
+  tick (one loop thread, blocked in the spawn, §1.1), so a retained stash
+  gains at most one attempt per 5 s poll. Eight rows hold the first attempt
+  plus seven per-tick retries, about 35 s. That covers a transient spawn
+  failure and its recovery, which is the case R4 exists for. A failure that
+  lasts longer already shows in `turn_health` / `model_errors_1h`. The
+  adapter keeps retrying exactly as today. Only the record stops. A ninth
+  report is refused, counted on the agent, and sets the delivery's
+  `attempts_capped` flag. The console then shows the latest attempt as
+  "unknown", not as attempt 8's outcome. A reply from an unrecorded attempt
+  has no attempt row to join (R2), so `first_reply_at` stays null, which
+  also shows as "unknown", never "no output".
 - `agent_turn_replies`, keyed `(fleet_id, agent_id, turn_id)`: `first_reply_at`
   (relay clock). `createMessage` inserts it on the first message whose sender is
   `agent_id` and whose `metadata.turn_id` is `turn_id`, and never updates it.
@@ -329,8 +356,8 @@ canonicals (§1.6), so no signed field changes.
   heartbeats (`db.ts:4078-4157`).
 - Delivery summary columns, which the console reads: `turn_attempts`,
   `latest_attempt`, `latest_turn_id`, `latest_turn_started_at`,
-  `latest_turn_outcome`, `latest_turn_category`, `first_reply_at`,
-  `first_reply_turn_id`, plus `adapter_dead_lettered_at` /
+  `latest_turn_outcome`, `latest_turn_category`, `attempts_capped`,
+  `first_reply_at`, `first_reply_turn_id`, plus `adapter_dead_lettered_at` /
   `adapter_dead_letter_reason`.
 
 **Reconciliation rules.** Every rule is idempotent and gives the same result
@@ -388,8 +415,8 @@ output".
 - **Adapter memory.** Unsent phase reports go into a FIFO ring capped at 200,
   flushed once per tick. On overflow the oldest are dropped and a counter goes on
   the heartbeat. Phase reporting never blocks or reorders ack → turn.
-- **Validation.** `message_id` and `turn_id` must be ≤ 64 characters of
-  `[A-Za-z0-9_.:-]`. `attempt` is an integer from 1 to 8. `phase`, `outcome`
+- **Validation.** `message_id`, `turn_id` and `holder_agent_id` must be ≤ 64
+  characters of `[A-Za-z0-9_.:-]`. `attempt` is an integer from 1 to 8. `phase`, `outcome`
   and `category` come from closed enums.
   Unknown keys are rejected. No free text is accepted anywhere.
 
@@ -445,7 +472,9 @@ out of scope (§8).
   1 queued behind" or "waiting on floor (held by Jarvis) 40s".
 - **Delivery ticks become honest.** "Acknowledged" → **"Received by N"**, and
   "read by N" → "received by N" (`App.jsx:783-784`;
-  `WireApp.jsx:268-271`; `CommandDeck.jsx:115`). A separate **"Turn sent output
+  `WireApp.jsx:268-271`; `CommandDeck.jsx:115`), and the `message.acked`
+  event label "Message acknowledged" → "Message received"
+  (`consoleState.js:183`). A separate **"Turn sent output
   (N)"** appears only from `first_reply_at`. It says only that the turn covering
   the delivery sent something, which may be a delegation to another teammate.
   The console never says "Answered" unless open question 5 (§9) decides
@@ -491,10 +520,19 @@ out of scope (§8).
 - **I5 Delivery and dead-letter guarantees.** Relay retry, dead-letter and expiry
   sweeps are unchanged. Adapter stash caps and `DEFERRED_*` reasons are unchanged.
 - **I6 Floors are never globally disabled.**
-- **I7 Version skew degrades to today.** A new adapter on an old relay, or an
-  old adapter on a new relay, behaves exactly as v0.7.5. Old and new adapters
-  sharing a new relay never run two turns for the same pair at once, in either
-  acquisition order, including across leases that exist at rollout.
+- **I7 Version skew degrades to today's floor scope, never past it.** A new
+  adapter on an old relay, or an old adapter on a new relay, contends only on
+  the conversation-wide floor, exactly as v0.7.5 does. That is all I7 promises
+  to keep identical. The §4.3 rules are **not** skew-gated. Mixed operator+peer
+  slices and covering turns change even when every lane is `''`, including a
+  new adapter on an old relay: the operator message no longer waits, and a
+  covering turn absorbs only stashes whose exact floor it holds. That change
+  is the safe direction. It closes the v0.7.5 next-tick bypass (§1.3) and
+  never lets a peer message skip a floor. It **must not** be disabled or
+  flagged off to make skew behaviour match v0.7.5 literally. Old and new
+  adapters sharing a new relay never run two turns for the same pair at once,
+  in either acquisition order, including across leases that exist at rollout
+  and across a relay rollback (§4.2 (e)).
 
 ### 4.2 Option A (recommended): audience-scoped floor, a "pair lane" for 1:1 replies
 
@@ -547,8 +585,55 @@ produces a reply to **one** peer (the prompt routes it 1:1: `autoreply.py:1609-1
     table under the new key and copies every existing row as `lane=''`,
     keeping holder, `acquired_at` and `expires_at`. A turn that was mid-flight
     across the relay upgrade therefore still excludes every pair lane on its
-    conversation until it releases or expires. Rolling the relay back requires
-    the down-migration, which keeps only the `lane=''` rows.
+    conversation until it releases or expires.
+
+    **Rollback keeps every live lease.** Restarting the relay does not stop
+    adapter children, so a pair-lane holder may still be mid-turn when the old
+    relay comes up. Dropping its lease would let another agent take the old
+    conversation-wide floor and start an overlapping turn. So the down step
+    **converts** live pair leases instead of discarding them:
+    - The migration runner is forward-only and applies every `migrations/*.sql`
+      file (`runMigrationsOn`, `db.ts:164-177`). Phase 6b therefore ships the
+      down step outside `migrations/`, as
+      `packages/relay/rollback/026_floor_lanes.down.sql`. It runs in one
+      transaction while the new relay is stopped, before the old binary
+      starts, so no acquire can interleave. It rebuilds the old table (keyed
+      by `conversation_id`) and deletes version 26 from `schema_migrations`.
+    - For each conversation C, it looks only at live leases
+      (`expires_at > now`). Expired rows are dropped, because the old relay
+      treats a missing floor and an expired floor the same way.
+    - **One holder.** All live leases on C belong to one agent H. That can be a
+      `lane=''` lease, a pair lane, or several of H's own. They become one
+      conversation-wide row: holder H, the earliest `acquired_at` and the
+      latest `expires_at`. The old relay sees C held by H. Nobody else takes a
+      peer turn on C until H releases (the old holder-only DELETE,
+      `db.ts:2283-2287`) or the lease expires.
+    - **Several holders.** Live pair lanes on C belong to two or more agents.
+      That is different pairs turning at once, which is the case #155 enables.
+      By (c), no other agent can hold C's `lane=''` lease at the same time.
+      The old key holds one row, and a row naming any one of these holders
+      would be freed when that holder releases while the others are still
+      mid-turn. So the row names the reserved holder `rollback:026`, with the
+      latest of their `expires_at`. No agent id can take that value: agent
+      ids are relay-minted `agent_…` (`db.ts:1215`), and the operator's
+      pseudo-agent is `op_…` (`db.ts:1564-1565`). No agent can release the
+      row, because release is holder-only, and every acquire on C is refused
+      until it expires.
+    - **Cost, stated plainly.** After rollback, any converted holder blocks
+      the **whole conversation**, not just its pair: until H releases, or
+      until the latest pair-lane expiry in the several-holder case. That is at
+      most `floorTtlMaxSeconds` (600 s) after the rollback. Meanwhile, peer
+      turns on C defer and retry as they do today, and run late through the
+      overrun path if they reach `DEFERRED_RETRY_TTL`. Operator-only turns are
+      unaffected. This is the safe direction: a bounded over-serialisation,
+      never overlapping turns.
+    - Waiter rows ((g)) are dropped. The old relay has no waiter concept, so
+      the waiter's next retry simply gets the old relay's behaviour.
+    - **Drain-first rollback was considered.** It would stop new pair
+      acquisitions, wait until every pair lease releases or expires (bounded
+      by `floorTtlMaxSeconds`), and only then drop the lane rows. It is just as
+      safe, but the operator has to keep the new relay running in a drain mode
+      for up to 600 s. The conversion needs no wait, so it is the procedure.
   - (f) **Release is lane-scoped.** `DELETE /v1/conversations/:id/floor` takes
     an optional `?lane=`. Without it, it releases only the caller's
     `lane=''` lease, which is exactly what an old adapter means. With it, it
@@ -573,6 +658,13 @@ produces a reply to **one** peer (the prompt routes it 1:1: `autoreply.py:1609-1
   - A peer message is lane-eligible only if `recipient_kind == 'agent'`, its
     conversation is not in `inbox.rooms`, and, when it is signed and verified,
     `sig_canonical.recipient.kind == 'agent'`.
+  - Hermes reads inbox messages through `InboxMessage`
+    (`sdks/python/ekho/types.py:47-106`). Its `from_dict` names every field
+    explicitly, so a key it does not name, such as `recipient_kind`, is
+    dropped. Hermes then sees `getattr(m, "recipient_kind", None)` as `None`,
+    every message fails the predicate, and Hermes never takes a pair lane.
+    Phase 6a therefore adds `recipient_kind: Optional[str] = None` to the
+    model and its parser, next to the TypeScript SDK type.
   - Everything else keeps the conversation floor (I1).
   - **Floors are recorded exactly.** Every grant or refusal is recorded under
     `(conversation, response.lane ?? '')`. `to_release` holds the granted keys,
@@ -589,6 +681,24 @@ produces a reply to **one** peer (the prompt routes it 1:1: `autoreply.py:1609-1
     (stash under `(conversation, '')`), or, only if it raises too, takes
     today's fail-open path. A scoped acquire therefore never yields a
     floorless turn by itself.
+  - **Slices that collapse onto one key are merged, never overwritten.** The
+    planner groups by the *requested* `(conversation, lane)` but records under
+    the *returned* key. A scoped acquire that falls back to unscoped, or a
+    scoped acquire on an old relay that ignores `scope`, returns `(C, '')`.
+    That is the same key as an ordinary conversation-wide slice on C in the
+    same tick. Carrying forward today's assignment (`deferred[conv] = msgs`,
+    `autoreply.py:1842`; `autoreply.ts:1936`) would let the second slice
+    overwrite the first slice's messages inside the planner. The stash merge
+    cannot recover them, because they never reach the stash. So:
+    - the deferred map holds a list per returned key, and a slice is
+      **appended**, deduplicated by `message_id`, in arrival order;
+    - once a key has a decision this tick, a later slice that resolves to it
+      takes that decision. A second grant is just the idempotent re-acquire
+      (§4.2 (c));
+    - `to_release` is a set of held keys, so each held key is released
+      **once**, with its lane;
+    - a refused key is stashed once, with every message from every slice that
+      resolved to it.
   - **Stashes are lane-keyed.** `deferred_by_conversation` /
     `deferredByConversation` key on `(conversation, lane)`. `stash_deferred`,
     `clear_deferred` / `clearDeferred`, `list_retryable_deferred`, the overrun
@@ -724,7 +834,7 @@ as the immediate caller-side mitigation.
 Option A fixes the scheduler where the wrong serialisation happens
 (`plan_floor_turn`). It does not depend on caller behaviour. It keeps a floor
 on every peer turn and pair turn-taking intact. It changes no signed field, and it
-degrades to v0.7.5 under version skew. Option B alone leaves the trap in place
+degrades to v0.7.5's floor scope under version skew (I7). Option B alone leaves the trap in place
 for every caller that reuses an id, and splits the operator's thread.
 `ekho_send` keeps its current fresh-id default and does not override explicit
 ids. The SDK default does not change.
@@ -737,7 +847,7 @@ ids. The SDK default does not change.
 | I4 trust generation | scope reads relay-attested/verified fields only | n/a | n/a |
 | I5 delivery/dead-letter | same stash machinery per lane | unchanged | unchanged |
 | I6 floors never globally off | every peer turn holds a floor | unchanged | unchanged |
-| I7 skew | old relay → conversation floor; old + new adapters on a new relay serialise per pair in both orders (§4.2 (d), (e)) | n/a | old relay → fixed lease |
+| I7 skew | old relay → conversation floor; old + new adapters on a new relay serialise per pair in both orders, across rollout and rollback (§4.2 (d), (e)). §4.3 still applies under skew, on purpose (I7) | n/a | old relay → fixed lease |
 
 ---
 
@@ -816,7 +926,14 @@ spawns):
 - `deriveInboxState` table tests (every precedence edge, time-injected).
 - `/v1/delivery-phases`: rejects foreign deliveries, closed enums only, first
   write wins per attempt column, 404-tolerant adapter feature detection, and a
-  ninth attempt refused and counted.
+  ninth attempt refused and counted. After a refused ninth attempt,
+  `attempts_capped` is set, the summary stays on attempt 8 but renders
+  "unknown", and a reply stamped with the unrecorded ninth `turn_id` leaves
+  `first_reply_at` null ("unknown", not "no output").
+- `floor_wait` holder: `holder_agent_id` is required on `floor_wait` and
+  rejected on every other phase. A malformed value fails validation. A
+  well-formed id that is not an agent in the caller's fleet is stored as null
+  and counted, with the same response as an accepted one.
 - **Attempt-aware turn records (Phase 1b relay, 3a/3b adapters):**
   - **Failed spawn, then a successful retry.** A covering turn T1 fails to
     spawn. The adapter reports `turn_ended{T1, attempt 1, spawn_failed,
@@ -861,6 +978,22 @@ spawns):
     lease, run the migration, and assert it is now `lane=''` with the same
     holder and expiry, and that it refuses a pair-lane acquire until it
     expires.
+  - **Rollback with an active pair holder.** Seed the new-shape table with A
+    holding a live `pair:A:B` on C, run
+    `rollback/026_floor_lanes.down.sql`, and drive the result with a fixture
+    copy of v0.7.5's acquire and release statements (`db.ts:2240-2287`).
+    Assert: C has one row, holder A, A's expiry. B's and D's acquires on C
+    are refused until A releases or the lease expires. A's release frees it.
+    Version 26 is gone from `schema_migrations`.
+  - **Rollback with several pair holders.** A holds `pair:A:B` and D holds
+    `pair:D:E` on C, with different expiries. After rollback, C's row names
+    `rollback:026` with the later expiry. A's and D's releases are no-ops,
+    every acquire on C is refused until that expiry, and the first acquire
+    after it is granted.
+  - **Rollback edge rows.** Expired lane rows are dropped. A single holder
+    with both a `lane=''` lease and its own pair lane becomes one row with the
+    later expiry. Re-running the forward migration afterwards copies the
+    rolled-back rows as `lane=''` again.
   - Fairness: a refused conversation-wide acquire registers a waiter, new pair
     lanes are refused while it is live, existing holders re-acquire, and the
     waiter is granted once the lanes drain. A waiter that stops retrying
@@ -889,6 +1022,16 @@ spawns):
   stashed under `(C, '')` and no floorless turn runs. If the scoped acquire
   raises and the unscoped retry raises too, today's fail-open path is taken,
   which is the pre-#155 behaviour.
+- **Mixed-slice fallback onto one key (Phase 7a/7b, full ticks).** One tick
+  carries a pair-eligible peer message on C, whose scoped acquire raises and
+  falls back to unscoped, and a room- or broadcast-addressed peer message on
+  C, which takes the conversation-wide floor. Both resolve to `(C, '')`.
+  - Refused: exactly one stash under `(C, '')` holding both messages, in
+    arrival order, with no message lost or duplicated.
+  - Granted: one turn carries both, and exactly one release is sent, with no
+    lane.
+  - The same pair of slices on an old relay, where the scoped acquire returns
+    no `lane`, gives the same results.
 
 ---
 
@@ -912,8 +1055,8 @@ or `sdk/src/crypto*`, or `sdk/src/identity/*`.
 | — | **Baseline window B0** (§5) | — | — |
 | **4** | Console: inbox badge, honest tick labels ("Received", "Turn sent output"), phase strip with attempts | `packages/relay/frontend/src/App.jsx`, `.../consoleState.js`, `.../api.js`, `.../WireApp.jsx`, `.../CommandDeck.jsx` | none |
 | **5** | Caller-side mitigation: prompt sentence only (§4.4) → **B1** | `packages/hermes-plugin/ekho_hermes/autoreply.py`, `packages/openclaw-plugin/src/autoreply.ts`, `packages/hermes-plugin/tests/test_autoreply.py`, `packages/openclaw-plugin/tests/autoreply.test.ts` | none |
-| **6a** | Inbox `recipient_kind` (relay-attested, additive) | `packages/relay/src/db.ts`, `packages/relay/tests/inbox-recipient-kind.test.ts`, `openapi.yaml`, `packages/sdk/src/types.ts` | **db.ts** |
-| **6b** | Pair-lane floors: `scope`, lane key `(fleet_id, conversation_id, lane)`, conflict rules and waiter (§4.2 (c)–(g)), rollout copy of existing leases, lane-scoped DELETE, pair-only tail | `packages/relay/migrations/026_floor_lanes.sql`, `packages/relay/src/db.ts`, `packages/relay/src/routes-agent.ts`, `packages/relay/src/config.ts` (`floorWaiterTtlSeconds`), `packages/relay/tests/floor-lanes.test.ts`, `openapi.yaml` | **db.ts** |
+| **6a** | Inbox `recipient_kind` (relay-attested, additive), in both SDK inbox models. The Python `InboxMessage` drops keys it does not name, so without it Hermes cannot evaluate pair eligibility (§4.2) | `packages/relay/src/db.ts`, `packages/relay/tests/inbox-recipient-kind.test.ts`, `openapi.yaml`, `packages/sdk/src/types.ts`, `sdks/python/ekho/types.py` | **db.ts** |
+| **6b** | Pair-lane floors: `scope`, lane key `(fleet_id, conversation_id, lane)`, conflict rules and waiter (§4.2 (c)–(g)), rollout copy of existing leases, the rollback that converts live leases (§4.2 (e)), lane-scoped DELETE, pair-only tail | `packages/relay/migrations/026_floor_lanes.sql`, `packages/relay/rollback/026_floor_lanes.down.sql`, `packages/relay/src/db.ts`, `packages/relay/src/routes-agent.ts`, `packages/relay/src/config.ts` (`floorWaiterTtlSeconds`), `packages/relay/tests/floor-lanes.test.ts`, `openapi.yaml` | **db.ts** |
 | **7a** | Hermes: lane grouping, lane-keyed stashes, §4.3 operator lift and exact-floor absorption, scoped-acquire fallback | `packages/hermes-plugin/ekho_hermes/autoreply.py`, `sdks/python/ekho/client.py`, `packages/hermes-plugin/tests/test_issue155_reply_latency.py`, `packages/hermes-plugin/tests/test_autoreply.py` | none |
 | **7b** | OpenClaw: the same as 7a | `packages/openclaw-plugin/src/autoreply.ts`, `packages/sdk/src/client.ts`, `packages/openclaw-plugin/tests/reply-latency-characterisation.test.ts`, `packages/openclaw-plugin/tests/deferred-tick.test.ts`, `packages/openclaw-plugin/tests/deferred-overrun.test.ts` | none |
 | — | **After window B2** (§5) | — | — |
@@ -924,8 +1067,8 @@ only. 5, 6 and 7 are the behaviour changes, each measured. 6a/6b can land before
 7a/7b because of I7. Until 7a/7b ship, no adapter sends `scope`, so every lease
 is `lane=''` and the relay behaves as v0.7.5. During the 7a/7b rollout, the
 conflict rules (§4.2 (c)–(e)) keep old and new adapters taking turns per pair.
-6b is six files. The conflict rules, the migration and their tests belong
-together.
+6b is seven files. The conflict rules, the migration, its rollback and their
+tests belong together.
 
 ---
 
