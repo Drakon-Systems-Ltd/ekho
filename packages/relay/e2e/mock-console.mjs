@@ -32,6 +32,32 @@ const events = [
   event(4, "agent", "| col a | col b | col c | col d |\n|---|---|---|---|\n| " + HASH + " | " + HASH + " | x | y |"),
   event(5, "agent", "https://example.com/" + "segment/".repeat(20) + "end"),
 ];
+// Command Deck shapes mirror db.getTopology (getFleetHealth nodes + folded edges) and
+// db.getActivity (parsed `payload`, resolved actor_name). One unit is quarantined so the
+// deck shows a non-zero alert count; names, ids and models are deliberately long.
+const node = (a, o = {}) => ({
+  id: a.id, display_name: a.display_name, runtime: "openclaw", status: "healthy", last_seen_at: iso(1),
+  consecutive_missed_heartbeats: 0, operator_trusted: true, peer_autoreply: true, peer_turn_budget: 4,
+  last_heartbeat_at: iso(1), metrics: { model: "anthropic/claude-opus-5-5-with-a-very-long-model-suffix" }, health: { level: "ok" },
+  active_conversations: [LONG_ID], sent_1h: 12, received_1h: 9, ...o,
+});
+const QUAR_ID = "agent-quarantined-" + "q".repeat(36);
+const topology = {
+  generated_at: iso(0), window_minutes: 60,
+  nodes: [
+    node(agents[0]),
+    node(agents[1], { runtime: "claude-code", operator_trusted: false, peer_autoreply: false, sent_1h: 3, received_1h: 40 }),
+    node({ id: QUAR_ID, display_name: "Quarantined unit with a remarkably long display name" }, { status: "quarantined", sent_1h: 0, received_1h: 1 }),
+  ],
+  edges: [{ source: agents[0].id, target: agents[1].id, count: 7, last_at: iso(2) }],
+};
+const activity = {
+  events: [
+    { id: "ac1", event_type: "message.queued", actor_kind: "agent", actor_id: agents[0].id, actor_name: "Jarvis", resource_kind: "message", resource_id: "m1", resource_name: "m1", conversation_id: LONG_ID, payload: { recipient_kind: "agent", recipient_id: agents[1].id, text: "Here is the hash " + HASH }, created_at: iso(3) },
+    { id: "ac2", event_type: "agent.quarantined", actor_kind: "operator", actor_id: "operator", actor_name: "operator", resource_kind: "agent", resource_id: QUAR_ID, resource_name: QUAR_ID, conversation_id: null, payload: { reason: "suspicious " + HASH } , created_at: iso(5) },
+    { id: "ac3", event_type: "agent.peer_autoreply_changed", actor_kind: "operator", actor_id: agents[0].id, actor_name: "Jarvis", resource_kind: "agent", resource_id: agents[0].id, resource_name: "Jarvis", conversation_id: null, payload: { peer_autoreply: true, peer_turn_budget: 4 }, created_at: iso(8) },
+  ],
+};
 const json = (o) => JSON.stringify(o);
 const api = (p) => {
   if (p.startsWith("/v1/operator/overview")) return { agents, recentConversations: [{ conversation_id: LONG_ID, last_at: iso(1), preview: "Here is the hash " + HASH, title: "", kind: "dm", participants: [agents[0].id], channel_key: "dm-f1-x" }], recentEvents: events, counts: {} };
@@ -45,6 +71,8 @@ const api = (p) => {
   if (p.startsWith("/v1/operator/profile")) return { display_name: "Michael", email: "m@example.com" };
   if (p.startsWith("/v1/operator/keys")) return { keys: [] };
   if (p.startsWith("/v1/operator/agent-keys")) return { agents: [] };
+  if (p.startsWith("/v1/operator/topology")) return topology;
+  if (p.startsWith("/v1/operator/activity")) return activity;
   return {};
 };
 

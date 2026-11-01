@@ -18,6 +18,8 @@ if (shots) fs.mkdirSync(shots, { recursive: true });
 // Phones, a coarse-pointer tablet (input rule must apply, layout must not pan) and a
 // fine-pointer desktop (input rule must NOT apply: desktop typography unchanged).
 const PROFILES = [
+  ["320", { ...devices["iPhone SE"], viewport: { width: 320, height: 568 } }, "phone"],
+  ["844-land", devices["iPhone 14 landscape"], "phone"],
   ["360", { ...devices["Pixel 7"], viewport: { width: 360, height: 780 } }, "phone"],
   ["390", { ...devices["iPhone 14"], viewport: { width: 390, height: 780 } }, "phone"],
   ["414", { ...devices["iPhone 11 Pro Max"], viewport: { width: 414, height: 780 } }, "phone"],
@@ -28,16 +30,34 @@ const PROFILES = [
   ["desktop-1280", { viewport: { width: 1280, height: 800 } }, "desktop"],
 ];
 const ROUTES = [["wire", ""], ["classic", "#classic"], ["deck", "#deck"]];
+const READY = { wire: ".topbar .brand", classic: "header.appbar", deck: ".cmd-deck .unit.unitbtn" };
 // Controls that must exist, be visible and sit wholly inside the viewport. A route that
 // renders an empty shell or an error page fails here instead of passing vacuously.
 const ESSENTIAL = {
   "wire/list": [[".topbar .brand", 1], [".topbar .tbbtn", 7], [".tbbtn.tb-deck", 1]],
-  "wire/chat": [[".topbar .tbbtn", 7], ["textarea", 1]],
-  "classic/list": [["header.appbar", 1]],
+  "wire/chat": [[".topbar .tbbtn", 7], [".rowline textarea", 1], [".rowline .sendbtn", 1]],
+  "classic/list": [["header.appbar", 1], [".appbar__right button", 5]],
+  "classic/chat": [[".appbar__right button", 5], ["textarea.composer__input", 1], ["button.composer__send", 1]],
   "deck/list": [[".cmd-deck .modes .mode", 3], [".cmd-deck .pill--alerts", 1], [".cmd-deck .exit", 1]],
+  "deck/dossier": [[".dossier textarea.hailbox__in", 1], [".dossier .hailbox__send", 1], [".dossier .exit", 1]],
+};
+// Content that must be rendered and visible (anywhere on the page, scrolled or not), so
+// an unpopulated mock cannot make the layout checks pass vacuously.
+const POPULATED = {
+  "deck/list": [[".cmd-deck .unit.unitbtn", 3], [".cmd-deck .blip.blipbtn", 3], [".cmd-deck .feedrow", 3]],
+  "deck/dossier": [[".cmd-deck .unit.unitbtn", 3], [".dossier__name", 1]],
+};
+// Controls whose hit-target must be the control itself at its centre point (not covered
+// by a sibling or an overlay) — i.e. a user can actually tap it.
+const TAPPABLE = {
+  "wire/list": [".topbar .tbbtn"],
+  "wire/chat": [".rowline .sendbtn"],
+  "classic/list": [".appbar__right button"],
+  "classic/chat": [".appbar__right button", "button.composer__send"],
+  "deck/dossier": [".dossier .hailbox__send", "#dk-hail"],
 };
 
-function measure(essential) {
+function measure([essential, populated, tappable]) {
   const vw = window.innerWidth;
   const visible = (el) => el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
   // Content may be clipped only inside a usable horizontal scroller that itself fits the
@@ -59,8 +79,21 @@ function measure(essential) {
     const ok = [...document.querySelectorAll(sel)].filter((e) => { if (!visible(e)) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= vw + 1 && r.top >= -1 && r.bottom <= window.innerHeight + 1; });
     if (ok.length < n) missing.push(`${sel}:${ok.length}/${n}`);
   }
+  for (const [sel, n] of populated) {
+    const c = [...document.querySelectorAll(sel)].filter(visible).length;
+    if (c < n) missing.push(`populated ${sel}:${c}/${n}`);
+  }
+  const blocked = [];
+  for (const sel of tappable) for (const e of document.querySelectorAll(sel)) {
+    if (!visible(e)) continue;
+    const r = e.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const hit = x >= 0 && x < vw && y >= 0 && y < window.innerHeight ? document.elementFromPoint(x, y) : null;
+    if (!hit || !(hit === e || e.contains(hit))) blocked.push(`${label(e)}@${Math.round(x)},${Math.round(y)}`);
+  }
+  const alertsPill = document.querySelector(".cmd-deck .pill--alerts b");
+  const alertCount = alertsPill ? Number(alertsPill.textContent) : null;
   const de = document.documentElement;
-  return { vw, scrollW: Math.max(de.scrollWidth, document.body.scrollWidth), clipped: clipped.slice(0, 8), small, fields: fields.length, missing };
+  return { vw, scrollW: Math.max(de.scrollWidth, document.body.scrollWidth), clipped: clipped.slice(0, 8), small, fields: fields.length, missing, blocked, alertCount };
 }
 
 const { srv, port } = await startMock();
@@ -72,23 +105,56 @@ for (const [w, prof, kind] of PROFILES) {
     const ctx = await browser.newContext(prof);
     await ctx.addInitScript(() => { localStorage.setItem("ekho.operator.token", "t"); localStorage.setItem("ekho.operator.fleetId", "f1"); localStorage.setItem("ekho.operator.email", "m@example.com"); });
     const page = await ctx.newPage();
+    // Entrance animations (.reveal fades, slide-ins) start at opacity 0; on a loaded box
+    // they can still be running after a fixed delay. Wait for the finite ones to end.
+    const settle = () => page.evaluate(() => Promise.race([
+      Promise.all(document.getAnimations().filter((a) => a.effect?.getTiming().iterations !== Infinity).map((a) => a.finished.catch(() => {}))),
+      new Promise((r) => setTimeout(r, 8000)),
+    ]));
+    page.setDefaultTimeout(5000);
     await page.goto(`http://127.0.0.1:${port}/ui/${hash}`, { waitUntil: "networkidle" });
+    // the route's shell (lazy chunk for the deck) can take seconds on a loaded box; wait
+    // for it, but let the measurement below decide pass/fail if it never appears
+    await page.waitForSelector(READY[name], { timeout: 20000 }).catch(() => {});
     await page.waitForTimeout(700);
+    await settle();
     const views = [["list", null]];
-    if (name === "wire") views.push(["chat", async () => { await page.locator(".sidebar button, .sidebar [role=button]").filter({ hasText: /Jarvis|hash/ }).first().click(); await page.waitForTimeout(500); }]);
+    if (name === "wire") views.push(["chat", async () => {
+      await page.locator(".sidebar button, .sidebar [role=button]").filter({ hasText: /Jarvis|hash/ }).first().click(); await page.waitForTimeout(500);
+      await page.locator(".rowline textarea").fill("draft reply"); await page.waitForTimeout(150);
+    }]);
+    if (name === "classic") views.push(["chat", async () => {
+      await page.locator(".conv-row").first().click(); await page.waitForTimeout(500);
+      await page.locator("textarea.composer__input").fill("draft reply"); await page.waitForTimeout(150);
+    }]);
+    if (name === "deck") views.push(["dossier", async () => {
+      // tap a fleet roster unit the way a user would, then type a hail
+      await page.locator(".cmd-deck .unit.unitbtn").first().click(); await page.waitForTimeout(450);
+      // wait out the dossier's slide-in (finite animations only) so we measure the settled box
+      await settle();
+      await page.locator("#dk-hail").fill("draft hail"); await page.waitForTimeout(150);
+      // on a short landscape phone the dossier body scrolls: bring TRANSMIT into view as a user would
+      await page.locator(".dossier .hailbox__send").scrollIntoViewIfNeeded();
+    }]);
     for (const [view, enter] of views) {
-      if (enter) await enter();
-      const m = await page.evaluate(measure, ESSENTIAL[`${name}/${view}`] || []);
-      const problems = [];
+      let enterErr = "";
+      if (enter) { try { await enter(); } catch (e) { enterErr = String(e.message || e).split("\n")[0]; } }
+      const key = `${name}/${view}`;
+      const m = await page.evaluate(measure, [ESSENTIAL[key] || [], POPULATED[key] || [], TAPPABLE[key] || []]);
+      const problems = enterErr ? [`could not enter view (${enterErr})`] : [];
       if (m.scrollW > m.vw) problems.push("pans");
       if (m.clipped.length) problems.push("clipped");
       if (m.missing.length) problems.push("missing");
+      if (m.blocked.length) problems.push("untappable");
+      if (name === "deck" && !(m.alertCount > 0)) problems.push("no alerts rendered");
+      // the dossier hail box is a phone/tablet input too: it must be >= 16px there
+      if (kind !== "desktop" && view !== "list" && !m.fields) problems.push("no input field measured");
       if (kind === "desktop") { if (m.fields && !m.small.length && name === "wire") problems.push("16px rule leaked to desktop"); }
       else if (m.small.length) problems.push("small inputs");
       report.push({ w, name, view, ...m, ok: !problems.length });
       if (problems.length) failures++;
-      console.log(`${problems.length ? "FAIL" : "ok  "} ${w} ${name}/${view}: ${problems.join(",") || "-"} scrollW=${m.scrollW} clipped=${JSON.stringify(m.clipped)} small=${JSON.stringify(m.small)} missing=${JSON.stringify(m.missing)}`);
-      if (shots && (w === "390" || kind !== "phone")) await page.screenshot({ path: `${shots}/${w}-${name}-${view}.png` });
+      console.log(`${problems.length ? "FAIL" : "ok  "} ${w} ${name}/${view}: ${problems.join(",") || "-"} scrollW=${m.scrollW} clipped=${JSON.stringify(m.clipped)} small=${JSON.stringify(m.small)} missing=${JSON.stringify(m.missing)} blocked=${JSON.stringify(m.blocked)} alerts=${m.alertCount}`);
+      if (shots) await page.screenshot({ timeout: 30000, path: `${shots}/${w}-${name}-${view}.png` });
     }
     await ctx.close();
   }
@@ -96,4 +162,4 @@ for (const [w, prof, kind] of PROFILES) {
 await browser.close(); srv.close();
 if (shots) fs.writeFileSync(`${shots}/results.json`, JSON.stringify(report, null, 1));
 if (failures) { console.error(`${failures} view(s) failed`); process.exit(1); }
-console.log("all views pass");
+console.log(`all ${report.length} views pass`);
