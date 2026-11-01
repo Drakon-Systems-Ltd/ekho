@@ -2715,10 +2715,11 @@ paths:
       summary: Acquire the conversation floor
       description: >
         Turn-taking lock so two agents do not reply into the same conversation at
-        once. Returns whether the floor was granted, who holds it, and the recent
-        tail of the conversation so a waiting agent can see what it missed. The
-        TTL defaults to `EKHO_FLOOR_TTL_SECONDS` and is clamped to
-        `EKHO_FLOOR_TTL_MAX_SECONDS`.
+        once. Returns whether the floor was granted, who holds it, and, when the
+        floor is granted, the recent tail of the conversation so the holder can
+        see what it missed. The tail carries only messages the caller may see;
+        a refused acquire returns an empty tail. The TTL defaults to
+        `EKHO_FLOOR_TTL_SECONDS` and is clamped to `EKHO_FLOOR_TTL_MAX_SECONDS`.
       security:
         - AgentHMAC: []
       requestBody:
@@ -2751,7 +2752,12 @@ paths:
                     nullable: true
                   conversation_tail:
                     type: array
-                    description: Most recent messages in the conversation, capped by `EKHO_FLOOR_TAIL_LIMIT`.
+                    description: >
+                      Most recent messages in the conversation that the caller may
+                      see, chronological and capped by `EKHO_FLOOR_TAIL_LIMIT`:
+                      messages it sent, messages delivered to it, and, in a room,
+                      the room's thread while it is a current member. Always
+                      present; empty when `granted` is false.
                     items:
                       type: object
                       additionalProperties: true

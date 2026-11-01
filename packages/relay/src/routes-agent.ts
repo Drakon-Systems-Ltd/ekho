@@ -338,7 +338,12 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     const rawTtl = Number((request.body as { ttl_seconds?: number } | undefined)?.ttl_seconds);
     const ttl = Math.max(0, Math.min(Number.isFinite(rawTtl) ? rawTtl : config.floorTtlSeconds, config.floorTtlMaxSeconds));
     const result = db.acquireFloor(request.agent.fleetId, conversationId, request.agent.id, ttl);
-    const conversation_tail = db.getConversationTail(request.agent.fleetId, conversationId, config.floorTailLimit);
+    // The tail is the holder's catch-up, scoped to what this agent may see. A
+    // refused acquire gets none — but keeps the field as [] because deployed
+    // SDKs type `conversation_tail` as a required array.
+    const conversation_tail = result.granted
+      ? db.getConversationTail(request.agent.fleetId, conversationId, request.agent.id, config.floorTailLimit)
+      : [];
     return reply.send({
       granted: result.granted,
       holder_agent_id: result.holderAgentId,

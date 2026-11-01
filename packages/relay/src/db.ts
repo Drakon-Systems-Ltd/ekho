@@ -2288,15 +2288,47 @@ export class EkhoDb {
   }
 
   /**
-   * The recent thread of a conversation (chronological), resolved to
-   * {message_id, sender_agent_id, sender_kind, sender_label, text, created_at} —
-   * the fresh catch-up handed to a floor holder so it never reasons on stale state.
+   * The recent thread of a conversation as `agentId` may see it (chronological),
+   * resolved to {message_id, sender_agent_id, sender_kind, sender_label, text,
+   * created_at} — the fresh catch-up handed to a floor holder so it never
+   * reasons on stale state.
+   *
+   * Being a participant (isConversationParticipant) is not a read grant for
+   * every message under the conversation id: a broadcast delivers to the whole
+   * fleet, and agents thread 1:1s under the broadcast's id. So the tail holds:
+   *   - what the caller sent;
+   *   - in a room, the room's thread while the caller is a CURRENT member (the
+   *     rule the inbox's conversation_history uses — a delivery row alone never
+   *     implies room access);
+   *   - anywhere else, what was delivered to the caller.
+   * The filter is part of the query, so `limit` counts visible rows only.
    */
-  getConversationTail(fleetId: string, conversationId: string, limit: number) {
+  getConversationTail(fleetId: string, conversationId: string, agentId: string, limit: number) {
+    const isRoom = Boolean(
+      this.db.prepare("SELECT 1 FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId)
+    );
+    const isRoomMember = isRoom && Boolean(this.db.prepare(
+      `SELECT 1 FROM rooms JOIN room_members ON room_members.room_id = rooms.id
+       WHERE rooms.fleet_id = ? AND rooms.id = ? AND room_members.agent_id = ?`
+    ).get(fleetId, conversationId, agentId));
     const rows = (this.db.prepare(
-      `SELECT id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at FROM messages
-       WHERE fleet_id = ? AND conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`
-    ).all(fleetId, conversationId, Math.max(1, limit)) as Array<Record<string, unknown>>).reverse();
+      `SELECT m.id, m.sender_agent_id, m.message_type, m.priority, m.body_json, m.metadata_json, m.created_at
+       FROM messages m
+       WHERE m.fleet_id = ? AND m.conversation_id = ? AND (
+         m.sender_agent_id = ?
+         OR ? = 1 -- a current member of this room sees its thread
+         OR (? = 0 AND EXISTS ( -- outside a room: delivered to the caller
+           SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_agent_id = ?
+         ))
+       )
+       ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`
+    ).all(
+      fleetId, conversationId,
+      agentId,
+      isRoomMember ? 1 : 0,
+      isRoom ? 1 : 0, agentId,
+      Math.max(1, limit)
+    ) as Array<Record<string, unknown>>).reverse();
     if (rows.length === 0) return [];
     const senderIds = Array.from(new Set(rows.map((r) => String(r.sender_agent_id))));
     const info = new Map<string, { runtime: string; display_name: string }>();
