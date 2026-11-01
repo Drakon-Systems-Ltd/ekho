@@ -120,6 +120,34 @@ export function canonicalDmId(fleetId: string, agentId: string): string {
   return `dm-${fleetId}-${agentId}`;
 }
 
+/**
+ * SQL predicate: may `agentId` read the message row aliased `alias`? The one
+ * rule for message content the relay hands an agent beyond its own deliveries —
+ * the floor's catch-up tail and inbox reply_to snapshots both filter on it, so
+ * the two cannot drift. Visible when:
+ *   - the agent sent it;
+ *   - it is under a room of the message's fleet that the agent is a CURRENT
+ *     member of (a delivery row alone never grants room access);
+ *   - outside a room, it was delivered to the agent.
+ * Neither naming a message id nor sharing its conversation id is a read grant.
+ * Bind `params` at the fragment's position in the statement.
+ */
+function messageVisibleToSql(alias: string, agentId: string): { sql: string; params: string[] } {
+  const roomOf = `SELECT 1 FROM rooms vr WHERE vr.id = ${alias}.conversation_id AND vr.fleet_id = ${alias}.fleet_id`;
+  return {
+    sql: `(
+      ${alias}.sender_agent_id = ?
+      OR EXISTS (${roomOf} AND EXISTS (
+        SELECT 1 FROM room_members vm WHERE vm.room_id = vr.id AND vm.agent_id = ?
+      ))
+      OR (NOT EXISTS (${roomOf}) AND EXISTS (
+        SELECT 1 FROM message_deliveries vd WHERE vd.message_id = ${alias}.id AND vd.recipient_agent_id = ?
+      ))
+    )`,
+    params: [agentId, agentId, agentId]
+  };
+}
+
 /** Split a migration file into individual statements. A naive ';' split is safe
  *  here: every migration is pure DDL with no ';' inside a string literal
  *  (verified across migrations/001..015). */
@@ -1501,11 +1529,13 @@ export class EkhoDb {
         throw new Error("room not found");
       } else if (this.isRoomConversation(input.fleetId, conversationId)) {
         // Rejected rather than delivered 1:1, membership or not. Falling through
-        // would still write the row under the ROOM's conversation_id, and
-        // getConversationTail selects purely on conversation_id — so the text
-        // would surface in the history the relay serves to every member, which
-        // the plugins render straight into each woken agent's prompt. That is a
-        // prompt-injection path open to any enrolled agent, member or not.
+        // would still write the row under the ROOM's conversation_id, and a
+        // room's thread is every message under that id, shown to every current
+        // member (the floor tail via messageVisibleToSql, and the inbox's
+        // conversation_history) — so the text would surface in the history the
+        // relay serves to every member, which the plugins render straight into
+        // each woken agent's prompt. That is a prompt-injection path open to any
+        // enrolled agent, member or not.
         throw new Error(
           `recipient/conversation mismatch: conversation ${conversationId} is a room — ` +
             `a "${input.recipientKind}" recipient must use recipient.kind "group" (id = the room id) to post into it`
@@ -2077,12 +2107,19 @@ export class EkhoDb {
 
     const HISTORY_LIMIT = 15;
     const contextRows: Array<Record<string, unknown>> = [];
+    // reply_to_message_id is free-form sender metadata, so naming a message (or
+    // sharing its conversation id) is no read grant: only a message the polling
+    // agent may see resolves. An invisible one is simply not found, and its
+    // reply_to comes out null exactly like a reference to a missing message.
+    const replyRows: Array<Record<string, unknown>> = [];
     if (replyToIds.length && fleetId) {
       const ph = replyToIds.map(() => "?").join(",");
-      contextRows.push(...(this.db.prepare(
-        `SELECT id, conversation_id, sender_agent_id, message_type, priority, body_json, metadata_json, created_at
-         FROM messages WHERE fleet_id = ? AND id IN (${ph})`
-      ).all(fleetId, ...replyToIds) as Array<Record<string, unknown>>));
+      const visible = messageVisibleToSql("m", agentId);
+      replyRows.push(...(this.db.prepare(
+        `SELECT m.id, m.conversation_id, m.sender_agent_id, m.message_type, m.priority, m.body_json, m.metadata_json, m.created_at
+         FROM messages m WHERE m.fleet_id = ? AND m.id IN (${ph}) AND ${visible.sql}`
+      ).all(fleetId, ...replyToIds, ...visible.params) as Array<Record<string, unknown>>));
+      contextRows.push(...replyRows);
     }
     const historyByConv = new Map<string, Array<Record<string, unknown>>>();
     for (const cid of roomConvIds) {
@@ -2136,11 +2173,10 @@ export class EkhoDb {
         attachments: Array.isArray(body.attachments) ? (body.attachments as unknown[]).map(String) : []
       };
     };
+    // Only from the visibility-filtered reply query, never the room history
+    // rows, so the filter above is the whole rule for what a reply_to resolves.
     const replyRowById = new Map<string, Record<string, unknown>>();
-    for (const rid of replyToIds) {
-      const row = contextRows.find((r) => String(r.id) === rid);
-      if (row) replyRowById.set(rid, row);
-    }
+    for (const row of replyRows) replyRowById.set(String(row.id), row);
     const conversation_history: Record<string, Array<ReturnType<typeof snapshotOf>>> = {};
     for (const [cid, rows] of historyByConv) conversation_history[cid] = rows.map(snapshotOf);
 
@@ -2188,8 +2224,9 @@ export class EkhoDb {
           reply_to: (() => {
             const rid = meta.reply_to_message_id ? String(meta.reply_to_message_id) : null;
             const refRow = rid ? replyRowById.get(rid) : undefined;
-            // Only a SAME-conversation reference resolves — never surface a body
-            // from a thread this recipient isn't part of (cross-conversation leak).
+            // Only a SAME-conversation reference to a message this recipient may
+            // see resolves (replyRowById holds visible rows only) — never surface
+            // a body from a thread or a 1:1 this recipient isn't part of.
             if (!refRow || String(refRow.conversation_id) !== String(row.conversation_id)) return null;
             return snapshotOf(refRow);
           })(),
@@ -2301,34 +2338,17 @@ export class EkhoDb {
    *     rule the inbox's conversation_history uses — a delivery row alone never
    *     implies room access);
    *   - anywhere else, what was delivered to the caller.
+   * That is messageVisibleToSql, shared with the inbox's reply_to snapshots.
    * The filter is part of the query, so `limit` counts visible rows only.
    */
   getConversationTail(fleetId: string, conversationId: string, agentId: string, limit: number) {
-    const isRoom = Boolean(
-      this.db.prepare("SELECT 1 FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId)
-    );
-    const isRoomMember = isRoom && Boolean(this.db.prepare(
-      `SELECT 1 FROM rooms JOIN room_members ON room_members.room_id = rooms.id
-       WHERE rooms.fleet_id = ? AND rooms.id = ? AND room_members.agent_id = ?`
-    ).get(fleetId, conversationId, agentId));
+    const visible = messageVisibleToSql("m", agentId);
     const rows = (this.db.prepare(
       `SELECT m.id, m.sender_agent_id, m.message_type, m.priority, m.body_json, m.metadata_json, m.created_at
        FROM messages m
-       WHERE m.fleet_id = ? AND m.conversation_id = ? AND (
-         m.sender_agent_id = ?
-         OR ? = 1 -- a current member of this room sees its thread
-         OR (? = 0 AND EXISTS ( -- outside a room: delivered to the caller
-           SELECT 1 FROM message_deliveries d WHERE d.message_id = m.id AND d.recipient_agent_id = ?
-         ))
-       )
+       WHERE m.fleet_id = ? AND m.conversation_id = ? AND ${visible.sql}
        ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`
-    ).all(
-      fleetId, conversationId,
-      agentId,
-      isRoomMember ? 1 : 0,
-      isRoom ? 1 : 0, agentId,
-      Math.max(1, limit)
-    ) as Array<Record<string, unknown>>).reverse();
+    ).all(fleetId, conversationId, ...visible.params, Math.max(1, limit)) as Array<Record<string, unknown>>).reverse();
     if (rows.length === 0) return [];
     const senderIds = Array.from(new Set(rows.map((r) => String(r.sender_agent_id))));
     const info = new Map<string, { runtime: string; display_name: string }>();
