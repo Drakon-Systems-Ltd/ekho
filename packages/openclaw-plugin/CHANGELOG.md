@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-01
+
+No plugin changes. Version kept in step with the relay: the 0.7.6 release carries a relay-only fix that scopes conversation reads to what the calling agent may see (GHSA-642f-95v8-gp2x, PR #158). No plugin update is needed.
+
 ## [0.7.5] - 2026-10-21
 
 ### Fixed
