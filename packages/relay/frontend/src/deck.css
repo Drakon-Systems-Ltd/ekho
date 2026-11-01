@@ -157,6 +157,24 @@
   .cmd-deck .radar { height: min(70vw, 56vh); }
 }
 
+@media (max-width: 760px) {
+  /* The deck grid had an implicit auto column sized to its widest content
+     (a ~1700px marquee/ticker), stretching every row past the phone width. */
+  .cmd-deck .deck { grid-template-columns: minmax(0, 1fr); }
+  .cmd-deck .deck > * { min-width: 0; }
+  /* The 3-column topbar (brand | modes | status) measured ~1726px; stack it into
+     a brand + horizontally scrollable mode strip that fits the phone width. */
+  .cmd-deck .topbar { grid-template-columns: auto minmax(0, 1fr); padding: 0 10px; gap: 10px; }
+  .cmd-deck .topbar > :nth-child(n+3) { display: none; }
+  .cmd-deck .brand__sub { display: none; }
+  .cmd-deck .brand__name { font-size: 15px; letter-spacing: 0.2em; }
+  .cmd-deck .modes { min-width: 0; overflow-x: auto; justify-self: end; max-width: 100%; }
+  .cmd-deck .mode { padding: 7px 10px; letter-spacing: 0.12em; white-space: nowrap; }
+}
+@media (max-width: 760px), (pointer: coarse) {
+  .cmd-deck input:not([type=checkbox]):not([type=radio]), .cmd-deck textarea, .cmd-deck select { font-size: 16px !important; }
+}
+
 @keyframes dk-spin { to { transform: rotate(360deg); } }
 @keyframes dk-spinslow { to { transform: rotate(360deg); } }
 @keyframes dk-pulse { 0% { transform: scale(0.7); opacity: 0.7; } 100% { transform: scale(1.7); opacity: 0; } }

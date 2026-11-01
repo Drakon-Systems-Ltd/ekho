@@ -857,7 +857,7 @@ export default function WireApp() {
             onClick={() => setTheme(theme === "auto" ? "dark" : theme === "dark" ? "light" : "auto")}>{I.theme}</button>
           <button className="tbbtn" aria-label="Settings" onClick={() => S.setSettingsOpen(true)}>{I.gear}</button>
           <button className="tbbtn" aria-label="Help" onClick={() => S.setHelpOpen(true)}>{I.help}</button>
-          <button className="tbbtn" aria-label="Command deck" title="Open the Command Deck" onClick={() => window.open("#deck", "_blank", "noopener")}>{I.deck}</button>
+          <button className="tbbtn tb-deck" aria-label="Command deck" title="Open the Command Deck" onClick={() => window.open("#deck", "_blank", "noopener")}>{I.deck}</button>
           <button className="tbbtn" aria-label="Log out" title="Log out" onClick={S.clearStoredSession}>{I.out}</button>
         </div>
       </header>
