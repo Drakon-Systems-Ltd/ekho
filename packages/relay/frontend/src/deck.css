@@ -161,7 +161,9 @@
   .cmd-deck .radar { height: min(70vw, 56vh); }
 }
 
-@media (max-width: 760px) {
+/* 860px, not 760px: the 3-column topbar needs ~800px before EXIT leaves the screen
+   (iPad Mini portrait is 768px), plus headroom for LINK DEGRADED and multi-digit alerts. */
+@media (max-width: 860px) {
   .cmd-deck .deck { grid-template-rows: auto 1fr 40px; }
   /* The 3-column topbar (brand | modes | status) measured ~1726px. On phones:
      row 1 = brand + alerts + exit, row 2 = full-width scrollable mode strip.

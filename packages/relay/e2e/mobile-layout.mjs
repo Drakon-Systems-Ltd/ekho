@@ -22,6 +22,9 @@ const PROFILES = [
   ["390", { ...devices["iPhone 14"], viewport: { width: 390, height: 780 } }, "phone"],
   ["414", { ...devices["iPhone 11 Pro Max"], viewport: { width: 414, height: 780 } }, "phone"],
   ["ipad-1024", devices["iPad Mini landscape"], "tablet"],
+  ["ipad-768", devices["iPad Mini"], "tablet"],
+  ["desktop-780", { viewport: { width: 780, height: 800 } }, "desktop"],
+  ["desktop-861", { viewport: { width: 861, height: 800 } }, "desktop"],
   ["desktop-1280", { viewport: { width: 1280, height: 800 } }, "desktop"],
 ];
 const ROUTES = [["wire", ""], ["classic", "#classic"], ["deck", "#deck"]];
