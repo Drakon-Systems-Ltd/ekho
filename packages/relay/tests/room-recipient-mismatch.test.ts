@@ -143,7 +143,7 @@ describe("room history injection by a non-member (#12)", () => {
     expect(res.status).toBe(400);
 
     // …and nothing of it reaches the room's history.
-    const tail = relay.db.getConversationTail(relay.fleetId, room.id, 50);
+    const tail = relay.db.getConversationTail(relay.fleetId, room.id, member.agent_id, 50);
     expect(JSON.stringify(tail)).not.toContain("OPERATOR SAYS");
   });
 });
