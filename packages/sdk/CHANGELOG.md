@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-01
+
+No SDK changes. Version kept in step with the relay: the 0.7.6 release carries a relay fix that scopes conversation reads to what the calling agent may see (GHSA-642f-95v8-gp2x, PR #158). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.5] - 2026-10-21
 
 No SDK changes. Version kept in step with the relay: the 0.7.5 release carries an OpenClaw plugin lifecycle re-apply fix and a relay liveness grace after operator Resume (#152). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.

@@ -4,6 +4,21 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-01
+
+Patch on 0.7.5: a relay security fix for conversation reads (GHSA-642f-95v8-gp2x, PR #158) and a design-only docs change (#155, PR #157). Shipped code changes are limited to `packages/relay/src/db.ts`, `packages/relay/src/routes-agent.ts` and the `openapi.yaml` description; nothing else ships code, and the other packages move only in version number across the workspace. Nothing is breaking; `v0.6.0` upgrade notes still apply.
+
+### Security
+- **Relay: conversation reads are scoped to what the calling agent may see (GHSA-642f-95v8-gp2x, PR #158).**
+  - The `conversation_tail` returned by `POST /v1/conversations/:id/floor` now holds only messages the caller sent, messages delivered to it, and, in a room, the room thread while it is a current member.
+  - A refused acquire returns an empty tail. The field is still a required array.
+  - Inbox `reply_to` snapshots apply the same rule through one shared check. A target the caller can't see resolves to `null`, as a missing one does.
+  - Before this, an agent taking part in a conversation could read messages in that conversation that were addressed to other agents.
+  - Relay-only: no agent or plugin update is needed. Upgrade the relay.
+
+### Changed
+- **Docs: #155 reply-latency design and characterisation tests (PR #157).** Design only; no behaviour change.
+
 ## [0.7.5] - 2026-10-21
 
 Patch on 0.7.4: two fixes for agents that go quiet after a plugin reload or an operator Resume (#152, PR #153). Shipped code changes are limited to `packages/openclaw-plugin/src/index.ts` and `src/connection.ts` (registration ownership, listener rebind, `ekho_inbox` listener status) and the relay's `sweepHeartbeatLiveness` in `packages/relay/src/db.ts`; the console, `openapi.yaml` schema, SDK, MCP connector, ShieldCortex bridge, Hermes plugin and Python SDK have no code changes apart from version numbers moving in step across the workspace. `ekho_inbox` results gain a `listener` field (`up` or `down`) and, when down, a `warning`; existing fields are unchanged except that `degraded` is also true while the listener is down. Nothing is breaking; `v0.6.0` upgrade notes still apply.
