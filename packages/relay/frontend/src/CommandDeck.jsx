@@ -490,8 +490,8 @@ export default function CommandDeck() {
             ))}
           </nav>
           <div className="status">
-            <div className={"pill " + (stale ? "pill--alert" : "pill--ok")}><span className="unit__dot" /> {stale ? "LINK" : "FLEET"} <b>{stale ? "DEGRADED" : `${online}/${agents.length} ONLINE`}</b></div>
-            <div className={"pill " + (alerts ? "pill--alert" : "")}>ALERTS <b>{alerts}</b></div>
+            <div className={"pill pill--fleet " + (stale ? "pill--alert" : "pill--ok")}><span className="unit__dot" /> {stale ? "LINK" : "FLEET"} <b>{stale ? "DEGRADED" : `${online}/${agents.length} ONLINE`}</b></div>
+            <div className={"pill pill--alerts " + (alerts ? "pill--alert" : "")}>ALERTS <b>{alerts}</b></div>
             <DeckClock />
             <button className="exit" onClick={exit} aria-label="Exit deck to console">EXIT ▸</button>
           </div>

@@ -956,3 +956,20 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 @media (prefers-reduced-motion: reduce) {
   .rail--right, .rail-backdrop { transition: none; }
 }
+
+/* 320px phones (iPhone SE 1st gen): brand + 5 app-bar controls measured ~346px and
+   .app{overflow:hidden} clipped Log out. Tighten spacing so every control still fits. */
+@media (max-width: 400px) {
+  .appbar__brand { gap: 6px; min-width: 0; }
+  .appbar__titles { min-width: 0; overflow: hidden; }
+  .appbar__right { gap: 2px; flex: 0 0 auto; }
+  .appbar__right .icon-button { padding: 2px 4px; }
+  .appbar__right .button { padding: 7px 7px; }
+}
+/* At 320px the wordmark only fits as a clipped "Ek"; the brand mark alone carries it. */
+@media (max-width: 340px) { .appbar__titles { display: none; } }
+
+/* iOS Safari auto-zooms focused fields < 16px; keep them at 16px on phones and touch tablets only. */
+@media (max-width:760px),(pointer:coarse) and (max-width:1024px){
+  input:not([type=checkbox]):not([type=radio]):not([type=range]),textarea,select{font-size:16px !important}
+}
