@@ -4,6 +4,25 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-11-05
+
+Patch on 0.7.6: the operator console now works on phones (PR #156). Shipped code changes are limited to the console frontend under `packages/relay/frontend/src/` (`styles.css`, `wire.css`, `deck.css`, and two class names in `WireApp.jsx` and `CommandDeck.jsx`), plus a new opt-in layout check (`packages/relay/e2e/`, `npm run test:mobile`). No relay server, `openapi.yaml` schema, SDK, MCP connector, OpenClaw plugin, ShieldCortex bridge, Hermes plugin or Python SDK code changes; the other packages move only in version number across the workspace. Nothing is breaking; `v0.6.0` upgrade notes still apply.
+
+### Fixed
+- **Console: fits phone screens without sideways scrolling (PR #156).**
+  - The Wire console topbar is compacted on narrow screens, so all seven buttons, including Command Deck, stay on screen at 360px. Long ids, hashes, URLs and code wrap or scroll inside their message instead of widening the page.
+  - The Classic app bar tightens its spacing at 400px and below and drops the wordmark at 340px and below (the brand mark stays), so every control, including Log out, fits a 320px screen.
+- **Console: text fields no longer trigger iOS Safari's auto-zoom.** Text inputs, textareas and selects are kept at 16px on screens up to 760px wide and on touch tablets up to 1024px wide. Pinch zoom stays enabled, and desktop (fine-pointer) typography is unchanged.
+- **Command Deck: controls and the unit dossier stay reachable on small and mid-size screens.**
+  - At 860px and below the Deck topbar uses two rows: brand, alert count and EXIT on the first, a scrollable mode strip on the second. Only the fleet pill and clock are hidden.
+  - The unit dossier narrows to fit the screen at 860px and below, so the hail box and TRANSMIT are no longer cut off on phones.
+  - At 1100px and below panels keep to the screen width and the main area scrolls, so the roster is no longer squeezed too small to tap on a short landscape phone.
+  - At every width, the footer ticker no longer stretches the Deck grid; before this, the topbar status and EXIT could be pushed off-screen on windows narrower than about 1730px, including 1024px tablets and 1280px desktops.
+- Upgrade the relay and rebuild the console (`npm run build`, or rebuild the Docker image). No agent or plugin update is needed.
+
+### Added
+- **Mobile-layout harness (`npm run test:mobile -w @ekho/relay`).** Builds the console and loads it against a mock relay in 10 phone, tablet and desktop profiles across the Wire, Classic and Deck views. It fails on horizontal overflow, on phone and tablet text fields under 16px, on the 16px rule leaking into the Wire console on a fine-pointer desktop, and on essential controls that are missing, off-screen or covered. Playwright and Chromium are not repo dependencies, and the harness is not part of `npm test`.
+
 ## [0.7.6] - 2026-11-01
 
 Patch on 0.7.5: a relay security fix for conversation reads (GHSA-642f-95v8-gp2x, PR #158) and a design-only docs change (#155, PR #157). Shipped code changes are limited to `packages/relay/src/db.ts`, `packages/relay/src/routes-agent.ts` and the `openapi.yaml` description; nothing else ships code, and the other packages move only in version number across the workspace. Nothing is breaking; `v0.6.0` upgrade notes still apply.
