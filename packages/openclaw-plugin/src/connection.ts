@@ -636,6 +636,10 @@ function resumeRuntime(agentId: string, successorDrain: Promise<void>): boolean 
     () => undefined,
     () => undefined
   );
+  // The successor's drain becomes part of this copy's own quiescence: if a
+  // newer generation supersedes us before it settles and is itself disposed,
+  // the next resume still waits for it (shutdown hands stopDrain on).
+  stopDrain = gate;
   autoReplyGate = gate;
   void gate.then(() => {
     if (autoReplyGate !== gate) return;

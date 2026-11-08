@@ -523,6 +523,49 @@ describe("plugin reload in one process", () => {
     expect(deadLetters()).toEqual([]);
   });
 
+  it("a successor's outstanding drain survives a further supersede + dispose: the twice-resumed loop still waits for it", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      if (served === 3) return new Promise((r) => { release = r; }); // B's first poll hangs
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // B's poll in flight
+    expect(served).toBe(3);
+    const unloadsB = hostB.dispose(); // A resumes, gated on B's drain
+    // Before B's drain settles, C supersedes A and is disposed in turn.
+    const c = await loadPluginCopy();
+    const hostC = fakeApi(true);
+    c.plugin.register(hostC.api);
+    await untilConnected(c.conn);
+    await Promise.all(hostC.dispose()); // A resumes again; B's poll is still outstanding
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+
+    const hold = POLL_MS + 500;
+    expect(hold).toBeLessThan(STOP_DRAIN_MS + POLL_MS);
+    const held = await producersOver(hold);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([]);
+    expect(served).toBe(3);
+
+    release({ messages: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(unloadsB);
+    const after = await producersOver(POLL_MS * 4);
+    expect(after).toMatchObject({ heartbeat: [1], poll: [1] });
+    expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
+  });
+
   it("a resume whose drain outlives a host stop or a newer generation starts no inbox loop", async () => {
     let release: (batch: unknown) => void = () => {};
     let served = 0;
