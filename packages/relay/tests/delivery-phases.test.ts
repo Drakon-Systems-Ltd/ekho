@@ -15,9 +15,11 @@ const REAL_MIGRATIONS_DIR = path.join(__dirname, "..", "migrations");
  *
  *   agents.last_inbox_poll_at          relay time of the agent's most recent
  *                                      GET /v1/inbox, written even when the
- *                                      batch is empty. The one signal that tells
- *                                      "the adapter stopped polling" apart from
- *                                      "the adapter is mid-turn" at the relay.
+ *                                      batch is empty. Evidence of recent
+ *                                      polling only: a stale value says the
+ *                                      adapter is not fetching, whether wedged
+ *                                      or mid-turn. Design §2.3's retained turn
+ *                                      intervals (Phase 1b) tell those apart.
  *   message_deliveries.ack_recorded_at relay time the ack ARRIVED. acked_at is
  *                                      still the adapter-supplied received_at
  *                                      (adapter clock) and keeps its meaning.
