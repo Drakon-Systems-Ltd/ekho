@@ -64,12 +64,12 @@ describe("#155 phase 1a: relay-observed delivery timing", () => {
       const first = row.last_inbox_poll_at as string;
 
       // The column is a "most recent", not a "first": a later poll moves it.
-      await new Promise((r) => setTimeout(r, 5));
+      // Timestamps are millisecond ISO strings, so sleep well past 1 ms.
+      await new Promise((r) => setTimeout(r, 25));
       await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
       health = await relay.operatorRequest("GET", "/v1/operator/fleet-health");
       row = health.body.agents.find((x: { id: string }) => x.id === a.agent_id);
-      expect(Date.parse(row.last_inbox_poll_at)).toBeGreaterThanOrEqual(Date.parse(first));
-      expect(row.last_inbox_poll_at).not.toBe(first);
+      expect(Date.parse(row.last_inbox_poll_at)).toBeGreaterThan(Date.parse(first));
     });
 
     it("heartbeats do not count as polls: an agent that heartbeats but never fetches keeps last_inbox_poll_at null (design §1.5)", async () => {
@@ -96,6 +96,16 @@ describe("#155 phase 1a: relay-observed delivery timing", () => {
       const rowB = health.body.agents.find((x: { id: string }) => x.id === b.agent_id);
       expect(rowA.last_inbox_poll_at).not.toBeNull();
       expect(rowB.last_inbox_poll_at).toBeNull();
+    });
+
+    it("is operator-only: an agent-signed request for fleet-health is refused", async () => {
+      const a = await relay.enrollAgent("dp-poll-auth");
+      await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      // Agent credentials are not operator credentials: the only read-back of
+      // last_inbox_poll_at sits behind requireOperatorAuth, unchanged here.
+      const res = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/operator/fleet-health");
+      expect(res.status).toBe(401);
+      expect(JSON.stringify(res.body)).not.toContain("last_inbox_poll_at");
     });
 
     it("is operator-only: the agent inbox and the sender's status read-back never expose a teammate's poll time", async () => {

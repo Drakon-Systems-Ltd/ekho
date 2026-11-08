@@ -5,8 +5,9 @@
 --
 --   agents.last_inbox_poll_at: relay time of the agent's most recent
 --   GET /v1/inbox, written even when the batch is empty. Heartbeats do not
---   touch it. It is the one signal that tells an adapter that stopped polling
---   apart from one that is mid-turn, which today both look like queued rows.
+--   touch it. It is evidence of recent polling only: a stale value shows the
+--   adapter is not fetching, whether wedged or mid-turn. Telling those two
+--   apart needs the retained turn intervals of design section 2.3 (Phase 1b).
 --
 --   message_deliveries.ack_recorded_at: relay time the ack ARRIVED. The
 --   existing acked_at keeps the adapter-supplied received_at (adapter clock)

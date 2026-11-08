@@ -1969,10 +1969,12 @@ export class EkhoDb {
   getInbox(agentId: string, limit: number) {
     const now = nowIso();
     // #155 Phase 1a: record the poll itself, relay clock, before anything is
-    // selected, so an EMPTY poll counts too. This is the one relay-side signal
-    // that separates "the adapter stopped polling" from "the adapter is busy
-    // in a turn" (both leave rows queued). Heartbeats never touch it. An
-    // unknown agent id matches no row, which is the existing no-op path.
+    // selected, so an EMPTY poll counts too. It is evidence of recent polling
+    // only: a stale value says the adapter is not fetching, whether it is
+    // wedged or mid-turn (an adapter does not poll during a turn). Telling
+    // those apart needs the retained turn intervals of design §2.3 (Phase 1b).
+    // Heartbeats never touch it, so "heartbeats but never fetches" now shows.
+    // An unknown agent id matches no row, which is the existing no-op path.
     this.db.prepare("UPDATE agents SET last_inbox_poll_at = ? WHERE id = ?").run(now, agentId);
     const deliveries = this.db.prepare(
       `SELECT messages.*, message_deliveries.id AS delivery_id, message_deliveries.queued_at
