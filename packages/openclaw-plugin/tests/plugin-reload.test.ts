@@ -352,7 +352,7 @@ describe("plugin reload in one process", () => {
     expect(after.beats).toBe((POLL_MS * 2) / HEARTBEAT_MS);
     expect(a.conn.listenerUp("agent_reload")).toBe(true);
     expect(await hostA.inbox()).toMatchObject({ listener: "up", degraded: false });
-    expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/generation \d+ resumed heartbeat and auto-reply/);
+    expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/generation \d+ resumed heartbeat for agent_reload/);
     // A generation is heartbeating, so the disposed copy's orphan alarm stays quiet.
     await vi.advanceTimersByTimeAsync(200);
     expect(hostB.log.error).not.toHaveBeenCalled();
@@ -430,7 +430,7 @@ describe("plugin reload in one process", () => {
     expect((await producersOver(POLL_MS)).heartbeat).toEqual([4]);
   });
 
-  it("a poll in flight on the superseded generation never overlaps the resumed loop: one poller cadence, no second poll after stop", async () => {
+  it("a poll in flight on the superseded generation never overlaps the resumed loop: heartbeat at once, inbox loop after the drain", async () => {
     let release: (batch: unknown) => void = () => {};
     let served = 0;
     relay.inbox = () => {
@@ -450,17 +450,60 @@ describe("plugin reload in one process", () => {
     const hostB = fakeApi(true);
     b.plugin.register(hostB.api);
     await untilConnected(b.conn);
+    const sinceSupersede = 1_000; // the issue's ~10 s is fake-timer time here
+    expect((await producersOver(sinceSupersede)).heartbeat).toEqual([2]);
+    expect(served).toBe(2); // B's first poll has not come round yet
     await Promise.all(hostB.dispose()); // ...and is disposed: A resumes
     expect(a.conn.listenerUp("agent_reload")).toBe(true);
+
+    // The old poll stays outstanding past a resumed loop's first poll
+    // deadline: the heartbeat is back, but no second inbox request starts
+    // while the first is still in flight. (A poll hung longer than the
+    // bounded drain, STOP_DRAIN_MS, is abandoned and the loop restarts; that
+    // restart's first poll lies beyond this window.)
+    const hold = POLL_MS + 500;
+    expect(hold).toBeLessThan(STOP_DRAIN_MS - sinceSupersede + POLL_MS);
+    const held = await producersOver(hold);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([]);
+    expect(served).toBe(2);
+
     release({ messages: [] }); // the old loop's tick completes now
     await vi.advanceTimersByTimeAsync(0);
-
     const after = await producersOver(POLL_MS * 4);
     expect(after.heartbeat).toEqual([1]);
     expect(after.poll).toEqual([1]);
     // Exactly the resumed loop's cadence from client 1: the stopped loop polls no more.
     expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
     expect(deadLetters()).toEqual([]);
+    expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/resumed heartbeat for agent_reload/);
+  });
+
+  it("a resume whose drain outlives a host stop or a newer generation starts no inbox loop", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      if (served === 2) return new Promise((r) => { release = r; });
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await Promise.all(hostB.dispose()); // A resumes its heartbeat; its loop waits for the drain
+    expect((await producersOver(POLL_MS / 2)).heartbeat).toEqual([1]);
+    const unloads = hostA.dispose(); // ...then the host unloads A before the drain settles
+    expect((await producersOver(POLL_MS / 2)).heartbeat).toEqual([]);
+    release({ messages: [] }); // the drain settles only now; A is host-stopped: no loop
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(unloads);
+    expect(await producersOver(POLL_MS * 2)).toEqual({ heartbeat: [], poll: [], beats: 0 });
   });
 
   for (const order of ["newest first", "oldest first"] as const) {

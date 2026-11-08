@@ -619,10 +619,21 @@ function resumeRuntime(agentId: string): boolean {
     retired = true;
     return false;
   }
-  maybeStartAutoReply(start?.api, start?.log, start?.config);
+  // The heartbeat is what keeps the agent out of quarantine, so it is back
+  // at once. The inbox loop waits for this copy's previous loop to drain: the
+  // supersession told that loop to stop, but a poll it had in flight may
+  // still be outstanding (bounded by autoreply.ts STOP_DRAIN_MS), and two
+  // concurrent polls for one agent would be two producers. Ownership is
+  // checked again when the drain settles: a newer generation or a host stop
+  // in the meantime means this copy starts nothing.
+  const drained = stopDrain;
+  void drained.then(() => {
+    if (retired || hostStopped || claimedAgentId !== agentId || stopDrain !== drained) return;
+    maybeStartAutoReply(start?.api, start?.log, start?.config);
+  });
   try {
     start?.log?.info?.(
-      `[ekho] generation ${generation} resumed heartbeat and auto-reply for ${agentId} (its successor was disposed before anything replaced it)`
+      `[ekho] generation ${generation} resumed heartbeat for ${agentId} (its successor was disposed before anything replaced it); auto-reply resumes once the previous loop has drained`
     );
   } catch {
     /* a host logger must not undo the resume */
