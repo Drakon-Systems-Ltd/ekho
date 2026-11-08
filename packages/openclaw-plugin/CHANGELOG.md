@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw plugin: a disposed second register pass no longer leaves the agent with no heartbeat (#160).** On a slow gateway start the host can run a second full plugin `register()` from a fresh module copy; that generation supersedes the first one's heartbeat and auto-reply loop, and when the host then disposes the second registry (about ten seconds later, with the first registration still live) nothing re-armed the first generation. No generation heartbeated, and the relay quarantined the agent until a manual gateway restart. The process-wide producer registry now keeps the superseded generation on standby; when the generation holding the agent is released with no successor, the most recently superseded generation that was stopped only by that hand-off resumes its heartbeat and auto-reply loop, synchronously, so there is never a moment with no producer. A generation its host also unloaded (OpenClaw's ordinary reload: `gateway_stop` + dispose on the old instance) never resumes, so a disabled plugin stays stopped, and a resumed generation still stands down when a newer one connects: one producer per agent per process throughout. The delayed "no ekho-adapter generation is heartbeating" alarm is unchanged in trigger and now says that no superseded generation could resume. `packages/openclaw-plugin/src/runtime-registry.ts` and `src/connection.ts` only; regression tests drive the real plugin entry through register → register (fresh copy) → dispose(second) and require a live heartbeat afterwards.
+
 ## [0.7.7] - 2026-11-05
 
 No plugin changes. Version kept in step with the relay: the 0.7.7 release carries operator console mobile layout fixes (PR #156). No plugin update is needed.

@@ -93,6 +93,16 @@ const generation = nextRuntimeGeneration();
 // never starts a heartbeat or an auto-reply loop again: restarting would make
 // it a second producer next to the generation that replaced it.
 let retired = false;
+// Set when this copy's HOST stopped it (plugin dispose, gateway_stop, an
+// explicit shutdown) as opposed to a newer copy superseding it. A copy the
+// host unloaded never produces again until the host registers it again; a
+// copy stopped only by supersession may resume if its successor goes away
+// before anything replaces it (#160, resumeRuntime below).
+let hostStopped = false;
+// What the last connect was started with, so a resume can restart the same
+// heartbeat and auto-reply loop against the same host api. Never cleared by
+// shutdown: the host registration behind it is what resume relies on.
+let lastStart: { api?: PluginApi; log?: Logger; config?: EkhoPluginConfig } | null = null;
 // The agent this copy holds in the registry, for release on shutdown.
 let claimedAgentId: string | null = null;
 let orphanCheckMs = 60_000;
@@ -402,6 +412,9 @@ export function seedConfigModelFromOpenClawConfig(config: unknown): void {
  * the agent, so the loop is only started when `api` is provided.
  */
 export async function ensureConnected(config: EkhoPluginConfig, log?: Logger, api?: PluginApi): Promise<EkhoConnection> {
+  // The host api is optional here (tool calls connect without one); keep the
+  // last one seen so a resume (#160) binds the loop to a live registration.
+  lastStart = { api: api ?? lastStart?.api, log: log ?? lastStart?.log, config };
   if (connection) {
     maybeStartHeartbeat(log, config);
     maybeStartAutoReply(api, log, config);
@@ -565,7 +578,12 @@ async function enrollOrLoadOnce(
 function claimRuntime(agentId: string, log?: Logger): boolean {
   if (retired) return false;
   if (claimedAgentId === agentId) return true;
-  if (!claimAgentRuntime(agentId, { generation, stop: (reason) => shutdown(reason, log) })) {
+  const holder = {
+    generation,
+    stop: (reason: string) => shutdown(reason, log),
+    resume: () => resumeRuntime(agentId)
+  };
+  if (!claimAgentRuntime(agentId, holder)) {
     retired = true;
     log?.info?.(
       `[ekho] generation ${generation} is superseded for ${agentId}; not starting heartbeat or auto-reply`
@@ -573,6 +591,37 @@ function claimRuntime(agentId: string, log?: Logger): boolean {
     return false;
   }
   claimedAgentId = agentId;
+  return true;
+}
+
+/**
+ * Produce for `agentId` again after the generation that superseded this one
+ * released it with no successor (#160: a slow-start second register pass whose
+ * registry the host then disposed). Only a copy stopped purely by that
+ * supersession qualifies; one its host unloaded stays down, since restarting it
+ * would put a heartbeat behind a registration the host has torn down (a
+ * disabled plugin must not keep beating). Called by the registry, synchronously
+ * inside the successor's release, so there is never a moment with no holder.
+ * True once this copy has re-claimed the agent and restarted its heartbeat.
+ */
+function resumeRuntime(agentId: string): boolean {
+  if (hostStopped || !connection || connection.credentials.agentId !== agentId) return false;
+  const start = lastStart;
+  retired = false;
+  maybeStartHeartbeat(start?.log, start?.config);
+  if (!heartbeatTimer) {
+    // The claim did not go through (a newer generation got there first).
+    retired = true;
+    return false;
+  }
+  maybeStartAutoReply(start?.api, start?.log, start?.config);
+  try {
+    start?.log?.info?.(
+      `[ekho] generation ${generation} resumed heartbeat and auto-reply for ${agentId} (its successor was disposed before anything replaced it)`
+    );
+  } catch {
+    /* a host logger must not undo the resume */
+  }
   return true;
 }
 
@@ -690,6 +739,10 @@ export function rebindAutoReply(api: PluginApi, log?: Logger, config?: EkhoPlugi
  */
 export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
   retired = true;
+  const superseded = reason.startsWith("superseded by generation ");
+  // Stopped by anyone but a successor: the host has let go of this
+  // registration, so this copy must never resume on its own (#160).
+  if (!superseded) hostStopped = true;
   const stoppedAgentId = claimedAgentId;
   const stoppedAt = new Date().toISOString();
   const stoppedHeartbeat = Boolean(heartbeatTimer);
@@ -716,10 +769,13 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
       /* swallowed on purpose */
     }
   }
-  if (stoppedHeartbeat && stoppedAgentId && !reason.startsWith("superseded by generation ")) {
+  if (stoppedHeartbeat && stoppedAgentId && !superseded) {
+    // Releasing above already resumed a superseded generation if one could
+    // (#160); this alarm is for when none could. Delayed, so a reload's new
+    // copy has its grace period to take over before anything is said.
     const check = setTimeout(() => {
       if (listenerUp(stoppedAgentId)) return;
-      const message = `[ekho] no ekho-adapter generation is heartbeating for ${stoppedAgentId} since ${stoppedAt} (generation ${generation} stopped: ${reason}); the relay will quarantine this agent after its liveness window. Run \`openclaw plugins reload ekho-adapter\` or restart the gateway.`;
+      const message = `[ekho] no ekho-adapter generation is heartbeating for ${stoppedAgentId} since ${stoppedAt} (generation ${generation} stopped: ${reason}; no superseded generation could resume); the relay will quarantine this agent after its liveness window. Run \`openclaw plugins reload ekho-adapter\` or restart the gateway.`;
       try { (log?.error ?? log?.warn)?.(message); } catch { /* logging cannot affect shutdown */ }
     }, orphanCheckMs);
     if (typeof check === "object" && "unref" in check) check.unref?.();
@@ -735,6 +791,7 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
  */
 export function activateRuntime(): void {
   retired = false;
+  hostStopped = false;
 }
 
 /** Test seam: this module copy's runtime generation. */
