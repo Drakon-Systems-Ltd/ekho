@@ -195,4 +195,23 @@ describe("runtime registry: standby withdrawal", () => {
     expect(agentRuntimeGeneration(AGENT)).toBe(1);
     expect(agentRuntimeStandbyGenerations(AGENT)).toEqual([]);
   });
+
+  it("the releasing generation's drain is handed to the standby that resumes", () => {
+    const drains: Promise<void>[] = [];
+    const g1 = holder(1, {
+      resume: vi.fn((drained: Promise<void>) => {
+        drains.push(drained);
+        return claimAgentRuntime(AGENT, g1);
+      })
+    });
+    claimAgentRuntime(AGENT, g1);
+    claimAgentRuntime(AGENT, holder(2));
+    const g2Drain = Promise.resolve();
+    releaseAgentRuntime(AGENT, 2, g2Drain);
+    expect(drains).toEqual([g2Drain]);
+    claimAgentRuntime(AGENT, holder(3));
+    releaseAgentRuntime(AGENT, 3); // no drain given: a settled default
+    expect(drains).toHaveLength(2);
+    expect(drains[1]).toBeInstanceOf(Promise);
+  });
 });

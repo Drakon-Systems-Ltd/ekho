@@ -479,6 +479,50 @@ describe("plugin reload in one process", () => {
     expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/resumed heartbeat for agent_reload/);
   });
 
+  it("the disposed successor's poll in flight is drained before the resumed loop polls, and a tool call's connect cannot start it early", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      // B's first poll (the third served) hangs until the test releases it.
+      if (served === 3) return new Promise((r) => { release = r; });
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2); // A polled twice, nothing in flight
+    expect(served).toBe(2);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // B's first poll: in flight
+    expect(served).toBe(3);
+    const unloads = hostB.dispose(); // B disposed with its poll outstanding: A resumes (the host awaits B's drain)
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+    // A straggling tool call connects on A while the gate is pending.
+    await a.conn.ensureConnected(hostA.api.pluginConfig as never, undefined, hostA.api as never);
+
+    const hold = POLL_MS + 500; // past A's first poll deadline, inside B's drain + a poll interval
+    expect(hold).toBeLessThan(STOP_DRAIN_MS + POLL_MS);
+    const held = await producersOver(hold);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([]);
+    expect(served).toBe(3);
+
+    release({ messages: [] }); // B's tick completes; B's drain settles
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(unloads);
+    const after = await producersOver(POLL_MS * 4);
+    expect(after.heartbeat).toEqual([1]);
+    expect(after.poll).toEqual([1]);
+    expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
+    expect(relay.polls.filter((n) => n === 2)).toHaveLength(0);
+    expect(deadLetters()).toEqual([]);
+  });
+
   it("a resume whose drain outlives a host stop or a newer generation starts no inbox loop", async () => {
     let release: (batch: unknown) => void = () => {};
     let served = 0;

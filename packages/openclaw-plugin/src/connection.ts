@@ -104,6 +104,10 @@ let hostStopped = false;
 // heartbeat and auto-reply loop against the same host api. Never cleared by
 // shutdown: the host registration behind it is what resume relies on.
 let lastStart: { api?: PluginApi; log?: Logger; config?: EkhoPluginConfig } | null = null;
+// While a resume (#160) waits for the loops it must not overlap to drain, no
+// path may start this copy's inbox loop early — not a tool call's connect,
+// not a rebind. The gate's own settlement starts it (if still allowed).
+let autoReplyGate: Promise<void> | null = null;
 // The agent this copy holds in the registry, for release on shutdown.
 let claimedAgentId: string | null = null;
 // The agent this copy last held, kept across a supersession so a later host
@@ -585,7 +589,7 @@ function claimRuntime(agentId: string, log?: Logger): boolean {
   const holder = {
     generation,
     stop: (reason: string) => shutdown(reason, log),
-    resume: () => resumeRuntime(agentId)
+    resume: (successorDrain: Promise<void>) => resumeRuntime(agentId, successorDrain)
   };
   if (!claimAgentRuntime(agentId, holder)) {
     retired = true;
@@ -609,8 +613,8 @@ function claimRuntime(agentId: string, log?: Logger): boolean {
  * inside the successor's release, so there is never a moment with no holder.
  * True once this copy has re-claimed the agent and restarted its heartbeat.
  */
-function resumeRuntime(agentId: string): boolean {
-  if (hostStopped || !connection || connection.credentials.agentId !== agentId) return false;
+function resumeRuntime(agentId: string, successorDrain: Promise<void>): boolean {
+  if (hostStopped || connection?.credentials?.agentId !== agentId) return false;
   const start = lastStart;
   retired = false;
   maybeStartHeartbeat(start?.log, start?.config);
@@ -620,20 +624,29 @@ function resumeRuntime(agentId: string): boolean {
     return false;
   }
   // The heartbeat is what keeps the agent out of quarantine, so it is back
-  // at once. The inbox loop waits for this copy's previous loop to drain: the
-  // supersession told that loop to stop, but a poll it had in flight may
-  // still be outstanding (bounded by autoreply.ts STOP_DRAIN_MS), and two
-  // concurrent polls for one agent would be two producers. Ownership is
-  // checked again when the drain settles: a newer generation or a host stop
-  // in the meantime means this copy starts nothing.
-  const drained = stopDrain;
-  void drained.then(() => {
-    if (retired || hostStopped || claimedAgentId !== agentId || stopDrain !== drained) return;
-    maybeStartAutoReply(start?.api, start?.log, start?.config);
+  // at once. The inbox loop waits for the two loops it must not overlap to
+  // drain: this copy's previous loop (stopped by the supersession) and the
+  // successor's loop (stopped by the dispose that brought us here); either
+  // may still have a poll in flight, bounded by autoreply.ts STOP_DRAIN_MS,
+  // and two concurrent polls for one agent would be two producers. While the
+  // gate is up nothing else starts the loop either (maybeStartAutoReply).
+  // Ownership is checked again when the gate settles: a newer generation or
+  // a host stop in the meantime means this copy starts nothing.
+  const gate = Promise.all([stopDrain, successorDrain]).then(
+    () => undefined,
+    () => undefined
+  );
+  autoReplyGate = gate;
+  void gate.then(() => {
+    if (autoReplyGate !== gate) return;
+    autoReplyGate = null;
+    if (retired || hostStopped || claimedAgentId !== agentId) return;
+    const now = lastStart;
+    maybeStartAutoReply(now?.api, now?.log, now?.config);
   });
   try {
     start?.log?.info?.(
-      `[ekho] generation ${generation} resumed heartbeat for ${agentId} (its successor was disposed before anything replaced it); auto-reply resumes once the previous loop has drained`
+      `[ekho] generation ${generation} resumed heartbeat for ${agentId} (its successor was disposed before anything replaced it); auto-reply resumes once the stopped loops have drained`
     );
   } catch {
     /* a host logger must not undo the resume */
@@ -675,6 +688,9 @@ function maybeStartHeartbeat(log?: Logger, config?: EkhoPluginConfig) {
  */
 function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: EkhoPluginConfig) {
   if (stopAutoReply || !connection || !api) return;
+  // A resume is waiting for stopped loops to drain (#160): it starts the loop
+  // itself when they have, and nothing may start it earlier.
+  if (autoReplyGate) return;
   if (!claimRuntime(connection.credentials.agentId, log)) return;
   // The auto-reply loop wakes the agent by spawning `openclaw agent -m`, which
   // re-loads this plugin in a one-shot child. That child sets this env var so it
@@ -772,8 +788,12 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
     stopAutoReply = null;
     autoReplyApi = null;
   }
+  // A pending resume gate must not start a loop in a copy that just stopped.
+  autoReplyGate = null;
   if (claimedAgentId) {
-    releaseAgentRuntime(claimedAgentId, generation);
+    // Hand the release our drain: a standby that resumes waits for it before
+    // polling, so a poll this loop still has in flight is never overlapped.
+    releaseAgentRuntime(claimedAgentId, generation, stopDrain);
     claimedAgentId = null;
   }
   // Host-stopped while on standby after a supersession: this copy can never

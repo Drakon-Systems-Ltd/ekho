@@ -27,8 +27,11 @@ export interface AgentRuntimeHolder {
    * agent with no successor (#160). Synchronous; true once this holder has
    * re-claimed the agent, false when it cannot (its host unloaded it, or it
    * no longer has a connection) — then it is dropped from standby for good.
+   * `successorDrain` settles when the releasing generation's loop has drained
+   * (its poll in flight included, within its bound); anything that must not
+   * overlap that loop waits for it.
    */
-  resume?: () => boolean;
+  resume?: (successorDrain: Promise<void>) => boolean;
 }
 
 interface RuntimeRegistry {
@@ -112,12 +115,17 @@ export function claimAgentRuntime(agentId: string, holder: AgentRuntimeHolder): 
 /**
  * Drop `agentId`'s entry if (and only if) this generation still holds it.
  * With the slot empty, the most recently superseded generation that can still
- * produce resumes (#160: a successor disposed before anything replaced it).
+ * produce resumes (#160: a successor disposed before anything replaced it),
+ * handed `drained`: the releasing generation's own drain promise.
  * A standby that declines (its host unloaded it too) is discarded, and the
  * next older one is tried. Nothing resumes when the slot stays held: a
  * superseded generation's own release is a no-op by then (see claim above).
  */
-export function releaseAgentRuntime(agentId: string, generation: number): void {
+export function releaseAgentRuntime(
+  agentId: string,
+  generation: number,
+  drained: Promise<void> = Promise.resolve()
+): void {
   const r = registry();
   if (r.byAgent.get(agentId)?.generation !== generation) return;
   r.byAgent.delete(agentId);
@@ -126,7 +134,7 @@ export function releaseAgentRuntime(agentId: string, generation: number): void {
     const candidate = waiting.pop()!;
     let resumed = false;
     try {
-      resumed = candidate.resume?.() === true;
+      resumed = candidate.resume?.(drained) === true;
     } catch {
       /* a standby that throws cannot produce; try the next */
     }
