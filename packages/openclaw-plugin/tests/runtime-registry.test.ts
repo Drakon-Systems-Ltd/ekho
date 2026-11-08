@@ -7,6 +7,7 @@ import {
   agentRuntimeStandbyGenerations,
   claimAgentRuntime,
   releaseAgentRuntime,
+  withdrawAgentRuntimeStandby,
   type AgentRuntimeHolder
 } from "../src/runtime-registry";
 
@@ -146,6 +147,51 @@ describe("runtime registry: synchronous re-entrancy", () => {
     claimAgentRuntime(AGENT, holder(2));
     releaseAgentRuntime(AGENT, 2);
     expect(g1.resume).toHaveBeenCalledTimes(1);
+    expect(agentRuntimeGeneration(AGENT)).toBe(1);
+    expect(agentRuntimeStandbyGenerations(AGENT)).toEqual([]);
+  });
+
+  it("a resume that is itself superseded before it returns keeps the resumed generation on the NEW standby list", () => {
+    // Release g2 → g1 resumes and re-claims (the old list is now empty) → a
+    // newer g3 claims before resume() returns, putting g1 on a fresh list.
+    // The outer release must not throw that fresh list away (it is not the
+    // list it emptied), or disposing g3 could never bring g1 back.
+    const g3 = holder(3);
+    let resumes = 0;
+    const g1 = holder(1, {
+      resume: vi.fn(() => {
+        const ok = claimAgentRuntime(AGENT, g1);
+        if (++resumes === 1) claimAgentRuntime(AGENT, g3); // only the first resume is interrupted
+        return ok;
+      })
+    });
+    claimAgentRuntime(AGENT, g1);
+    claimAgentRuntime(AGENT, holder(2));
+    releaseAgentRuntime(AGENT, 2);
+    expect(agentRuntimeGeneration(AGENT)).toBe(3);
+    expect(agentRuntimeStandbyGenerations(AGENT)).toEqual([1]);
+    releaseAgentRuntime(AGENT, 3);
+    expect(g1.resume).toHaveBeenCalledTimes(2);
+    expect(agentRuntimeGeneration(AGENT)).toBe(1);
+  });
+});
+
+describe("runtime registry: standby withdrawal", () => {
+  it("a host-stopped standby is withdrawn by generation and never tried; the list is forgotten once empty", () => {
+    const g1 = holder(1, { resume: vi.fn(() => claimAgentRuntime(AGENT, g1)) });
+    const g2 = holder(2, { resume: vi.fn(() => claimAgentRuntime(AGENT, g2)) });
+    claimAgentRuntime(AGENT, g1);
+    claimAgentRuntime(AGENT, g2);
+    claimAgentRuntime(AGENT, holder(3));
+    expect(agentRuntimeStandbyGenerations(AGENT)).toEqual([1, 2]);
+    withdrawAgentRuntimeStandby(AGENT, 2); // g2's host unloaded it (ordinary reload)
+    withdrawAgentRuntimeStandby(AGENT, 9); // unknown generation: no-op
+    withdrawAgentRuntimeStandby("agent_other", 1); // unknown agent: no-op
+    expect(agentRuntimeStandbyGenerations(AGENT)).toEqual([1]);
+    releaseAgentRuntime(AGENT, 3);
+    expect(g2.resume).not.toHaveBeenCalled();
+    expect(agentRuntimeGeneration(AGENT)).toBe(1);
+    withdrawAgentRuntimeStandby(AGENT, 1); // not on standby (it holds the slot): no-op
     expect(agentRuntimeGeneration(AGENT)).toBe(1);
     expect(agentRuntimeStandbyGenerations(AGENT)).toEqual([]);
   });

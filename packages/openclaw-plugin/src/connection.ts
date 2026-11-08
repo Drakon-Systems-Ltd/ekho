@@ -27,6 +27,7 @@ import {
   nextRuntimeGeneration,
   putEnrolOperatorKeys,
   releaseAgentRuntime,
+  withdrawAgentRuntimeStandby,
   runEnrolmentExclusive,
   takeEnrolOperatorKeys
 } from "./runtime-registry.js";
@@ -105,6 +106,9 @@ let hostStopped = false;
 let lastStart: { api?: PluginApi; log?: Logger; config?: EkhoPluginConfig } | null = null;
 // The agent this copy holds in the registry, for release on shutdown.
 let claimedAgentId: string | null = null;
+// The agent this copy last held, kept across a supersession so a later host
+// stop can take the copy off that agent's standby (#160).
+let lastHeldAgentId: string | null = null;
 let orphanCheckMs = 60_000;
 
 /** Test seam for the delayed missing-heartbeat alarm. */
@@ -591,6 +595,7 @@ function claimRuntime(agentId: string, log?: Logger): boolean {
     return false;
   }
   claimedAgentId = agentId;
+  lastHeldAgentId = agentId;
   return true;
 }
 
@@ -760,6 +765,9 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
     releaseAgentRuntime(claimedAgentId, generation);
     claimedAgentId = null;
   }
+  // Host-stopped while on standby after a supersession: this copy can never
+  // resume, so stop holding a place (and this module graph) in the registry.
+  if (!superseded && lastHeldAgentId) withdrawAgentRuntimeStandby(lastHeldAgentId, generation);
   if (hadWork) {
     // The work is already secured; a throwing host logger must not cost the
     // host the drain promise it awaits.

@@ -102,7 +102,7 @@ export function claimAgentRuntime(agentId: string, holder: AgentRuntimeHolder): 
       /* the old copy is going away regardless */
     }
   }
-  if (waiting.length === 0) r.standby?.delete(agentId);
+  forgetIfEmpty(r, agentId, waiting);
   // The stop above may re-enter this registry (a stop that itself claims, or
   // a release that resumes a standby). Only a holder that still owns the slot
   // once everything synchronous has settled may start producing.
@@ -132,7 +132,29 @@ export function releaseAgentRuntime(agentId: string, generation: number): void {
     }
     if (resumed) break;
   }
-  if (waiting.length === 0) r.standby?.delete(agentId);
+  forgetIfEmpty(r, agentId, waiting);
+}
+
+/**
+ * Take `generation` off `agentId`'s standby. A superseded copy whose host then
+ * unloads it (OpenClaw's ordinary reload) could never resume; left listed, it
+ * would pin its whole module graph until the active holder's next release.
+ */
+export function withdrawAgentRuntimeStandby(agentId: string, generation: number): void {
+  const r = registry();
+  const waiting = r.standby?.get(agentId);
+  if (!waiting) return;
+  dropStandby(waiting, generation);
+  forgetIfEmpty(r, agentId, waiting);
+}
+
+/**
+ * Drop the map entry for `waiting` once it is empty — but only while it IS
+ * the agent's current list: a re-entrant claim during a resume may already
+ * have replaced it with a fresh list that holds the next standby.
+ */
+function forgetIfEmpty(r: RuntimeRegistry, agentId: string, waiting: AgentRuntimeHolder[]): void {
+  if (waiting.length === 0 && r.standby?.get(agentId) === waiting) r.standby.delete(agentId);
 }
 
 function standbyFor(r: RuntimeRegistry, agentId: string): AgentRuntimeHolder[] {

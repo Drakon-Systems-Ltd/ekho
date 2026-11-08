@@ -409,6 +409,60 @@ describe("plugin reload in one process", () => {
     expect((await producersOver(POLL_MS)).heartbeat).toEqual([1]);
   });
 
+  it("ordinary reloads leave no superseded generation on standby once the host has unloaded it (bounded retention)", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const registry = await import("../src/runtime-registry");
+    let previous = { copy: a, host: hostA };
+    for (let i = 0; i < 3; i++) {
+      const next = await loadPluginCopy();
+      const host = fakeApi(true);
+      next.plugin.register(host.api);
+      await untilConnected(next.conn);
+      expect(registry.agentRuntimeStandbyGenerations("agent_reload")).toEqual([previous.copy.conn.runtimeGeneration()]);
+      await Promise.all(previous.host.fire("gateway_stop", { reason: "plugin replacement" }));
+      await Promise.all(previous.host.dispose());
+      expect(registry.agentRuntimeStandbyGenerations("agent_reload")).toEqual([]);
+      previous = { copy: next, host };
+    }
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([4]);
+  });
+
+  it("a poll in flight on the superseded generation never overlaps the resumed loop: one poller cadence, no second poll after stop", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      // A's second poll hangs (a slow relay) until the test releases it.
+      if (served === 2) return new Promise((r) => { release = r; });
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2); // tick 1 answered, tick 2 in flight
+    expect(served).toBe(2);
+
+    const b = await loadPluginCopy(); // supersedes A while A's poll is in flight
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await Promise.all(hostB.dispose()); // ...and is disposed: A resumes
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+    release({ messages: [] }); // the old loop's tick completes now
+    await vi.advanceTimersByTimeAsync(0);
+
+    const after = await producersOver(POLL_MS * 4);
+    expect(after.heartbeat).toEqual([1]);
+    expect(after.poll).toEqual([1]);
+    // Exactly the resumed loop's cadence from client 1: the stopped loop polls no more.
+    expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
+    expect(deadLetters()).toEqual([]);
+  });
+
   for (const order of ["newest first", "oldest first"] as const) {
     it(`gateway shutdown with two live registrations leaves nothing beating (${order})`, async () => {
       const a = await loadPluginCopy();
