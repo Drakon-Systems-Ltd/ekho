@@ -429,6 +429,18 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: >
+            The recipient's own `received_at` from its ack (adapter clock).
+            An ack means received, not answered.
+        ack_recorded_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Relay time the ack arrived (relay clock), next to the adapter-clock
+            `acked_at`, so transport and ack lag can be measured on one clock.
+            Null for acks recorded before the relay tracked it. Added under
+            #155 (phase 1a).
         delivery_attempts:
           type: integer
         retry_count:
@@ -2877,6 +2889,18 @@ paths:
                           type: string
                           format: date-time
                           nullable: true
+                        last_inbox_poll_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+                          description: >
+                            Relay time of the agent's most recent `GET /v1/inbox`,
+                            empty polls included. Null if it has never polled.
+                            Heartbeats do not update it, so an agent that
+                            heartbeats but never fetches shows a fresh
+                            `last_heartbeat_at` and a stale or null
+                            `last_inbox_poll_at`. Not an input to `health`.
+                            Added under #155 (phase 1a).
                         consecutive_missed_heartbeats:
                           type: integer
         "401":

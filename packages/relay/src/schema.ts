@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS agents (
   operator_trusted INTEGER NOT NULL DEFAULT 0,
   peer_autoreply INTEGER NOT NULL DEFAULT 1,
   peer_turn_budget INTEGER NOT NULL DEFAULT 0,
+  last_inbox_poll_at TEXT,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
   queued_at TEXT NOT NULL,
   delivered_at TEXT,
   acked_at TEXT,
+  ack_recorded_at TEXT,
   status TEXT NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0,
   next_retry_at TEXT,
