@@ -409,21 +409,26 @@ describe("plugin reload in one process", () => {
     expect((await producersOver(POLL_MS)).heartbeat).toEqual([1]);
   });
 
-  it("gateway shutdown with two live registrations leaves nothing beating, whichever stops first", async () => {
-    const a = await loadPluginCopy();
-    const hostA = fakeApi(true);
-    a.plugin.register(hostA.api);
-    await untilConnected(a.conn);
-    const b = await loadPluginCopy();
-    const hostB = fakeApi(true);
-    b.plugin.register(hostB.api);
-    await untilConnected(b.conn);
-    // The newest stops first: a resumes for a moment, then its own stop lands.
-    await Promise.all(hostB.fire("gateway_stop", { reason: "shutdown" }));
-    await Promise.all(hostA.fire("gateway_stop", { reason: "shutdown" }));
-    expect(await producersOver(POLL_MS * 2)).toEqual({ heartbeat: [], poll: [], beats: 0 });
-    expect(a.conn.listenerUp("agent_reload")).toBe(false);
-  });
+  for (const order of ["newest first", "oldest first"] as const) {
+    it(`gateway shutdown with two live registrations leaves nothing beating (${order})`, async () => {
+      const a = await loadPluginCopy();
+      const hostA = fakeApi(true);
+      a.plugin.register(hostA.api);
+      await untilConnected(a.conn);
+      const b = await loadPluginCopy();
+      const hostB = fakeApi(true);
+      b.plugin.register(hostB.api);
+      await untilConnected(b.conn);
+      expect((await producersOver(POLL_MS)).heartbeat).toEqual([2]);
+      // Newest first: a resumes for a moment, then its own stop lands. Oldest
+      // first: a is host-stopped while on standby, so b's release finds no one.
+      const stops = order === "newest first" ? [hostB, hostA] : [hostA, hostB];
+      for (const host of stops) await Promise.all(host.fire("gateway_stop", { reason: "shutdown" }));
+      expect(await producersOver(POLL_MS * 2)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+      expect(a.conn.listenerUp("agent_reload")).toBe(false);
+      expect(b.conn.listenerUp("agent_reload")).toBe(false);
+    });
+  }
 
   it("registered inbox isolates transport-distinct base paths", async () => {
     const edge = { ...defaultConfig(), relayBaseUrl: "http://relay.invalid/edge" };

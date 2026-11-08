@@ -74,6 +74,9 @@ export function nextRuntimeGeneration(): number {
  * stopped first (its stop must not throw, but a throwing one never blocks the
  * hand-off). Returns false — and changes nothing — when a NEWER generation
  * already holds the agent: the caller is stale and must not start anything.
+ * Also false if, by the time the old holder's stop has returned, the slot is
+ * no longer this holder's (a re-entrant claim won it): then too the caller
+ * must start nothing.
  */
 export function claimAgentRuntime(agentId: string, holder: AgentRuntimeHolder): boolean {
   const r = registry();
@@ -100,7 +103,10 @@ export function claimAgentRuntime(agentId: string, holder: AgentRuntimeHolder): 
     }
   }
   if (waiting.length === 0) r.standby?.delete(agentId);
-  return true;
+  // The stop above may re-enter this registry (a stop that itself claims, or
+  // a release that resumes a standby). Only a holder that still owns the slot
+  // once everything synchronous has settled may start producing.
+  return r.byAgent.get(agentId) === holder;
 }
 
 /**
