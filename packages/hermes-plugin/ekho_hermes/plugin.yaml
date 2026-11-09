@@ -37,3 +37,6 @@ optional_env:
   - name: EKHO_PEER_TURN_BUDGET
     description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence. An operator message re-opens a closed latch."
     prompt: "Peer turn budget per conversation"
+  - name: EKHO_OUTBOX_DIR
+    description: "The only directory ekho_send attaches files from (default ~/ekho-outbox). Must not be, contain, or sit inside ~/.hermes, the Ekho state dir or ~/.openclaw."
+    prompt: "Ekho attachment outbox directory"

@@ -83,9 +83,13 @@ EKHO_SEND_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Local file path(s) to attach. Each is read, base64-encoded, "
-                "and uploaded; must be an allowed type (images png/jpg/gif/webp, "
-                "or pdf/txt/md/csv/json) under the 25 MiB cap. Max 10 per message."
+                "File(s) to attach, from the Ekho outbox directory only "
+                "(EKHO_OUTBOX_DIR, else ~/ekho-outbox): copy a file there first, "
+                "then pass its path or its name relative to the outbox. Anything "
+                "outside the outbox, hidden files and credential files are "
+                "refused. Each is read, base64-encoded, and uploaded; must be an "
+                "allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) "
+                "under the 25 MiB cap. Max 10 per message."
             ),
         },
     },

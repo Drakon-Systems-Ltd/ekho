@@ -28,7 +28,7 @@ type StatePaths = typeof import("openclaw/plugin-sdk/state-paths");
  * that predates this SDK module (or a loader that cannot resolve it) must fall
  * back, never fail to load the plugin.
  */
-function resolveOpenClawStateDir(): string {
+export function resolveOpenClawStateDir(): string {
   try {
     const statePaths = createRequire(import.meta.url)("openclaw/plugin-sdk/state-paths") as StatePaths;
     const dir = statePaths.resolveStateDir();
