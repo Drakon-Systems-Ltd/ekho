@@ -322,6 +322,298 @@ describe("plugin reload in one process", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(host2.log.error).not.toHaveBeenCalled();
   });
+  // #160: on a slow gateway start the host runs a SECOND full register pass
+  // from a fresh module copy (generation n+1), which supersedes generation n
+  // when it connects. About ten seconds later the host disposes that second
+  // registry only; registration n stays live. Before the fix nothing re-armed
+  // generation n, so no generation heartbeated and the relay quarantined the
+  // agent until a manual gateway restart.
+  it("resumes the superseded generation when its successor is disposed before a third registers (#160)", async () => {
+    const a = await loadPluginCopy(); // generation n: the first register pass
+    a.conn.setOrphanCheckMs(100);
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([1]);
+
+    const b = await loadPluginCopy(); // generation n+1: the slow-start second pass
+    b.conn.setOrphanCheckMs(100);
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([2]);
+    expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/superseded by generation/);
+
+    // The host disposes the second registry only; registration n is still live.
+    await Promise.all(hostB.dispose());
+    const after = await producersOver(POLL_MS * 2);
+    expect(after.heartbeat).toEqual([1]);
+    expect(after.poll).toEqual([1]);
+    expect(after.beats).toBe((POLL_MS * 2) / HEARTBEAT_MS);
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+    expect(await hostA.inbox()).toMatchObject({ listener: "up", degraded: false });
+    expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/generation \d+ resumed heartbeat for agent_reload/);
+    // A generation is heartbeating, so the disposed copy's orphan alarm stays quiet.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(hostB.log.error).not.toHaveBeenCalled();
+    expect(hostA.log.error).not.toHaveBeenCalled();
+  });
+
+  it("a superseded generation the host also unloaded stays down when its successor is disposed (ordinary reload)", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const b = await loadPluginCopy();
+    b.conn.setOrphanCheckMs(100);
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    // OpenClaw's reload: the old instance gets gateway_stop + dispose after the new one took over.
+    await Promise.all(hostA.fire("gateway_stop", { reason: "plugin replacement" }));
+    await Promise.all(hostA.dispose());
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([2]);
+
+    // Later the host disposes the new one too (plugin disabled): nothing may come back.
+    await Promise.all(hostB.dispose());
+    expect(await producersOver(POLL_MS * 2)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+    expect(a.conn.listenerUp("agent_reload")).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(hostB.log.error).toHaveBeenCalledTimes(1);
+    expect(String(hostB.log.error.mock.calls[0][0])).toContain("no ekho-adapter generation is heartbeating");
+  });
+
+  it("a resumed generation stands down again when a newer generation connects (one producer)", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await Promise.all(hostB.dispose());
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([1]); // a resumed
+
+    const c = await loadPluginCopy();
+    const hostC = fakeApi(true);
+    c.plugin.register(hostC.api);
+    await untilConnected(c.conn);
+    const after = await producersOver(POLL_MS * 2);
+    expect(after.heartbeat).toEqual([3]);
+    expect(after.poll).toEqual([3]);
+    expect(after.beats).toBe((POLL_MS * 2) / HEARTBEAT_MS);
+    expect(await hostA.inbox()).toMatchObject({ listener: "up" }); // the registry holds the agent: c
+    // And a third dispose hands back to a once more: resume is repeatable.
+    await Promise.all(hostC.dispose());
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([1]);
+  });
+
+  it("ordinary reloads leave no superseded generation on standby once the host has unloaded it (bounded retention)", async () => {
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    const registry = await import("../src/runtime-registry");
+    let previous = { copy: a, host: hostA };
+    for (let i = 0; i < 3; i++) {
+      const next = await loadPluginCopy();
+      const host = fakeApi(true);
+      next.plugin.register(host.api);
+      await untilConnected(next.conn);
+      expect(registry.agentRuntimeStandbyGenerations("agent_reload")).toEqual([previous.copy.conn.runtimeGeneration()]);
+      await Promise.all(previous.host.fire("gateway_stop", { reason: "plugin replacement" }));
+      await Promise.all(previous.host.dispose());
+      expect(registry.agentRuntimeStandbyGenerations("agent_reload")).toEqual([]);
+      previous = { copy: next, host };
+    }
+    expect((await producersOver(POLL_MS)).heartbeat).toEqual([4]);
+  });
+
+  it("a poll in flight on the superseded generation never overlaps the resumed loop: heartbeat at once, inbox loop after the drain", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      // A's second poll hangs (a slow relay) until the test releases it.
+      if (served === 2) return new Promise((r) => { release = r; });
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2); // tick 1 answered, tick 2 in flight
+    expect(served).toBe(2);
+
+    const b = await loadPluginCopy(); // supersedes A while A's poll is in flight
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    const sinceSupersede = 1_000; // the issue's ~10 s is fake-timer time here
+    expect((await producersOver(sinceSupersede)).heartbeat).toEqual([2]);
+    expect(served).toBe(2); // B's first poll has not come round yet
+    await Promise.all(hostB.dispose()); // ...and is disposed: A resumes
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+
+    // The old poll stays outstanding past a resumed loop's first poll
+    // deadline: the heartbeat is back, but no second inbox request starts
+    // while the first is still in flight. (A poll hung longer than the
+    // bounded drain, STOP_DRAIN_MS, is abandoned and the loop restarts; that
+    // restart's first poll lies beyond this window.)
+    const hold = POLL_MS + 500;
+    expect(hold).toBeLessThan(STOP_DRAIN_MS - sinceSupersede + POLL_MS);
+    const held = await producersOver(hold);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([]);
+    expect(served).toBe(2);
+
+    release({ messages: [] }); // the old loop's tick completes now
+    await vi.advanceTimersByTimeAsync(0);
+    const after = await producersOver(POLL_MS * 4);
+    expect(after.heartbeat).toEqual([1]);
+    expect(after.poll).toEqual([1]);
+    // Exactly the resumed loop's cadence from client 1: the stopped loop polls no more.
+    expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
+    expect(deadLetters()).toEqual([]);
+    expect(hostA.log.info.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/resumed heartbeat for agent_reload/);
+  });
+
+  it("the disposed successor's poll in flight is drained before the resumed loop polls, and a tool call's connect cannot start it early", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      // B's first poll (the third served) hangs until the test releases it.
+      if (served === 3) return new Promise((r) => { release = r; });
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2); // A polled twice, nothing in flight
+    expect(served).toBe(2);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // B's first poll: in flight
+    expect(served).toBe(3);
+    const unloads = hostB.dispose(); // B disposed with its poll outstanding: A resumes (the host awaits B's drain)
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+    // A straggling tool call connects on A while the gate is pending.
+    await a.conn.ensureConnected(hostA.api.pluginConfig as never, undefined, hostA.api as never);
+
+    const hold = POLL_MS + 500; // past A's first poll deadline, inside B's drain + a poll interval
+    expect(hold).toBeLessThan(STOP_DRAIN_MS + POLL_MS);
+    const held = await producersOver(hold);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([]);
+    expect(served).toBe(3);
+
+    release({ messages: [] }); // B's tick completes; B's drain settles
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(unloads);
+    const after = await producersOver(POLL_MS * 4);
+    expect(after.heartbeat).toEqual([1]);
+    expect(after.poll).toEqual([1]);
+    expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
+    expect(relay.polls.filter((n) => n === 2)).toHaveLength(0);
+    expect(deadLetters()).toEqual([]);
+  });
+
+  it("a successor's outstanding drain survives a further supersede + dispose: the twice-resumed loop still waits for it", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      if (served === 3) return new Promise((r) => { release = r; }); // B's first poll hangs
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS); // B's poll in flight
+    expect(served).toBe(3);
+    const unloadsB = hostB.dispose(); // A resumes, gated on B's drain
+    // Before B's drain settles, C supersedes A and is disposed in turn.
+    const c = await loadPluginCopy();
+    const hostC = fakeApi(true);
+    c.plugin.register(hostC.api);
+    await untilConnected(c.conn);
+    await Promise.all(hostC.dispose()); // A resumes again; B's poll is still outstanding
+    expect(a.conn.listenerUp("agent_reload")).toBe(true);
+
+    const hold = POLL_MS + 500;
+    expect(hold).toBeLessThan(STOP_DRAIN_MS + POLL_MS);
+    const held = await producersOver(hold);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([]);
+    expect(served).toBe(3);
+
+    release({ messages: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(unloadsB);
+    const after = await producersOver(POLL_MS * 4);
+    expect(after).toMatchObject({ heartbeat: [1], poll: [1] });
+    expect(relay.polls.filter((n) => n === 1)).toHaveLength(4);
+  });
+
+  it("a resume whose drain outlives a host stop or a newer generation starts no inbox loop", async () => {
+    let release: (batch: unknown) => void = () => {};
+    let served = 0;
+    relay.inbox = () => {
+      served++;
+      if (served === 2) return new Promise((r) => { release = r; });
+      return Promise.resolve({ messages: [] });
+    };
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    const b = await loadPluginCopy();
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    await Promise.all(hostB.dispose()); // A resumes its heartbeat; its loop waits for the drain
+    expect((await producersOver(POLL_MS / 2)).heartbeat).toEqual([1]);
+    const unloads = hostA.dispose(); // ...then the host unloads A before the drain settles
+    expect((await producersOver(POLL_MS / 2)).heartbeat).toEqual([]);
+    release({ messages: [] }); // the drain settles only now; A is host-stopped: no loop
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.all(unloads);
+    expect(await producersOver(POLL_MS * 2)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+  });
+
+  for (const order of ["newest first", "oldest first"] as const) {
+    it(`gateway shutdown with two live registrations leaves nothing beating (${order})`, async () => {
+      const a = await loadPluginCopy();
+      const hostA = fakeApi(true);
+      a.plugin.register(hostA.api);
+      await untilConnected(a.conn);
+      const b = await loadPluginCopy();
+      const hostB = fakeApi(true);
+      b.plugin.register(hostB.api);
+      await untilConnected(b.conn);
+      expect((await producersOver(POLL_MS)).heartbeat).toEqual([2]);
+      // Newest first: a resumes for a moment, then its own stop lands. Oldest
+      // first: a is host-stopped while on standby, so b's release finds no one.
+      const stops = order === "newest first" ? [hostB, hostA] : [hostA, hostB];
+      for (const host of stops) await Promise.all(host.fire("gateway_stop", { reason: "shutdown" }));
+      expect(await producersOver(POLL_MS * 2)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+      expect(a.conn.listenerUp("agent_reload")).toBe(false);
+      expect(b.conn.listenerUp("agent_reload")).toBe(false);
+    });
+  }
+
   it("registered inbox isolates transport-distinct base paths", async () => {
     const edge = { ...defaultConfig(), relayBaseUrl: "http://relay.invalid/edge" };
     const a = await loadPluginCopy();
