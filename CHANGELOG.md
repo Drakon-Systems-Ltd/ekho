@@ -4,6 +4,17 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+Relay only so far. **Upgrade the relay** to get the two fields below; no SDK, plugin or connector change is needed to read them, and nothing is breaking.
+
+### Added
+- **Relay: two relay-clock delivery timestamps (PR #163, migration 025).** Both are additive and nullable, appear only on records that were already returned to the same caller, and carry no message content.
+  - `last_inbox_poll_at` on each agent in `GET /v1/operator/fleet-health`, and on the nodes of `GET /v1/operator/topology`, which are built from the same rows: relay time of the agent's most recent `GET /v1/inbox`, empty polls included. Heartbeats do not update it, so an agent that heartbeats but never fetches shows a fresh `last_heartbeat_at` beside a stale or null `last_inbox_poll_at`. It is not an input to `health`. Operator sessions only; an agent-signed request to either route is refused.
+  - `ack_recorded_at` on each delivery in `GET /v1/messages/{id}/status`: relay time the ack arrived, next to the existing `acked_at`, which is still the recipient's own `received_at` (adapter clock) and keeps its meaning.
+  - **Upgrade notes.** Migration `025_delivery_phases.sql` adds one nullable column to `agents` and one to `message_deliveries` and runs by itself the first time the upgraded relay starts; it rewrites no rows. Acks recorded before the upgrade keep `ack_recorded_at: null` (nothing is backfilled from `acked_at`, which is a different clock), and an agent shows `last_inbox_poll_at: null` until its first poll on the upgraded relay. Rolling back to the previous relay build is safe on a migrated database: that build never reads or writes the two columns and they stay in place unused.
+
+### Tests
+- **Relay: migration 025 is exercised in boot order on an existing database (#167).** `schema-upgrade-path.test.ts` now starts the relay on a database that already has `agents` and `message_deliveries` in their previous shape, where only the migration can add the columns, then serves one inbox poll and one ack through the routes. Tests only; no shipped code changes.
+
 ## [0.7.8] - 2026-11-09
 
 Patch on 0.7.7: a security fix to `ekho_send` attachments in the OpenClaw and Hermes plugins (see Security below) and an OpenClaw plugin heartbeat fix (#160, PR #162). No functional relay, `openapi.yaml` schema, SDK, MCP connector, ShieldCortex bridge or Python SDK changes; those move only in version metadata. **Behaviour change:** attachments must now be inside the outbox directory, and hosts without an anchored open refuse every attachment (see Security). `v0.6.0` upgrade notes still apply. Update the OpenClaw plugin and the Hermes plugin; the relay needs no update.
