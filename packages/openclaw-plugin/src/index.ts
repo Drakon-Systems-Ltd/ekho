@@ -116,7 +116,7 @@ const EKHO_SEND_PARAMETERS = Type.Object({
   attachment_paths: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Local file path(s) to attach. Each is read, base64-encoded, and uploaded; must be an allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) under the 25 MiB size cap. Max 10 per message."
+        "File(s) to attach, from the Ekho outbox directory only (plugin config outboxDir, else EKHO_OUTBOX_DIR, else ~/ekho-outbox): copy a file there first, then pass its path or its name relative to the outbox. Anything outside the outbox, hidden files and credential files are refused. Each is read, base64-encoded, and uploaded; must be an allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) under the 25 MiB size cap. Max 10 per message."
     })
   )
 });
@@ -169,9 +169,10 @@ async function executeEkhoSend(
   if (paths.length > ATTACHMENT_MAX_PER_MESSAGE) {
     throw new Error(`too many attachments (${paths.length}); max ${ATTACHMENT_MAX_PER_MESSAGE} per message`);
   }
+  // Every path passes the outbox checks before anything is uploaded.
+  const files = paths.map((p) => readUploadFile(p, config));
   const attachmentIds: string[] = [];
-  for (const p of paths) {
-    const { bytes, mime, filename } = readUploadFile(p);
+  for (const { bytes, mime, filename } of files) {
     const up = await client.uploadAttachment({ filename, mime, dataBase64: bytes.toString("base64") });
     attachmentIds.push(up.id);
   }
