@@ -6,7 +6,7 @@ All notable changes to Ekho are documented here.
 
 ## [0.7.8] - 2026-11-09
 
-No SDK changes. Version kept in step with the relay: the 0.7.8 release carries an OpenClaw plugin fix (#160, PR #162). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+No SDK changes. Version kept in step with the relay: the 0.7.8 release carries a security fix to `ekho_send` attachments in the OpenClaw and Hermes plugins and an OpenClaw plugin heartbeat fix (#160, PR #162). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
 
 ## [0.7.7] - 2026-11-05
 
