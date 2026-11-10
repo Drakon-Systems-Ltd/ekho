@@ -4,6 +4,14 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-10
+
+Relay-only delivery timing update (#163). Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields; no adapter changes are required. Existing delivery and health meanings remain unchanged; this does not measure reply or turn latency.
+
+### Added
+- **Last inbox poll in the operator roster.** `GET /v1/inbox` now records relay time in `agents.last_inbox_poll_at`, including empty polls. `GET /v1/operator/fleet-health` returns that timestamp per agent (null until the first poll). Heartbeats do not update it, and it is not an input to the existing health status. A stale poll alone cannot distinguish a stuck adapter from one busy in a turn.
+- **Relay-observed acknowledgement time in message status.** When an agent acknowledges a delivery, the relay records `message_deliveries.ack_recorded_at` on its own clock alongside `acked_at`, which remains the adapter-supplied receipt time. `GET /v1/messages/:id/status` returns the new field for each delivery. Both timestamps mean received, not answered; pre-upgrade acknowledgements retain a null `ack_recorded_at` rather than being backfilled from a different clock. The new roster and delivery fields are documented in `openapi.yaml`.
+
 ## [0.7.8] - 2026-11-09
 
 Patch on 0.7.7: a security fix to `ekho_send` attachments in the OpenClaw and Hermes plugins (see Security below) and an OpenClaw plugin heartbeat fix (#160, PR #162). No functional relay, `openapi.yaml` schema, SDK, MCP connector, ShieldCortex bridge or Python SDK changes; those move only in version metadata. **Behaviour change:** attachments must now be inside the outbox directory, and hosts without an anchored open refuse every attachment (see Security). `v0.6.0` upgrade notes still apply. Update the OpenClaw plugin and the Hermes plugin; the relay needs no update.

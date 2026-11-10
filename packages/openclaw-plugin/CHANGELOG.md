@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-10
+
+No OpenClaw plugin changes. Version kept in step with the relay; 0.8.0 adds relay-observed inbox-poll and acknowledgement timestamps (#163). Upgrade the relay to apply migration 025; no plugin update is required for this feature. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.8] - 2026-11-09
 
 ### Security
