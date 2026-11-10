@@ -1,0 +1,24 @@
+-- #155 Phase 1a: relay-observed delivery timing (docs/plans/2026-11-01-155-reply-latency-design.md, section 2.2).
+--
+-- Two relay-clock timestamps that need no adapter cooperation and carry no
+-- message content, key material or paths:
+--
+--   agents.last_inbox_poll_at: relay time of the agent's most recent
+--   GET /v1/inbox, written even when the batch is empty. Heartbeats do not
+--   touch it. It is evidence of recent polling only: a stale value shows the
+--   adapter is not fetching, whether wedged or mid-turn. Telling those two
+--   apart needs the retained turn intervals of design section 2.3 (Phase 1b).
+--
+--   message_deliveries.ack_recorded_at: relay time the ack ARRIVED. The
+--   existing acked_at keeps the adapter-supplied received_at (adapter clock)
+--   and its meaning, received, not answered. Pre-upgrade acks keep NULL here:
+--   nothing is backfilled from acked_at, because that value is another clock.
+--
+-- Existing databases get the columns here, fresh ones from schema.ts. The
+-- migration runner swallows duplicate-column errors per statement, so the two
+-- paths never collide.
+--
+-- NOTE: keep these comments free of semicolons and quote characters, because
+-- the migration runner splits statements naively.
+ALTER TABLE agents ADD COLUMN last_inbox_poll_at TEXT;
+ALTER TABLE message_deliveries ADD COLUMN ack_recorded_at TEXT;

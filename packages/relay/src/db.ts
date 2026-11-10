@@ -1968,6 +1968,14 @@ export class EkhoDb {
 
   getInbox(agentId: string, limit: number) {
     const now = nowIso();
+    // #155 Phase 1a: record the poll itself, relay clock, before anything is
+    // selected, so an EMPTY poll counts too. It is evidence of recent polling
+    // only: a stale value says the adapter is not fetching, whether it is
+    // wedged or mid-turn (an adapter does not poll during a turn). Telling
+    // those apart needs the retained turn intervals of design §2.3 (Phase 1b).
+    // Heartbeats never touch it, so "heartbeats but never fetches" now shows.
+    // An unknown agent id matches no row, which is the existing no-op path.
+    this.db.prepare("UPDATE agents SET last_inbox_poll_at = ? WHERE id = ?").run(now, agentId);
     const deliveries = this.db.prepare(
       `SELECT messages.*, message_deliveries.id AS delivery_id, message_deliveries.queued_at
        FROM message_deliveries
@@ -2411,7 +2419,7 @@ export class EkhoDb {
     if (!m) return null;
 
     const deliveries = this.db.prepare(
-      `SELECT d.recipient_agent_id, d.status, d.queued_at, d.delivered_at, d.acked_at,
+      `SELECT d.recipient_agent_id, d.status, d.queued_at, d.delivered_at, d.acked_at, d.ack_recorded_at,
               d.delivery_attempts, d.retry_count, d.last_failure_reason,
               dl.failure_reason AS dead_letter_reason, dl.dead_lettered_at
        FROM message_deliveries d
@@ -2439,6 +2447,9 @@ export class EkhoDb {
         queued_at: (d.queued_at as string | null) ?? null,
         delivered_at: (d.delivered_at as string | null) ?? null,
         acked_at: (d.acked_at as string | null) ?? null,
+        // #155 Phase 1a: relay clock. acked_at above is the adapter's clock.
+        // Both mean "received", never "answered".
+        ack_recorded_at: (d.ack_recorded_at as string | null) ?? null,
         delivery_attempts: Number(d.delivery_attempts ?? 0),
         retry_count: Number(d.retry_count ?? 0),
         last_failure_reason: (d.last_failure_reason as string | null) ?? null,
@@ -2570,14 +2581,19 @@ export class EkhoDb {
 
   ackMessages(agentId: string, ackRows: Array<{ message_id: string; received_at: string }>) {
     let updated = 0;
+    // #155 Phase 1a: acked_at stays the adapter-supplied received_at (adapter
+    // clock, unchanged). ack_recorded_at is the relay's own time the ack
+    // arrived, so transport and ack lag can be measured on one clock. Both are
+    // written once, by the same status != 'acked' guard.
+    const ackRecordedAt = nowIso();
     const tx = this.db.transaction(() => {
       for (const ack of ackRows) {
         // Only the agent's OWN delivery is touched. If nothing matched (the
         // message wasn't delivered to this agent), the ack is a no-op — never
         // flip a foreign/broadcast message's shared status off an unrelated ack.
         const res = this.db.prepare(
-          "UPDATE message_deliveries SET status = 'acked', acked_at = ? WHERE message_id = ? AND recipient_agent_id = ? AND status != 'acked'"
-        ).run(ack.received_at, ack.message_id, agentId);
+          "UPDATE message_deliveries SET status = 'acked', acked_at = ?, ack_recorded_at = ? WHERE message_id = ? AND recipient_agent_id = ? AND status != 'acked'"
+        ).run(ack.received_at, ackRecordedAt, ack.message_id, agentId);
         if (res.changes === 0) continue;
         updated += 1;
 
@@ -2971,7 +2987,7 @@ export class EkhoDb {
     const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
     const agents = this.db.prepare(
       `SELECT id, display_name, runtime, status, last_seen_at, consecutive_missed_heartbeats,
-              operator_trusted, peer_autoreply, peer_turn_budget
+              operator_trusted, peer_autoreply, peer_turn_budget, last_inbox_poll_at
        FROM agents WHERE fleet_id = ? AND runtime != 'operator'
        ORDER BY display_name`
     ).all(fleetId) as Array<Record<string, unknown>>;
@@ -3020,6 +3036,10 @@ export class EkhoDb {
         peer_autoreply: Boolean(a.peer_autoreply),
         peer_turn_budget: turnBudgetOut(a.peer_turn_budget),
         last_heartbeat_at: hb?.received_at ?? null,
+        // #155 Phase 1a: relay time of the last GET /v1/inbox (null = never
+        // polled). Deliberately NOT an input to `health`, which stays the
+        // connection + model axis; Phase 2 derives inbox.state from this.
+        last_inbox_poll_at: (a.last_inbox_poll_at as string | null) ?? null,
         metrics,
         health,
         active_conversations: activeConversations,

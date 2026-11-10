@@ -20,6 +20,20 @@
 
 All line references are to the tree at 0a2ebe8.
 
+**Delivery status (updated as phases land):**
+
+- **Phase 1a shipped, reduced scope.** `agents.last_inbox_poll_at` and
+  `message_deliveries.ack_recorded_at` (§2.2, relay-observed rows), migration
+  `025_delivery_phases.sql`, additive read-back on `/v1/messages/:id/status`
+  and `/v1/operator/fleet-health`, tests in
+  `packages/relay/tests/delivery-phases.test.ts`. The delivery summary
+  columns, `delivery_turn_attempts` and `agent_turn_replies` (§2.4) were
+  **not** created in 1a: nothing writes them until `POST /v1/delivery-phases`
+  exists, so they move to Phase 1b and land together with their writers and
+  the R1–R4 tests. `fetch_wait` (§2.3) also waits for 1b, because without
+  retained turn intervals every slow fetch would read `inbox_stalled`, which
+  mislabels a busy adapter.
+
 ---
 
 ## 0. Summary

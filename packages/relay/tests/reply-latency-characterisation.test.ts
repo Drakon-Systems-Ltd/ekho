@@ -104,12 +104,18 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     const [d] = status.body.deliveries;
     expect(d.status).toBe("acked");
     expect(d.queued_at && d.delivered_at && d.acked_at).toBeTruthy();
-    // These are the only per-recipient lifecycle fields. None records floor
-    // waiting, turn start, first reply or completion. #155 adds them.
+    // Phase 1a (#155) added ack_recorded_at: the RELAY time the ack arrived,
+    // next to the adapter-supplied acked_at. It is still only "received".
+    // Nothing here records floor waiting, turn start, first reply or
+    // completion. Later #155 phases add those.
     expect(Object.keys(d).sort()).toEqual([
-      "acked_at", "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts",
+      "ack_recorded_at", "acked_at", "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts",
       "last_failure_reason", "queued_at", "recipient_agent_id", "retry_count", "status"
     ]);
+    expect(d.ack_recorded_at).toBeTruthy();
+    for (const k of Object.keys(d)) {
+      expect(k).not.toMatch(/reply|answer|turn|floor|complet/);
+    }
   });
 
   it("clamps the floor lease to floorTtlMaxSeconds (the adapters ask for 960 s)", async () => {
@@ -171,6 +177,9 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     expect(row.received_1h).toBe(1);
     expect(Object.keys(row)).not.toContain("queued");
     expect(Object.keys(row)).not.toContain("oldest_queued_at");
+    // Phase 1a (#155): the relay now records the agent's last /v1/inbox poll,
+    // and this agent never polled. Phase 2 turns this into inbox.state.
+    expect(row.last_inbox_poll_at).toBeNull();
 
     // Nothing in the Needs-You queue either.
     const attention = await relay.operatorRequest("GET", "/v1/operator/attention");
