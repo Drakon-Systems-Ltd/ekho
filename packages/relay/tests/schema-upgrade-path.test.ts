@@ -207,11 +207,16 @@ describe("migration 025 on an existing database, in boot order", () => {
       const untouched = raw.prepare("SELECT ack_recorded_at FROM message_deliveries WHERE id = 'dlv_old'").get() as { ack_recorded_at: string | null };
       expect(untouched.ack_recorded_at).toBeNull();
     } finally {
-      relay?.cleanup();
-      relay?.db.raw().close();
-      if (previousDbPath === undefined) delete process.env.EKHO_DB_PATH;
-      else process.env.EKHO_DB_PATH = previousDbPath;
-      fs.rmSync(dir, { recursive: true, force: true });
+      // Shut the app down fully before closing the database under it, and put
+      // the environment back and remove the files whatever teardown does.
+      try {
+        await relay?.app.close();
+        relay?.db.raw().close();
+      } finally {
+        if (previousDbPath === undefined) delete process.env.EKHO_DB_PATH;
+        else process.env.EKHO_DB_PATH = previousDbPath;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 });
