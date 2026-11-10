@@ -6,11 +6,17 @@ All notable changes to Ekho are documented here.
 
 ## [0.8.0] - 2026-11-10
 
-Relay-only delivery timing update (#163). Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields; no adapter changes are required. Existing delivery and health meanings remain unchanged; this does not measure reply or turn latency.
+Relay-only delivery timing update (#163). Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields; no adapter changes are required. Existing delivery and health meanings remain unchanged; this does not measure reply or turn latency. The added fields are nullable, appear only on records already returned to the same caller, and carry no message content.
 
 ### Added
-- **Last inbox poll in the operator roster.** `GET /v1/inbox` now records relay time in `agents.last_inbox_poll_at`, including empty polls. `GET /v1/operator/fleet-health` returns that timestamp per agent (null until the first poll). Heartbeats do not update it, and it is not an input to the existing health status. A stale poll alone cannot distinguish a stuck adapter from one busy in a turn.
-- **Relay-observed acknowledgement time in message status.** When an agent acknowledges a delivery, the relay records `message_deliveries.ack_recorded_at` on its own clock alongside `acked_at`, which remains the adapter-supplied receipt time. `GET /v1/messages/:id/status` returns the new field for each delivery. Both timestamps mean received, not answered; pre-upgrade acknowledgements retain a null `ack_recorded_at` rather than being backfilled from a different clock. The new roster and delivery fields are documented in `openapi.yaml`.
+- **Last inbox poll in the operator roster and topology.** `GET /v1/inbox` records relay time in `agents.last_inbox_poll_at`, including empty polls. `GET /v1/operator/fleet-health` returns that timestamp per agent, and `GET /v1/operator/topology` returns it on nodes built from the same rows. Both read-back routes require an operator session; agent-signed requests are refused. Heartbeats do not update the field, and it is not an input to the existing health status. A stale poll alone cannot distinguish a stuck adapter from one busy in a turn.
+- **Relay-observed acknowledgement time in message status.** When an agent acknowledges a delivery, the relay records `message_deliveries.ack_recorded_at` on its own clock alongside `acked_at`, which remains the adapter-supplied receipt time. `GET /v1/messages/{id}/status` returns the new field for each delivery. Both timestamps mean received, not answered. The new roster and delivery fields are documented in `openapi.yaml`.
+
+### Upgrade notes
+- Migration `025_delivery_phases.sql` runs on first start of the upgraded relay, adding one nullable column each to `agents` and `message_deliveries` without rewriting rows. An agent has `last_inbox_poll_at: null` until its first poll on the upgraded relay; pre-upgrade acknowledgements keep `ack_recorded_at: null`, not backfilled from the different adapter clock. Rolling back to the previous relay build on the migrated database is safe: that build does not read or write these columns, which remain unused.
+
+### Tests
+- **Boot-order migration regression (#167, PR #169).** `schema-upgrade-path.test.ts` starts the relay on an existing database with the previous `agents` and `message_deliveries` shapes, then exercises an inbox poll and acknowledgement after migration. Tests only; no shipped relay source change from #169.
 
 ## [0.7.8] - 2026-11-09
 

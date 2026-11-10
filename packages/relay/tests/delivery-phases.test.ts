@@ -110,6 +110,29 @@ describe("#155 phase 1a: relay-observed delivery timing", () => {
       expect(JSON.stringify(res.body)).not.toContain("last_inbox_poll_at");
     });
 
+    it("is also carried on operator topology nodes, and an agent-signed topology request is refused", async () => {
+      const a = await relay.enrollAgent("dp-topo-polled");
+      const b = await relay.enrollAgent("dp-topo-silent");
+      const before = Date.now();
+      await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/inbox");
+      const after = Date.now();
+
+      // Topology nodes are built from the fleet-health rows, so the operator
+      // sees the same poll time there.
+      const topo = await relay.operatorRequest("GET", "/v1/operator/topology");
+      expect(topo.status).toBe(200);
+      const nodeA = topo.body.nodes.find((n: { id: string }) => n.id === a.agent_id);
+      const nodeB = topo.body.nodes.find((n: { id: string }) => n.id === b.agent_id);
+      isoWithin(nodeA.last_inbox_poll_at, before, after);
+      expect(nodeB.last_inbox_poll_at).toBeNull();
+
+      // Agent credentials do not open it: no nodes, no poll times.
+      const res = await relay.agentRequest(a.agent_id, a.secret, "GET", "/v1/operator/topology");
+      expect(res.status).toBe(401);
+      expect(res.body.nodes).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain("last_inbox_poll_at");
+    });
+
     it("is operator-only: the agent inbox and the sender's status read-back never expose a teammate's poll time", async () => {
       const a = await relay.enrollAgent("dp-poll-priv-a");
       const b = await relay.enrollAgent("dp-poll-priv-b");
