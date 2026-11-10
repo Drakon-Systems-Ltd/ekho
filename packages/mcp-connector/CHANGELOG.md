@@ -4,6 +4,10 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-11-09
+
+No MCP connector changes. Version kept in step with the relay: the 0.7.8 release carries a security fix to `ekho_send` attachments in the OpenClaw and Hermes plugins and an OpenClaw plugin heartbeat fix (#160, PR #162). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.7] - 2026-11-05
 
 Patch on 0.7.6, in lockstep with the rest of the workspace. No connector changes. Still not published to npm; install from a checkout as the package README describes.

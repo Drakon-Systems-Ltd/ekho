@@ -4,6 +4,8 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-11-09
+
 ### Security
 - **`ekho_send` attaches files only from the outbox directory.** Files must now be inside the outbox (`outboxDir` config, else `EKHO_OUTBOX_DIR`, else `~/ekho-outbox`), checked on the real path so `..`, outside absolute paths and symlinks leading out are refused, then opened from the outbox directory itself one component at a time without following any symlink (a symlink anywhere beneath the outbox is refused even when it points inside; Node has no `openat`, so the open is anchored through `/proc/self/fd`, which exists on Linux only), and only a regular file is read, so a FIFO is refused without blocking. On any non-Linux host the plugin refuses every attachment with an error naming the platform; no file is opened. Hidden files and the identity/credential file names are refused everywhere, the plugin state dir, `~/.openclaw` and `~/.hermes` are never a source, and an outbox that overlaps any of them is refused. **Behaviour changes:** a path outside the outbox that used to upload is now refused; copy the file into the outbox first. A symlink inside the outbox is refused even when it points inside. On macOS, Windows and every other non-Linux host `ekho_send` can no longer attach files at all (`attachment "…" refused: this host (<platform>) cannot anchor the open to the outbox directory`) until a native anchored open exists for them; messages without attachments are unaffected. See [Attachments outbox](README.md#attachments-outbox).
 
