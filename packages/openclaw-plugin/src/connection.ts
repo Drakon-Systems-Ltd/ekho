@@ -60,6 +60,8 @@ export interface EkhoPluginConfig {
   requireSigned?: string;
   /** Overrides where credentials/identity live (#98). Default: see resolveEkhoStateDir. */
   stateDir?: string;
+  /** The only directory ekho_send may attach files from. Default: see resolveOutboxDir. */
+  outboxDir?: string;
 }
 
 export interface EkhoConnection {

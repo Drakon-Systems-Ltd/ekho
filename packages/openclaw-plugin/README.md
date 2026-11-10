@@ -23,7 +23,7 @@ the gateway.
 
 Built as an OpenClaw **tool plugin** (`openclaw >= 2026.5.17`). It adds three agent tools:
 
-- **`ekho_send`** — send a message to another agent in the fleet (delegate a task, ask a question, hand off work, or `broadcast` to everyone), or into a room.
+- **`ekho_send`** — send a message to another agent in the fleet (delegate a task, ask a question, hand off work, or `broadcast` to everyone), or into a room. It can attach files, but only from the [outbox directory](#attachments-outbox).
 - **`ekho_open_room`** — open a named topic room with the agents you list, for a multi-step collaboration; then continue there with `ekho_send`.
 - **`ekho_inbox`** — read messages other agents have sent this agent. It lists the messages the background loop has already delivered (attachments included, even after the queue is drained) and the teammate roster with `roster_fetched_at`, the time of the last inbox poll; a quarantined teammate also shows the relay's `quarantine_reason`. Plugin copies share the process cache only for the same relay endpoint, agent, fleet, and agent identity. Other connections see an empty view. A retained tool closure whose operator-key view is older than the active producer's reads that producer's recorded verdicts and reports `verification_generation: "stale"` and `degraded: true`.
 
@@ -176,6 +176,7 @@ Set the plugin config in your `~/.openclaw/openclaw.json` under `plugins.entries
 | `peerAutoreply` | optional | Bounded agent-to-agent delegation — let teammates wake this agent (default `true`; set `false` to opt out) |
 | `peerTurnBudget` | optional | Optional local turn limit: peer wakes per conversation before the latch closes. `0`/unset = **no limit** (default). A limit the operator sets on the relay console takes precedence |
 | `stateDir` | optional | Where the plugin keeps its state files. Overrides `EKHO_STATE_DIR` and the default (see [State files](#state-files)) |
+| `outboxDir` | optional | The only directory `ekho_send` attaches files from. Overrides `EKHO_OUTBOX_DIR` and the default `~/ekho-outbox` (see [Attachments outbox](#attachments-outbox)) |
 
 Then enable the plugin and restart the gateway:
 
@@ -200,6 +201,7 @@ Optional, read from the gateway's environment. None is needed for a normal insta
 | `EKHO_REPORT_MODEL` / `EKHO_REPORT_PROVIDER` | unset | Explicit model and provider to report in heartbeats when they cannot be read from the host |
 | `EKHO_REQUIRE_SIGNED` | `warn` | Peer wake strictness. `warn` (default) and `off`: an unsigned teammate message, or a signed one the agent cannot check yet because it has no trust root (no pinned operator key), still wakes a turn and is shown as untrusted. A signed teammate message whose signature fails verification is rejected in every mode, `off` included. `require`: only signed **and** verified teammate messages wake a turn; the rest are dead-lettered. Any other value is read as `warn`. Operator messages are unaffected |
 | `EKHO_STATE_DIR` | unset | Where the plugin keeps its state files, when `stateDir` is not set in config (see [State files](#state-files)) |
+| `EKHO_OUTBOX_DIR` | `~/ekho-outbox` | The only directory `ekho_send` attaches files from, when `outboxDir` is not set in config (see [Attachments outbox](#attachments-outbox)) |
 
 ### State files
 
@@ -238,6 +240,45 @@ Downloaded attachments go to `attachments/` in the same directory.
 Earlier versions kept these files in the install directory, `~/.openclaw/extensions/ekho-adapter/`. On the first start after upgrading, any found there are copied (not moved) to the new location; a copy already present in the new location always wins. A legacy file that cannot be read is not copied, and the agent fails closed exactly as it would for an unreadable file in the new location.
 
 **Upgrading from 0.5.5 or earlier:** the update that installs 0.5.6 runs before 0.5.6 does, so if it replaces `~/.openclaw/extensions/ekho-adapter/` the files are gone before they can be copied. Back them up first: see [Upgrading from 0.5.5 or earlier](#upgrading-from-055-or-earlier). Later updates leave them alone.
+
+### Attachments outbox
+
+`ekho_send` attaches files only from one outbox directory: `outboxDir` in the
+plugin config, else `EKHO_OUTBOX_DIR`, else `~/ekho-outbox`. To send a file,
+copy it into the outbox and pass its path, or its name relative to the outbox.
+The plugin does not create the outbox; create it (`mkdir -m 700 ~/ekho-outbox`)
+before the first attachment.
+
+The plugin enforces these rules itself:
+
+- The file's real path, after resolving every symlink, must be inside the
+  outbox. `..`, absolute paths elsewhere, a symlink that points out and a
+  symlinked directory that leads out are all refused.
+- The file is then opened from the outbox directory itself, one path
+  component at a time, never following a symlink: a symlink anywhere beneath
+  the outbox is refused even when it points inside it. Only a regular file is
+  attached; a FIFO or device is refused without blocking. Node has no
+  `openat`; the open is anchored through `/proc/self/fd`, which exists on
+  Linux only.
+- **Linux only.** On macOS, Windows and every other non-Linux host there is
+  no anchored open, so the plugin refuses every attachment there with
+  `attachment "…" refused: this host (<platform>) cannot anchor the open to
+  the outbox directory, so no attachment can be sent from it`. No file is
+  opened. Messages without attachments work as before. Attachments on those
+  hosts return when a native anchored open is available for them.
+- Hidden files (any name or directory starting with `.`) and the names
+  `.ekho-identity.json`, `.ekho-credentials.json`, `identity.json`,
+  `credentials.json` and `openclaw.json` are refused even inside the outbox.
+- The plugin state directory, OpenClaw's state directory (`~/.openclaw`, or
+  `OPENCLAW_STATE_DIR`) and the Hermes home (`~/.hermes`, or `HERMES_HOME`) are
+  never a source. An outbox that is one of them, sits inside one, or contains
+  one (your home directory, for example) is refused, and no attachment is sent
+  until it is moved.
+- The type allow-list and the 25 MiB and 10-per-message caps still apply.
+
+A refusal tells the agent the outbox path and nothing about where a refused
+symlink led. Attachments downloaded by `ekho_inbox` land in the state directory,
+so forwarding one means copying it into the outbox first.
 
 ### Agent-to-agent delegation
 

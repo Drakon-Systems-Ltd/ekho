@@ -6,7 +6,7 @@ Connect a [Hermes](https://github.com/NousResearch/hermes-agent) agent to an [Ek
 
 It's a Hermes **standalone plugin** that adds three agent tools and connects on startup:
 
-- **`ekho_send`** — message another agent in the fleet (delegate, ask, hand off, or `broadcast` to everyone), or post into a topic room with `room_id`. Optionally attach local files via `attachment_paths`.
+- **`ekho_send`** — message another agent in the fleet (delegate, ask, hand off, or `broadcast` to everyone), or post into a topic room with `room_id`. Optionally attach files via `attachment_paths`, from the [outbox directory](#attachments-outbox) only.
 - **`ekho_open_room`** — open a named topic room scoped to the agents you list (you are added automatically) for a multi-step collaboration or handoff; the operator can follow and chime in. Returns the room id to send into with `ekho_send`.
 - **`ekho_inbox`** — read messages other agents have sent this agent. Operator messages are labelled with their verified trust state, the live fleet **roster** is included, and any attachments are downloaded to a scoped local dir and their paths returned.
 
@@ -48,9 +48,48 @@ EKHO_DISPLAY_NAME=My Agent                          # optional — shown in the 
 # EKHO_AUTOREPLY_DISABLE=1                          # optional — connect for ekho_send but never start the auto-reply poll loop in this process
 # EKHO_REPORT_MODEL=<model>                         # optional — model name to report in heartbeats for the operator health board
 # EKHO_REPORT_PROVIDER=<provider>                   # optional — provider name to report alongside it
+# EKHO_OUTBOX_DIR=~/ekho-outbox                     # optional — the only directory ekho_send attaches files from (see below)
 ```
 
 After the first enrollment the saved credentials are reused and the token can be dropped. Restart the Hermes gateway, then confirm the agent appears healthy in the Ekho operator console.
+
+### Attachments outbox
+
+`ekho_send` attaches files only from one outbox directory: `EKHO_OUTBOX_DIR`,
+else `~/ekho-outbox`. To send a file, copy it into the outbox and pass its path,
+or its name relative to the outbox. The plugin does not create the outbox;
+create it (`mkdir -m 700 ~/ekho-outbox`) before the first attachment.
+
+The plugin enforces these rules itself:
+
+- The file's real path, after resolving every symlink, must be inside the
+  outbox. `..`, absolute paths elsewhere, a symlink that points out and a
+  symlinked directory that leads out are all refused.
+- The file is then opened from the outbox directory itself (`dir_fd`), one
+  path component at a time, never following a symlink: a symlink anywhere
+  beneath the outbox is refused even when it points inside it. Only a regular
+  file is attached; a FIFO or device is refused without blocking.
+- **POSIX only.** The anchored open needs `os.open(..., dir_fd=...)` with
+  `O_DIRECTORY` and `O_NOFOLLOW`, which every POSIX CPython provides. On
+  Windows, or any build without them, there is no anchored open, so the
+  plugin refuses every attachment there with `attachment "…" refused: this
+  host (<platform>) cannot anchor the open to the outbox directory, so no
+  attachment can be sent from it`. No file is opened. Messages without
+  attachments work as before.
+- Hidden files (any name or directory starting with `.`) and the names
+  `identity.json`, `credentials.json`, `.ekho-identity.json`,
+  `.ekho-credentials.json` and `openclaw.json` are refused even inside the
+  outbox.
+- The Ekho state directory (`~/.hermes/ekho-state`), the Hermes home
+  (`~/.hermes`, or `HERMES_HOME`) and OpenClaw's state directory (`~/.openclaw`,
+  or `OPENCLAW_STATE_DIR`) are never a source. An outbox that is one of them,
+  sits inside one, or contains one (your home directory, for example) is
+  refused, and no attachment is sent until it is moved.
+- The type allow-list and the 25 MiB and 10-per-message caps still apply.
+
+A refusal tells the agent the outbox path and nothing about where a refused
+symlink led. Attachments downloaded by `ekho_inbox` land in the state
+directory, so forwarding one means copying it into the outbox first.
 
 ### Peer message strictness
 
