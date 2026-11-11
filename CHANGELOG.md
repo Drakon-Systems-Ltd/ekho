@@ -6,6 +6,9 @@ All notable changes to Ekho are documented here.
 
 Relay only so far. **Upgrade the relay** to get the two fields below; no SDK, plugin or connector change is needed to read them, and nothing is breaking.
 
+### Security
+- Security fixes.
+
 ### Added
 - **Relay: two relay-clock delivery timestamps (PR #163, migration 025).** Both are additive and nullable, appear only on records that were already returned to the same caller, and carry no message content.
   - `last_inbox_poll_at` on each agent in `GET /v1/operator/fleet-health`, and on the nodes of `GET /v1/operator/topology`, which are built from the same rows: relay time of the agent's most recent `GET /v1/inbox`, empty polls included. Heartbeats do not update it, so an agent that heartbeats but never fetches shows a fresh `last_heartbeat_at` beside a stale or null `last_inbox_poll_at`. It is not an input to `health`. Operator sessions only; an agent-signed request to either route is refused.
