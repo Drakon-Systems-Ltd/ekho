@@ -2,7 +2,7 @@
 
 Status: design only. No implementation, install or canary is authorised by this document. Written fresh on 2026-11-11 from issue #118 and its design-review status comment (6071896841), because the round-3 design text was not recoverable by the ruling's deadline (2026-11-11T13:35Z). Base: `main` `5303fda`. Source line numbers below are from that commit, re-checked at `2a9a011` (`connection.ts` and `runtime-registry.ts` are unchanged between the two; `db.ts` references are given at `2a9a011`).
 
-Revised 2026-11-11 after the exact-head panel on `6015753` (three FIX verdicts). Changed: R1, R2, R5, R6, R7, the `verified` definition and the slicing. Added: I1, the relay verify session, G-12, G-13, G-14. The earlier "re-read the in-process registry at window close" is withdrawn: `verify` is a separate process and cannot read it.
+Revised 2026-11-11 after the exact-head panel on `6015753` (three FIX verdicts). Changed: R1, R2, R5, R6, R7, the `verified` definition and the slicing. Added: I1, the relay verify session, G-12, G-13, G-14. A second panel on `8cb9c75` (two APPROVE, one FIX) found the R5 proof wrongly said the close beat itself completed live when beats overlap; R5 now rests on the acknowledged beat, and G-13c is added. The earlier "re-read the in-process registry at window close" is withdrawn: `verify` is a separate process and cannot read it.
 
 Anything this document says about C1–C3, C5, C6 and F1/F5/F6/F7/F10 is a **restatement of the one-line summaries in comment 6071896841**, not the reviewed round-3 text. Where the original text would differ, the original wins and this file is reconciled to it.
 
@@ -62,9 +62,9 @@ For 4, **promote `agentRuntimeGeneration` from test seam to a supported read** (
 
 So the epoch changes when a copy stops, not only when it starts again. A beat that is in flight across a stop sees a different epoch at completion whether or not the copy has been resumed since. A boolean cannot detect stop-then-resume; a counter that only moves on claim cannot detect stop.
 
-**Dispatch check.** A beat that carries load identity (R7) is dispatched only if `L` holds. It captures the epoch `e_d` and a per-copy sequence number `seq`.
+**Dispatch check.** A beat that carries load identity (R7) is dispatched only if `L` holds. It captures the epoch `e_d` and a per-copy sequence number `seq`, assigned at dispatch and strictly increasing in dispatch order.
 
-**Completion check.** When the response arrives, the beat is *completed live* only if `L` holds **and** the current epoch equals `e_d`. Only then does the copy set `acked_seq = seq`. A beat that fails the check is dropped: it is never written to the copy's local completion record (`{generation, epoch, seq, dispatched_at, completed_at}`, kept for diagnostics and for the `loaded` fallback in R7) and never acknowledged in a later beat.
+**Completion check.** When the response arrives, the beat is *completed live* only if `L` holds **and** the current epoch equals `e_d`. Only then does the copy raise `acked_seq` to `seq` (`acked_seq` is the highest sequence number that completed live; it never goes down). A beat that fails the check is dropped: it is never written to the copy's local completion record (`{generation, epoch, seq, dispatched_at, completed_at}`, kept for diagnostics and for the `loaded` fallback in R7) and never acknowledged in a later beat.
 
 `acked_seq` is how a completion-time fact, which only the copy can observe, reaches the relay: it rides on the **next** beat, which is itself dispatched only if `L` still holds.
 
@@ -97,17 +97,26 @@ A completion-time check cannot see what happens after the completion. The first 
 At `T_c`, `verify` asks the relay to close the session. The relay issues a fresh close nonce `N_c`. `verified` requires, in the relay's own receive order:
 
 1. a **close beat** `B_close`: carries `N_c`, load identity `I`, sequence `s`;
-2. a **confirming beat** `B_conf`: same identity `I` (same epoch included), with `acked_seq >= s`;
+2. a **confirming beat** `B_conf`: same identity `I` (same epoch included), with `acked_seq = a` and `a >= s`;
 3. no beat from any other identity, and no beat without identity, for this agent between them or after them up to the final read (the run rule, R7);
 4. `I.build_sha256` equals the installed artifact's hash.
 
-What this proves. `N_c` did not exist before `T_c`, so `B_close` was dispatched after `T_c`, with `L` true at dispatch. `B_conf` says `B_close` completed live: `L` true and the epoch unchanged at that completion. So copy `I` was the live holder, without interruption, from the dispatch of `B_close` to its completion, and that interval is after `T_c`. The relay received `B_close` before that completion and `B_conf` after it, so `verify` reports `live_between = [received_at(B_close), received_at(B_conf)]` in relay time. No client clock is trusted.
+What this proves. Beats may overlap (main does not wait for one response before the next interval fires), so `a` is not always `s`. The proof is about beat `a`, whichever it is:
 
-**The bound.** `verified` says nothing after `live_between`. A copy disposed after its close beat completed is, correctly, verified as of that instant. `verify` polls and does the final read as soon as the session is confirmed, so the gap between the proof and the report is one poll. No schedule in which the installed copy stopped holding the agent before its close beat completed can produce `verified`.
+- `N_c` did not exist before `T_c`, so `B_close` was dispatched after `T_c`. `seq` follows dispatch order and `a >= s`, so beat `a` was dispatched no earlier than `B_close`, hence also after `T_c`, with `L` true at its dispatch.
+- `acked_seq = a` says beat `a` completed live: `L` true and the epoch unchanged since its dispatch.
+- `B_conf` carries the same epoch as `B_close`, and the epoch never repeats, so beat `a` belongs to that same holding period.
+
+So copy `I` was the live holder, without interruption, from the dispatch of beat `a` to its completion, and that whole interval is after `T_c`. The completion of `a` lies between the relay's receipt of `B_close` and its receipt of `B_conf` (the relay answered `a` before the copy could acknowledge it, and by the run rule it accepted nothing from `I` with a sequence at or above `s` before `B_close`). `verify` therefore reports `live_between = [received_at(B_close), received_at(B_conf)]` in relay time and claims one thing: **at some instant inside `live_between`, the installed copy was the live holder.** No client clock is trusted.
+
+It does not claim that `B_close` itself completed live. When `a > s`, `B_close` may complete after the copy has stopped (G-13c); the claim above is still true, because it rests on beat `a`.
+
+**The bound.** `verified` says nothing after `live_between`. A copy disposed after beat `a` completed is, correctly, verified as of that instant. `verify` polls and does the final read as soon as the session is confirmed, so the gap between the proof and the report is one poll. No schedule in which the installed copy stopped holding the agent before `T_c`, or after `T_c` but before any beat it dispatched after `T_c` had completed live, can produce `verified`.
 
 - **G-11 (recorded, then disposed in the window).** G2's beats are recorded in the session; G2 is disposed and G1 resumes before `T_c`. G2 dispatches nothing more (`L` false), so nothing from G2 can carry `N_c`. G1's beats arrive with a different identity or none. Expected: `previous-generation-resumed`.
 - **G-13 (pending resumed heartbeat).** As G-11, but G1's immediate resume beat is still in flight when the window closes, so the relay's stored state still shows only G2. Stored state is not what is asked: `N_c` can only be learned from the response to a beat dispatched after `T_c`, and G2 dispatches none. If G1's beat lands before the final read the run breaks: `previous-generation-resumed`. If it has not landed when the close wait `W_c` expires there is still no close beat: `loaded`. Never `verified`.
-- **G-13b (disposed between close beat and its completion).** G2 dispatches `B_close`, is disposed, `B_close` completes. `shutdown` moved the epoch and set `retired`, so the completion check fails, `acked_seq` does not advance and G2 never dispatches again. No `B_conf`. Expected: never `verified`; `loaded` while G2's beats are the latest the relay saw, `previous-generation-resumed` once another copy's beat lands.
+- **G-13b (disposed between close beat and its completion).** G2 dispatches `B_close` with no later beat completed, is disposed, `B_close` completes. `shutdown` moved the epoch and set `retired`, so the completion check fails, `acked_seq` does not advance and G2 never dispatches again. No `B_conf`. Expected: never `verified`; `loaded` while G2's beats are the latest the relay saw, `previous-generation-resumed` once another copy's beat lands.
+- **G-13c (two beats in flight, close beat completes after the stop).** After `T_c`, G2 has `B_close` (`s`) and a later beat (`s+1`) in flight in one epoch. `s+1` completes live, G2 dispatches `B_conf` with `acked_seq = s+1`, then G2 is disposed, then `B_close`'s response arrives and fails the completion check. Expected: `verified` is allowed and true. G2 was the live holder from the dispatch of `s+1` to its completion, after `T_c` and inside `live_between`; the stop came later, which the bound already excludes from the claim. The variant where G2 is disposed **before** `s+1` completes yields no acknowledgement at all: never `verified`.
 - **G-14 (process kill).** The process dies at any point before `B_conf` is dispatched. No code runs, so no confirming beat exists. Expected: `loaded` if G2's earlier beats are the latest the relay saw, `unverified` if there were none.
 
 Close wait: `W_c` defaults to three heartbeat intervals plus 10 s. To keep it short, a copy may dispatch one extra beat at once when a response first delivers a nonce it has not yet echoed, and one when a close beat completes live. Both go through the dispatch check; neither changes the interval timer.
@@ -132,7 +141,7 @@ Hermes sends the same load identity and answers the same relay session (R5, R7).
 
 - `run`: the current unbroken sequence of beats that echo `N` with one identical identity `{build_sha256, load_id, generation, epoch}` and increasing `seq`. A beat for this agent with a different identity, with no `load`, or without `N` ends the run and is recorded as a **break** (time, and identity if any). A beat with the run's identity but a `seq` not above the last one is ignored.
 - `close_beat`: the first beat in the current run that echoes `N_c`. Cleared when the run breaks.
-- `confirmed_at`: receive time of the first beat in the current run with `acked_seq >= close_beat.seq`. Cleared when the run breaks.
+- `confirmed_at`: receive time of the first beat in the current run, received after `close_beat`, with `acked_seq >= close_beat.seq`. Cleared when the run breaks. The relay does not need `acked_seq` to equal `close_beat.seq`: any beat of the same run and epoch at or above it was dispatched after `T_c` (R5).
 
 A stale beat from a stopped copy therefore cannot be mistaken for the live one, and cannot permanently block a correct load either: a stopped copy has at most one request in flight, the installed copy keeps echoing both nonces, and the next two of its beats rebuild the run, the close beat and the confirmation.
 
@@ -169,6 +178,7 @@ The updater never creates, rotates, pins or unpins a key and refuses if the oper
 | G-12 stopped holder, registry still names it | `L` 1–2, epoch | never acknowledged; not `verified` |
 | G-13 resumed copy's beat pending at close | close nonce needs a post-`T_c` dispatch | `loaded` or `previous-generation-resumed` |
 | G-13b disposed between close beat and completion | completion check, no `B_conf` | `loaded`, then `previous-generation-resumed` |
+| G-13c two beats in flight, close beat completes after the stop | proof rests on the acknowledged beat `a >= s`, not on `B_close` | `verified`, true for an instant in `live_between`; not `verified` if stopped before `a` completes |
 | G-14 process kill | no `B_conf` | `loaded` / `unverified` |
 | correct load, one stale foreign beat in the window | run rebuilds | `verified` |
 | correct load, clean | — | `verified` |
@@ -185,4 +195,4 @@ In-process schedules run under fake timers with a controllable heartbeat promise
 
 ## Not covered
 
-First publication of a new npm package name, installs or canaries on a live box, any key or pin change. The schedules above (G-7 to G-14) were derived by reading `main`, **not run**. The verify session is specified here and does not exist in the relay.
+First publication of a new npm package name, installs or canaries on a live box, any key or pin change. The schedules above (G-7 to G-14, with G-13b and G-13c) were derived by reading `main`, **not run**. The verify session is specified here and does not exist in the relay.
