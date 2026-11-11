@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
-import { db } from "./db";
+import { db, canonicalDmId } from "./db";
 import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
@@ -194,6 +194,7 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("not found")) return reply.code(404).send({ error: msg });
+      if (msg.includes("conversation not permitted")) return reply.code(403).send({ error: msg });
       if (msg.includes("too many") || msg.includes("unsupported recipient") || msg.includes("recipient/conversation mismatch"))
         return reply.code(400).send({ error: msg });
       throw err;
@@ -372,6 +373,13 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
     const parsed = noticeSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    // A stall event is stored under the conversation and rendered inside it in
+    // the console. A thread id with no history may be stalled; in the reserved
+    // dm- namespace an agent records an event only under its OWN canonical DM.
+    const noticeConv = parsed.data.conversation_id;
+    if (noticeConv.startsWith("dm-") && noticeConv !== canonicalDmId(request.agent.fleetId, request.agent.id)) {
+      return reply.code(404).send({ error: "not found" });
+    }
     const result = db.recordConversationStall(request.agent.fleetId, request.agent.id, parsed.data.conversation_id, {
       reason: parsed.data.reason,
       pending_count: parsed.data.pending_count,

@@ -1430,6 +1430,16 @@ export class EkhoDb {
     return !!this.db.prepare("SELECT 1 FROM rooms WHERE id = ? AND fleet_id = ?").get(conversationId, fleetId);
   }
 
+  /** Whether an agent may store a message under conversationId as far as the
+   *  reserved dm- namespace is concerned: any non-dm id passes (rooms and
+   *  thread ids are authorised elsewhere); a dm- id must be the agent's OWN
+   *  canonical DM in this fleet. Pure string comparison on the authenticated
+   *  sender — no stored row can widen it. */
+  private isDmConversationAllowedForAgent(fleetId: string, conversationId: string, agentId: string): boolean {
+    if (!conversationId.startsWith("dm-")) return true;
+    return conversationId === canonicalDmId(fleetId, agentId);
+  }
+
   createMessage(input: {
     fleetId: string;
     senderAgentId: string;
@@ -1473,6 +1483,22 @@ export class EkhoDb {
           // AUTHENTICATED sender, so an agent can never post into another's DM.
           ? canonicalDmId(input.fleetId, input.senderAgentId)
           : input.conversationId;
+
+    // The dm- namespace is relay-reserved: dm-<fleet>-<agent> is the operator's
+    // 1:1 channel with THAT agent. Whatever recipient the sender names (itself,
+    // a peer, a broadcast), the only canonical DM an agent may thread under is
+    // its own. Checked before the transaction, so a refused send stores no row
+    // and no delivery. Rooms and oc-/hermes-/op- threads are untouched.
+    if (!this.isDmConversationAllowedForAgent(input.fleetId, conversationId, input.senderAgentId)) {
+      throw new Error("conversation not permitted: an agent may only post under its own canonical DM");
+    }
+    // A canonical DM carries only replies to the operator. Any other recipient
+    // is refused here, with a pointer to an ordinary thread or a room.
+    // Operator replies and room normalization above remain supported.
+    if (conversationId.startsWith("dm-") &&
+        !(input.recipientKind === "agent" && input.recipientId === `op_${input.fleetId}`)) {
+      throw new Error("conversation not permitted: canonical DMs are only for replies to the operator; for peer collaboration use a fresh non-dm- conversation_id (omit conversation_id in ekho_send), or send to a room with room_id");
+    }
 
     const tx = this.db.transaction(() => {
       this.db.prepare(
@@ -2309,6 +2335,11 @@ export class EkhoDb {
    * can never acquire a floor for, or read the tail of, a thread it isn't in.
    */
   isConversationParticipant(fleetId: string, conversationId: string, agentId: string): boolean {
+    // A canonical DM has exactly one agent participant: its owner. Decided from
+    // the id alone; stored rows never add a participant.
+    if (conversationId.startsWith("dm-")) {
+      return conversationId === canonicalDmId(fleetId, agentId);
+    }
     const room = this.db.prepare(
       `SELECT 1 FROM room_members rm JOIN rooms r ON r.id = rm.room_id
        WHERE r.fleet_id = ? AND rm.room_id = ? AND rm.agent_id = ? LIMIT 1`
