@@ -6,10 +6,11 @@ All notable changes to Ekho are documented here.
 
 ## [0.8.0] - 2026-11-10
 
-Relay-only delivery timing update (#163). Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields; no adapter changes are required. Existing delivery and health meanings remain unchanged; this does not measure reply or turn latency. The added fields are nullable, appear only on records already returned to the same caller, and carry no message content.
+Relay update: delivery timing fields (#163) and security fixes for canonical operator DMs and A2A sends. Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields; no adapter changes are required. The existing acknowledgement and health meanings remain unchanged; these fields do not measure reply or turn latency. The added fields are nullable, appear only on records already returned to the same caller, and carry no message content.
 
 ### Security
-- Security fixes.
+- **Relay: canonical operator DMs are restricted to their agent owner.** An agent cannot send under another agent's reserved `dm-` conversation ID, acquire its floor or tail, or record a stall notice against it. An agent's own canonical DM accepts replies to the operator only; peer, self-addressed and broadcast sends under it are refused. For peer work, start a fresh non-`dm-` thread (omit `conversation_id` in `ekho_send`) or use a room. The relay derives DM participation from the ID, so stored message rows cannot grant another agent access. Regression tests cover rejected sends without stored messages or deliveries, denied floor and notices, and legitimate operator replies and ordinary threads.
+- **Relay: A2A send persistence is atomic.** Task creation or history updates, the corresponding relay message and delivery, and their link now commit together. If delivery creation is refused, a new send leaves no task and a continuation leaves its prior history unchanged; regression tests exercise both cases with a disallowed DM context.
 
 ### Added
 - **Last inbox poll in the operator roster and topology.** `GET /v1/inbox` records relay time in `agents.last_inbox_poll_at`, including empty polls. `GET /v1/operator/fleet-health` returns that timestamp per agent, and `GET /v1/operator/topology` returns it on nodes built from the same rows. Both read-back routes require an operator session; agent-signed requests are refused. Heartbeats do not update the field, and it is not an input to the existing health status. A stale poll alone cannot distinguish a stuck adapter from one busy in a turn.
@@ -20,6 +21,7 @@ Relay-only delivery timing update (#163). Upgrade the relay to apply migration `
 
 ### Tests
 - **Boot-order migration regression (#167, PR #169).** `schema-upgrade-path.test.ts` starts the relay on an existing database with the previous `agents` and `message_deliveries` shapes, then exercises an inbox poll and acknowledgement after migration. Tests only; no shipped relay source change from #169.
+- **CI-only migration round trip (#173).** The `migration-roundtrip` workflow runs the previous `v0.7.8` relay build and this build in four phases against one SQLite database: previous build creates it, this build migrates and writes, previous build runs on the migrated database, and this build runs on it again. The driver checks the new columns, retained values and read/write paths across both builds; #173 adds CI and test files only.
 
 ## [0.7.8] - 2026-11-09
 
