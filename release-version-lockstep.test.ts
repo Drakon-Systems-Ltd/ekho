@@ -74,7 +74,7 @@ describe("release version lockstep", () => {
       ],
       [
         "README project status",
-        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is released/, "README project status")
+        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is (?:released|the current release candidate)/, "README project status")
       ],
       ...workspace
     ];
