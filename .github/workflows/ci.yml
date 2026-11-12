@@ -55,3 +55,73 @@ jobs:
         run: python -c "import hermes_cli.plugins_discovery, hermes_cli.plugins_manifest, hermes_constants"
       - run: python -m pytest -q -rs
         working-directory: packages/hermes-plugin
+
+  # Migration round trip across two relay builds on ONE SQLite file. The
+  # ordinary suite proves the upgrade direction only; this proves that the
+  # previous release still runs on a database this tree has migrated and
+  # written to, and that this tree runs on it again afterwards. Phases (see
+  # packages/relay/tests/roundtrip/migration-025.roundtrip.ts):
+  #   A previous build creates the database   B this tree migrates and writes
+  #   C previous build runs on the migrated file   D this tree runs on it again
+  # The previous build is pinned by commit, not by tag name; bump it
+  # deliberately when the release it stands for changes. The driver is copied
+  # into that checkout unchanged, so both builds run the same assertions
+  # through their own relay code and their own installed dependencies.
+  migration-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PREVIOUS_BUILD_REF: 3eb37e45215757518167005dc915261f628facb2  # v0.7.8
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: head
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.PREVIOUS_BUILD_REF }}
+          path: previous
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            head/package-lock.json
+            previous/package-lock.json
+      - name: Previous build is the pinned commit and predates migration 025
+        run: |
+          test "$(git -C previous rev-parse HEAD)" = "$PREVIOUS_BUILD_REF"
+          test -z "$(ls previous/packages/relay/migrations | grep '^025_' || true)"
+          test -n "$(ls head/packages/relay/migrations | grep '^025_')"
+      - name: Install and build (head)
+        working-directory: head
+        run: npm ci && npm run build -w @drakon-systems/ekho-sdk
+      - name: Install and build (previous)
+        working-directory: previous
+        run: npm ci && npm run build -w @drakon-systems/ekho-sdk
+      - name: Copy the driver into the previous build, unchanged
+        run: |
+          echo "EKHO_ROUNDTRIP_DIR=$RUNNER_TEMP/ekho-roundtrip" >> "$GITHUB_ENV"
+          mkdir -p previous/packages/relay/tests/roundtrip "$RUNNER_TEMP/ekho-roundtrip"
+          cp head/packages/relay/tests/roundtrip/migration-025.roundtrip.ts previous/packages/relay/tests/roundtrip/
+          cp head/packages/relay/vitest.roundtrip.config.ts previous/packages/relay/
+          cmp head/packages/relay/tests/setup.ts previous/packages/relay/tests/setup.ts
+      - name: Phase A, previous build creates the database
+        working-directory: previous/packages/relay
+        env: { EKHO_ROUNDTRIP_PHASE: A, EKHO_ROUNDTRIP_EXPECT: previous }
+        run: npx vitest run --config vitest.roundtrip.config.ts
+      - name: Phase B, head build migrates and writes
+        working-directory: head/packages/relay
+        env: { EKHO_ROUNDTRIP_PHASE: B, EKHO_ROUNDTRIP_EXPECT: head }
+        run: npx vitest run --config vitest.roundtrip.config.ts
+      - name: Phase C, previous build runs on the migrated database
+        working-directory: previous/packages/relay
+        env: { EKHO_ROUNDTRIP_PHASE: C, EKHO_ROUNDTRIP_EXPECT: previous }
+        run: npx vitest run --config vitest.roundtrip.config.ts
+      - name: Phase D, head build runs on it again
+        working-directory: head/packages/relay
+        env: { EKHO_ROUNDTRIP_PHASE: D, EKHO_ROUNDTRIP_EXPECT: head }
+        run: npx vitest run --config vitest.roundtrip.config.ts
+      - name: All four phases completed on the one database
+        run: |
+          node -e 'const s=require(process.env.EKHO_ROUNDTRIP_DIR+"/state.json"); if (s.completed.join("")!=="ABCD") { console.error("phases completed: "+s.completed.join("")); process.exit(1) } console.log("[roundtrip] phases completed: "+s.completed.join(" "))'
+          ls "$EKHO_ROUNDTRIP_DIR" | grep -c '\.sqlite$' | grep -qx 1

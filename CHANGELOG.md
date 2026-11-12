@@ -8,6 +8,9 @@ All notable changes to Ekho are documented here.
 
 Relay-only delivery timing update (#163). Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields; no adapter changes are required. Existing delivery and health meanings remain unchanged; this does not measure reply or turn latency. The added fields are nullable, appear only on records already returned to the same caller, and carry no message content.
 
+### Security
+- Security fixes.
+
 ### Added
 - **Last inbox poll in the operator roster and topology.** `GET /v1/inbox` records relay time in `agents.last_inbox_poll_at`, including empty polls. `GET /v1/operator/fleet-health` returns that timestamp per agent, and `GET /v1/operator/topology` returns it on nodes built from the same rows. Both read-back routes require an operator session; agent-signed requests are refused. Heartbeats do not update the field, and it is not an input to the existing health status. A stale poll alone cannot distinguish a stuck adapter from one busy in a turn.
 - **Relay-observed acknowledgement time in message status.** When an agent acknowledges a delivery, the relay records `message_deliveries.ack_recorded_at` on its own clock alongside `acked_at`, which remains the adapter-supplied receipt time. `GET /v1/messages/{id}/status` returns the new field for each delivery. Both timestamps mean received, not answered. The new roster and delivery fields are documented in `openapi.yaml`.

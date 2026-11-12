@@ -178,62 +178,66 @@ export async function messageSend(ctx: A2AMethodContext, params: unknown): Promi
     throw gateDenialToRpcError(gate);
   }
 
-  // Reuse existing task if taskId provided
-  let task: A2ATask;
-  if (message.taskId) {
-    // #58: continuing a task requires being on it. Without this any enrolled
-    // agent could append to a stranger's task history — and read the whole
-    // history back, since the method returns the task.
-    const participants = ctx.tasks.taskParticipants(message.taskId);
-    const onTask =
-      participants !== null &&
-      participants.fleetId === ctx.senderFleetId &&
-      (participants.recipientAgentId === ctx.senderAgentId || participants.senderAgentId === ctx.senderAgentId);
-    if (!onTask) {
-      throw new JsonRpcException(A2A_TASK_NOT_FOUND, `task ${message.taskId} not found`);
+  // Task history, relay delivery and their link must commit together. The gate
+  // above is async; keep this transaction synchronous on the shared database.
+  return ctx.db.raw().transaction(() => {
+    // Reuse existing task if taskId provided
+    let task: A2ATask;
+    if (message.taskId) {
+      // #58: continuing a task requires being on it. Without this any enrolled
+      // agent could append to a stranger's task history — and read the whole
+      // history back, since the method returns the task.
+      const participants = ctx.tasks.taskParticipants(message.taskId);
+      const onTask =
+        participants !== null &&
+        participants.fleetId === ctx.senderFleetId &&
+        (participants.recipientAgentId === ctx.senderAgentId || participants.senderAgentId === ctx.senderAgentId);
+      if (!onTask) {
+        throw new JsonRpcException(A2A_TASK_NOT_FOUND, `task ${message.taskId} not found`);
+      }
+      // ...and the message must go to the OTHER party on that task, not be
+      // re-addressed to a third agent who was never part of the exchange.
+      if (recipientId !== participants.recipientAgentId && recipientId !== participants.senderAgentId) {
+        throw new JsonRpcException(
+          JSONRPC_INVALID_PARAMS,
+          `recipient ${recipientId} is not a participant of task ${message.taskId}`
+        );
+      }
+      const existing = ctx.tasks.getTask(message.taskId)!;
+      if (TERMINAL_STATES.includes(existing.status.state)) {
+        throw new JsonRpcException(A2A_TASK_NOT_CANCELABLE, `task ${message.taskId} is in terminal state`);
+      }
+      ctx.tasks.appendMessage(existing.id, message);
+      task = ctx.tasks.getTask(existing.id)!;
+    } else {
+      task = ctx.tasks.createTask({
+        fleetId: ctx.senderFleetId,
+        agentId: recipientId,
+        senderAgentId: ctx.senderAgentId,
+        contextId: message.contextId,
+        initialMessage: message,
+      });
     }
-    // ...and the message must go to the OTHER party on that task, not be
-    // re-addressed to a third agent who was never part of the exchange.
-    if (recipientId !== participants.recipientAgentId && recipientId !== participants.senderAgentId) {
-      throw new JsonRpcException(
-        JSONRPC_INVALID_PARAMS,
-        `recipient ${recipientId} is not a participant of task ${message.taskId}`
-      );
-    }
-    const existing = ctx.tasks.getTask(message.taskId)!;
-    if (TERMINAL_STATES.includes(existing.status.state)) {
-      throw new JsonRpcException(A2A_TASK_NOT_CANCELABLE, `task ${message.taskId} is in terminal state`);
-    }
-    ctx.tasks.appendMessage(existing.id, message);
-    task = ctx.tasks.getTask(existing.id)!;
-  } else {
-    task = ctx.tasks.createTask({
+
+    // Create corresponding Ekho message for store-and-forward delivery
+    const { messageId } = ctx.db.createMessage({
       fleetId: ctx.senderFleetId,
-      agentId: recipientId,
       senderAgentId: ctx.senderAgentId,
-      contextId: message.contextId,
-      initialMessage: message,
+      recipientKind: "agent",
+      recipientId,
+      messageType: "a2a.message",
+      priority: "normal",
+      ttlSeconds: 3600,
+      requiresApproval: false,
+      body,
+      metadata: { a2a_task_id: task.id, a2a_context_id: task.contextId },
+      conversationId: task.contextId,
+      correlationId: task.id,
     });
-  }
+    ctx.tasks.linkMessage(task.id, messageId);
 
-  // Create corresponding Ekho message for store-and-forward delivery
-  const { messageId } = ctx.db.createMessage({
-    fleetId: ctx.senderFleetId,
-    senderAgentId: ctx.senderAgentId,
-    recipientKind: "agent",
-    recipientId,
-    messageType: "a2a.message",
-    priority: "normal",
-    ttlSeconds: 3600,
-    requiresApproval: false,
-    body,
-    metadata: { a2a_task_id: task.id, a2a_context_id: task.contextId },
-    conversationId: task.contextId,
-    correlationId: task.id,
-  });
-  ctx.tasks.linkMessage(task.id, messageId);
-
-  return task;
+    return task;
+  })();
 }
 
 export function tasksGet(ctx: A2AMethodContext, params: unknown): A2ATask {
