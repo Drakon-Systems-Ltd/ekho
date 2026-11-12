@@ -18,6 +18,25 @@ import {
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
+/** Context of a concrete-recipient policy denial raised inside createMessage's
+ *  transaction. Carried out of the rollback so the denial can be audited once
+ *  the failed transaction has discarded the message (and the denial event the
+ *  policy engine recorded inside it). */
+export interface MessagePolicyDenial {
+  policyId: string | null;
+  policyName: string;
+  recipientId: string;
+}
+
+export class MessagePolicyDeniedError extends Error {
+  readonly policy: string;
+  constructor(readonly denial: MessagePolicyDenial) {
+    super("blocked by policy");
+    this.name = "MessagePolicyDeniedError";
+    this.policy = denial.policyName;
+  }
+}
+
 export interface OperatorKeyRow {
   fleet_id: string;
   key_id: string;
@@ -1545,6 +1564,22 @@ export class EkhoDb {
         input.recipientKind === "group"
           ? this.roomMemberIds(input.fleetId, conversationId, input.senderAgentId, true)
           : null;
+      // Resolve and authorize the exact delivery set within this transaction.
+      // Any denial rolls back the whole send, including history and attachments.
+      const policyRecipients = roomRecipients ?? (input.recipientKind === "broadcast"
+        ? this.broadcastRecipientIds(input.fleetId, input.senderAgentId) : []);
+      for (const recipientId of policyRecipients) {
+        const verdict = this.evaluateMessagePolicies(
+          input.fleetId, input.senderAgentId, recipientId, input.messageType, input.priority
+        );
+        if (!verdict.allowed) {
+          throw new MessagePolicyDeniedError({
+            policyId: verdict.deniedByPolicyId ?? null,
+            policyName: verdict.deniedByPolicy ?? "",
+            recipientId
+          });
+        }
+      }
       if (roomRecipients !== null) {
         for (const rid of roomRecipients) {
           deliveryStmt.run(id("dly"), messageId, rid, createdAt, "queued");
@@ -1570,7 +1605,7 @@ export class EkhoDb {
         if (!this.isDeliverableAgent(input.fleetId, input.recipientId)) throw new Error("recipient not found");
         deliveryStmt.run(id("dly"), messageId, input.recipientId, createdAt, "queued");
       } else if (input.recipientKind === "broadcast") {
-        for (const recipientId of this.broadcastRecipientIds(input.fleetId, input.senderAgentId)) {
+        for (const recipientId of policyRecipients) {
           deliveryStmt.run(id("dly"), messageId, recipientId, createdAt, "queued");
         }
       } else {
@@ -1605,7 +1640,40 @@ export class EkhoDb {
       }
     });
 
-    tx();
+    try {
+      tx();
+    } catch (err) {
+      if (err instanceof MessagePolicyDeniedError) {
+        // The rollback that correctly discards the message, its deliveries and
+        // the attachment bindings also discards the message.policy_denied event
+        // evaluateMessagePolicies recorded inside the transaction. Persist
+        // exactly one denial event here, outside the failed transaction, so a
+        // rejected fan-out is as visible to the operator as a rejected direct
+        // send to the same recipient.
+        //
+        // The denial is the outcome; this event is its record. If the write
+        // itself fails (database full or locked), the caller must still get
+        // the typed denial, never the storage error in its place, so the
+        // failure is reported on stderr and the original error is rethrown.
+        try {
+          this.recordEvent(input.fleetId, "message.policy_denied", "system", null, "policy", err.denial.policyId, null, {
+            policy_name: err.denial.policyName,
+            sender: input.senderAgentId,
+            recipient: err.denial.recipientId,
+            message_type: input.messageType,
+            recipient_kind: input.recipientKind,
+            conversation_id: conversationId
+          });
+        } catch (auditErr) {
+          console.error("[ekho-relay] message.policy_denied event not recorded for a rejected fan-out send", {
+            fleet_id: input.fleetId,
+            policy_id: err.denial.policyId,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr)
+          });
+        }
+      }
+      throw err;
+    }
     return { messageId, createdAt };
   }
 
@@ -3756,7 +3824,7 @@ export class EkhoDb {
     recipientId: string | null,
     messageType: string,
     priority: string
-  ): { allowed: boolean; deniedByPolicy?: string } {
+  ): { allowed: boolean; deniedByPolicy?: string; deniedByPolicyId?: string } {
     const policies = this.db.prepare(
       `SELECT id, name, scope_kind, scope_id, rule_json
        FROM policies
@@ -3776,7 +3844,7 @@ export class EkhoDb {
           this.recordEvent(fleetId, "message.policy_denied", "system", null, "policy", String(policy.id), null, {
             policy_name: policy.name, sender: senderAgentId, recipient: recipientId, message_type: messageType
           });
-          return { allowed: false, deniedByPolicy: String(policy.name) };
+          return { allowed: false, deniedByPolicy: String(policy.name), deniedByPolicyId: String(policy.id) };
         }
         return { allowed: true };
       }
