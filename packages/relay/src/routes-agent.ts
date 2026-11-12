@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
-import { db, canonicalDmId } from "./db";
+import { db, canonicalDmId, MessagePolicyDeniedError } from "./db";
 import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
@@ -192,6 +192,9 @@ export async function registerAgentRoutes(app: FastifyInstance) {
         correlationId: parsed.data.correlation_id
       });
     } catch (err) {
+      if (err instanceof MessagePolicyDeniedError) {
+        return sendGateDenial(reply, { kind: "policy", policy: err.policy });
+      }
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("not found")) return reply.code(404).send({ error: msg });
       if (msg.includes("conversation not permitted")) return reply.code(403).send({ error: msg });
