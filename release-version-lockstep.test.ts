@@ -127,6 +127,46 @@ describe("release version lockstep", () => {
     expect(readme.split("## How it works")[0]).not.toMatch(/canonical operator DM|A2A sends now|Room and broadcast sends/i);
   });
 
+  it("keeps each published package's current changelog section truthful about #175", () => {
+    // Parse the current version's section of EACH package changelog on its own,
+    // so a "no changes" claim in this section fails even though older sections
+    // legitimately say it.
+    const section = (rel: string): string => {
+      const found = read(rel)
+        .split(/^## \[/m)
+        .find((chunk) => chunk.startsWith(`${expected}] - `));
+      expect(found, `${rel} [${expected}] section`).toBeTruthy();
+      return found!;
+    };
+    const unpublishedLanguage = /not yet published|release candidate|is a candidate|is released|now (?:live|available) on npm/i;
+
+    const sdk = section("packages/sdk/CHANGELOG.md");
+    expect(sdk, "SDK section").not.toMatch(/no SDK changes/i);
+    expect(sdk, "SDK section").not.toMatch(/no SDK update (?:is )?(?:required|needed)/i);
+    expect(sdk, "SDK section").not.toMatch(/SDK update (?:is )?not (?:required|needed)/i);
+    expect(sdk).toContain("#175");
+    expect(sdk).toContain("`getDeliveredMessage(id)`");
+    expect(sdk).toContain("`downloadDeliveredAttachment(messageId, attachmentId)`");
+    expect(sdk).toContain("#163");
+    expect(sdk).toContain("migration 025");
+    expect(sdk).not.toMatch(unpublishedLanguage);
+
+    const plugin = section("packages/openclaw-plugin/CHANGELOG.md");
+    expect(plugin, "plugin section").not.toMatch(/no (?:OpenClaw )?plugin (?:code )?changes/i);
+    expect(plugin, "plugin section").not.toMatch(/no plugin update (?:is )?(?:required|needed)/i);
+    expect(plugin, "plugin section").not.toMatch(/plugin update (?:is )?not (?:required|needed)/i);
+    expect(plugin).toContain("#175");
+    expect(plugin).toContain("`getDeliveredMessage`");
+    expect(plugin).toContain("`downloadDeliveredAttachment`");
+    expect(plugin).toContain("no local signature verdict");
+    expect(plugin).toContain("`degraded: true`");
+    expect(plugin).toContain('`recovery: "delivered-message"`');
+    expect(plugin).toMatch(/needs both an upgraded relay and an updated OpenClaw plugin/);
+    expect(plugin).toContain("#163");
+    expect(plugin).toContain("migration 025");
+    expect(plugin).not.toMatch(unpublishedLanguage);
+  });
+
   it("does not mark the npm publish step continue-on-error", () => {
     // Since 0.4.9 one step publishes both packages and skips a version that is
     // already on the registry. Skipping a verifiably published version is the

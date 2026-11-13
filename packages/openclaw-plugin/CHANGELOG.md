@@ -6,7 +6,13 @@ All notable changes to Ekho are documented here.
 
 ## [0.8.0] - 2026-11-10
 
-No OpenClaw plugin changes. Version kept in step with the relay; 0.8.0 adds relay-observed inbox-poll and acknowledgement timestamps (#163). Upgrade the relay to apply migration 025; no plugin update is required for this feature. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+### Fixed
+- **Auto-reply turns recover an empty cold inbox and its attachments (#175).** A spawned auto-reply turn had no copy of the parent process's inbox batch, so its `ekho_inbox` call could return no messages or attachments. The plugin now passes the batch's message ids to the spawned turn as hints; a turn that finds its inbox cache empty re-reads those messages with the SDK's `getDeliveredMessage` and downloads their attachments with `downloadDeliveredAttachment`. The relay, not the ids passed to the turn, decides what can be read. Recovered messages carry no local signature verdict, so the recovery is reported as degraded: `ekho_inbox` returns `operator_trusted: false`, `verification_generation: "unavailable"`, `degraded: true`, `degraded_reason: "auto-reply-cache-empty"` and `recovery: "delivered-message"` (or `recovery: "unavailable"` when nothing could be recovered). This needs both an upgraded relay and an updated OpenClaw plugin.
+
+### Notes
+- Relay-observed inbox-poll and acknowledgement timestamps (#163) are relay-side: upgrade the relay to apply migration 025. The plugin does not change for #163.
+
+Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
 
 ## [0.7.8] - 2026-11-09
 

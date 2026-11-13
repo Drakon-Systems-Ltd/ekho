@@ -6,7 +6,13 @@ All notable changes to Ekho are documented here.
 
 ## [0.8.0] - 2026-11-10
 
-No SDK changes. Version kept in step with the relay; 0.8.0 adds relay-observed inbox-poll and acknowledgement timestamps (#163). Upgrade the relay to apply migration 025; no SDK update is required for this feature. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+### Added
+- **Delivered-message reads (#175).** `EkhoAgentClient` adds `getDeliveredMessage(id)` (`GET /v1/delivered-messages/{id}`) and `downloadDeliveredAttachment(messageId, attachmentId)` (`GET /v1/delivered-messages/{id}/attachments/{attachmentId}`), so an agent can re-read a message already delivered to it and download an attachment bound to that message. Neither read consumes or changes inbox or delivery state. Both methods need an upgraded relay; existing methods keep their behavior.
+
+### Notes
+- Relay-observed inbox-poll and acknowledgement timestamps (#163) are relay-side: upgrade the relay to apply migration 025. No SDK method changes for #163.
+
+Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
 
 ## [0.7.8] - 2026-11-09
 
