@@ -148,8 +148,19 @@ export class EkhoAgentClient {
     );
   }
 
+  getDeliveredMessage(id: string) {
+    return this.request<{ message: Record<string, unknown> }>("GET", `/v1/delivered-messages/${encodeURIComponent(id)}`);
+  }
+
+  downloadDeliveredAttachment(messageId: string, attachmentId: string) {
+    return this.downloadAttachmentAt(`/v1/delivered-messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`, attachmentId);
+  }
+
   async downloadAttachment(id: string): Promise<{ bytes: Buffer; filename: string; mime: string }> {
-    const routePath = `/v1/attachments/${encodeURIComponent(id)}`;
+    return this.downloadAttachmentAt(`/v1/attachments/${encodeURIComponent(id)}`, id);
+  }
+
+  private async downloadAttachmentAt(routePath: string, id: string): Promise<{ bytes: Buffer; filename: string; mime: string }> {
     const signaturePath = routePath; // no query
     const response = await fetch(`${this.credentials.relayBaseUrl}${routePath}`, {
       method: "GET",

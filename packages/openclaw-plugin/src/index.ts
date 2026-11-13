@@ -17,7 +17,7 @@ import {
   type EkhoPluginConfig
 } from "./connection.js";
 import { registerModelCallHooks } from "./model-call-hooks.js";
-import { effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
+import { boundedChildMessageIds, CHILD_MESSAGE_IDS_ENV, effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
 import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
 import { inboxMessageView } from "./inbox-trust.js";
@@ -59,7 +59,8 @@ interface LocalAttachment {
 async function resolveLocalAttachments(
   messages: Array<Record<string, unknown>>,
   client: EkhoAgentClient,
-  config?: { stateDir?: string }
+  config?: { stateDir?: string },
+  deliveredOnly = false
 ): Promise<LocalAttachment[][]> {
   const dir = attachmentsDownloadDir(config);
   let dirReady = false;
@@ -83,8 +84,10 @@ async function resolveLocalAttachments(
         const filename = sanitizeFilename(typeof meta.filename === "string" ? meta.filename : meta.id);
         const localPath = attachmentLocalPath(meta.id, filename, config);
         try {
-          if (!fs.existsSync(localPath)) {
-            const { bytes } = await client.downloadAttachment(meta.id);
+          if (deliveredOnly || !fs.existsSync(localPath)) {
+            const { bytes } = deliveredOnly
+              ? await client.downloadDeliveredAttachment(String(m.message_id), meta.id)
+              : await client.downloadAttachment(meta.id);
             if (bytes.length > ATTACHMENT_MAX_BYTES) continue; // defence: trust decoded length too
             ensureDir();
             fs.writeFileSync(localPath, bytes, { mode: 0o600 });
@@ -365,6 +368,7 @@ const plugin = defineToolPlugin({
             messages: [],
             verification_generation: "unavailable",
             degraded: true,
+            ...(process.env.EKHO_AUTOREPLY_DISABLE === "1" ? { degraded_reason: "auto-reply-cache-empty" } : {}),
             error: `not connected: ${String(err)}`
           };
         }
@@ -372,9 +376,28 @@ const plugin = defineToolPlugin({
         const listener = listenerUp(agentId) ? "up" : "down";
         // Entries pair each message with ITS OWN verdict. `messages` is a
         // positional mirror (index i matches) used only for attachment resolution.
-        const entries = cached.entries;
-        const messages = cached.messages as unknown as Array<Record<string, unknown>>;
-        const operatorTrusted = Boolean(cached.operator_trusted);
+        const entries = [...cached.entries];
+        const coldAutoReply = entries.length === 0 && process.env.EKHO_AUTOREPLY_DISABLE === "1";
+        let recovered = false;
+        if (coldAutoReply) {
+          let ids: unknown;
+          try { ids = JSON.parse(process.env[CHILD_MESSAGE_IDS_ENV] ?? "[]"); } catch { ids = []; }
+          if (Array.isArray(ids)) {
+            // Re-bounded here: the env is only a hint, never trusted as-is.
+            for (const id of boundedChildMessageIds(ids)) {
+              try {
+                const { message } = await client.getDeliveredMessage(id);
+                if (message.message_id !== id) continue;
+                // A recovered row has no local signature verdict or current
+                // trust snapshot. Never turn relay data into a verified claim.
+                entries.push({ message, verification: null } as unknown as (typeof entries)[number]);
+                recovered = true;
+              } catch { /* An inaccessible or expired row cannot be recovered. */ }
+            }
+          }
+        }
+        const messages = entries.map((e) => e.message) as unknown as Array<Record<string, unknown>>;
+        const operatorTrusted = recovered ? false : Boolean(cached.operator_trusted);
         const roster = (cached.roster ?? []) as unknown as Array<Record<string, unknown>>;
         const controls = (cached.controls ?? []) as unknown as Array<Record<string, unknown>>;
         const peerAutoreply = Boolean(cached.peer_autoreply);
@@ -389,7 +412,7 @@ const plugin = defineToolPlugin({
         // every poll. Each download is isolated: one bad attachment never fails
         // the whole inbox read. Bytes are written 0o600 under an id-prefixed,
         // sanitized filename (no collisions, no path traversal).
-        const localAttachments = await resolveLocalAttachments(messages, client, config);
+        const localAttachments = await resolveLocalAttachments(messages, client, config, recovered);
 
         return {
           count: messages.length,
@@ -398,8 +421,9 @@ const plugin = defineToolPlugin({
           listener,
           ...(listener === "down" ? { warning: LISTENER_WARNING } : {}),
           roster_fetched_at: cached.recorded_at,
-          verification_generation: cached.verification_generation,
-          degraded: listener === "down" || cached.verification_generation !== "current",
+          verification_generation: recovered ? "unavailable" : cached.verification_generation,
+          degraded: coldAutoReply || listener === "down" || cached.verification_generation !== "current",
+          ...(coldAutoReply ? { degraded_reason: "auto-reply-cache-empty", recovery: recovered ? "delivered-message" : "unavailable" } : {}),
           // When ON, the relay vouches that the console operator is this agent's
           // verified principal. Surfaced top-level so the agent can reason about
           // operator messages even before reading them.

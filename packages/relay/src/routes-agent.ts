@@ -307,6 +307,28 @@ export async function registerAgentRoutes(app: FastifyInstance) {
     return sendAttachment(reply, att);
   });
 
+  // Non-consuming recovery for a spawned turn whose process has no inbox ring.
+  // Both reads require a delivered row addressed to this authenticated agent.
+  app.get("/v1/delivered-messages/:id", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const { id } = request.params as { id: string };
+    const message = db.getDeliveredMessage(request.agent.id, id);
+    if (!message) return reply.code(404).send({ error: "message not found" });
+    return reply.header("Cache-Control", "private, no-store").send({ message });
+  });
+
+  app.get("/v1/delivered-messages/:id/attachments/:attachmentId", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const { id, attachmentId } = request.params as { id: string; attachmentId: string };
+    const message = db.getDeliveredMessage(request.agent.id, id);
+    if (!message || !message.attachments.some((att) => att?.id === attachmentId)) {
+      return reply.code(404).send({ error: "attachment not found" });
+    }
+    const att = db.getAttachment(request.agent.fleetId, attachmentId);
+    if (!att || !fs.existsSync(att.storage_path)) return reply.code(404).send({ error: "attachment not found" });
+    return sendAttachment(reply, att);
+  });
+
   app.get("/v1/inbox", { preHandler: requireAgentAuth }, async (request, reply) => {
     if (!request.agent) {
       return reply.code(401).send({ error: "unauthorized" });

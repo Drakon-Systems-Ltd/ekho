@@ -32,7 +32,10 @@ import {
   applyPeerLatch,
   reconcilePeerLatches,
   applyPeerRateGate,
-  withLocalRoomCap
+  withLocalRoomCap,
+  boundedChildMessageIds,
+  CHILD_MESSAGE_ID_MAX_LENGTH,
+  CHILD_MESSAGE_IDS_ENV
 } from "../src/autoreply";
 import { makeSnapshotVerifier, NO_SNAPSHOT_VERIFICATION } from "../src/verification";
 import { inboxMessageView } from "../src/inbox-trust";
@@ -46,11 +49,14 @@ import {
 import { endorsementPayload } from "../src/identity";
 
 const turnSpawns = vi.hoisted(() => vi.fn());
+// Every spawn's options, so a test can read the env the parent hands the child.
+const turnSpawnOptions = vi.hoisted(() => [] as Array<{ env?: Record<string, string | undefined> } | undefined>);
 vi.mock("node:child_process", async () => {
   const { EventEmitter } = await import("node:events");
   return {
-    spawn: (_command: string, args: string[]) => {
+    spawn: (_command: string, args: string[], options?: { env?: Record<string, string | undefined> }) => {
       turnSpawns(args);
+      turnSpawnOptions.push(options);
       const child = new EventEmitter() as EventEmitter & { kill: () => void };
       child.kill = () => {};
       setTimeout(() => child.emit("exit", 0), 0);
@@ -1821,5 +1827,87 @@ describe("history/quote snapshots are verified, not merely signature-shaped (ekh
     const emptyTextSig = signedSnapshot("operator", "");
     expect(verifier()({ ...emptyTextSig, text: RETRACTION })).toBe(false);
     expect(verifier()(signedSnapshot("operator", RETRACTION))).toBe(true);
+  });
+});
+
+// #113: a spawned turn runs in a fresh process with no copy of the parent's
+// inbox ring, so the parent hands it the batch's message ids via the env. The
+// ids are hints only; the relay remains the authorization boundary (it serves a
+// delivered row solely to that row's recipient).
+describe("spawned turn receives bounded message ids (#113)", () => {
+  it("dedupes, drops non-strings and out-of-range lengths, and caps at 25", () => {
+    const max = "x".repeat(CHILD_MESSAGE_ID_MAX_LENGTH);
+    const tooLong = "y".repeat(CHILD_MESSAGE_ID_MAX_LENGTH + 1);
+    const ids = boundedChildMessageIds(["a", "a", "", tooLong, max, 7, null, undefined, { id: "z" }, "b"]);
+    expect(ids).toEqual(["a", max, "b"]);
+    const many = Array.from({ length: 40 }, (_, i) => `m${i}`);
+    expect(boundedChildMessageIds([...many, ...many])).toEqual(many.slice(0, 25));
+    expect(boundedChildMessageIds([])).toEqual([]);
+  });
+
+  it("the real poll path puts the bounded ids in the spawned child's env", async () => {
+    const ids = Array.from({ length: 30 }, (_, i) => `env-m${i}`);
+    const tooLong = "z".repeat(CHILD_MESSAGE_ID_MAX_LENGTH + 1);
+    // One sender per message keeps every message under the per-peer rate gate.
+    const peerMsg = (id: string, i: number, text = `task ${i}`) => ({
+      message_id: id, conversation_id: "env-conv", sender_kind: "agent",
+      sender_agent_id: `env-peer-${i}`, message_type: "direct", body: { text }
+    });
+    const messages = [
+      ...ids.map((id, i) => peerMsg(id, i)),
+      // Same id, different material: survives the held-key dedupe, so the env
+      // builder itself must collapse it.
+      peerMsg(ids[0], 99, "same id, other body"),
+      peerMsg(tooLong, 98)
+    ];
+    let served = false;
+    const fakeClient = {
+      getInbox: async () => {
+        if (served) return { messages: [] };
+        served = true;
+        return { messages, operator_trusted: false, peer_autoreply: true, roster: [] };
+      },
+      ackMessages: async () => ({}),
+      acquireFloor: async () => ({ granted: true, conversation_tail: [] }),
+      releaseFloor: async () => ({}),
+      raiseNotice: async () => ({})
+    };
+    turnSpawns.mockClear();
+    turnSpawnOptions.length = 0;
+    const stop = startAutoReply({
+      client: fakeClient as any,
+      api: {} as any,
+      selfAgentId: "env-self",
+      peerEnabled: true,
+      pollIntervalMs: 5,
+      log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} } as any
+    });
+    try {
+      await vi.waitFor(() => expect(turnSpawnOptions.length).toBeGreaterThanOrEqual(1), { timeout: 2000 });
+    } finally {
+      await stop();
+      resetCachedInboxForTest("env-self");
+    }
+    const env = turnSpawnOptions[0]?.env;
+    // Regression: a parent that spawns without an explicit env (or drops the
+    // var) leaves the cold child unable to recover anything.
+    expect(env).toBeDefined();
+    expect(env?.EKHO_AUTOREPLY_DISABLE).toBe("1");
+    const raw = env?.[CHILD_MESSAGE_IDS_ENV];
+    expect(typeof raw).toBe("string");
+    const handed = JSON.parse(raw as string) as unknown[];
+    expect(Array.isArray(handed)).toBe(true);
+    expect(handed.length).toBeGreaterThan(0);
+    expect(handed.length).toBeLessThanOrEqual(25);
+    expect(new Set(handed).size).toBe(handed.length);
+    for (const id of handed) {
+      expect(typeof id).toBe("string");
+      expect((id as string).length).toBeGreaterThanOrEqual(1);
+      expect((id as string).length).toBeLessThanOrEqual(CHILD_MESSAGE_ID_MAX_LENGTH);
+      expect(ids).toContain(id);
+    }
+    expect(handed).not.toContain(tooLong);
+    // 30 distinct valid ids reached the turn, so the cap is what bounds it.
+    expect(handed).toHaveLength(25);
   });
 });

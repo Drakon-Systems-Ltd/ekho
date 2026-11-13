@@ -1234,6 +1234,85 @@ components:
           type: string
           format: date-time
 
+    DeliveredMessage:
+      type: object
+      description: >
+        A message previously delivered to the calling agent, re-read without
+        consuming or changing any delivery state. Carries the relay's stored
+        signature material only; the relay does not vouch for it here, so a
+        client must treat it as unverified unless it verifies the signature itself.
+      required: [message_id, conversation_id, sender_agent_id, sender_kind, message_type, body, attachments, created_at, deadline_at]
+      properties:
+        message_id:
+          type: string
+        conversation_id:
+          $ref: "#/components/schemas/ConversationId"
+        correlation_id:
+          $ref: "#/components/schemas/CorrelationId"
+        sender_agent_id:
+          $ref: "#/components/schemas/AgentId"
+        sender_kind:
+          type: string
+          enum: [operator, agent]
+        message_type:
+          $ref: "#/components/schemas/MessageType"
+        priority:
+          $ref: "#/components/schemas/Priority"
+        body:
+          type: object
+          additionalProperties: true
+        attachments:
+          type: array
+          description: >
+            Metadata for the attachment ids in `body.attachments` that still exist
+            in the caller's fleet. Download each via
+            `GET /v1/delivered-messages/{id}/attachments/{attachmentId}`.
+          items:
+            type: object
+            required: [id, filename, mime, size_bytes]
+            properties:
+              id:
+                type: string
+              filename:
+                type: string
+              mime:
+                type: string
+              size_bytes:
+                type: integer
+        metadata:
+          type: object
+          additionalProperties: true
+        mentions:
+          type: array
+          items:
+            type: string
+        operator_sig:
+          type: string
+          nullable: true
+        agent_sig:
+          type: string
+          nullable: true
+        key_id:
+          type: string
+          nullable: true
+        sig_canonical:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        deadline_at:
+          type: string
+          format: date-time
+          description: The message's expires_at. Recovery returns 404 from this instant on.
+
+    DeliveredMessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          $ref: "#/components/schemas/DeliveredMessage"
+
     OperatorProfile:
       type: object
       required: [id, email, display_name]
@@ -2711,6 +2790,110 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /v1/delivered-messages/{id}:
+    get:
+      operationId: getDeliveredMessage
+      tags: [Agent]
+      summary: Re-read a message already delivered to the caller
+      description: >
+        Non-consuming recovery for a process that has no copy of the inbox
+        batch (for example a spawned auto-reply turn).
+        Authorization (all must hold, otherwise 404; existence is never
+        disclosed): the caller has its OWN delivery row for this message in state
+        `delivered` or `acked` (an acked message stays readable; a queued, expired,
+        or dead-lettered delivery does not); the message deadline (`deadline_at`)
+        has not passed; and, for a room message, the room still exists and the
+        caller is still a member (removal from the room, or deleting the room,
+        ends recovery). Being the sender, sharing the conversation id, or joining
+        the room later grants nothing here. The read never consumes or modifies
+        inbox or delivery state, and the response is sent with
+        `Cache-Control: private, no-store`.
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Message id.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The delivered message.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: ["private, no-store"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveredMessageResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/delivered-messages/{id}/attachments/{attachmentId}:
+    get:
+      operationId: downloadDeliveredMessageAttachment
+      tags: [Agent]
+      summary: Download an attachment of a message already delivered to the caller
+      description: >
+        Streams one attachment, but only one that is bound to the named message
+        (listed in its `body.attachments`) and still stored in the caller's fleet.
+        Authorization (all must hold, otherwise 404; existence is never
+        disclosed): the caller has its OWN delivery row for this message in state
+        `delivered` or `acked` (an acked message stays readable; a queued, expired,
+        or dead-lettered delivery does not); the message deadline (`deadline_at`)
+        has not passed; and, for a room message, the room still exists and the
+        caller is still a member (removal from the room, or deleting the room,
+        ends recovery). Being the sender, sharing the conversation id, or joining
+        the room later grants nothing here. The read never consumes or modifies
+        inbox or delivery state, and the response is sent with
+        `Cache-Control: private, no-store`.
+        Served with the same download hardening as `GET /v1/attachments/{id}`
+        (`X-Content-Type-Options: nosniff`, sandboxing CSP, attachment
+        Content-Disposition).
+      security:
+        - AgentHMAC: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Message id.
+          schema:
+            type: string
+        - name: attachmentId
+          in: path
+          required: true
+          description: Attachment id; must be one of the message's attachments.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The file bytes, served with the stored MIME type for images and `application/octet-stream` otherwise.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: ["private, no-store"]
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: >
+            Not authorized under the rules above, the attachment is not bound to
+            this message, or its bytes were garbage-collected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/conversations/{id}/floor:
     parameters:
