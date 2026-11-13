@@ -69,12 +69,12 @@ describe("release version lockstep", () => {
         )
       ],
       [
-        "README current release",
-        capture(read("README.md"), /\*\*Current release:\*\* `v([^`]+)`/, "README current release")
+        "README release version",
+        capture(read("README.md"), /\*\*Release version:\*\* `v([^`]+)`/, "README release version")
       ],
       [
         "README project status",
-        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is (?:released|the current release candidate)/, "README project status")
+        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is the release version\./, "README project status")
       ],
       ...workspace
     ];
@@ -82,6 +82,22 @@ describe("release version lockstep", () => {
     for (const [label, actual] of surfaces) {
       expect(actual, label).toBe(expected);
     }
+  });
+
+  it("keeps final release copy generic and publication-neutral", () => {
+    const changelog = read("CHANGELOG.md").split(/^## \[/m)[2];
+    expect(changelog, "current version changelog section").toBeTruthy();
+    expect(changelog).toMatch(new RegExp(`^${expected.replace(/\./g, "\\.")}\\] - \\d{4}-\\d{2}-\\d{2}\\n`));
+    expect(changelog).toMatch(/\] - \d{4}-\d{2}-\d{2}\n\nRelay update: delivery timing fields \(#163\) and security fixes\./);
+    expect(changelog).toMatch(/### Security\n- \*\*Security fixes\.\*\*/);
+    expect(changelog).not.toMatch(/canonical operator DMs|A2A send persistence|room and broadcast sends/i);
+
+    const readme = read("README.md");
+    expect(readme).toContain(`**Release version:** \`v${expected}\``);
+    expect(readme).toContain(`## Project Status\n\nEkho \`v${expected}\` is the release version.`);
+    expect(readme).not.toMatch(/current release candidate|not yet published|is a candidate|is released/i);
+    expect(readme.split("## How it works")[0]).toMatch(/security fixes\./);
+    expect(readme.split("## How it works")[0]).not.toMatch(/canonical operator DM|A2A sends now|Room and broadcast sends/i);
   });
 
   it("does not mark the npm publish step continue-on-error", () => {
