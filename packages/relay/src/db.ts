@@ -4338,7 +4338,24 @@ export class EkhoDb {
   }
 
   /** Read a previously delivered row without changing its delivery state. The
-   * recipient join is the authorization boundary, including after ack. */
+   * recipient join is the authorization boundary, including after ack.
+   *
+   * Deliberately STRICTER than messageVisibleToSql: that rule also grants the
+   * sender and every current room member (thread history), whereas this read
+   * hands back a whole row plus its attachment bytes, so it requires this
+   * agent's own delivered/acked delivery row. A sender with no delivery row
+   * gets 404, and a later room member cannot read history through here.
+   *
+   * Room cutoff: a room-addressed message (recipient_kind 'room' from the
+   * operator, 'group' from an agent) is readable only while the room exists and
+   * the agent is still a member. Deleting the room removes its membership, so
+   * that also ends recovery instead of falling back to the plain delivery row.
+   *
+   * Expiry is enforced uniformly: the read is open only while the message's
+   * own deadline (expires_at, returned as deadline_at) is in the future. Without
+   * this, an acked row would stay readable forever while an unacked delivered
+   * row would vanish once sweepExpiredMessages marked it 'expired'. Attachment
+   * bytes can still disappear earlier via sweepAttachments (404 on download). */
   getDeliveredMessage(agentId: string, messageId: string) {
     const row = this.db.prepare(
       `SELECT m.*, sender.runtime AS sender_runtime FROM messages m
@@ -4346,9 +4363,13 @@ export class EkhoDb {
        JOIN agents recipient ON recipient.id = d.recipient_agent_id AND recipient.fleet_id = m.fleet_id
        JOIN agents sender ON sender.id = m.sender_agent_id
        WHERE m.id = ? AND d.recipient_agent_id = ? AND d.status IN ('delivered', 'acked')
-         AND (NOT EXISTS (SELECT 1 FROM rooms room WHERE room.id = m.conversation_id AND room.fleet_id = m.fleet_id)
-           OR EXISTS (SELECT 1 FROM room_members member WHERE member.room_id = m.conversation_id AND member.agent_id = d.recipient_agent_id))`
-    ).get(messageId, agentId) as Record<string, unknown> | undefined;
+         AND m.expires_at > ?
+         AND CASE
+           WHEN EXISTS (SELECT 1 FROM rooms room WHERE room.id = m.conversation_id AND room.fleet_id = m.fleet_id)
+             THEN EXISTS (SELECT 1 FROM room_members member WHERE member.room_id = m.conversation_id AND member.agent_id = d.recipient_agent_id)
+           ELSE m.recipient_kind NOT IN ('room', 'group')
+         END`
+    ).get(messageId, agentId, nowIso()) as Record<string, unknown> | undefined;
     if (!row) return undefined;
     const body = JSON.parse(String(row.body_json)) as Record<string, unknown>;
     const meta = row.metadata_json ? JSON.parse(String(row.metadata_json)) as Record<string, unknown> : {};

@@ -17,7 +17,7 @@ import {
   type EkhoPluginConfig
 } from "./connection.js";
 import { registerModelCallHooks } from "./model-call-hooks.js";
-import { effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
+import { boundedChildMessageIds, CHILD_MESSAGE_IDS_ENV, effectiveConversationBudget, getCachedInbox, normalizeTurnBudget } from "./autoreply.js";
 import { buildSendMetadata, resolveOriginSessionId } from "./origin.js";
 import { buildSignedSendFields } from "./verification.js";
 import { inboxMessageView } from "./inbox-trust.js";
@@ -381,10 +381,10 @@ const plugin = defineToolPlugin({
         let recovered = false;
         if (coldAutoReply) {
           let ids: unknown;
-          try { ids = JSON.parse(process.env.EKHO_AUTOREPLY_MESSAGE_IDS ?? "[]"); } catch { ids = []; }
+          try { ids = JSON.parse(process.env[CHILD_MESSAGE_IDS_ENV] ?? "[]"); } catch { ids = []; }
           if (Array.isArray(ids)) {
-            const bounded = [...new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 200))].slice(0, 25);
-            for (const id of bounded) {
+            // Re-bounded here: the env is only a hint, never trusted as-is.
+            for (const id of boundedChildMessageIds(ids)) {
               try {
                 const { message } = await client.getDeliveredMessage(id);
                 if (message.message_id !== id) continue;

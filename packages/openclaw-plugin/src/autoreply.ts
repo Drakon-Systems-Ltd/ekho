@@ -280,6 +280,25 @@ export const STOP_DRAIN_MS = 4_000;
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
 const LAST_BATCH_CAP = 25; // ring exposed to ekho_inbox (Part B1)
 
+/** Longest message id handed to a spawned turn (the relay mints far shorter). */
+export const CHILD_MESSAGE_ID_MAX_LENGTH = 200;
+/** Env var carrying a spawned turn's message ids to its cold ekho_inbox. */
+export const CHILD_MESSAGE_IDS_ENV = "EKHO_AUTOREPLY_MESSAGE_IDS";
+
+/**
+ * The bounded id list a spawned auto-reply turn may use to recover its batch:
+ * strings of 1..CHILD_MESSAGE_ID_MAX_LENGTH chars, deduplicated in first-seen
+ * order, at most LAST_BATCH_CAP. Used by the parent to write the env var and by
+ * the child to re-validate it. The ids are hints only: the relay remains the
+ * authorization boundary (it serves a row only to its delivered recipient).
+ */
+export function boundedChildMessageIds(ids: readonly unknown[]): string[] {
+  const valid = ids.filter(
+    (id): id is string => typeof id === "string" && id.length > 0 && id.length <= CHILD_MESSAGE_ID_MAX_LENGTH
+  );
+  return [...new Set(valid)].slice(0, LAST_BATCH_CAP);
+}
+
 // Stamp we put on every auto-reply send so peers' loops (and ours) can tell a
 // machine reply from a human/intentional one (Part B4 / Part C, rule 4).
 export const EKHO_ORIGIN_STAMP = "openclaw-agent";
@@ -2155,9 +2174,7 @@ async function triggerTurn(
           EKHO_AUTOREPLY_DISABLE: "1",
           // The child has no copy of the parent inbox ring. These IDs are only
           // hints: the relay still requires its own delivered recipient row.
-          EKHO_AUTOREPLY_MESSAGE_IDS: JSON.stringify(
-            [...new Set(messages.map((m) => m.message_id).filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 200))].slice(0, LAST_BATCH_CAP)
-          )
+          [CHILD_MESSAGE_IDS_ENV]: JSON.stringify(boundedChildMessageIds(messages.map((m) => m.message_id)))
         }
       });
       const timer = setTimeout(() => {
