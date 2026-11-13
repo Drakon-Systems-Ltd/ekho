@@ -88,15 +88,42 @@ describe("release version lockstep", () => {
     const changelog = read("CHANGELOG.md").split(/^## \[/m)[2];
     expect(changelog, "current version changelog section").toBeTruthy();
     expect(changelog).toMatch(new RegExp(`^${expected.replace(/\./g, "\\.")}\\] - \\d{4}-\\d{2}-\\d{2}\\n`));
-    expect(changelog).toMatch(/\] - \d{4}-\d{2}-\d{2}\n\nRelay update: delivery timing fields \(#163\) and security fixes\./);
+    expect(changelog).toMatch(
+      /\] - \d{4}-\d{2}-\d{2}\n\nRelay, SDK and OpenClaw plugin update: delivery timing fields \(#163\), cold inbox attachment recovery \(#175\), and security fixes\./
+    );
     expect(changelog).toMatch(/### Security\n- \*\*Security fixes\.\*\*/);
     expect(changelog).not.toMatch(/canonical operator DMs|A2A send persistence|room and broadcast sends/i);
+
+    // #175 shipped relay, published SDK and published OpenClaw plugin changes:
+    // no copy may claim the release needs no adapter, SDK or plugin changes.
+    expect(changelog).toContain("published Node SDK (`@drakon-systems/ekho-sdk`)");
+    expect(changelog).toContain("published OpenClaw plugin (`@drakon-systems/ekho-openclaw-plugin`)");
+    expect(changelog).toContain("`GET /v1/delivered-messages/{id}`");
+    expect(changelog).toContain("`GET /v1/delivered-messages/{id}/attachments/{attachmentId}`");
+    expect(changelog).toContain("Neither read consumes or changes inbox or delivery state");
+    expect(changelog).toContain("`Cache-Control: private, no-store`");
+    expect(changelog).toContain("`getDeliveredMessage(id)` and `downloadDeliveredAttachment(messageId, attachmentId)`");
+    expect(changelog).toContain('`recovery: "delivered-message"`');
+    expect(changelog).toContain("Recovered messages carry no local signature verdict");
+    expect(changelog).not.toMatch(/no (?:adapter|SDK|plugin) changes/i);
+
+    // Rollback copy is bound to the tested v0.7.8 path, never a blanket promise.
+    expect(changelog).toContain("Running the previous `v0.7.8` relay build on the migrated database was tested");
+    expect(changelog).toContain(
+      "it does not guarantee a full rollback, does not reverse the migration, and does not cover older relay builds"
+    );
+    expect(changelog).not.toMatch(/Rolling back to the previous relay build on the migrated database is safe/i);
 
     const readme = read("README.md");
     expect(readme).toContain(`**Release version:** \`v${expected}\``);
     expect(readme).toContain(`## Project Status\n\nEkho \`v${expected}\` is the release version.`);
     expect(readme).not.toMatch(/current release candidate|not yet published|is a candidate|is released/i);
     expect(readme.split("## How it works")[0]).toMatch(/security fixes\./);
+    expect(readme).toContain(
+      `**Release version:** \`v${expected}\` adds relay delivery timing fields (#163), cold inbox attachment recovery (#175), and security fixes.`
+    );
+    expect(readme).toContain("changes the relay, the published Node SDK and the published OpenClaw plugin");
+    expect(readme).not.toMatch(/no (?:adapter|SDK|plugin) changes/i);
     expect(readme.split("## How it works")[0]).not.toMatch(/canonical operator DM|A2A sends now|Room and broadcast sends/i);
   });
 
