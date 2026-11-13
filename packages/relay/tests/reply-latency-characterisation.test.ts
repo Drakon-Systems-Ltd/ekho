@@ -106,16 +106,21 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     expect(d.queued_at && d.delivered_at && d.acked_at).toBeTruthy();
     // Phase 1a (#155) added ack_recorded_at: the RELAY time the ack arrived,
     // next to the adapter-supplied acked_at. It is still only "received".
-    // Nothing here records floor waiting, turn start, first reply or
-    // completion. Later #155 phases add those.
+    // No phase report or matching reply has arrived, so every Phase 1b field
+    // still describes unknown work rather than treating the ack as an answer.
     expect(Object.keys(d).sort()).toEqual([
-      "ack_recorded_at", "acked_at", "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts",
-      "last_failure_reason", "queued_at", "recipient_agent_id", "retry_count", "status"
+      "ack_recorded_at", "acked_at", "adapter_dead_letter_reason", "adapter_dead_lettered_at", "attempts_capped",
+      "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts", "first_reply_at",
+      "first_reply_turn_id", "floor_granted_at", "floor_overrun_at", "floor_wait_started_at",
+      "last_failure_reason", "latest_attempt", "latest_turn_category", "latest_turn_id", "latest_turn_outcome",
+      "latest_turn_started_at", "phase_recorded_at", "queued_at", "recipient_agent_id", "retry_count", "status", "turn_attempts"
     ]);
     expect(d.ack_recorded_at).toBeTruthy();
-    for (const k of Object.keys(d)) {
-      expect(k).not.toMatch(/reply|answer|turn|floor|complet/);
-    }
+    for (const k of ["first_reply_at", "first_reply_turn_id", "floor_wait_started_at",
+      "floor_granted_at", "floor_overrun_at", "latest_attempt", "latest_turn_id", "latest_turn_started_at",
+      "latest_turn_outcome", "latest_turn_category", "phase_recorded_at", "adapter_dead_lettered_at"]) expect(d[k]).toBeNull();
+    expect(d.turn_attempts).toBe(0);
+    expect(d.attempts_capped).toBe(false);
   });
 
   it("clamps the floor lease to floorTtlMaxSeconds (the adapters ask for 960 s)", async () => {

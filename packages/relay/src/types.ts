@@ -33,6 +33,29 @@ export const ackSchema = z.object({
   })).min(1)
 });
 
+const phaseId = z.string().min(1).max(64).regex(/^[A-Za-z0-9_.:-]+$/);
+const turnCategories = ["timeout", "spawn_error", "spawn_error_retained", "exit_signal", ...Array.from({ length: 256 }, (_, n) => `exit_${n}`)] as [string, ...string[]];
+const phaseEntrySchema = z.strictObject({
+  message_id: phaseId,
+  phase: z.enum(["floor_wait", "floor_granted", "floor_overrun", "turn_started", "turn_ended", "dead_lettered"]),
+  at: z.iso.datetime(),
+  turn_id: phaseId.optional(),
+  attempt: z.number().int().min(1).max(65535).optional(),
+  outcome: z.enum(["completed", "error", "timeout", "spawn_failed"]).optional(),
+  category: z.enum(turnCategories).optional(),
+  holder_agent_id: phaseId.optional(),
+  reason: z.enum(["deferred_evicted_cap", "deferred_overflow_per_conv", "deferred_expired_spawn_failed", "deferred_retry_spawn_failed", "deferred_loop_stopped"]).optional()
+}).superRefine((p, ctx) => {
+  const turn = p.phase === "turn_started" || p.phase === "turn_ended";
+  if (turn !== Boolean(p.turn_id && p.attempt)) ctx.addIssue({ code: "custom", message: "turn_id and attempt required only for turn phases" });
+  if ((p.phase === "floor_wait") !== Boolean(p.holder_agent_id)) ctx.addIssue({ code: "custom", message: "holder_agent_id required only for floor_wait" });
+  if ((p.phase === "turn_ended") !== Boolean(p.outcome)) ctx.addIssue({ code: "custom", message: "outcome required only for turn_ended" });
+  if (p.category && p.phase !== "turn_ended") ctx.addIssue({ code: "custom", message: "category requires turn_ended" });
+  if ((p.phase === "dead_lettered") !== Boolean(p.reason)) ctx.addIssue({ code: "custom", message: "reason required only for dead_lettered" });
+});
+export const deliveryPhasesSchema = z.strictObject({ phases: z.array(phaseEntrySchema).min(1).max(100) });
+export type DeliveryPhase = z.infer<typeof phaseEntrySchema>;
+
 // An agent-raised operator-visible notice. Today the only kind is a stalled
 // conversation (peer-turn budget exhausted with real work withheld), recorded as
 // a `conversation.stalled` event the operator console already surfaces.

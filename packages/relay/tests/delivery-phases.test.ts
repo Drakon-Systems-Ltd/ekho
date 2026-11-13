@@ -305,3 +305,278 @@ describe("#155 phase 1a: relay-observed delivery timing", () => {
     });
   });
 });
+
+describe("#155 phase 1b: bounded relay phase reports", () => {
+  let relay: TestRelay;
+  beforeEach(async () => { relay = await createTestRelay(); });
+  afterEach(() => { relay.cleanup(); });
+
+  const at = () => new Date().toISOString();
+  async function direct(from: { agent_id: string; secret: string }, to: { agent_id: string }, metadata?: Record<string, unknown>) {
+    const sent = await relay.agentRequest(from.agent_id, from.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: to.agent_id }, message_type: "direct", body: { text: "reply" },
+      conversation_id: `phase-${Math.random()}`, correlation_id: `phase-${Math.random()}`, metadata
+    });
+    expect(sent.status).toBe(200);
+    return sent.body.message_id as string;
+  }
+  async function status(sender: { agent_id: string; secret: string }, id: string) {
+    const res = await relay.agentRequest(sender.agent_id, sender.secret, "GET", `/v1/messages/${id}/status`);
+    expect(res.status).toBe(200);
+    return res.body.deliveries as Array<Record<string, unknown>>;
+  }
+  async function report(agent: { agent_id: string; secret: string }, phases: unknown[]) {
+    return relay.agentRequest(agent.agent_id, agent.secret, "POST", "/v1/delivery-phases", { phases });
+  }
+
+  it("authenticates, validates, and scopes reports to the recipient", async () => {
+    const a = await relay.enrollAgent("phase-a");
+    const b = await relay.enrollAgent("phase-b");
+    const sent = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", { recipient: { kind: "agent", id: b.agent_id }, message_type: "direct", body: { text: "hello" }, conversation_id: "phase-auth", correlation_id: "phase-auth" });
+    const phase = { message_id: sent.body.message_id, phase: "floor_wait", at: new Date().toISOString(), holder_agent_id: a.agent_id };
+    const foreign = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/delivery-phases", { phases: [phase] });
+    expect(foreign.status).toBe(200);
+    expect(foreign.body.recorded).toBe(0);
+    expect((await relay.app.inject({ method: "POST", url: "/v1/delivery-phases", payload: { phases: [phase] } })).statusCode).toBe(401);
+    expect((await relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/delivery-phases", { phases: [{ ...phase, detail: "secret" }] })).status).toBe(400);
+    expect((await relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/delivery-phases", { phases: [{ ...phase, phase: "arbitrary" }] })).status).toBe(400);
+    expect((await relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/delivery-phases", { phases: [phase] })).body.recorded).toBe(1);
+    const status = await relay.agentRequest(a.agent_id, a.secret, "GET", `/v1/messages/${sent.body.message_id}/status`);
+    expect(status.body.deliveries[0]).not.toHaveProperty("floor_holder_agent_id");
+    expect(JSON.stringify(status.body)).not.toContain("floor_holder_agent_id");
+    expect((relay.db.raw().prepare("SELECT floor_holder_agent_id FROM message_deliveries WHERE message_id = ? AND recipient_agent_id = ?")
+      .get(sent.body.message_id, b.agent_id) as { floor_holder_agent_id: string | null }).floor_holder_agent_id).toBe(a.agent_id);
+  });
+
+  it("reconciles late reports and replies across attempts without losing the earliest output", async () => {
+    const a = await relay.enrollAgent("phase-r-a");
+    const b = await relay.enrollAgent("phase-r-b");
+    const send = async (from: typeof a, to: typeof b, turn?: string) => relay.agentRequest(from.agent_id, from.secret, "POST", "/v1/messages", { recipient: { kind: "agent", id: to.agent_id }, message_type: "direct", body: { text: "x" }, metadata: turn ? { turn_id: turn } : undefined, conversation_id: "phase-r", correlation_id: `phase-${Math.random()}` });
+    const original = await send(a, b);
+    const id = original.body.message_id;
+    const at = new Date().toISOString();
+    const report = async (phases: unknown[]) => relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/delivery-phases", { phases });
+    await send(b, a, "turn.2"); // reply arrives before the matching report
+    expect((await report([{ message_id: id, phase: "turn_started", at, turn_id: "turn.2", attempt: 2 }])).body.recorded).toBe(1);
+    await report([{ message_id: id, phase: "turn_started", at, turn_id: "turn.1", attempt: 1 }, { message_id: id, phase: "turn_ended", at, turn_id: "turn.1", attempt: 1, outcome: "spawn_failed", category: "spawn_error_retained" }]);
+    let d = (await relay.agentRequest(a.agent_id, a.secret, "GET", `/v1/messages/${id}/status`)).body.deliveries[0];
+    expect(d.latest_attempt).toBe(2);
+    expect(d.latest_turn_outcome).toBeNull();
+    expect(d.first_reply_turn_id).toBe("turn.2");
+    await report([{ message_id: id, phase: "turn_ended", at, turn_id: "turn.2", attempt: 2, outcome: "completed" }]);
+    d = (await relay.agentRequest(a.agent_id, a.secret, "GET", `/v1/messages/${id}/status`)).body.deliveries[0];
+    expect(d.latest_turn_outcome).toBe("completed");
+    expect(d.first_reply_turn_id).toBe("turn.2");
+    expect(d.turn_attempts).toBe(2);
+    await send(b, a, "turn.1"); // older attempt replies later in wall time
+    expect((await relay.agentRequest(a.agent_id, a.secret, "GET", `/v1/messages/${id}/status`)).body.deliveries[0].first_reply_turn_id).toBe("turn.2");
+  });
+
+  it("joins report-before-reply and keeps the earliest reply after duplicates", async () => {
+    const a = await relay.enrollAgent("phase-order-a");
+    const b = await relay.enrollAgent("phase-order-b");
+    const id = await direct(a, b);
+    const phase = { message_id: id, phase: "turn_started", at: at(), turn_id: "order.1", attempt: 1 };
+    expect((await report(b, [phase, phase])).body).toEqual({ recorded: 2, refused: 0 });
+    expect((await status(a, id))[0].turn_attempts).toBe(1);
+    expect((await status(a, id))[0].first_reply_at).toBeNull();
+    await direct(b, a, { turn_id: "order.1" });
+    const first = (await status(a, id))[0];
+    expect(first.first_reply_turn_id).toBe("order.1");
+    expect(first.first_reply_at).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 5));
+    await direct(b, a, { turn_id: "order.1" });
+    expect((await status(a, id))[0].first_reply_at).toBe(first.first_reply_at);
+    expect((await report(b, [phase])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((await status(a, id))[0].turn_attempts).toBe(1);
+  });
+
+  it("isolates broadcast delivery rows and rejects foreign or malformed floor holders", async () => {
+    const a = await relay.enrollAgent("phase-cast-a");
+    const b = await relay.enrollAgent("phase-cast-b");
+    const c = await relay.enrollAgent("phase-cast-c");
+    const cast = await relay.operatorRequest("POST", "/v1/operator/messages", { recipient_agent_id: "broadcast", text: "ping" });
+    const id = cast.body.message_id as string;
+    const phase = { message_id: id, phase: "floor_wait", at: at(), holder_agent_id: a.agent_id };
+    expect((await report(b, [phase])).body).toEqual({ recorded: 1, refused: 0 });
+    const rows = relay.db.raw().prepare("SELECT recipient_agent_id, floor_holder_agent_id FROM message_deliveries WHERE message_id = ?").all(id) as
+      Array<{ recipient_agent_id: string; floor_holder_agent_id: string | null }>;
+    expect(rows.find((r) => r.recipient_agent_id === b.agent_id)?.floor_holder_agent_id).toBe(a.agent_id);
+    expect(rows.find((r) => r.recipient_agent_id === c.agent_id)?.floor_holder_agent_id).toBeNull();
+    expect((await report(c, [{ ...phase, holder_agent_id: "agt_nonexistent" }])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((relay.db.raw().prepare("SELECT floor_holder_agent_id FROM message_deliveries WHERE message_id = ? AND recipient_agent_id = ?").get(id, c.agent_id) as { floor_holder_agent_id: string | null }).floor_holder_agent_id).toBeNull();
+    expect((await report(c, [{ ...phase, holder_agent_id: "bad holder" }])).status).toBe(400);
+    const otherFleet = await createTestRelay();
+    try {
+      const foreign = await otherFleet.enrollAgent("phase-foreign-holder");
+      expect((await report(c, [{ ...phase, holder_agent_id: foreign.agent_id }])).body).toEqual({ recorded: 1, refused: 0 });
+    } finally { otherFleet.cleanup(); }
+    expect((await report(a, [{ ...phase, holder_agent_id: a.agent_id }])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((await report(b, [{ ...phase, message_id: "msg_foreign" }])).body).toEqual({ recorded: 0, refused: 1 });
+  });
+
+  it("clamps untrusted phase time and locks terminal dead letters", async () => {
+    const a = await relay.enrollAgent("phase-terminal-a");
+    const b = await relay.enrollAgent("phase-terminal-b");
+    const id = await direct(a, b);
+    const before = Date.now();
+    const old = new Date(before - 2 * 86400000).toISOString();
+    const future = new Date(before + 2 * 86400000).toISOString();
+    const phases = [
+      { message_id: id, phase: "floor_wait", at: old, holder_agent_id: a.agent_id },
+      { message_id: id, phase: "dead_lettered", at: future, reason: "deferred_evicted_cap" }
+    ];
+    expect((await report(b, phases)).body).toEqual({ recorded: 2, refused: 0 });
+    const d = (await status(a, id))[0];
+    for (const key of ["floor_wait_started_at", "adapter_dead_lettered_at"]) {
+      expect(Date.parse(d[key] as string)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(d[key] as string)).toBeLessThanOrEqual(Date.now());
+    }
+    expect(d.adapter_dead_letter_reason).toBe("deferred_evicted_cap");
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "too.late", attempt: 1 }])).body)
+      .toEqual({ recorded: 0, refused: 1 });
+    expect((await status(a, id))[0].turn_attempts).toBe(0);
+  });
+
+  it("retains a terminal spawn error and refuses a new turn", async () => {
+    const a = await relay.enrollAgent("phase-spawn-a");
+    const b = await relay.enrollAgent("phase-spawn-b");
+    const id = await direct(a, b);
+    const ended = { message_id: id, phase: "turn_ended", at: at(), turn_id: "spawn.1", attempt: 1,
+      outcome: "spawn_failed", category: "spawn_error" };
+    expect((await report(b, [ended])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((await report(b, [ended])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((await report(b, [{ ...ended, phase: "turn_started", turn_id: "spawn.2", attempt: 2,
+      outcome: undefined, category: undefined }])).body).toEqual({ recorded: 0, refused: 1 });
+    const d = (await status(a, id))[0];
+    expect(d.turn_attempts).toBe(1);
+    expect(d.latest_turn_outcome).toBe("spawn_failed");
+  });
+
+  it("accepts delayed older attempt history and reply after a newer terminal attempt", async () => {
+    const a = await relay.enrollAgent("phase-late-a");
+    const b = await relay.enrollAgent("phase-late-b");
+    const id = await direct(a, b);
+    const terminal = { message_id: id, phase: "turn_ended", at: at(), turn_id: "late.2", attempt: 2,
+      outcome: "spawn_failed", category: "spawn_error" };
+    expect((await report(b, [terminal])).body).toEqual({ recorded: 1, refused: 0 });
+    await direct(b, a, { turn_id: "late.1" });
+    const older = { message_id: id, phase: "turn_started", at: at(), turn_id: "late.1", attempt: 1 };
+    expect((await report(b, [older, { ...older, phase: "turn_ended", outcome: "completed" }])).body)
+      .toEqual({ recorded: 2, refused: 0 });
+    const d = (await status(a, id))[0];
+    expect(d.turn_attempts).toBe(2);
+    expect(d.latest_attempt).toBe(2);
+    expect(d.latest_turn_outcome).toBe("spawn_failed");
+    expect(d.first_reply_turn_id).toBe("late.1");
+    expect((await report(b, [{ ...older, attempt: 3, turn_id: "late.3" }])).body)
+      .toEqual({ recorded: 0, refused: 1 });
+    expect((await report(b, [{ ...older, attempt: 9, turn_id: "late.9" }])).body)
+      .toEqual({ recorded: 0, refused: 1 });
+    expect((await status(a, id))[0]).toMatchObject({ turn_attempts: 2, attempts_capped: true });
+  });
+
+  it("caps retained attempts and ignores invalid reply metadata", async () => {
+    const a = await relay.enrollAgent("phase-cap-a");
+    const b = await relay.enrollAgent("phase-cap-b");
+    const id = await direct(a, b);
+    for (const invalid of [{ turn_id: 3 }, { turn_id: "bad turn" }, { turn_id: "x".repeat(65) }]) await direct(b, a, invalid);
+    const phases = Array.from({ length: 8 }, (_, i) => ({ message_id: id, phase: "turn_started", at: at(), turn_id: `cap.${i + 1}`, attempt: i + 1 }));
+    expect((await report(b, phases)).body).toEqual({ recorded: 8, refused: 0 });
+    let d = (await status(a, id))[0];
+    expect(d.turn_attempts).toBe(8);
+    expect(d.attempts_capped).toBe(false); // eight recorded attempts are not evidence of a ninth refusal
+    expect(d.first_reply_at).toBeNull();
+    expect((await report(b, [{ ...phases[7], turn_id: "cap.collision" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect((await status(a, id))[0].attempts_capped).toBe(false);
+    expect((await report(b, [{ ...phases[7], attempt: 9, turn_id: "cap.9" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect((await report(b, [{ ...phases[7], attempt: 10, turn_id: "cap.10" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect((await report(b, [{ ...phases[7], attempt: 65535, turn_id: "cap.max" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect((await report(b, [{ ...phases[7], attempt: 65536, turn_id: "cap.invalid" }])).status).toBe(400);
+    d = (await status(a, id))[0];
+    expect(d.turn_attempts).toBe(8);
+    expect(d.latest_turn_id).toBe("cap.8");
+    expect(d.attempts_capped).toBe(true);
+    expect((relay.db.raw().prepare("SELECT COUNT(*) AS n FROM delivery_turn_attempts WHERE message_id = ?").get(id) as { n: number }).n).toBe(8);
+  });
+
+  it("flags a new overflow attempt even when fewer than eight attempts were reported", async () => {
+    const a = await relay.enrollAgent("phase-gap-a");
+    const b = await relay.enrollAgent("phase-gap-b");
+    const id = await direct(a, b);
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "gap.9", attempt: 9 }])).body)
+      .toEqual({ recorded: 0, refused: 1 });
+    expect((await status(a, id))[0]).toMatchObject({ turn_attempts: 0, attempts_capped: true });
+  });
+
+  it("deletes attempt history when only its delivery is deleted", async () => {
+    const a = await relay.enrollAgent("phase-cascade-a");
+    const b = await relay.enrollAgent("phase-cascade-b");
+    const id = await direct(a, b);
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "cascade.1", attempt: 1 }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    const raw = relay.db.raw();
+    expect((raw.prepare("SELECT delivery_id FROM delivery_turn_attempts WHERE message_id = ?").get(id) as { delivery_id: string }).delivery_id)
+      .toBe((raw.prepare("SELECT id FROM message_deliveries WHERE message_id = ?").get(id) as { id: string }).id);
+    raw.prepare("DELETE FROM message_deliveries WHERE message_id = ?").run(id);
+    expect(raw.prepare("SELECT id FROM messages WHERE id = ?").get(id)).toBeTruthy();
+    expect(raw.prepare("SELECT 1 FROM delivery_turn_attempts WHERE message_id = ?").get(id)).toBeUndefined();
+  });
+
+  it("joins a first reply to every matching own delivery and skips duplicate reply work", async () => {
+    const a = await relay.enrollAgent("phase-join-a");
+    const b = await relay.enrollAgent("phase-join-b");
+    const firstId = await direct(a, b);
+    const secondId = await direct(a, b);
+    for (const id of [firstId, secondId]) {
+      expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "shared.1", attempt: 1 }])).body)
+        .toEqual({ recorded: 1, refused: 0 });
+    }
+    await direct(b, a, { turn_id: "shared.1" });
+    for (const id of [firstId, secondId]) expect((await status(a, id))[0].first_reply_turn_id).toBe("shared.1");
+    const raw = relay.db.raw();
+    raw.exec(`CREATE TRIGGER fail_duplicate_join BEFORE UPDATE OF first_reply_at ON message_deliveries
+      BEGIN SELECT RAISE(ABORT, 'duplicate join ran'); END`);
+    try {
+      expect(await direct(b, a, { turn_id: "shared.1" })).toBeTruthy();
+    } finally { raw.exec("DROP TRIGGER fail_duplicate_join"); }
+  });
+
+  it("rolls back a sent message when reply observation fails", async () => {
+    const a = await relay.enrollAgent("phase-atomic-a");
+    const b = await relay.enrollAgent("phase-atomic-b");
+    const raw = relay.db.raw();
+    const before = (raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n;
+    raw.exec(`CREATE TRIGGER fail_reply_observation BEFORE INSERT ON agent_turn_replies
+      BEGIN SELECT RAISE(ABORT, 'reply observation failed'); END`);
+    const res = await relay.agentRequest(a.agent_id, a.secret, "POST", "/v1/messages", {
+      recipient: { kind: "agent", id: b.agent_id }, message_type: "direct", body: { text: "atomic" },
+      conversation_id: "phase-atomic", correlation_id: "phase-atomic", metadata: { turn_id: "atomic.1" }
+    });
+    expect(res.status).toBe(500);
+    expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before);
+    raw.exec("DROP TRIGGER fail_reply_observation");
+  });
+
+  it("rolls back the reply message and observation when the delivery join fails", async () => {
+    const a = await relay.enrollAgent("phase-join-atomic-a");
+    const b = await relay.enrollAgent("phase-join-atomic-b");
+    const id = await direct(a, b);
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "join.atomic", attempt: 1 }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    const raw = relay.db.raw();
+    const before = (raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n;
+    raw.exec(`CREATE TRIGGER fail_first_reply_join BEFORE UPDATE OF first_reply_at ON message_deliveries
+      BEGIN SELECT RAISE(ABORT, 'first reply join failed'); END`);
+    try {
+      const res = await relay.agentRequest(b.agent_id, b.secret, "POST", "/v1/messages", {
+        recipient: { kind: "agent", id: a.agent_id }, message_type: "direct", body: { text: "atomic reply" },
+        conversation_id: "phase-join-atomic", correlation_id: "phase-join-atomic", metadata: { turn_id: "join.atomic" }
+      });
+      expect(res.status).toBe(500);
+    } finally { raw.exec("DROP TRIGGER fail_first_reply_join"); }
+    expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before);
+    expect(raw.prepare("SELECT 1 FROM agent_turn_replies WHERE agent_id = ? AND turn_id = ?").get(b.agent_id, "join.atomic")).toBeUndefined();
+    expect((await status(a, id))[0].first_reply_at).toBeNull();
+  });
+});
