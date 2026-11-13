@@ -110,5 +110,5 @@ export async function createTestRelay() {
   }
 
   // fleetName/operatorEmail are exposed so tests can drive the real login route.
-  return { app, db, fleetId, fleetName, operatorId, operatorEmail: `admin-${testId}@test.com`, operatorToken, enrollAgent, agentRequest, operatorRequest, cleanup };
+  return { app, db, fleetId, fleetName, operatorId, operatorEmail: `admin-${testId}@test.com`, operatorToken, enrollAgent, agentRequest, operatorRequest, signedHeaders, cleanup };
 }

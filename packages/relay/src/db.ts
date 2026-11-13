@@ -4337,6 +4337,38 @@ export class EkhoDb {
     } | undefined;
   }
 
+  /** Read a previously delivered row without changing its delivery state. The
+   * recipient join is the authorization boundary, including after ack. */
+  getDeliveredMessage(agentId: string, messageId: string) {
+    const row = this.db.prepare(
+      `SELECT m.*, sender.runtime AS sender_runtime FROM messages m
+       JOIN message_deliveries d ON d.message_id = m.id
+       JOIN agents recipient ON recipient.id = d.recipient_agent_id AND recipient.fleet_id = m.fleet_id
+       JOIN agents sender ON sender.id = m.sender_agent_id
+       WHERE m.id = ? AND d.recipient_agent_id = ? AND d.status IN ('delivered', 'acked')
+         AND (NOT EXISTS (SELECT 1 FROM rooms room WHERE room.id = m.conversation_id AND room.fleet_id = m.fleet_id)
+           OR EXISTS (SELECT 1 FROM room_members member WHERE member.room_id = m.conversation_id AND member.agent_id = d.recipient_agent_id))`
+    ).get(messageId, agentId) as Record<string, unknown> | undefined;
+    if (!row) return undefined;
+    const body = JSON.parse(String(row.body_json)) as Record<string, unknown>;
+    const meta = row.metadata_json ? JSON.parse(String(row.metadata_json)) as Record<string, unknown> : {};
+    const ids = Array.isArray(body.attachments) ? body.attachments.filter((id): id is string => typeof id === "string") : [];
+    const metas = this.getAttachmentsMeta(String(row.fleet_id), ids);
+    const byId = new Map(metas.map((att) => [att.id, att]));
+    const senderKind = row.sender_runtime === "operator" ? "operator" : "agent";
+    return {
+      message_id: row.id, conversation_id: row.conversation_id, correlation_id: row.correlation_id,
+      sender_agent_id: row.sender_agent_id, sender_kind: senderKind,
+      message_type: row.message_type, priority: row.priority, body,
+      attachments: ids.map((id) => byId.get(id)).filter(Boolean),
+      metadata: meta, mentions: Array.isArray(meta.mentions) ? meta.mentions : [],
+      operator_sig: senderKind === "operator" ? (meta.operator_sig ?? null) : null,
+      agent_sig: senderKind === "agent" ? (meta.agent_sig ?? null) : null,
+      key_id: meta.key_id ?? null, sig_canonical: meta.sig_canonical ?? null,
+      created_at: row.created_at, deadline_at: row.expires_at
+    };
+  }
+
   // Metadata for a set of ids, fleet-scoped. Used to surface inbox/conversation
   // attachment metadata. Silently drops ids not in the fleet.
   getAttachmentsMeta(fleetId: string, ids: string[]): Array<{ id: string; filename: string; mime: string; size_bytes: number }> {

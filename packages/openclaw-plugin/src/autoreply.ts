@@ -2150,7 +2150,15 @@ async function triggerTurn(
     try {
       const child = spawn(node, [entry, "agent", "--agent", agentId, "-m", prompt], {
         stdio: "ignore",
-        env: { ...process.env, EKHO_AUTOREPLY_DISABLE: "1" }
+        env: {
+          ...process.env,
+          EKHO_AUTOREPLY_DISABLE: "1",
+          // The child has no copy of the parent inbox ring. These IDs are only
+          // hints: the relay still requires its own delivered recipient row.
+          EKHO_AUTOREPLY_MESSAGE_IDS: JSON.stringify(
+            [...new Set(messages.map((m) => m.message_id).filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 200))].slice(0, LAST_BATCH_CAP)
+          )
+        }
       });
       const timer = setTimeout(() => {
         try { child.kill("SIGTERM"); } catch { /* already gone */ }

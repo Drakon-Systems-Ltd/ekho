@@ -20,7 +20,9 @@ const relay = vi.hoisted(() => ({
   // Overridable inbox; the default is an empty batch.
   inbox: null as null | (() => Promise<unknown>),
   floorFree: (conv: string) => conv !== "held-conv",
-  spawnsAfterStop: 0
+  spawnsAfterStop: 0,
+  recovered: null as null | Record<string, unknown>,
+  scopedDownloads: [] as string[]
 }));
 
 vi.mock("node:child_process", async () => {
@@ -57,6 +59,14 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
       return {};
     }
     async downloadAttachment() { return { bytes: Buffer.from("ok") }; }
+    async getDeliveredMessage(id: string) {
+      if (!relay.recovered || relay.recovered.message_id !== id) throw new Error("not delivered");
+      return { message: relay.recovered };
+    }
+    async downloadDeliveredAttachment(messageId: string, attachmentId: string) {
+      relay.scopedDownloads.push(`${messageId}/${attachmentId}`);
+      return { bytes: Buffer.from("cold attachment") };
+    }
     async acquireFloor(conv: string) {
       if (relay.stopped) relay.afterStop.push("acquire");
       return { granted: relay.floorFree(conv), holder_agent_id: "other" };
@@ -219,6 +229,8 @@ beforeEach(() => {
   relay.afterStop.length = 0;
   relay.inbox = null;
   relay.spawnsAfterStop = 0;
+  relay.recovered = null;
+  relay.scopedDownloads.length = 0;
   // LEGACY_EKHO_DIR is read from HOME at import: keep every copy off the real home.
   vi.stubEnv("HOME", mkScratch("home"));
   vi.stubEnv("EKHO_AUTOREPLY_DISABLE", "");
@@ -629,6 +641,30 @@ describe("plugin reload in one process", () => {
     b.plugin.register(hostB.api);
     await b.conn.ensureConnected(slash as never);
     expect(await hostB.inbox()).toMatchObject({ count: 0, verification_generation: "unavailable" });
+  });
+  it("recovers a cold auto-reply attachment without promoting its trust", async () => {
+    const copy = await loadPluginCopy();
+    const host = fakeApi(false);
+    copy.plugin.register(host.api);
+    await untilConnected(copy.conn);
+    vi.stubEnv("EKHO_AUTOREPLY_DISABLE", "1");
+    vi.stubEnv("EKHO_AUTOREPLY_MESSAGE_IDS", JSON.stringify(["delivered", "foreign"]));
+    relay.recovered = {
+      message_id: "delivered", conversation_id: "c", sender_agent_id: "operator",
+      sender_kind: "operator", message_type: "direct", body: { text: "inspect", attachments: ["att"] },
+      operator_sig: "unverified-signature", key_id: "untrusted-key",
+      attachments: [{ id: "att", filename: "evidence.txt", mime: "text/plain", size_bytes: 15 }]
+    };
+    const result = await host.inbox();
+    expect(result).toMatchObject({ count: 1, degraded: true, degraded_reason: "auto-reply-cache-empty", recovery: "delivered-message", verification_generation: "unavailable", operator_trusted: false });
+    expect(result.messages[0]).toMatchObject({ signature: { status: "unchecked" }, attachments: [{ id: "att", local_path: expect.stringContaining("att__evidence.txt") }] });
+    expect(result.messages[0].trust).toBe("unverified-operator");
+    const downloaded = result.messages[0].attachments[0].local_path as string;
+    expect(existsSync(downloaded)).toBe(true);
+    expect(readFileSync(downloaded, "utf8")).toBe("cold attachment");
+    expect(relay.scopedDownloads).toEqual(["delivered/att"]);
+    vi.stubEnv("EKHO_AUTOREPLY_MESSAGE_IDS", "[]");
+    expect(await host.inbox()).toMatchObject({ count: 0, degraded: true, degraded_reason: "auto-reply-cache-empty", recovery: "unavailable" });
   });
   it("registered inbox shares only the matching trust context and retains rejected material", async () => {
     const a = await loadPluginCopy();
