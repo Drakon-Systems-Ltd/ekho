@@ -523,6 +523,24 @@ describe("#155 phase 1b: bounded relay phase reports", () => {
     expect(raw.prepare("SELECT 1 FROM delivery_turn_attempts WHERE message_id = ?").get(id)).toBeUndefined();
   });
 
+  it("prunes aged reply join cache without deleting recent replies or delivery attempts", async () => {
+    const a = await relay.enrollAgent("phase-retain-a");
+    const b = await relay.enrollAgent("phase-retain-b");
+    const id = await direct(a, b);
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "retain.recent", attempt: 1 }])).status).toBe(200);
+    const raw = relay.db.raw();
+    const aged = new Date(0).toISOString();
+    const recent = at();
+    raw.prepare("INSERT INTO agent_turn_replies (fleet_id, agent_id, turn_id, first_reply_at) VALUES (?, ?, ?, ?)")
+      .run(relay.fleetId, b.agent_id, "retain.aged", aged);
+    raw.prepare("INSERT INTO agent_turn_replies (fleet_id, agent_id, turn_id, first_reply_at) VALUES (?, ?, ?, ?)")
+      .run(relay.fleetId, b.agent_id, "retain.recent", recent);
+    relay.db.sweepHeartbeatRetention();
+    expect(raw.prepare("SELECT 1 FROM agent_turn_replies WHERE turn_id = 'retain.aged'").get()).toBeUndefined();
+    expect(raw.prepare("SELECT first_reply_at FROM agent_turn_replies WHERE turn_id = 'retain.recent'").get()).toEqual({ first_reply_at: recent });
+    expect(raw.prepare("SELECT 1 FROM delivery_turn_attempts WHERE message_id = ?").get(id)).toBeTruthy();
+  });
+
   it("joins a first reply to every matching own delivery and skips duplicate reply work", async () => {
     const a = await relay.enrollAgent("phase-join-a");
     const b = await relay.enrollAgent("phase-join-b");
@@ -542,7 +560,7 @@ describe("#155 phase 1b: bounded relay phase reports", () => {
     } finally { raw.exec("DROP TRIGGER fail_duplicate_join"); }
   });
 
-  it("rolls back a sent message when reply observation fails", async () => {
+  it("delivers a sent message when reply observation fails", async () => {
     const a = await relay.enrollAgent("phase-atomic-a");
     const b = await relay.enrollAgent("phase-atomic-b");
     const raw = relay.db.raw();
@@ -553,12 +571,15 @@ describe("#155 phase 1b: bounded relay phase reports", () => {
       recipient: { kind: "agent", id: b.agent_id }, message_type: "direct", body: { text: "atomic" },
       conversation_id: "phase-atomic", correlation_id: "phase-atomic", metadata: { turn_id: "atomic.1" }
     });
-    expect(res.status).toBe(500);
-    expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before);
+    expect(res.status).toBe(200);
+    expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before + 1);
+    expect(raw.prepare("SELECT id FROM messages WHERE id = ?").get(res.body.message_id)).toBeTruthy();
+    expect(raw.prepare("SELECT id FROM message_deliveries WHERE message_id = ? AND recipient_agent_id = ?").get(res.body.message_id, b.agent_id)).toBeTruthy();
+    expect(raw.prepare("SELECT 1 FROM agent_turn_replies WHERE agent_id = ? AND turn_id = ?").get(a.agent_id, "atomic.1")).toBeUndefined();
     raw.exec("DROP TRIGGER fail_reply_observation");
   });
 
-  it("rolls back the reply message and observation when the delivery join fails", async () => {
+  it("delivers the reply message but rolls back optional observation when the delivery join fails", async () => {
     const a = await relay.enrollAgent("phase-join-atomic-a");
     const b = await relay.enrollAgent("phase-join-atomic-b");
     const id = await direct(a, b);
@@ -573,9 +594,11 @@ describe("#155 phase 1b: bounded relay phase reports", () => {
         recipient: { kind: "agent", id: a.agent_id }, message_type: "direct", body: { text: "atomic reply" },
         conversation_id: "phase-join-atomic", correlation_id: "phase-join-atomic", metadata: { turn_id: "join.atomic" }
       });
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(200);
+      expect(raw.prepare("SELECT id FROM messages WHERE id = ?").get(res.body.message_id)).toBeTruthy();
+      expect(raw.prepare("SELECT id FROM message_deliveries WHERE message_id = ? AND recipient_agent_id = ?").get(res.body.message_id, a.agent_id)).toBeTruthy();
     } finally { raw.exec("DROP TRIGGER fail_first_reply_join"); }
-    expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before);
+    expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before + 1);
     expect(raw.prepare("SELECT 1 FROM agent_turn_replies WHERE agent_id = ? AND turn_id = ?").get(b.agent_id, "join.atomic")).toBeUndefined();
     expect((await status(a, id))[0].first_reply_at).toBeNull();
   });

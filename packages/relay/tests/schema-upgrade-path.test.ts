@@ -270,6 +270,15 @@ describe("migration 026 from an existing 025 database", () => {
         expect(raw.prepare("SELECT acked_at, ack_recorded_at, first_reply_at, turn_attempts FROM message_deliveries WHERE id = 'd026'").get())
           .toEqual({ acked_at: "2026-11-01T00:00:05.000Z", ack_recorded_at: "2026-11-01T00:00:06.000Z", first_reply_at: null, turn_attempts: 0 });
         expect(raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_turn_replies'").get()).toBeTruthy();
+        const fresh = new Database(":memory:");
+        try {
+          fresh.exec(schemaSql);
+          const foreignKeys = (db: Database.Database) =>
+            (db.prepare("PRAGMA foreign_key_list(delivery_turn_attempts)").all() as Array<{ table: string; from: string; to: string; on_delete: string }>)
+              .map(({ table, from: column, to, on_delete }) => ({ table, column, to, on_delete }))
+              .sort((a, b) => a.column.localeCompare(b.column));
+          expect(foreignKeys(fresh)).toEqual(foreignKeys(raw));
+        } finally { fresh.close(); }
         runMigrationsOn(raw, MIGRATIONS_DIR);
         expect(raw.prepare("SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 26").get()).toEqual({ n: 1 });
       } finally { fs.rmSync(before026, { recursive: true, force: true }); }

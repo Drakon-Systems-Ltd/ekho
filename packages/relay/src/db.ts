@@ -1642,7 +1642,15 @@ export class EkhoDb {
       const turnId = input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
         ? (input.metadata as Record<string, unknown>).turn_id : undefined;
       if (typeof turnId === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(turnId)) {
-        this.observeTurnReply(input.fleetId, input.senderAgentId, turnId, createdAt);
+        // Optional telemetry must not roll back a valid message. A nested
+        // better-sqlite3 transaction uses a savepoint here: if either the
+        // observation or its delivery join fails, both are discarded while
+        // the enclosing message transaction can still commit.
+        try {
+          this.db.transaction(() => this.observeTurnReply(input.fleetId, input.senderAgentId, turnId, createdAt))();
+        } catch (err) {
+          console.error("reply observation failed (message delivery unaffected):", err);
+        }
       }
     });
 

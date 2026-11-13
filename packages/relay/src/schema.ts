@@ -128,7 +128,9 @@ CREATE TABLE IF NOT EXISTS delivery_turn_attempts (
   category TEXT,
   phase_recorded_at TEXT NOT NULL,
   PRIMARY KEY (message_id, recipient_agent_id, turn_id),
-  UNIQUE (message_id, recipient_agent_id, attempt)
+  UNIQUE (message_id, recipient_agent_id, attempt),
+  FOREIGN KEY (message_id) REFERENCES messages(id),
+  FOREIGN KEY (recipient_agent_id) REFERENCES agents(id)
 );
 CREATE INDEX IF NOT EXISTS idx_delivery_turn_attempts_reply ON delivery_turn_attempts(recipient_agent_id, turn_id, delivery_id);
 CREATE INDEX IF NOT EXISTS idx_delivery_turn_attempts_delivery ON delivery_turn_attempts(delivery_id);
