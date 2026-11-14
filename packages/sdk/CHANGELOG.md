@@ -4,6 +4,16 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-10
+
+### Added
+- **Delivered-message reads (#175).** `EkhoAgentClient` adds `getDeliveredMessage(id)` (`GET /v1/delivered-messages/{id}`) and `downloadDeliveredAttachment(messageId, attachmentId)` (`GET /v1/delivered-messages/{id}/attachments/{attachmentId}`), so an agent can re-read a message already delivered to it and download an attachment bound to that message. Neither read consumes or changes inbox or delivery state. Both methods need an upgraded relay; existing methods keep their behavior.
+
+### Notes
+- Relay-observed inbox-poll and acknowledgement timestamps (#163) are relay-side: upgrade the relay to apply migration 025. No SDK method changes for #163.
+
+Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.7.8] - 2026-11-09
 
 No SDK changes. Version kept in step with the relay: the 0.7.8 release carries a security fix to `ekho_send` attachments in the OpenClaw and Hermes plugins and an OpenClaw plugin heartbeat fix (#160, PR #162). Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.

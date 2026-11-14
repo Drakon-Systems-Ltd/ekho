@@ -69,12 +69,12 @@ describe("release version lockstep", () => {
         )
       ],
       [
-        "README current release",
-        capture(read("README.md"), /\*\*Current release:\*\* `v([^`]+)`/, "README current release")
+        "README release version",
+        capture(read("README.md"), /\*\*Release version:\*\* `v([^`]+)`/, "README release version")
       ],
       [
         "README project status",
-        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is released/, "README project status")
+        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is the release version\./, "README project status")
       ],
       ...workspace
     ];
@@ -82,6 +82,89 @@ describe("release version lockstep", () => {
     for (const [label, actual] of surfaces) {
       expect(actual, label).toBe(expected);
     }
+  });
+
+  it("keeps final release copy generic and publication-neutral", () => {
+    const changelog = read("CHANGELOG.md").split(/^## \[/m)[2];
+    expect(changelog, "current version changelog section").toBeTruthy();
+    expect(changelog).toMatch(new RegExp(`^${expected.replace(/\./g, "\\.")}\\] - \\d{4}-\\d{2}-\\d{2}\\n`));
+    expect(changelog).toMatch(
+      /\] - \d{4}-\d{2}-\d{2}\n\nRelay, SDK and OpenClaw plugin update: delivery timing fields \(#163\), cold inbox attachment recovery \(#175\), and security fixes\./
+    );
+    expect(changelog).toMatch(/### Security\n- \*\*Security fixes\.\*\*/);
+    expect(changelog).not.toMatch(/canonical operator DMs|A2A send persistence|room and broadcast sends/i);
+
+    // #175 shipped relay, published SDK and published OpenClaw plugin changes:
+    // no copy may claim the release needs no adapter, SDK or plugin changes.
+    expect(changelog).toContain("published Node SDK (`@drakon-systems/ekho-sdk`)");
+    expect(changelog).toContain("published OpenClaw plugin (`@drakon-systems/ekho-openclaw-plugin`)");
+    expect(changelog).toContain("`GET /v1/delivered-messages/{id}`");
+    expect(changelog).toContain("`GET /v1/delivered-messages/{id}/attachments/{attachmentId}`");
+    expect(changelog).toContain("Neither read consumes or changes inbox or delivery state");
+    expect(changelog).toContain("`Cache-Control: private, no-store`");
+    expect(changelog).toContain("`getDeliveredMessage(id)` and `downloadDeliveredAttachment(messageId, attachmentId)`");
+    expect(changelog).toContain('`recovery: "delivered-message"`');
+    expect(changelog).toContain("Recovered messages carry no local signature verdict");
+    expect(changelog).not.toMatch(/no (?:adapter|SDK|plugin) changes/i);
+
+    // Rollback copy is bound to the tested v0.7.8 path, never a blanket promise.
+    expect(changelog).toContain("Running the previous `v0.7.8` relay build on the migrated database was tested");
+    expect(changelog).toContain(
+      "it does not guarantee a full rollback, does not reverse the migration, and does not cover older relay builds"
+    );
+    expect(changelog).not.toMatch(/Rolling back to the previous relay build on the migrated database is safe/i);
+
+    const readme = read("README.md");
+    expect(readme).toContain(`**Release version:** \`v${expected}\``);
+    expect(readme).toContain(`## Project Status\n\nEkho \`v${expected}\` is the release version.`);
+    expect(readme).not.toMatch(/current release candidate|not yet published|is a candidate|is released/i);
+    expect(readme.split("## How it works")[0]).toMatch(/security fixes\./);
+    expect(readme).toContain(
+      `**Release version:** \`v${expected}\` adds relay delivery timing fields (#163), cold inbox attachment recovery (#175), and security fixes.`
+    );
+    expect(readme).toContain("changes the relay, the published Node SDK and the published OpenClaw plugin");
+    expect(readme).not.toMatch(/no (?:adapter|SDK|plugin) changes/i);
+    expect(readme.split("## How it works")[0]).not.toMatch(/canonical operator DM|A2A sends now|Room and broadcast sends/i);
+  });
+
+  it("keeps each published package's current changelog section truthful about #175", () => {
+    // Parse the current version's section of EACH package changelog on its own,
+    // so a "no changes" claim in this section fails even though older sections
+    // legitimately say it.
+    const section = (rel: string): string => {
+      const found = read(rel)
+        .split(/^## \[/m)
+        .find((chunk) => chunk.startsWith(`${expected}] - `));
+      expect(found, `${rel} [${expected}] section`).toBeTruthy();
+      return found!;
+    };
+    const unpublishedLanguage = /not yet published|release candidate|is a candidate|is released|now (?:live|available) on npm/i;
+
+    const sdk = section("packages/sdk/CHANGELOG.md");
+    expect(sdk, "SDK section").not.toMatch(/no SDK changes/i);
+    expect(sdk, "SDK section").not.toMatch(/no SDK update (?:is )?(?:required|needed)/i);
+    expect(sdk, "SDK section").not.toMatch(/SDK update (?:is )?not (?:required|needed)/i);
+    expect(sdk).toContain("#175");
+    expect(sdk).toContain("`getDeliveredMessage(id)`");
+    expect(sdk).toContain("`downloadDeliveredAttachment(messageId, attachmentId)`");
+    expect(sdk).toContain("#163");
+    expect(sdk).toContain("migration 025");
+    expect(sdk).not.toMatch(unpublishedLanguage);
+
+    const plugin = section("packages/openclaw-plugin/CHANGELOG.md");
+    expect(plugin, "plugin section").not.toMatch(/no (?:OpenClaw )?plugin (?:code )?changes/i);
+    expect(plugin, "plugin section").not.toMatch(/no plugin update (?:is )?(?:required|needed)/i);
+    expect(plugin, "plugin section").not.toMatch(/plugin update (?:is )?not (?:required|needed)/i);
+    expect(plugin).toContain("#175");
+    expect(plugin).toContain("`getDeliveredMessage`");
+    expect(plugin).toContain("`downloadDeliveredAttachment`");
+    expect(plugin).toContain("no local signature verdict");
+    expect(plugin).toContain("`degraded: true`");
+    expect(plugin).toContain('`recovery: "delivered-message"`');
+    expect(plugin).toMatch(/needs both an upgraded relay and an updated OpenClaw plugin/);
+    expect(plugin).toContain("#163");
+    expect(plugin).toContain("migration 025");
+    expect(plugin).not.toMatch(unpublishedLanguage);
   });
 
   it("does not mark the npm publish step continue-on-error", () => {
