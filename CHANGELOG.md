@@ -11,6 +11,7 @@ All notable changes to Ekho are documented here.
   - The relay runs a bridge self-test at start-up (handshake + required tools) and logs `shieldcortex bridge self-test passed` or `shieldcortex bridge self-test failed: ...`; the relay still starts either way.
   - Concurrent tool calls share one ShieldCortex process and one handshake; a failed handshake stops that process so the next call starts a fresh one.
   - Relay-only (the bridge is bundled with the relay): no agent or plugin update is needed. Operators running `EKHO_SHIELDCORTEX_PROFILE=strict` should expect messages to be refused while ShieldCortex is unreachable.
+- **Hermes plugin: security fixes in the agent identity store and the auto-reply loop.** `packages/hermes-plugin/ekho_hermes/credentials.py`, `connection.py`, `autoreply.py`, `plugin.py`. Behaviour as now documented in the plugin README under "State files": `identity.json` is written atomically; a file that is present but cannot be read as an identity is kept (with a byte-exact `identity.json.unusable-<timestamp>` copy beside it) rather than replaced; an absent file on an already-enrolled agent is refused unless `EKHO_ALLOW_NEW_IDENTITY=1` is set for a deliberate re-key; and while the identity is unavailable the auto-reply loop withholds every wake, retries the file each poll interval and resumes by itself once it is restored. Regression tests in `tests/test_identity_persistence.py` and `tests/test_identity_unavailable_autoreply.py`.
 
 ## [0.8.0] - 2026-11-10
 

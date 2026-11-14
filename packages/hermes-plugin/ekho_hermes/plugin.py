@@ -249,7 +249,9 @@ def _handle_ekho_send(args: dict, **kw) -> str:
     try:
         config_dir = getattr(conn, "config_dir", None)
         if config_dir and config.fleet_id:
-            ident = load_or_create_identity(config_dir)
+            # Never mint from the send path; a missing or unusable identity
+            # file means this send goes out unsigned (ensure_connected logged why).
+            ident = load_or_create_identity(config_dir, allow_create=False)
             nonce = base64.urlsafe_b64encode(os.urandom(16)).rstrip(b"=").decode("ascii")
             sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             payload.update(
