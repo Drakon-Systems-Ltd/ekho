@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
 import { db, canonicalDmId, MessagePolicyDeniedError } from "./db";
-import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadSchema, deliveryPhasesSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -346,6 +346,13 @@ export async function registerAgentRoutes(app: FastifyInstance) {
 
     const updated = db.ackMessages(request.agent.id, parsed.data.acks);
     return reply.send({ updated });
+  });
+
+  app.post("/v1/delivery-phases", { preHandler: requireAgentAuth }, async (request, reply) => {
+    if (!request.agent) return reply.code(401).send({ error: "unauthorized" });
+    const parsed = deliveryPhasesSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
+    return reply.send(db.recordDeliveryPhases(request.agent.fleetId, request.agent.id, parsed.data.phases));
   });
 
   // Floor control — an agent acquires a conversation's floor before replying so

@@ -440,6 +440,26 @@ components:
             Relay time the ack arrived (relay clock), next to the adapter-clock
             `acked_at`, so transport and ack lag can be measured on one clock.
             Null for acks recorded before the relay tracked it.
+        floor_wait_started_at: { type: [string, "null"], format: date-time }
+        floor_granted_at: { type: [string, "null"], format: date-time }
+        floor_overrun_at: { type: [string, "null"], format: date-time }
+        adapter_dead_lettered_at: { type: [string, "null"], format: date-time }
+        adapter_dead_letter_reason: { type: [string, "null"] }
+        turn_attempts: { type: integer, minimum: 0, maximum: 8 }
+        latest_attempt: { type: [integer, "null"], minimum: 1, maximum: 8 }
+        latest_turn_id: { type: [string, "null"] }
+        latest_turn_started_at: { type: [string, "null"], format: date-time }
+        latest_turn_outcome: { type: [string, "null"], enum: [completed, error, timeout, spawn_failed, null] }
+        latest_turn_category: { type: [string, "null"] }
+        attempts_capped:
+          type: boolean
+          description: True after a new attempt above 8 is refused. Attempts 1 through 8 may be retained; recording attempt 8 alone does not set this flag.
+        first_reply_at:
+          type: [string, "null"]
+          format: date-time
+          description: Relay clock time of the earliest output sent by a covering turn. This does not establish that the output answered the delivery.
+        first_reply_turn_id: { type: [string, "null"] }
+        phase_recorded_at: { type: [string, "null"], format: date-time }
         delivery_attempts:
           type: integer
         retry_count:
@@ -1911,6 +1931,57 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AckResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/delivery-phases:
+    post:
+      operationId: reportDeliveryPhases
+      tags: [Agent]
+      summary: Report bounded delivery and turn phases
+      description: Reports refer only to the authenticated agent's own delivery rows. Unknown or foreign ids are refused without disclosing existence. Timestamps are adapter clock and are clamped to relay time beyond 24 hours. Replies mean turn sent output, not answered. Attempts 1 through 8 may be retained; new overflow attempts 9 through 65535 are refused and set attempts_capped. Values outside 1 through 65535 are invalid.
+      security:
+        - AgentHMAC: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [phases]
+              properties:
+                phases:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [message_id, phase, at]
+                    properties:
+                      message_id: { type: string, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+                      phase: { type: string, enum: [floor_wait, floor_granted, floor_overrun, turn_started, turn_ended, dead_lettered] }
+                      at: { type: string, format: date-time }
+                      turn_id: { type: string, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+                      attempt: { type: integer, minimum: 1, maximum: 65535, description: 'Attempts 1 through 8 may be retained. New attempts above 8 are refused and flag attempts_capped.' }
+                      outcome: { type: string, enum: [completed, error, timeout, spawn_failed] }
+                      category: { type: string, description: 'timeout, spawn_error, spawn_error_retained, exit_signal, or exit_0 through exit_255' }
+                      holder_agent_id: { type: string, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
+                      reason: { type: string, enum: [deferred_evicted_cap, deferred_overflow_per_conv, deferred_expired_spawn_failed, deferred_retry_spawn_failed, deferred_loop_stopped] }
+      responses:
+        "200":
+          description: Report count, including refused foreign or capped entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recorded, refused]
+                properties:
+                  recorded: { type: integer }
+                  refused: { type: integer }
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":

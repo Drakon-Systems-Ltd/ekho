@@ -93,6 +93,11 @@ describe("migration 025 on an existing database, in boot order", () => {
     runMigrationsOn(seed, before025);
     seed.exec("ALTER TABLE agents DROP COLUMN last_inbox_poll_at");
     seed.exec("ALTER TABLE message_deliveries DROP COLUMN ack_recorded_at");
+    seed.exec("DROP TABLE delivery_turn_attempts; DROP TABLE agent_turn_replies");
+    for (const column of ["floor_wait_started_at", "floor_holder_agent_id", "floor_granted_at", "floor_overrun_at",
+      "adapter_dead_lettered_at", "adapter_dead_letter_reason", "turn_attempts", "latest_attempt", "latest_turn_id",
+      "latest_turn_started_at", "latest_turn_outcome", "latest_turn_category", "attempts_capped", "first_reply_at",
+      "first_reply_turn_id", "phase_recorded_at"]) seed.exec(`ALTER TABLE message_deliveries DROP COLUMN ${column}`);
 
     // Rows written before the upgrade: an agent that polled and acked on the
     // previous build, which recorded neither relay-clock time.
@@ -131,11 +136,12 @@ describe("migration 025 on an existing database, in boot order", () => {
     try {
       const seeded = seedPre025Database(dbPath, dir);
       // The seed really is pre-025: both tables exist, neither has its new
-      // column, and 025 is the only migration not yet applied.
+      // column, and migrations 025 and 026 have not yet been applied.
       expect(seeded.agentColumns).toContain("peer_turn_budget");
       expect(seeded.agentColumns).not.toContain("last_inbox_poll_at");
       expect(seeded.deliveryColumns).toContain("acked_at");
       expect(seeded.deliveryColumns).not.toContain("ack_recorded_at");
+      expect(seeded.deliveryColumns).not.toContain("first_reply_at");
       const expectedBefore = ALL_MIGRATIONS.map((f) => parseInt(f.split("_")[0], 10)).filter((v) => v < 25);
       expect(seeded.versions).toEqual(expectedBefore);
       expect(ALL_MIGRATIONS.some((f) => f.startsWith("025_"))).toBe(true);
@@ -150,9 +156,11 @@ describe("migration 025 on an existing database, in boot order", () => {
       expect(raw.name).toBe(dbPath);
 
       // The migration ran, once, and added exactly one of each column.
-      expect(versions(raw)).toEqual([...expectedBefore, 25]);
+      expect(versions(raw)).toEqual([...expectedBefore, 25, 26]);
       expect(columns(raw, "agents").filter((c) => c === "last_inbox_poll_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "ack_recorded_at")).toHaveLength(1);
+      expect(columns(raw, "message_deliveries").filter((c) => c === "first_reply_at")).toHaveLength(1);
+      expect(raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'delivery_turn_attempts'").get()).toBeTruthy();
 
       // Pre-upgrade rows survive untouched: no poll time, and the old ack
       // keeps its adapter time with no relay time (nothing is backfilled).
@@ -203,6 +211,16 @@ describe("migration 025 on an existing database, in boot order", () => {
       expect(delivery.status).toBe("acked");
       within(delivery.ack_recorded_at);
 
+      // The newly added 026 tables and columns are usable through the route,
+      // proving this was a real ALTER path rather than a fresh-schema no-op.
+      const report = await relay.agentRequest(recipient.agent_id, recipient.secret, "POST", "/v1/delivery-phases", {
+        phases: [{ message_id: messageId, phase: "turn_started", at: new Date().toISOString(), turn_id: "upgrade.turn", attempt: 1 }]
+      });
+      expect(report.status).toBe(200);
+      expect(report.body).toEqual({ recorded: 1, refused: 0 });
+      const phaseStatus = await relay.agentRequest(sender.agent_id, sender.secret, "GET", `/v1/messages/${messageId}/status`);
+      expect(phaseStatus.body.deliveries[0].latest_turn_id).toBe("upgrade.turn");
+
       // The new writes landed only on the rows that polled and acked.
       const untouched = raw.prepare("SELECT ack_recorded_at FROM message_deliveries WHERE id = 'dlv_old'").get() as { ack_recorded_at: string | null };
       expect(untouched.ack_recorded_at).toBeNull();
@@ -218,5 +236,52 @@ describe("migration 025 on an existing database, in boot order", () => {
         fs.rmSync(dir, { recursive: true, force: true });
       }
     }
+  });
+});
+
+describe("migration 026 from an existing 025 database", () => {
+  it("adds the phase columns and join tables without altering pre-upgrade delivery data", () => {
+    const raw = new Database(":memory:");
+    try {
+      raw.exec(schemaSql);
+      const before026 = fs.mkdtempSync(path.join(os.tmpdir(), "ekho-before-026-"));
+      try {
+        for (const name of fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql") && Number(f.slice(0, 3)) < 26))
+          fs.copyFileSync(path.join(MIGRATIONS_DIR, name), path.join(before026, name));
+        runMigrationsOn(raw, before026);
+        raw.exec("DROP TABLE delivery_turn_attempts; DROP TABLE agent_turn_replies");
+        for (const column of ["floor_wait_started_at", "floor_holder_agent_id", "floor_granted_at", "floor_overrun_at",
+          "adapter_dead_lettered_at", "adapter_dead_letter_reason", "turn_attempts", "latest_attempt", "latest_turn_id",
+          "latest_turn_started_at", "latest_turn_outcome", "latest_turn_category", "attempts_capped", "first_reply_at",
+          "first_reply_turn_id", "phase_recorded_at"]) raw.exec(`ALTER TABLE message_deliveries DROP COLUMN ${column}`);
+        raw.exec(`INSERT INTO fleets (id, name, created_at) VALUES ('f026', 'old', '2026-11-01T00:00:00.000Z');
+          INSERT INTO agents (id, fleet_id, display_name, runtime, status, policy_profile, created_at)
+            VALUES ('a026', 'f026', 'old', 'custom', 'active', 'default', '2026-11-01T00:00:00.000Z');
+          INSERT INTO messages (id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+            message_type, priority, body_json, ttl_seconds, created_at, expires_at, status)
+            VALUES ('m026', 'f026', 'old-conv', 'old-cor', 'a026', 'agent', 'a026', 'direct', 'normal', '{"text":"old"}',
+              3600, '2026-11-01T00:00:00.000Z', '2026-11-01T01:00:00.000Z', 'acked');
+          INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, acked_at, ack_recorded_at, status)
+            VALUES ('d026', 'm026', 'a026', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:05.000Z', '2026-11-01T00:00:06.000Z', 'acked')`);
+        expect(raw.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get()).toEqual({ version: 25 });
+        expect((raw.prepare("PRAGMA table_info(message_deliveries)").all() as Array<{ name: string }>).some((c) => c.name === "first_reply_at")).toBe(false);
+        runMigrationsOn(raw, MIGRATIONS_DIR);
+        expect(raw.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get()).toEqual({ version: 26 });
+        expect(raw.prepare("SELECT acked_at, ack_recorded_at, first_reply_at, turn_attempts FROM message_deliveries WHERE id = 'd026'").get())
+          .toEqual({ acked_at: "2026-11-01T00:00:05.000Z", ack_recorded_at: "2026-11-01T00:00:06.000Z", first_reply_at: null, turn_attempts: 0 });
+        expect(raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_turn_replies'").get()).toBeTruthy();
+        const fresh = new Database(":memory:");
+        try {
+          fresh.exec(schemaSql);
+          const foreignKeys = (db: Database.Database) =>
+            (db.prepare("PRAGMA foreign_key_list(delivery_turn_attempts)").all() as Array<{ table: string; from: string; to: string; on_delete: string }>)
+              .map(({ table, from: column, to, on_delete }) => ({ table, column, to, on_delete }))
+              .sort((a, b) => a.column.localeCompare(b.column));
+          expect(foreignKeys(fresh)).toEqual(foreignKeys(raw));
+        } finally { fresh.close(); }
+        runMigrationsOn(raw, MIGRATIONS_DIR);
+        expect(raw.prepare("SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 26").get()).toEqual({ n: 1 });
+      } finally { fs.rmSync(before026, { recursive: true, force: true }); }
+    } finally { raw.close(); }
   });
 });
