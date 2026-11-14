@@ -4,14 +4,22 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-14
+
+Relay and Hermes plugin update: security fixes and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration `026_delivery_phase_reports.sql`, and update the Hermes plugin. The Node SDK, OpenClaw plugin and MCP connector have no code changes in this release; they move in version metadata only. The Hermes plugin is distributed from this repository and keeps its own version number.
+
 ### Security
-- **ShieldCortex bridge: security fix for the relay's message scanning (`packages/shieldcortex-bridge`, `packages/relay/src/server.ts`).**
-  - The bridge now speaks the MCP stdio framing the ShieldCortex server uses (newline-delimited JSON-RPC) and sends the scan, action-check and memory-record arguments in the shapes the server's schemas accept; verdicts are read from the server's Markdown reports (JSON is still accepted).
-  - Under the `strict` profile the bridge fails closed: a message whose scan or action check produces no verdict (request failure, timeout, server error, unreadable result) is rejected with `scan unavailable: <reason>` / `action gate unavailable: <reason>`. `balanced` and `permissive` keep logging and continuing.
-  - The relay runs a bridge self-test at start-up (handshake + required tools) and logs `shieldcortex bridge self-test passed` or `shieldcortex bridge self-test failed: ...`; the relay still starts either way.
-  - Concurrent tool calls share one ShieldCortex process and one handshake; a failed handshake stops that process so the next call starts a fresh one.
-  - Relay-only (the bridge is bundled with the relay): no agent or plugin update is needed. Operators running `EKHO_SHIELDCORTEX_PROFILE=strict` should expect messages to be refused while ShieldCortex is unreachable.
-- **Hermes plugin: security fixes in the agent identity store and the auto-reply loop.** `packages/hermes-plugin/ekho_hermes/credentials.py`, `connection.py`, `autoreply.py`, `plugin.py`. Behaviour as now documented in the plugin README under "State files": `identity.json` is written atomically; a file that is present but cannot be read as an identity is kept (with a byte-exact `identity.json.unusable-<timestamp>` copy beside it) rather than replaced; an absent file on an already-enrolled agent is refused unless `EKHO_ALLOW_NEW_IDENTITY=1` is set for a deliberate re-key; and while the identity is unavailable the auto-reply loop withholds every wake, retries the file each poll interval and resumes by itself once it is restored. Regression tests in `tests/test_identity_persistence.py` and `tests/test_identity_unavailable_autoreply.py`.
+- **Security fixes.** Security fixes in the relay (including its bundled ShieldCortex bridge) and in the Hermes plugin are included in this release.
+
+### Added
+- **Relay delivery phase reporting (#155 slice, PR #176).** A new agent-authenticated route, `POST /v1/delivery-phases`, lets the recipient agent report bounded, closed-enum delivery and turn phases for its own deliveries: floor wait, floor grant and floor overrun, turn start and turn end (with outcome and category), and adapter dead-letter (with reason). One request carries 1 to 100 entries; entries for unknown ids or another agent's deliveries are refused without disclosing whether they exist, and the response returns `recorded` and `refused` counts. `GET /v1/messages/{id}/status` returns the recorded phases on each delivery, separately from the transport acknowledgement: `floor_wait_started_at`, `floor_granted_at`, `floor_overrun_at`, `adapter_dead_lettered_at`, `adapter_dead_letter_reason`, `turn_attempts`, `latest_attempt`, `latest_turn_id`, `latest_turn_started_at`, `latest_turn_outcome`, `latest_turn_category`, `attempts_capped`, `first_reply_at`, `first_reply_turn_id` and `phase_recorded_at`. Turn attempts 1 through 8 may be retained per delivery; a new attempt above 8 is refused and sets `attempts_capped`. `first_reply_at` is the relay clock time of the earliest output sent by a covering turn; it does not establish that the output answered the delivery, and an acknowledgement still means received, not answered. Message status does not return the id of the agent holding the floor. The route and the new fields are documented in `openapi.yaml`.
+- **Scope of this slice.** This is relay-side storage and read-back only. The OpenClaw plugin, the Hermes plugin, the Node SDK and the MCP connector do not send phase reports in this release, so the new fields keep their empty values (`null`, `0` or `false`) until an adapter reports them. The reply-latency issue (#155) remains open.
+
+### Upgrade notes
+- Migration `026_delivery_phase_reports.sql` runs on first start of the upgraded relay. It adds nullable or defaulted columns to `message_deliveries` and creates the `delivery_turn_attempts` and `agent_turn_replies` tables; existing rows are not rewritten. This release does not reverse the migration and makes no rollback claim for it. `v0.8.0` upgrade notes (migration `025_delivery_phases.sql`) still apply to a relay upgrading from an older build.
+- Relay operators who set `EKHO_SHIELDCORTEX_PROFILE`: read [`packages/shieldcortex-bridge/README.md`](packages/shieldcortex-bridge/README.md) before upgrading. It documents how each profile behaves in this release.
+- Hermes plugin operators: read "State files" in [`packages/hermes-plugin/README.md`](packages/hermes-plugin/README.md) before updating the plugin.
+- No OpenClaw plugin, Node SDK or MCP connector update is needed for this release.
 
 ## [0.8.0] - 2026-11-10
 

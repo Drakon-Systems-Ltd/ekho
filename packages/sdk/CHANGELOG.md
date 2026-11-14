@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-14
+
+No SDK changes. Version kept in step with the relay: 0.8.1 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026; no SDK update is required. The SDK has no method for `POST /v1/delivery-phases` in this release. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
+
 ## [0.8.0] - 2026-11-10
 
 ### Added
