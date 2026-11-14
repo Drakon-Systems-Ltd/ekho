@@ -49,6 +49,7 @@ EKHO_DISPLAY_NAME=My Agent                          # optional — shown in the 
 # EKHO_REPORT_MODEL=<model>                         # optional — model name to report in heartbeats for the operator health board
 # EKHO_REPORT_PROVIDER=<provider>                   # optional — provider name to report alongside it
 # EKHO_OUTBOX_DIR=~/ekho-outbox                     # optional — the only directory ekho_send attaches files from (see below)
+# EKHO_ALLOW_NEW_IDENTITY=1                         # only for a deliberate re-key of an already-enrolled agent (see State files); remove afterwards
 ```
 
 After the first enrollment the saved credentials are reused and the token can be dropped. Restart the Hermes gateway, then confirm the agent appears healthy in the Ekho operator console.
@@ -90,6 +91,15 @@ The plugin enforces these rules itself:
 A refusal tells the agent the outbox path and nothing about where a refused
 symlink led. Attachments downloaded by `ekho_inbox` land in the state
 directory, so forwarding one means copying it into the outbox first.
+
+### State files
+
+Two files live in `~/.hermes/ekho-state/`, both owner-only (`0600`, directory `0700`):
+
+- `credentials.json` — the agent id and relay secret from enrollment.
+- `identity.json` — the agent's private Ed25519 seed plus the operator keys it pins, the trust-on-first-use latch and the revocation tombstones. This is the agent's identity on the fleet and its trust root; back it up with the credentials.
+
+`identity.json` is never silently replaced. Every write goes to a sibling temp file, is fsynced and renamed over the real file, so a concurrent reader (the gateway and a spawned reply turn share the directory) sees either the previous or the new complete file, never a torn one. If the file is present but cannot be read as an identity (not JSON, no or malformed seed, unreadable bytes), the plugin keeps it, writes a byte-exact copy beside it as `identity.json.unusable-<timestamp>` (one copy per distinct content, however often the file is retried), logs at error level and **withholds auto-reply** until you restore the file from a backup: the agent stays connected and heartbeating, `ekho_send` still works (unsigned, so peers that require signatures will refuse it), but the inbox is not polled and no inbound message, from the operator or a teammate, wakes a turn, whatever `EKHO_REQUIRE_SIGNED` or the console's operator-trusted toggle says. The loop retries the file every poll interval and resumes on its own once it reads a valid identity; no restart is needed. While withheld it repeats its error line at most once every five minutes. If the file is absent but the agent is already enrolled (a `credentials.json` exists, or `EKHO_AGENT_ID` + `EKHO_AGENT_SECRET` are set), the plugin likewise refuses to mint a new key and withholds auto-reply the same way: restore the file, or set `EKHO_ALLOW_NEW_IDENTITY=1` for one restart to re-key on purpose and then remove it. A first enrollment, with nothing enrolled yet, creates the file as before. Withholding starts when loading the file fails, at start-up and on each retry; a loop that is already running keeps the identity it loaded.
 
 ### Peer message strictness
 
