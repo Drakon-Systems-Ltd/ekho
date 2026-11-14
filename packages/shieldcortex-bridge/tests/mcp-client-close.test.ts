@@ -4,24 +4,23 @@ import { dirname, join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { McpClient } from "../src/mcp-client";
 
-// Minimal framed MCP server: answers initialize, answers tools/call unless
-// arguments.hang is true (then it never replies, leaving the request pending).
+// Minimal newline-delimited MCP server (the MCP stdio framing): answers
+// initialize, answers tools/call unless arguments.hang is true (then it never
+// replies, leaving the request pending).
 const FIXTURE = `
 let buf = "";
 function send(obj) {
-  const body = JSON.stringify(obj);
-  process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body);
+  process.stdout.write(JSON.stringify(obj) + "\\n");
 }
 process.stdin.on("data", (chunk) => {
   buf += chunk.toString();
   for (;;) {
-    const end = buf.indexOf("\\r\\n\\r\\n");
+    const end = buf.indexOf("\\n");
     if (end === -1) return;
-    const m = buf.slice(0, end).match(/Content-Length:\\s*(\\d+)/i);
-    const len = m ? parseInt(m[1], 10) : 0;
-    if (buf.length < end + 4 + len) return;
-    const msg = JSON.parse(buf.slice(end + 4, end + 4 + len));
-    buf = buf.slice(end + 4 + len);
+    const line = buf.slice(0, end);
+    buf = buf.slice(end + 1);
+    if (line.trim() === "") continue;
+    const msg = JSON.parse(line);
     if (msg.id === undefined) continue;
     if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: {} });
     else if (msg.method === "tools/call" && !(msg.params.arguments && msg.params.arguments.hang)) {

@@ -49,13 +49,31 @@ async function buildServer() {
   if (config.shieldcortexPath) {
     try {
       const { createShieldCortexExtension } = await import("@ekho/shieldcortex-bridge");
-      registerExtension(createShieldCortexExtension({
+      const bridge = createShieldCortexExtension({
         cortexBinaryPath: config.shieldcortexPath,
         defenceProfile: config.shieldcortexProfile,
         enableMemoryExtraction: true,
         enableIronDome: true
-      }));
+      });
+      registerExtension(bridge);
       app.log.info({ profile: config.shieldcortexProfile }, "shieldcortex bridge loaded");
+      // Liveness self-test at start-up: start ShieldCortex, complete the MCP
+      // handshake and confirm the scan and action-check tools exist, so a
+      // bridge that cannot reach its server is reported here rather than
+      // discovered one message at a time. The outcome is logged, not fatal:
+      // under `strict` the hook rejects every message until the server
+      // answers; under `balanced`/`permissive` it logs and continues.
+      try {
+        const { tools } = await bridge.selfTest();
+        app.log.info({ profile: config.shieldcortexProfile, tools }, "shieldcortex bridge self-test passed");
+      } catch (err) {
+        app.log.error(
+          { err, profile: config.shieldcortexProfile },
+          config.shieldcortexProfile === "strict"
+            ? "shieldcortex bridge self-test failed: strict profile rejects every message until ShieldCortex answers"
+            : "shieldcortex bridge self-test failed: scan and action check are skipped until ShieldCortex answers"
+        );
+      }
     } catch (err) {
       app.log.warn({ err }, "failed to load shieldcortex bridge");
     }

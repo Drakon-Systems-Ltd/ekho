@@ -554,9 +554,10 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(denialSentence).toContain("HTTP 429 `rate limit exceeded`");
   });
 
-  it("bridge README states the failure handling, short-circuit order and reconnect that index.ts and mcp-client.ts implement", () => {
+  it("bridge README states the framing, failure handling, short-circuit order, self-test and reconnect that index.ts, mcp-client.ts and server.ts implement", () => {
     const index = read("packages/shieldcortex-bridge/src/index.ts");
     const client = read("packages/shieldcortex-bridge/src/mcp-client.ts");
+    const server = read("packages/relay/src/server.ts");
     const bridgeReadme = read("packages/shieldcortex-bridge/README.md");
     const hook = block(index, /async onBeforeMessage\(ctx: BeforeMessageContext\): Promise<void> \{\n([\s\S]*?)\n    \}\n  \};/, "onBeforeMessage body");
     const at = (needle: string): number => {
@@ -565,71 +566,127 @@ describe("bridge, connector, security policy, API spec scope and package changel
       return i;
     };
 
-    // A tool result that is not JSON is swallowed by an empty inner catch, so it
-    // never reaches the outer catch that logs the warning; only a failed request does.
-    expect(hook).toContain("try { parsed = JSON.parse(scanText); } catch {}");
-    expect(hook).toContain("try { gateParsed = JSON.parse(gateText); } catch {}");
-    expect(hook).toContain("console.warn(`[shieldcortex-bridge] scan failed: ${err instanceof Error ? err.message : err}`);");
-    expect(hook).toContain("console.warn(`[shieldcortex-bridge] action gate failed: ${err instanceof Error ? err.message : err}`);");
+    // Framing: one JSON object per line on both directions, no Content-Length
+    // header anywhere in the client; the README names the framing and says whose it is.
+    expect(client).toContain('this.process?.stdin?.write(JSON.stringify(message) + "\\n");');
+    expect(client).toContain('const lineEnd = this.buffer.indexOf("\\n");');
+    expect(client).not.toMatch(/Content-Length/);
+    expect(bridgeReadme).toMatch(/newline-delimited JSON-RPC 2\.0, one JSON object per line/);
+    expect(bridgeReadme).toMatch(/`@modelcontextprotocol\/sdk` stdio transport the ShieldCortex server uses/);
+    expect(bridgeReadme).not.toMatch(/Content-Length/);
+
+    // Arguments and verdicts: the hook sends what the server's schemas accept and
+    // reads the server's Markdown reports (JSON still accepted); the README says so.
+    expect(hook).toContain('await mcp.callTool("iron_dome_scan", { text: bodyText });');
+    expect(hook).toContain('const source = { type: "agent", identifier: ctx.senderAgentId };');
+    expect(hook).toContain('tags: ["ekho", "agent-communication", ctx.messageType],');
+    expect(index).toMatch(/export function parseScanVerdict\(text: string \| null\): ScanVerdict \| null/);
+    expect(index).toMatch(/export function parseGateVerdict\(text: string \| null\): GateVerdict \| null/);
+    expect(index).toMatch(/\\\*\\\*Risk Level:\\\*\\\*/);
+    expect(index).toMatch(/\\\*\\\*Action Gate:\\\*\\\*/);
+    expect(index).toMatch(/BLOCKED by gateway/);
+    expect(index).toMatch(/Iron Dome is not active/);
+    expect(bridgeReadme).toContain("(argument `text` = the JSON-encoded body)");
+    expect(bridgeReadme).toContain('source = `{ type: "agent", identifier: <sending agent id> }`');
+    expect(bridgeReadme).toContain("`**Risk Level:** CRITICAL`");
+    expect(bridgeReadme).toContain("`**Action Gate:** blocked — <reason>`");
+    expect(bridgeReadme).toContain("`**Result:** BLOCKED by gateway`");
+    expect(bridgeReadme).toMatch(/a server whose Iron Dome is not active counts as `approved`/);
+    expect(bridgeReadme).toMatch(/and the message type \(as an array\)/);
+    expect(bridgeReadme).not.toMatch(/not valid JSON is silently ignored/);
+    expect(bridgeReadme).not.toMatch(/If the result's `riskLevel`/);
+
+    // Failure handling per profile: every failed step warns; strict then rejects
+    // with its own prefix, the other profiles continue. The README states both.
+    expect(index).toContain('const strict = config.defenceProfile === "strict";');
+    expect(hook).toContain("console.warn(`[shieldcortex-bridge] scan failed: ${scanFailure}`);");
+    expect(hook).toContain("console.warn(`[shieldcortex-bridge] action gate failed: ${gateFailure}`);");
+    expect(hook).toMatch(/if \(scanFailure !== null\) \{\n\s+console\.warn\(`\[shieldcortex-bridge\] scan failed: \$\{scanFailure\}`\);\n\s+if \(strict\) \{\n\s+throw new Error\(`scan unavailable: \$\{scanFailure\}`\);/);
+    expect(hook).toMatch(/if \(gateFailure !== null\) \{\n\s+console\.warn\(`\[shieldcortex-bridge\] action gate failed: \$\{gateFailure\}`\);\n\s+if \(strict\) \{\n\s+throw new Error\(`action gate unavailable: \$\{gateFailure\}`\);/);
+    expect(hook).toContain('scanFailure = scanResult?.isError');
+    expect(hook).toContain('"no verdict in scan result"');
+    expect(hook).toContain('"no decision in action gate result"');
     expect(bridgeReadme).toContain("`[shieldcortex-bridge] scan failed:`");
     expect(bridgeReadme).toContain("`[shieldcortex-bridge] action gate failed:`");
-    expect(bridgeReadme).toMatch(/not valid JSON is silently ignored/);
-    expect(bridgeReadme).not.toMatch(/cannot be parsed, the scan and the action check log a warning/);
+    expect(bridgeReadme).toContain("`scan unavailable: <reason>`");
+    expect(bridgeReadme).toContain("`action gate unavailable: <reason>`");
+    expect(bridgeReadme).toMatch(/`strict` \*\*fails closed\*\*/);
+    expect(bridgeReadme).toMatch(/`balanced` and `permissive` \*\*fail open\*\*/);
+    expect(bridgeReadme).toMatch(/a tool result flagged `isError`, or one whose text holds neither the Markdown report nor a JSON verdict/);
+    expect(bridgeReadme).toMatch(/10 seconds each/);
+    expect(bridgeReadme).not.toMatch(/The bridge fails open on request failures/);
+    expect(bridgeReadme).not.toMatch(/A failure to launch `node` itself also fails open/);
+    expect(bridgeReadme).not.toMatch(/Rejection is decided by the error message/);
+    expect(bridgeReadme).not.toMatch(/Only the scan step behaves differently between them/);
 
-    // A `node` that cannot be spawned fails open too (#135, PR #136): the child's
-    // `error` listener releases it like an exit, rejecting the pending requests
-    // with the spawn error and resetting the client, so the hook's catch blocks
-    // log and continue. The README and the root changelog must say so and must no
-    // longer say the relay exits or stops.
-    const changelog = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
-    expect(client).toMatch(/child\.on\("error", \(error\) => \{\n\s+this\.releaseChild\(child, error\);/);
-    expect(client).toMatch(/child\.on\("exit", \(\) => \{\n\s+this\.releaseChild\(child, new Error\("MCP process exited"\)\);/);
-    expect(bridgeReadme).toContain("A failure to launch `node` itself also fails open.");
-    expect(bridgeReadme).toContain("The client listens for the child process's `error` event (`src/mcp-client.ts`)");
-    expect(bridgeReadme).toMatch(/every pending request is rejected with that error \(for example one with code `ENOENT`\), and the client resets, so the next tool call tries to start a new process/);
-    expect(bridgeReadme).toMatch(/a failed `remember` call is silently ignored/);
-    expect(bridgeReadme).toContain("The relay no longer exits in this case");
-    expect(bridgeReadme).not.toMatch(/registers no `error` listener/);
-    expect(bridgeReadme).not.toMatch(/not handled and does not fail open/);
-    expect(bridgeReadme).not.toMatch(/the relay process exits instead of logging a warning/);
-    expect(changelog).toContain("a failure to launch `node` itself fails open the same way since #135 (PR #136)");
-    expect(changelog).toContain("the relay no longer exits");
-    expect(changelog).not.toMatch(/a failure to launch `node` itself is not handled and stops the relay/);
-    expect(changelog).not.toMatch(/the missing `error` listener on the spawned process/);
-
-    // Rejection is by error-message prefix. The prefixes are read from the two
-    // rethrow lines; the bridge builds errors with them, and mcp-client.ts turns a
-    // JSON-RPC error into an Error carrying the server's message, so the README
-    // must name every prefix and may not say only a parsed decision rejects.
-    const scanPrefix = capture(hook, /if \(err instanceof Error && err\.message\.startsWith\(("[^"]+")\)\) throw err;/, "scan rethrow");
-    const gateRethrow = line(hook, /^\s*if \(err instanceof Error && \(err\.message\.startsWith\("[^"]+"\) \|\| err\.message\.startsWith\("[^"]+"\)\)\) throw err;$/m, "gate rethrow");
-    const gatePrefixes = [...gateRethrow.matchAll(/startsWith\("([^"]+)"\)/g)].map((m) => m[1]);
-    expect(gatePrefixes).toHaveLength(2);
-    expect(hook).toContain(`throw new Error(\`${scanPrefix} `);
-    for (const prefix of gatePrefixes) expect(hook, prefix).toMatch(new RegExp(`throw new Error\\(\`${escapeRe(prefix)}`));
-    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(bridgeReadme, prefix).toContain(`\`${prefix}\``);
+    // Decision prefixes: built by the hook, named in the README.
+    const scanPrefix = "threat detected:";
+    const gatePrefixes = ["Iron Dome blocked:", "Iron Dome requires approval:"];
+    expect(hook).toContain(`throw new Error(\`${scanPrefix} \${verdict.summary ?? "high-risk content"}\`);`);
+    expect(hook).toContain(`throw new Error(\`${gatePrefixes[0]} \${gate.reason ?? "action not allowed"}\`);`);
+    expect(hook).toContain(`throw new Error(\`${gatePrefixes[1]} \${gate.reason ?? "action needs operator review"}\`);`);
+    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(bridgeReadme, prefix).toContain(`\`${prefix} <`);
+    expect(hook).not.toMatch(/startsWith\(/);
     expect(client).toContain("req.reject(new Error(msg.error.message));");
-    expect(bridgeReadme).toMatch(/JSON-RPC error returned by the server/);
-    expect(bridgeReadme).not.toContain("Only an explicit high-risk scan result");
+    expect(bridgeReadme).toMatch(/the server answers with a JSON-RPC error \(surfaced with the server's own message/);
 
-    // Each rethrow sits before the next tool call and nothing wraps the hook, so a
-    // strict scan denial never reaches iron_dome_check and a denial of either kind
-    // never reaches remember. Five try blocks: scan, its parse, gate, its parse, remember.
+    // Short-circuit order: scan, strict scan rejections, gate, strict gate
+    // rejection, remember. Three try blocks: scan, gate, remember. Remember is
+    // fire-and-forget with an empty catch.
     const scanCall = at('callTool("iron_dome_scan"');
-    const strictThrow = at(`if (config.defenceProfile === "strict") {\n            throw new Error(\`${scanPrefix} `);
-    const scanRethrow = at(`startsWith("${scanPrefix}")) throw err;`);
+    const scanUnavailable = at("throw new Error(`scan unavailable: ${scanFailure}`);");
+    const threat = at(`throw new Error(\`${scanPrefix} `);
     const gateCall = at('callTool("iron_dome_check"');
-    const gateRethrowAt = hook.indexOf(gateRethrow);
+    const gateUnavailable = at("throw new Error(`action gate unavailable: ${gateFailure}`);");
     const rememberCall = at('callTool("remember"');
-    expect([scanCall, strictThrow, scanRethrow, gateCall, gateRethrowAt, rememberCall]).toEqual(
-      [scanCall, strictThrow, scanRethrow, gateCall, gateRethrowAt, rememberCall].slice().sort((a, b) => a - b)
-    );
-    expect(hook.match(/\btry \{/g)).toHaveLength(5);
+    const order = [scanCall, scanUnavailable, threat, gateCall, gateUnavailable, rememberCall];
+    expect(order).toEqual(order.slice().sort((a, b) => a - b));
+    expect(hook.match(/\btry \{/g)).toHaveLength(3);
     expect(hook).toMatch(/if \(config\.enableMemoryExtraction\) \{\n\s+void \(async \(\) => \{\n\s+try \{\n\s+await mcp\.callTool\("remember"/);
-    // The relay enables both optional steps, so the README describes them unconditionally.
-    const server = read("packages/relay/src/server.ts");
+    expect(hook).toMatch(/\} catch \{\n\s+\/\/ Fire-and-forget — don't block message delivery\n\s+\}/);
+    expect(bridgeReadme).toMatch(/stops at the first step that rejects it/);
+    expect(bridgeReadme).toMatch(/only if neither of the bridge's own steps above rejected it/);
+    expect(bridgeReadme).toMatch(/A message rejected by the bridge's scan or action check leaves no memory record/);
+    expect(bridgeReadme).toMatch(/A failed `remember` call is silently ignored in every profile/);
+
+    // The relay enables both optional steps, runs the self-test at start-up and
+    // logs the outcome without exiting; the README describes exactly that.
     expect(server).toContain("enableMemoryExtraction: true");
     expect(server).toContain("enableIronDome: true");
+    expect(server).toMatch(/const \{ tools \} = await bridge\.selfTest\(\);\n\s+app\.log\.info\(\{ profile: config\.shieldcortexProfile, tools \}, "shieldcortex bridge self-test passed"\);/);
+    expect(server).toMatch(/app\.log\.error\(\n\s+\{ err, profile: config\.shieldcortexProfile \},\n\s+config\.shieldcortexProfile === "strict"\n\s+\? "shieldcortex bridge self-test failed: strict profile rejects every message until ShieldCortex answers"\n\s+: "shieldcortex bridge self-test failed: scan and action check are skipped until ShieldCortex answers"/);
+    const bridgeLoad = block(server, /(const bridge = createShieldCortexExtension\(\{[\s\S]*?await bridge\.selfTest\(\);[\s\S]*?)\n  registerHealthRoutes\(app\);/, "relay bridge load + self-test block");
+    expect(bridgeLoad).not.toMatch(/process\.exit|throw /);
+    expect(bridgeLoad).toContain('app.log.warn({ err }, "failed to load shieldcortex bridge");');
+    expect(index).toMatch(/async selfTest\(\): Promise<ShieldCortexSelfTestResult> \{\n\s+const tools = await getClient\(\)\.listTools\(\);\n\s+const required = \["iron_dome_scan", \.\.\.\(config\.enableIronDome \? \["iron_dome_check"\] : \[\]\)\];/);
+    expect(client).toMatch(/async listTools\(\): Promise<string\[\]> \{\n\s+if \(!this\.initialized\) await this\.connect\(\);\n\s+const result = \(await this\.sendRequest\("tools\/list", \{\}\)\)/);
+    expect(bridgeReadme).toContain("`shieldcortex bridge self-test passed`");
+    expect(bridgeReadme).toContain("`shieldcortex bridge self-test failed: ...`");
+    expect(bridgeReadme).toMatch(/must include `iron_dome_scan` and `iron_dome_check`/);
+    expect(bridgeReadme).toMatch(/the relay still starts/);
+    expect(bridgeReadme).toMatch(/The self-test does not change that behaviour/);
+
+    // Process lifecycle: one shared handshake, a failed handshake stops the
+    // child, exit/spawn errors release it and the next call reconnects.
+    expect(client).toMatch(/connect\(\): Promise<void> \{\n\s+if \(this\.initialized\) return Promise\.resolve\(\);\n\s+if \(this\.connecting\) return this\.connecting;/);
+    expect(client).toMatch(/\} catch \(error\) \{\n\s+this\.releaseChild\(child, error instanceof Error \? error : new Error\(String\(error\)\)\);\n\s+child\.kill\(\);\n\s+throw error;/);
+    expect(client).toMatch(/child\.on\("error", \(error\) => \{\n\s+this\.releaseChild\(child, error\);/);
+    expect(client).toMatch(/child\.on\("exit", \(\) => \{\n\s+this\.releaseChild\(child, new Error\("MCP process exited"\)\);/);
+    expect(client).toMatch(/private releaseChild\(child: ChildProcess, error: Error\) \{\n\s+if \(this\.process !== child\) return;\n\s+this\.process = null;\n\s+this\.initialized = false;\n[\s\S]*?req\.reject\(error\);/);
+    expect(client).toMatch(/async callTool\([^)]*\): Promise<McpToolResult> \{\n\s+if \(!this\.initialized\) await this\.connect\(\);/);
+    expect(bridgeReadme).toMatch(/Concurrent tool calls share one process and one handshake/);
+    expect(bridgeReadme).toMatch(/A handshake that fails \(no `initialize` reply within the request timeout, a server error, an exit\) stops that process so the next call starts a fresh one/);
+    expect(bridgeReadme).toContain("`MCP process exited`");
+    expect(bridgeReadme).toMatch(/the next tool call starts a new process/);
+    expect(bridgeReadme).toMatch(/can belong to the same message/);
+    expect(bridgeReadme).toMatch(/the `node` executable itself cannot be started/);
+    expect(bridgeReadme).toMatch(/for example an error with code `ENOENT`/);
+    expect(bridgeReadme).toContain("The relay never exits because of a bridge failure");
+    expect(bridgeReadme).not.toMatch(/no health check beyond the per-request timeout/);
+    expect(bridgeReadme).not.toMatch(/on the first message after the relay starts/);
+    expect(bridgeReadme).not.toMatch(/registers no `error` listener/);
+    expect(bridgeReadme).not.toMatch(/not handled and does not fail open/);
+
     // The relay gate refuses by status, rate limit and policy before any extension runs.
     const gateFn = block(read("packages/relay/src/message-gate.ts"), /export async function evaluateMessageGate\([^)]*\): Promise<MessageGateVerdict> \{\n([\s\S]*?)\n\}\n/, "evaluateMessageGate body");
     const gateOrder = ['agent.status === "quarantined"', "db.checkAndIncrementRateLimit(", "db.evaluateMessagePolicies(", "for (const ext of getExtensions())"].map((needle) => {
@@ -639,9 +696,6 @@ describe("bridge, connector, security policy, API spec scope and package changel
     });
     expect(gateOrder).toEqual(gateOrder.slice().sort((a, b) => a - b));
     expect(bridgeReadme).toMatch(/never reaches the bridge/);
-    expect(bridgeReadme).toMatch(/stops at the first step that rejects it/);
-    expect(bridgeReadme).toMatch(/only if neither of the bridge's own steps above rejected it/);
-    expect(bridgeReadme).toMatch(/A message rejected by the bridge's scan or action check leaves no memory record/);
     expect(bridgeReadme).not.toMatch(/A rejected message leaves no memory record/);
     // The no-record claim is bridge-local: the gate runs every extension in
     // registration order and remember is fire-and-forget, so a later extension's
@@ -653,38 +707,27 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(bridgeReadme).not.toMatch(/every message an agent submits/);
     expect(bridgeReadme).not.toMatch(/For each message the hook:/);
 
-    // The exit handler releases the child, which clears the client and rejects
-    // the pending requests, and callTool reconnects, whichever message's tool call
-    // comes next, so the restart is not tied to a message boundary.
-    expect(client).toMatch(/private releaseChild\(child: ChildProcess, error: Error\) \{\n\s+if \(this\.process !== child\) return;\n\s+this\.process = null;\n\s+this\.initialized = false;\n[\s\S]*?req\.reject\(error\);/);
-    expect(client).toMatch(/async callTool\([^)]*\): Promise<McpToolResult> \{\n\s+if \(!this\.initialized\) await this\.connect\(\);/);
-    expect(bridgeReadme).toContain("`MCP process exited`");
-    expect(bridgeReadme).toMatch(/the next tool call starts a new process/);
-    expect(bridgeReadme).toMatch(/can belong to the same message/);
-    expect(bridgeReadme).toMatch(/on the first tool call/);
-    expect(bridgeReadme).not.toMatch(/the next message starts a new process/);
-    expect(bridgeReadme).not.toMatch(/on the first message after the relay starts/);
-
-    // The root CHANGELOG bullet carries the same qualifications.
-    const a3 = line(read("CHANGELOG.md"), /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
+    // The root CHANGELOG's [Unreleased] security bullet states the change, and the
+    // historical 0.7.2 slice-A3 bullet (which described the earlier behaviour) is
+    // untouched: it still carries the qualifications it was reviewed with.
+    const changelog = read("CHANGELOG.md");
+    const unreleased = block(changelog, /## \[Unreleased\]\n([\s\S]*?)\n## \[/, "CHANGELOG [Unreleased] section");
+    const securityBullet = line(unreleased, /^- \*\*ShieldCortex bridge: security fix.*$/m, "root CHANGELOG bridge security bullet");
+    expect(securityBullet).toContain("`packages/shieldcortex-bridge`");
+    expect(unreleased).toMatch(/newline-delimited JSON-RPC/);
+    expect(unreleased).toMatch(/Under the `strict` profile the bridge fails closed/);
+    expect(unreleased).toContain("`scan unavailable: <reason>`");
+    expect(unreleased).toContain("`action gate unavailable: <reason>`");
+    expect(unreleased).toMatch(/`balanced` and `permissive` keep logging and continuing/);
+    expect(unreleased).toContain("`shieldcortex bridge self-test passed`");
+    expect(unreleased).toMatch(/the relay still starts either way/);
+    const a3 = line(changelog, /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
     expect(a3).not.toMatch(/runs on every agent-sent message/);
     expect(a3).toMatch(/stopping at the first step that rejects the message/);
-    expect(a3).not.toMatch(/so a rejected message is never recorded by `remember`\)/);
     expect(a3).toMatch(/a message rejected by an extension registered after the bridge can already have been recorded/);
-    expect(a3).toMatch(/not JSON is silently ignored/);
-    for (const prefix of [scanPrefix, ...gatePrefixes]) expect(a3, prefix).toContain(`\`${prefix}\``);
+    for (const prefix of [scanPrefix, ...gatePrefixes.map((p) => p.replace(/ approval:$/, ""))]) expect(a3, prefix).toContain(`\`${prefix}\``);
     expect(a3).toMatch(/the next tool call, possibly for the same message, starts a new process/);
-    // Failure handling is per step: the scan and action-check catches warn and
-    // continue, the remember catch is empty, and each rethrow honours only its
-    // own step's prefixes, so the bullet must not state one rule for all requests.
-    expect(hook).toMatch(/\} catch \{\n\s+\/\/ Fire-and-forget — don't block message delivery\n\s+\}/);
-    expect(a3).not.toMatch(/a request that fails because the ShieldCortex process exited, or that times out \(10 seconds per request\), is logged and fails open/);
-    expect(a3).toMatch(/a scan or action-check request that fails because the ShieldCortex process exited, or that times out \(10 seconds per request\), is logged as a warning and the hook continues/);
     expect(a3).toMatch(/any failed `remember` request is silently ignored, not logged, and never rejects the message/);
-    expect(a3).toContain(`the scan step rejects the message on an error whose message starts with \`${scanPrefix}\``);
-    expect(a3).toContain(`the action check on one that starts with \`${gatePrefixes[0]}\` or \`${gatePrefixes[1]}\``);
-    expect(a3).toMatch(/an error with the other step's prefix is logged as a warning and the hook continues/);
-    expect(a3).not.toMatch(/an error whose message starts with `[^`]+`, `[^`]+` or `[^`]+` rejects the message/);
   });
 
   it("MCP connector README states the store's queue-full rule, which tools are idempotent, the relay floor and the version placeholder", () => {

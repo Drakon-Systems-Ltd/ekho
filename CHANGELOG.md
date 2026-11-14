@@ -4,6 +4,14 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Security
+- **ShieldCortex bridge: security fix for the relay's message scanning (`packages/shieldcortex-bridge`, `packages/relay/src/server.ts`).**
+  - The bridge now speaks the MCP stdio framing the ShieldCortex server uses (newline-delimited JSON-RPC) and sends the scan, action-check and memory-record arguments in the shapes the server's schemas accept; verdicts are read from the server's Markdown reports (JSON is still accepted).
+  - Under the `strict` profile the bridge fails closed: a message whose scan or action check produces no verdict (request failure, timeout, server error, unreadable result) is rejected with `scan unavailable: <reason>` / `action gate unavailable: <reason>`. `balanced` and `permissive` keep logging and continuing.
+  - The relay runs a bridge self-test at start-up (handshake + required tools) and logs `shieldcortex bridge self-test passed` or `shieldcortex bridge self-test failed: ...`; the relay still starts either way.
+  - Concurrent tool calls share one ShieldCortex process and one handshake; a failed handshake stops that process so the next call starts a fresh one.
+  - Relay-only (the bridge is bundled with the relay): no agent or plugin update is needed. Operators running `EKHO_SHIELDCORTEX_PROFILE=strict` should expect messages to be refused while ShieldCortex is unreachable.
+
 ## [0.8.0] - 2026-11-10
 
 Relay, SDK and OpenClaw plugin update: delivery timing fields (#163), cold inbox attachment recovery (#175), and security fixes. Upgrade the relay to apply migration `025_delivery_phases.sql` and expose the new read-back fields. Cold inbox attachment recovery changes the relay, the published Node SDK (`@drakon-systems/ekho-sdk`) and the published OpenClaw plugin (`@drakon-systems/ekho-openclaw-plugin`); update the OpenClaw plugin to use it. The existing acknowledgement and health meanings remain unchanged; the timing fields do not measure reply or turn latency. The added timing fields are nullable, appear only on records already returned to the same caller, and carry no message content.
