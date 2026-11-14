@@ -92,6 +92,22 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
   delivered_at TEXT,
   acked_at TEXT,
   ack_recorded_at TEXT,
+  floor_wait_started_at TEXT,
+  floor_holder_agent_id TEXT,
+  floor_granted_at TEXT,
+  floor_overrun_at TEXT,
+  adapter_dead_lettered_at TEXT,
+  adapter_dead_letter_reason TEXT,
+  turn_attempts INTEGER NOT NULL DEFAULT 0,
+  latest_attempt INTEGER,
+  latest_turn_id TEXT,
+  latest_turn_started_at TEXT,
+  latest_turn_outcome TEXT,
+  latest_turn_category TEXT,
+  attempts_capped INTEGER NOT NULL DEFAULT 0,
+  first_reply_at TEXT,
+  first_reply_turn_id TEXT,
+  phase_recorded_at TEXT,
   status TEXT NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0,
   next_retry_at TEXT,
@@ -99,6 +115,33 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
   FOREIGN KEY (message_id) REFERENCES messages(id),
   FOREIGN KEY (recipient_agent_id) REFERENCES agents(id)
 );
+
+CREATE TABLE IF NOT EXISTS delivery_turn_attempts (
+  delivery_id TEXT NOT NULL REFERENCES message_deliveries(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL,
+  recipient_agent_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL CHECK (attempt BETWEEN 1 AND 8),
+  started_at TEXT,
+  ended_at TEXT,
+  outcome TEXT,
+  category TEXT,
+  phase_recorded_at TEXT NOT NULL,
+  PRIMARY KEY (message_id, recipient_agent_id, turn_id),
+  UNIQUE (message_id, recipient_agent_id, attempt),
+  FOREIGN KEY (message_id) REFERENCES messages(id),
+  FOREIGN KEY (recipient_agent_id) REFERENCES agents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_turn_attempts_reply ON delivery_turn_attempts(recipient_agent_id, turn_id, delivery_id);
+CREATE INDEX IF NOT EXISTS idx_delivery_turn_attempts_delivery ON delivery_turn_attempts(delivery_id);
+CREATE TABLE IF NOT EXISTS agent_turn_replies (
+  fleet_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  first_reply_at TEXT NOT NULL,
+  PRIMARY KEY (fleet_id, agent_id, turn_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_turn_replies_at ON agent_turn_replies(first_reply_at);
 
 CREATE TABLE IF NOT EXISTS rooms (
   id TEXT PRIMARY KEY,

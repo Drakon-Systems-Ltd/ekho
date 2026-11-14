@@ -7,6 +7,7 @@ import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
 import { deriveAgentHealth, buildAttentionItems } from "./fleet-health";
+import type { DeliveryPhase } from "./types";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -1638,6 +1639,19 @@ export class EkhoDb {
           `UPDATE attachments SET bound_message_id = ?, bound_at = ? WHERE id IN (${placeholders})`
         ).run(messageId, createdAt, ...attachmentIds);
       }
+      const turnId = input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata)
+        ? (input.metadata as Record<string, unknown>).turn_id : undefined;
+      if (typeof turnId === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(turnId)) {
+        // Optional telemetry must not roll back a valid message. A nested
+        // better-sqlite3 transaction uses a savepoint here: if either the
+        // observation or its delivery join fails, both are discarded while
+        // the enclosing message transaction can still commit.
+        try {
+          this.db.transaction(() => this.observeTurnReply(input.fleetId, input.senderAgentId, turnId, createdAt))();
+        } catch (err) {
+          console.error("reply observation failed (message delivery unaffected):", err);
+        }
+      }
     });
 
     try {
@@ -2509,6 +2523,114 @@ export class EkhoDb {
    * only 'queued' | 'acked' | 'dead_lettered' fleet-wide, whereas a delivery
    * carries queued/delivered/acked/dead_lettered with its own timestamps.
    */
+  private applyReplyToDelivery(messageId: string, agentId: string, turnId: string, replyAt: string): void {
+    this.db.prepare(`UPDATE message_deliveries SET first_reply_at = ?, first_reply_turn_id = ?
+      WHERE message_id = ? AND recipient_agent_id = ?
+        AND (first_reply_at IS NULL OR first_reply_at > ?)`)
+      .run(replyAt, turnId, messageId, agentId, replyAt);
+  }
+
+  private observeTurnReply(fleetId: string, agentId: string, turnId: string, at: string): void {
+    const inserted = this.db.prepare(`INSERT OR IGNORE INTO agent_turn_replies
+      (fleet_id, agent_id, turn_id, first_reply_at) VALUES (?, ?, ?, ?)`)
+      .run(fleetId, agentId, turnId, at);
+    if (inserted.changes === 0) return;
+    this.db.prepare(`UPDATE message_deliveries SET first_reply_at = ?, first_reply_turn_id = ?
+      WHERE id IN (SELECT delivery_id FROM delivery_turn_attempts
+        WHERE recipient_agent_id = ? AND turn_id = ?)
+        AND (first_reply_at IS NULL OR first_reply_at > ?)`)
+      .run(at, turnId, agentId, turnId, at);
+  }
+
+  recordDeliveryPhases(fleetId: string, agentId: string, phases: DeliveryPhase[]): { recorded: number; refused: number } {
+    let recorded = 0;
+    let refused = 0;
+    const tx = this.db.transaction(() => {
+      for (const phase of phases) {
+        const delivery = this.db.prepare(`SELECT d.id, d.message_id, d.latest_attempt, d.attempts_capped, d.adapter_dead_lettered_at,
+          d.latest_turn_outcome, d.latest_turn_category
+          FROM message_deliveries d JOIN messages m ON m.id = d.message_id
+          WHERE d.message_id = ? AND d.recipient_agent_id = ? AND m.fleet_id = ?`)
+          .get(phase.message_id, agentId, fleetId) as { id: string; message_id: string; latest_attempt: number | null; attempts_capped: number;
+            adapter_dead_lettered_at: string | null; latest_turn_outcome: string | null; latest_turn_category: string | null } | undefined;
+        if (!delivery) { refused++; continue; }
+        const receivedAt = nowIso();
+        const parsedAt = Date.parse(phase.at);
+        const reportedAt = !Number.isFinite(parsedAt) || Math.abs(parsedAt - Date.parse(receivedAt)) > 86400000
+          ? receivedAt : phase.at;
+        if (phase.phase === "floor_wait") {
+          const holder = this.db.prepare("SELECT id FROM agents WHERE id = ? AND fleet_id = ?").get(phase.holder_agent_id, fleetId) as { id: string } | undefined;
+          const prior = this.db.prepare(`SELECT floor_wait_started_at FROM message_deliveries
+            WHERE message_id = ? AND recipient_agent_id = ?`).get(phase.message_id, agentId) as { floor_wait_started_at: string | null };
+          if (prior.floor_wait_started_at) { recorded++; continue; }
+          this.db.prepare(`UPDATE message_deliveries SET floor_wait_started_at = COALESCE(floor_wait_started_at, ?),
+            floor_holder_agent_id = COALESCE(floor_holder_agent_id, ?), phase_recorded_at = ?
+            WHERE message_id = ? AND recipient_agent_id = ?`).run(reportedAt, holder?.id ?? null, receivedAt, phase.message_id, agentId);
+        } else if (phase.phase === "floor_granted" || phase.phase === "floor_overrun" || phase.phase === "dead_lettered") {
+          const column = phase.phase === "floor_granted" ? "floor_granted_at" : phase.phase === "floor_overrun" ? "floor_overrun_at" : "adapter_dead_lettered_at";
+          const prior = this.db.prepare(`SELECT ${column} AS at FROM message_deliveries
+            WHERE message_id = ? AND recipient_agent_id = ?`).get(phase.message_id, agentId) as { at: string | null };
+          if (prior.at) { recorded++; continue; }
+          this.db.prepare(`UPDATE message_deliveries SET ${column} = COALESCE(${column}, ?),
+            adapter_dead_letter_reason = COALESCE(adapter_dead_letter_reason, ?), phase_recorded_at = ?
+            WHERE message_id = ? AND recipient_agent_id = ?`).run(reportedAt, phase.phase === "dead_lettered" ? phase.reason : null, receivedAt, phase.message_id, agentId);
+        } else {
+          const existing = this.db.prepare(`SELECT attempt, started_at, ended_at FROM delivery_turn_attempts
+            WHERE message_id = ? AND recipient_agent_id = ? AND turn_id = ?`)
+            .get(phase.message_id, agentId, phase.turn_id) as { attempt: number; started_at: string | null; ended_at: string | null } | undefined;
+          if (existing && existing.attempt !== phase.attempt) { refused++; continue; }
+          if (existing && (phase.phase === "turn_started" ? existing.started_at : existing.ended_at)) {
+            recorded++; continue;
+          }
+          if (!existing) {
+            const collision = this.db.prepare(`SELECT 1 FROM delivery_turn_attempts
+              WHERE message_id = ? AND recipient_agent_id = ? AND attempt = ?`).get(phase.message_id, agentId, phase.attempt);
+            if (collision) { refused++; continue; }
+            if (phase.attempt! > 8) {
+              this.db.prepare(`UPDATE message_deliveries SET attempts_capped = 1 WHERE message_id = ? AND recipient_agent_id = ?`).run(phase.message_id, agentId);
+              refused++; continue;
+            }
+            const terminal = delivery.adapter_dead_lettered_at ||
+              (delivery.latest_turn_outcome === "spawn_failed" && delivery.latest_turn_category === "spawn_error");
+            if (terminal && (delivery.latest_attempt === null || phase.attempt! >= delivery.latest_attempt)) { refused++; continue; }
+            const count = this.db.prepare(`SELECT COUNT(*) AS n FROM delivery_turn_attempts
+              WHERE message_id = ? AND recipient_agent_id = ?`).get(phase.message_id, agentId) as { n: number };
+            if (count.n >= 8) {
+              this.db.prepare(`UPDATE message_deliveries SET attempts_capped = 1 WHERE message_id = ? AND recipient_agent_id = ?`).run(phase.message_id, agentId);
+              refused++; continue;
+            }
+            this.db.prepare(`INSERT INTO delivery_turn_attempts
+              (delivery_id, message_id, recipient_agent_id, turn_id, attempt, phase_recorded_at) VALUES (?, ?, ?, ?, ?, ?)`)
+              .run(delivery.id, phase.message_id, agentId, phase.turn_id, phase.attempt, receivedAt);
+          }
+          const isStart = phase.phase === "turn_started";
+          this.db.prepare(`UPDATE delivery_turn_attempts SET
+            started_at = COALESCE(started_at, ?), ended_at = COALESCE(ended_at, ?),
+            outcome = COALESCE(outcome, ?), category = COALESCE(category, ?)
+            WHERE message_id = ? AND recipient_agent_id = ? AND turn_id = ?`)
+            .run(isStart ? reportedAt : null, isStart ? null : reportedAt, phase.outcome ?? null, phase.category ?? null, phase.message_id, agentId, phase.turn_id);
+          const attempt = this.db.prepare(`SELECT * FROM delivery_turn_attempts WHERE message_id = ? AND recipient_agent_id = ? AND turn_id = ?`)
+            .get(phase.message_id, agentId, phase.turn_id) as Record<string, unknown>;
+          if (delivery.latest_attempt === null || phase.attempt! >= delivery.latest_attempt) {
+            this.db.prepare(`UPDATE message_deliveries SET turn_attempts = (SELECT COUNT(*) FROM delivery_turn_attempts WHERE message_id = ? AND recipient_agent_id = ?),
+              latest_attempt = ?, latest_turn_id = ?, latest_turn_started_at = ?, latest_turn_outcome = ?, latest_turn_category = ?, phase_recorded_at = ?
+              WHERE message_id = ? AND recipient_agent_id = ?`)
+              .run(phase.message_id, agentId, phase.attempt, phase.turn_id, attempt.started_at ?? null, attempt.outcome ?? null, attempt.category ?? null, receivedAt, phase.message_id, agentId);
+          } else {
+            this.db.prepare(`UPDATE message_deliveries SET turn_attempts = (SELECT COUNT(*) FROM delivery_turn_attempts WHERE message_id = ? AND recipient_agent_id = ?)
+              WHERE message_id = ? AND recipient_agent_id = ?`).run(phase.message_id, agentId, phase.message_id, agentId);
+          }
+          const reply = this.db.prepare(`SELECT first_reply_at FROM agent_turn_replies WHERE fleet_id = ? AND agent_id = ? AND turn_id = ?`)
+            .get(fleetId, agentId, phase.turn_id) as { first_reply_at: string } | undefined;
+          if (reply) this.applyReplyToDelivery(phase.message_id, agentId, phase.turn_id!, reply.first_reply_at);
+        }
+        recorded++;
+      }
+    });
+    tx();
+    return { recorded, refused };
+  }
+
   getSentMessageStatus(fleetId: string, senderAgentId: string, messageId: string) {
     const m = this.db.prepare(
       `SELECT id, conversation_id, correlation_id, message_type, priority, recipient_kind, recipient_id,
@@ -2520,6 +2642,11 @@ export class EkhoDb {
     const deliveries = this.db.prepare(
       `SELECT d.recipient_agent_id, d.status, d.queued_at, d.delivered_at, d.acked_at, d.ack_recorded_at,
               d.delivery_attempts, d.retry_count, d.last_failure_reason,
+              d.floor_wait_started_at, d.floor_granted_at, d.floor_overrun_at,
+              d.adapter_dead_lettered_at, d.adapter_dead_letter_reason, d.turn_attempts,
+              d.latest_attempt, d.latest_turn_id, d.latest_turn_started_at,
+              d.latest_turn_outcome, d.latest_turn_category, d.attempts_capped,
+              d.first_reply_at, d.first_reply_turn_id, d.phase_recorded_at,
               dl.failure_reason AS dead_letter_reason, dl.dead_lettered_at
        FROM message_deliveries d
        LEFT JOIN dead_letters dl ON dl.original_delivery_id = d.id
@@ -2549,6 +2676,21 @@ export class EkhoDb {
         // #155 Phase 1a: relay clock. acked_at above is the adapter's clock.
         // Both mean "received", never "answered".
         ack_recorded_at: (d.ack_recorded_at as string | null) ?? null,
+        floor_wait_started_at: (d.floor_wait_started_at as string | null) ?? null,
+        floor_granted_at: (d.floor_granted_at as string | null) ?? null,
+        floor_overrun_at: (d.floor_overrun_at as string | null) ?? null,
+        adapter_dead_lettered_at: (d.adapter_dead_lettered_at as string | null) ?? null,
+        adapter_dead_letter_reason: (d.adapter_dead_letter_reason as string | null) ?? null,
+        turn_attempts: Number(d.turn_attempts ?? 0),
+        latest_attempt: (d.latest_attempt as number | null) ?? null,
+        latest_turn_id: (d.latest_turn_id as string | null) ?? null,
+        latest_turn_started_at: (d.latest_turn_started_at as string | null) ?? null,
+        latest_turn_outcome: (d.latest_turn_outcome as string | null) ?? null,
+        latest_turn_category: (d.latest_turn_category as string | null) ?? null,
+        attempts_capped: Boolean(d.attempts_capped),
+        first_reply_at: (d.first_reply_at as string | null) ?? null,
+        first_reply_turn_id: (d.first_reply_turn_id as string | null) ?? null,
+        phase_recorded_at: (d.phase_recorded_at as string | null) ?? null,
         delivery_attempts: Number(d.delivery_attempts ?? 0),
         retry_count: Number(d.retry_count ?? 0),
         last_failure_reason: (d.last_failure_reason as string | null) ?? null,
@@ -4319,6 +4461,13 @@ export class EkhoDb {
       const changes = stmt.run(cutoff, RETENTION_BATCH_SIZE).changes;
       deleted += changes;
       if (changes < RETENTION_BATCH_SIZE) break; // backlog drained
+    }
+    // Turn replies are a bounded join cache, not an audit trail. Keep them for
+    // the same window as heartbeat history, in bounded batches.
+    const pruneReplies = this.db.prepare(`DELETE FROM agent_turn_replies WHERE rowid IN
+      (SELECT rowid FROM agent_turn_replies WHERE first_reply_at < ? LIMIT ?)`);
+    for (let batch = 0; batch < RETENTION_MAX_BATCHES_PER_TICK; batch += 1) {
+      if (pruneReplies.run(cutoff, RETENTION_BATCH_SIZE).changes < RETENTION_BATCH_SIZE) break;
     }
     return deleted;
   }
