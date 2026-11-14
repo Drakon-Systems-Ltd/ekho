@@ -24,9 +24,12 @@ from ekho.identity import key_id as _derive_key_id
 from . import autoreply
 from .config import EkhoConfig
 from .credentials import (
+    IdentityUnavailableError,
     enroll_or_load,
+    load_credentials,
     load_or_create_identity,
     save_identity,
+    should_allow_new_identity,
     take_enroll_operator_keys,
 )
 from .verification import sync_pinned_operator_keys
@@ -207,12 +210,17 @@ def register_and_bootstrap_identity(
     operator_pubkey: Optional[str],
     config_dir: str,
     log: logging.Logger = logger,
+    allow_create: bool = True,
 ) -> Any:
     """Register the agent's identity key with the relay and bootstrap-pin the
     operator key(s) from config (the trusted out-of-band channel for agents that
     predate signing). Best-effort: a relay blip must never break connecting.
-    ``operator_pubkey`` is comma-separated "<b64url>" or "<key_id>:<b64url>"."""
-    identity = load_or_create_identity(config_dir)
+    ``operator_pubkey`` is comma-separated "<b64url>" or "<key_id>:<b64url>".
+
+    Raises :class:`IdentityUnavailableError` rather than minting over a lost or
+    unreadable identity file (see ``credentials.py``); nothing is registered in
+    that case."""
+    identity = load_or_create_identity(config_dir, allow_create=allow_create)
     try:
         client.register_identity_key(identity.public_key_b64url())
     except Exception as exc:  # noqa: BLE001
@@ -278,14 +286,33 @@ def ensure_connected(
 
         if config_dir == DEFAULT_CONFIG_DIR:
             _migrate_legacy_config_dir()
+        # Whether a credentials file existed BEFORE this connect: a token-enrolled
+        # agent carries no agent_id/secret in config, its enrolment lives only
+        # in that file, and it is just as enrolled.
+        has_stored_credentials = load_credentials(config_dir) is not None
         credentials = enroll_or_load(config, config_dir)
         client = EkhoAgentClient(credentials)
         connection = Connection(client=client, credentials=credentials, config_dir=config_dir)
 
+        # An agent that is already enrolled has an identity somewhere; an absent
+        # identity file here is a lost or moved file. Minting a fresh key for it
+        # needs the operator's explicit say-so (EKHO_ALLOW_NEW_IDENTITY=1), never
+        # a silent default. A fresh enrolment may mint.
+        allow_create = should_allow_new_identity(
+            os.environ,
+            has_stored_credentials=has_stored_credentials,
+            has_config_credentials=bool(
+                getattr(config, "agent_id", None) and getattr(config, "agent_secret", None)
+            ),
+        )
+
         # Register our identity key + bootstrap-pin the operator key (best-effort).
         try:
             identity = register_and_bootstrap_identity(
-                client, operator_pubkey=getattr(config, "operator_pubkey", None), config_dir=config_dir
+                client,
+                operator_pubkey=getattr(config, "operator_pubkey", None),
+                config_dir=config_dir,
+                allow_create=allow_create,
             )
             # TOFU (#5): pin the operator keys the relay handed us at enrollment —
             # sent since the beginning, dropped on the floor until now. Only fires
@@ -304,6 +331,10 @@ def ensure_connected(
                     "[ekho] pinned %d operator key(s) from enrollment (TOFU)",
                     len(identity.pinned_operator_keys),
                 )
+        except IdentityUnavailableError as exc:
+            # Loud and unsigned, not quiet and re-keyed. Peers that require
+            # signatures will refuse this box until the operator restores the file.
+            logger.error("[ekho] identity unavailable, running UNSIGNED: %s", exc)
         except Exception as exc:  # noqa: BLE001 — never block connecting
             logger.warning("[ekho] identity bootstrap failed: %s", exc)
 
@@ -361,15 +392,35 @@ def start_autoreply_once(
         # a test Connection without config_dir simply runs without verification.
         identity_obj = None
         on_identity_changed = None
+        identity_unavailable = None
+        reload_identity = None
         config_dir = getattr(conn, "config_dir", None)
         if config_dir:
+            # Never mint from here: ensure_connected is the only place a key
+            # may be created, and it already decided whether that is allowed.
+            reload_identity = lambda _dir=config_dir: load_or_create_identity(  # noqa: E731
+                _dir, allow_create=False
+            )
+            on_identity_changed = (
+                lambda ident, _dir=config_dir: save_identity(_dir, ident)
+            )
             try:
-                identity_obj = load_or_create_identity(config_dir)
-                on_identity_changed = (
-                    lambda ident, _dir=config_dir: save_identity(_dir, ident)
-                )
+                identity_obj = reload_identity()
+            except IdentityUnavailableError as exc:
+                identity_unavailable = str(exc)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[ekho] identity load failed; verification off: %s", exc)
+                identity_unavailable = f"identity load failed: {exc}"
+            if identity_unavailable:
+                # This agent HAS a trust root; it cannot read it. That is not
+                # the never-pinned state the relay-attested fallback serves, so
+                # the loop is handed the explicit state and withholds every
+                # wake until the file is back (it retries each poll). A None
+                # identity would read as "no trust root yet", which it is not.
+                logger.error(
+                    "[ekho] identity unavailable; auto-reply WITHHELD until the "
+                    "identity file is restored (no inbound message wakes a turn): %s",
+                    identity_unavailable,
+                )
 
         starter = start_fn or autoreply.start_autoreply
         _autoreply_stop = starter(
@@ -381,6 +432,8 @@ def start_autoreply_once(
             identity_obj=identity_obj,
             on_identity_changed=on_identity_changed,
             require_signed=require_signed,
+            identity_unavailable=identity_unavailable,
+            reload_identity=reload_identity,
         )
         return _autoreply_stop
 

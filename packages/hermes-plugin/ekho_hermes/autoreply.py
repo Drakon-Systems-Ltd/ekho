@@ -166,6 +166,10 @@ SEEN_CAP = 500  # FIFO-evicted dedupe set
 LAST_BATCH_CAP = 25  # ring exposed to ekho_inbox
 
 DEFAULT_POLL_INTERVAL_S = 5.0
+# How often a WITHHELD loop (established identity unavailable) repeats its
+# error line while it waits for the identity file to be restored. Loud, not
+# silent (#5), but one line per window rather than one per poll.
+IDENTITY_UNAVAILABLE_LOG_INTERVAL_S = 300.0
 
 # The one-shot CLI entry: `python -m hermes_cli.main -z "<prompt>"`.
 ONESHOT_MODULE = "hermes_cli.main"
@@ -1875,13 +1879,28 @@ def process_inbox_once(
     wall_now: Optional[datetime] = None,
     dead_letter_path: Optional[str] = None,
     require_signed: str = "warn",
+    identity_unavailable: bool = False,
 ) -> Dict[str, int]:
     """One poll cycle: read + cache the inbox, ack the whole batch (real or not)
     BEFORE any turn (at-most-once), and on a qualifying message wake the agent.
     The operator always wakes it (trust-gated); teammates wake it when
     ``peer_enabled``, bounded by a per-conversation latch (``peer_turn_budget``).
-    Returns a small summary for observability/tests."""
+    Returns a small summary for observability/tests.
+
+    ``identity_unavailable`` is the explicit state of an ENROLLED agent whose
+    identity file is missing or unusable (``IdentityUnavailableError``). That
+    agent has a trust root; it just cannot read it. It is not the "no pinned
+    key yet" agent the relay-attested ``operator_trusted`` fallback exists for,
+    so the tick must not run on that fallback in its place: without the trust
+    root no signature can be checked, and relay attestation alone is not
+    execution authority for an agent that has one, in any ``require_signed``
+    mode. The tick is withheld whole: nothing is read, acked or spawned, and
+    the messages stay on the relay for the tick that runs after the file is
+    restored."""
     log = log or logger
+    if identity_unavailable:
+        log.debug("[ekho-autoreply] tick withheld: identity unavailable")
+        return {"polled": 0, "real": 0, "kept": 0, "spawned": 0, "acked": 0, "withheld": 1}
     if state.in_flight:
         return {"polled": 0, "real": 0, "kept": 0, "spawned": 0, "acked": 0}
     if now is None:
@@ -2497,6 +2516,8 @@ def start_autoreply(
     identity_obj: Any = None,
     on_identity_changed: Optional[Callable[[Any], None]] = None,
     require_signed: str = "warn",
+    identity_unavailable: Optional[str] = None,
+    reload_identity: Optional[Callable[[], Any]] = None,
 ) -> Callable[[], None]:
     """Start the background poll loop in a daemon thread. Spends zero LLM tokens
     unless a real message arrives. ``peer_enabled`` turns on bounded
@@ -2504,10 +2525,64 @@ def start_autoreply(
     ``identity_obj`` (the agent's EkhoIdentity) enables cryptographic verification;
     ``on_identity_changed`` persists it when the pinned operator keys change.
     ``require_signed`` is the peer wake strictness (#5). Returns a ``stop()``
-    callable."""
+    callable.
+
+    ``identity_unavailable`` (the refusal's reason text) starts the loop
+    WITHHELD: an enrolled agent's identity file is missing or unusable, so no
+    tick runs, nothing is read or acked and no inbound message wakes a turn,
+    whatever the relay attests. Each poll interval the loop calls
+    ``reload_identity`` (the never-mint loader); the first call that returns an
+    identity resumes normal ticks with it. Nothing else resumes it. The
+    withheld state is logged at error level on start and then once per
+    ``IDENTITY_UNAVAILABLE_LOG_INTERVAL_S``."""
     log = log or logger
+    if identity_unavailable and identity_obj is not None:
+        raise ValueError("identity_unavailable given together with an identity_obj")
     state = AutoReplyState()
     stop_event = threading.Event()
+    # Mutable loop state: the identity in use and, while withheld, the reason.
+    ident_holder: Dict[str, Any] = {
+        "identity": identity_obj,
+        "unavailable": identity_unavailable or None,
+        "last_logged": None,
+    }
+
+    def _log_withheld(now: float) -> None:
+        last = ident_holder["last_logged"]
+        if last is not None and now - last < IDENTITY_UNAVAILABLE_LOG_INTERVAL_S:
+            return
+        ident_holder["last_logged"] = now
+        log.error(
+            "[ekho-autoreply] auto-reply WITHHELD: identity unavailable, so no "
+            "inbound message wakes a turn until the identity file is restored "
+            "(retrying every %.0fs): %s",
+            poll_interval_s,
+            ident_holder["unavailable"],
+        )
+
+    def _try_recover() -> None:
+        if reload_identity is None:
+            _log_withheld(time.monotonic())
+            return
+        try:
+            ident = reload_identity()
+        except Exception as exc:  # noqa: BLE001 — stay withheld, say why
+            ident_holder["unavailable"] = str(exc) or ident_holder["unavailable"]
+            _log_withheld(time.monotonic())
+            return
+        if ident is None:
+            _log_withheld(time.monotonic())
+            return
+        ident_holder["identity"] = ident
+        ident_holder["unavailable"] = None
+        log.warning(
+            "[ekho-autoreply] identity available again; auto-reply resumed with "
+            "%d pinned operator key(s)",
+            len(getattr(ident, "pinned_operator_keys", None) or {}),
+        )
+
+    if ident_holder["unavailable"]:
+        _log_withheld(time.monotonic())
     # The live reply-turn child, so stop() can kill it and unblock the loop
     # thread instantly instead of waiting out the turn timeout.
     proc_holder: Dict[str, Any] = {"proc": None}
@@ -2523,6 +2598,8 @@ def start_autoreply(
             stop_event.wait(poll_interval_s)
             if stop_event.is_set():
                 break
+            if ident_holder["unavailable"]:
+                _try_recover()
             try:
                 process_inbox_once(
                     client,
@@ -2532,9 +2609,10 @@ def start_autoreply(
                     log=log,
                     peer_enabled=peer_enabled,
                     peer_turn_budget=peer_turn_budget,
-                    identity_obj=identity_obj,
+                    identity_obj=ident_holder["identity"],
                     on_identity_changed=on_identity_changed,
                     require_signed=require_signed,
+                    identity_unavailable=bool(ident_holder["unavailable"]),
                 )
             except Exception as exc:  # noqa: BLE001 — a relay blip must not kill the loop
                 log.debug("[ekho-autoreply] tick failed: %s", exc)
@@ -2549,8 +2627,9 @@ def start_autoreply(
     except (OSError, UnicodeError):
         _bundle_note = ""
     log.info(
-        "[ekho-autoreply] listening for inbound (poll %.0fs) as %s "
+        "[ekho-autoreply] %s for inbound (poll %.0fs) as %s "
         "(peer_delegation=%s, local_turn_limit=%s)%s",
+        "WITHHELD, not listening" if ident_holder["unavailable"] else "listening",
         poll_interval_s,
         self_agent_id,
         "on" if peer_enabled else "off",
