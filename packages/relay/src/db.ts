@@ -8,6 +8,7 @@ import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
 import { deriveAgentHealth, buildAttentionItems } from "./fleet-health";
 import type { DeliveryPhase } from "./types";
+import { classifyFetchWait, fetchGap, type FetchWait, type TurnInterval } from "./fetch-wait";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -2631,6 +2632,43 @@ export class EkhoDb {
     return { recorded, refused };
   }
 
+  /**
+   * #155 fetch_wait (design §2.3): classify one delivery's fetch gap at read
+   * time. Nothing is stored, so a late turn report reclassifies. The attempt
+   * rows are read only for a gap already longer than the stale threshold, and
+   * only the recipient's own rows (an agent id belongs to exactly one fleet).
+   * The SQL window is a coarse relay-clock prefilter on when each attempt row
+   * was first recorded: a report's adapter time is clamped to within 24 h of
+   * its arrival, so an interval that can overlap the gap was recorded inside
+   * [gap start - 24 h - cap, gap end + 24 h]. The exact overlap is computed
+   * in classifyFetchWait. Approximate by design; see fetch-wait.ts.
+   */
+  private fetchWaitFor(d: Record<string, unknown>): FetchWait | null {
+    const timing = {
+      queuedAt: (d.queued_at as string | null) ?? null,
+      deliveredAt: (d.delivered_at as string | null) ?? null,
+      deliveryAttempts: Number(d.delivery_attempts ?? 0)
+    };
+    const staleMs = config.inboxStaleSeconds * 1000;
+    const capMs = config.turnIntervalCapSeconds * 1000;
+    const gap = fetchGap(timing);
+    let intervals: TurnInterval[] = [];
+    if (gap && gap.end - gap.start > Math.max(0, staleMs)) {
+      const clampMs = 86_400_000;
+      intervals = (this.db.prepare(
+        `SELECT started_at, ended_at FROM delivery_turn_attempts
+         WHERE recipient_agent_id = ? AND started_at IS NOT NULL
+           AND phase_recorded_at >= ? AND phase_recorded_at <= ?`
+      ).all(
+        String(d.recipient_agent_id),
+        new Date(gap.start - clampMs - Math.max(0, capMs)).toISOString(),
+        new Date(gap.end + clampMs).toISOString()
+      ) as Array<{ started_at: string | null; ended_at: string | null }>)
+        .map((row) => ({ startedAt: row.started_at, endedAt: row.ended_at }));
+    }
+    return classifyFetchWait({ ...timing, intervals, staleMs, capMs });
+  }
+
   getSentMessageStatus(fleetId: string, senderAgentId: string, messageId: string) {
     const m = this.db.prepare(
       `SELECT id, conversation_id, correlation_id, message_type, priority, recipient_kind, recipient_id,
@@ -2672,6 +2710,9 @@ export class EkhoDb {
         status: String(d.status),
         queued_at: (d.queued_at as string | null) ?? null,
         delivered_at: (d.delivered_at as string | null) ?? null,
+        // #155: why the fetch took as long as it did, derived on every read
+        // and approximate. null = unknown (not fetched, or fetched twice).
+        fetch_wait: this.fetchWaitFor(d),
         acked_at: (d.acked_at as string | null) ?? null,
         // #155 Phase 1a: relay clock. acked_at above is the adapter's clock.
         // Both mean "received", never "answered".

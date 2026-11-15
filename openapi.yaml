@@ -425,6 +425,24 @@ components:
             delivery can legitimately show `delivered_at: null` with
             `retry_count > 0` — read `delivery_attempts` and `last_failure_reason`
             for the fuller picture.
+        fetch_wait:
+          type: [string, "null"]
+          enum: [prompt, adapter_busy, inbox_stalled, null]
+          description: >
+            Why the recipient took as long as it did to collect this delivery.
+            Derived on every read and never stored, so a turn report that
+            arrives late changes it. `prompt` — collected within
+            `EKHO_INBOX_STALE_SECONDS` of being queued. `adapter_busy` — a
+            longer wait, at least 80 % of which is covered by turns the
+            recipient reported through `POST /v1/delivery-phases` (an adapter
+            does not poll while it runs a turn). `inbox_stalled` — any other
+            longer wait. `null` — unknown: not collected yet, or collected
+            more than once (the wait then includes a retry). Approximate: the
+            wait is relay clock and the reported turns are adapter clock, with
+            no clock-offset correction, and a recipient that reports no turns
+            reads `inbox_stalled` for every long wait, so `adapter_busy` is a
+            lower bound. It says nothing about whether the delivery was
+            answered.
         acked_at:
           type: string
           format: date-time
