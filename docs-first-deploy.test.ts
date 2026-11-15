@@ -707,20 +707,19 @@ describe("bridge, connector, security policy, API spec scope and package changel
     expect(bridgeReadme).not.toMatch(/every message an agent submits/);
     expect(bridgeReadme).not.toMatch(/For each message the hook:/);
 
-    // The root CHANGELOG's [Unreleased] security bullet states the change, and the
-    // historical 0.7.2 slice-A3 bullet (which described the earlier behaviour) is
-    // untouched: it still carries the qualifications it was reviewed with.
+    // Release notes keep security copy generic (one "Security fixes." bullet), so
+    // the bridge README above is the place that states the behaviour. The release
+    // section that carries the fix points operators to it, and the historical
+    // 0.7.2 slice-A3 bullet (which described the earlier behaviour) is untouched:
+    // it still carries the qualifications it was reviewed with.
     const changelog = read("CHANGELOG.md");
-    const unreleased = block(changelog, /## \[Unreleased\]\n([\s\S]*?)\n## \[/, "CHANGELOG [Unreleased] section");
-    const securityBullet = line(unreleased, /^- \*\*ShieldCortex bridge: security fix.*$/m, "root CHANGELOG bridge security bullet");
-    expect(securityBullet).toContain("`packages/shieldcortex-bridge`");
-    expect(unreleased).toMatch(/newline-delimited JSON-RPC/);
-    expect(unreleased).toMatch(/Under the `strict` profile the bridge fails closed/);
-    expect(unreleased).toContain("`scan unavailable: <reason>`");
-    expect(unreleased).toContain("`action gate unavailable: <reason>`");
-    expect(unreleased).toMatch(/`balanced` and `permissive` keep logging and continuing/);
-    expect(unreleased).toContain("`shieldcortex bridge self-test passed`");
-    expect(unreleased).toMatch(/the relay still starts either way/);
+    const bridgeRelease = block(changelog, /\n## \[0\.9\.0\] - \d{4}-\d{2}-\d{2}\n([\s\S]*?)\n## \[/, "CHANGELOG [0.9.0] section");
+    const securityBullet = line(bridgeRelease, /^- \*\*Security fixes\.\*\*.*$/m, "root CHANGELOG 0.9.0 security bullet");
+    expect(securityBullet).toMatch(/bundled ShieldCortex bridge/);
+    expect(bridgeRelease).toContain(
+      "Relay operators who set `EKHO_SHIELDCORTEX_PROFILE`: read [`packages/shieldcortex-bridge/README.md`](packages/shieldcortex-bridge/README.md) before upgrading."
+    );
+    expect(read("packages/shieldcortex-bridge/README.md")).toContain("`EKHO_SHIELDCORTEX_PROFILE`");
     const a3 = line(changelog, /^- \*\*ShieldCortex bridge, MCP connector README.*$/m, "root CHANGELOG slice A3 bullet");
     expect(a3).not.toMatch(/runs on every agent-sent message/);
     expect(a3).toMatch(/stopping at the first step that rejects the message/);
