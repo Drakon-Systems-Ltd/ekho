@@ -77,6 +77,15 @@ export const config = {
   floorTtlMaxSeconds: resolveNumber(process.env.EKHO_FLOOR_TTL_MAX_SECONDS, 600),
   floorTailLimit: resolveNumber(process.env.EKHO_FLOOR_TAIL_LIMIT, 20),
 
+  // #155 fetch_wait (design §2.3). Detection thresholds only: neither changes
+  // polling, delivery, retries or turn-taking. A delivery fetched more than
+  // inboxStaleSeconds after it was queued is classified adapter_busy or
+  // inbox_stalled at read time. turnIntervalCapSeconds is the longest one
+  // reported turn may count for (the adapters' default turn timeout), and how
+  // long a turn with no reported end is assumed to have run.
+  inboxStaleSeconds: resolveNumber(process.env.EKHO_INBOX_STALE_SECONDS, 120),
+  turnIntervalCapSeconds: resolveNumber(process.env.EKHO_TURN_INTERVAL_CAP_SECONDS, 900),
+
   // Quarantine automation
   heartbeatLivenessThreshold: resolveNumber(process.env.EKHO_HEARTBEAT_LIVENESS_THRESHOLD, 3),
   heartbeatTimeoutSeconds: resolveNumber(process.env.EKHO_HEARTBEAT_TIMEOUT_SECONDS, 90),

@@ -110,7 +110,7 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     // still describes unknown work rather than treating the ack as an answer.
     expect(Object.keys(d).sort()).toEqual([
       "ack_recorded_at", "acked_at", "adapter_dead_letter_reason", "adapter_dead_lettered_at", "attempts_capped",
-      "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts", "first_reply_at",
+      "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts", "fetch_wait", "first_reply_at",
       "first_reply_turn_id", "floor_granted_at", "floor_overrun_at", "floor_wait_started_at",
       "last_failure_reason", "latest_attempt", "latest_turn_category", "latest_turn_id", "latest_turn_outcome",
       "latest_turn_started_at", "phase_recorded_at", "queued_at", "recipient_agent_id", "retry_count", "status", "turn_attempts"
@@ -121,6 +121,9 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
       "latest_turn_outcome", "latest_turn_category", "phase_recorded_at", "adapter_dead_lettered_at"]) expect(d[k]).toBeNull();
     expect(d.turn_attempts).toBe(0);
     expect(d.attempts_capped).toBe(false);
+    // fetch_wait (#155) labels how long the FETCH took, nothing more: a
+    // promptly collected, never-answered delivery reads "prompt".
+    expect(d.fetch_wait).toBe("prompt");
   });
 
   it("clamps the floor lease to floorTtlMaxSeconds (the adapters ask for 960 s)", async () => {

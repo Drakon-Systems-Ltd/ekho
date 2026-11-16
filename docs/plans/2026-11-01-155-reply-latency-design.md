@@ -33,6 +33,21 @@ All line references are to the tree at 0a2ebe8.
   the R1–R4 tests. `fetch_wait` (§2.3) also waits for 1b, because without
   retained turn intervals every slow fetch would read `inbox_stalled`, which
   mislabels a busy adapter.
+- **Phase 1b relay storage shipped (PR #176).** Migration
+  `026_delivery_phase_reports.sql`, `POST /v1/delivery-phases`, attempt rows,
+  the reply join and rules R1–R4, with read-back on `/v1/messages/:id/status`.
+- **Query-time `fetch_wait` shipped, reduced scope (§2.3).**
+  `packages/relay/src/fetch-wait.ts`, read back per delivery on
+  `/v1/messages/:id/status`, tests in `packages/relay/tests/fetch-wait.test.ts`
+  and `fetch-wait-classify.test.ts`. Thresholds: `EKHO_INBOX_STALE_SECONDS`
+  (120, the value proposed in open question 4, which stays open) and
+  `EKHO_TURN_INTERVAL_CAP_SECONDS` (900, the adapters' default turn timeout).
+  **Not** in this slice: the per-agent clock offset (it needs the heartbeat
+  `last_poll_at` metric, which no adapter sends), so intervals are compared
+  unadjusted; the §5 measurement queries; the console. A delivery fetched more
+  than once reads `null` (unknown), because its gap includes a retry. No
+  adapter emits turn reports yet, so every long gap reads `inbox_stalled`
+  until one does.
 
 ---
 
