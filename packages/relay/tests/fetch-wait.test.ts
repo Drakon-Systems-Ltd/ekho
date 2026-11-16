@@ -1,6 +1,7 @@
 import "./setup"; // sets a temp EKHO_DB_PATH before db.ts's singleton is created
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
+import { config } from "../src/config";
 
 /**
  * #155 — query-time `fetch_wait` classification (design §2.3).
@@ -211,5 +212,26 @@ describe("#155: query-time fetch_wait classification", () => {
       .map((d) => [d.recipient_agent_id, d.fetch_wait]));
     expect(by[b.agent_id]).toBe("adapter_busy");
     expect(by[c.agent_id]).toBe("inbox_stalled");
+  });
+  it("clamps both thresholds to [0, one day] so an extreme finite setting cannot make the read throw", async () => {
+    const a = await relay.enrollAgent("fw-ovf-a");
+    const b = await relay.enrollAgent("fw-ovf-b");
+    const id = await direct(a, b);
+    setGap(id, b, 1000, 400);
+    const saved = { stale: config.inboxStaleSeconds, cap: config.turnIntervalCapSeconds };
+    try {
+      for (const extreme of [1e15, Number.MAX_VALUE, -1e15]) {
+        config.inboxStaleSeconds = 120;
+        config.turnIntervalCapSeconds = extreme; // 1e15 s * 1000 is outside Date's range
+        // Before the clamp this status read threw RangeError: Invalid time value.
+        expect(await fetchWait(a, id)).toBe("inbox_stalled");
+      }
+      config.inboxStaleSeconds = 1e15;
+      config.turnIntervalCapSeconds = 900;
+      expect(await fetchWait(a, id)).toBe("prompt"); // stale clamps to one day; this 600 s gap is within it
+    } finally {
+      config.inboxStaleSeconds = saved.stale;
+      config.turnIntervalCapSeconds = saved.cap;
+    }
   });
 });

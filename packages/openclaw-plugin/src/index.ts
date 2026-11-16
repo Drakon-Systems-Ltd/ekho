@@ -56,12 +56,19 @@ interface LocalAttachment {
  * id, oversize, network) drops just that attachment and never fails the whole
  * inbox read. Already-present files are not re-downloaded (id-keyed path).
  */
-async function resolveLocalAttachments(
+/** An advertised attachment that could not be fetched (#114). Never carries error text. */
+export interface UnavailableAttachment {
+  id: string;
+  filename: string;
+  reason: "download-failed" | "too-large";
+}
+
+export async function resolveLocalAttachments(
   messages: Array<Record<string, unknown>>,
   client: EkhoAgentClient,
   config?: { stateDir?: string },
   deliveredOnly = false
-): Promise<LocalAttachment[][]> {
+): Promise<{ attachments: LocalAttachment[][]; unavailable: UnavailableAttachment[][] }> {
   const dir = attachmentsDownloadDir(config);
   let dirReady = false;
   const ensureDir = () => {
@@ -71,24 +78,27 @@ async function resolveLocalAttachments(
     }
   };
 
-  return Promise.all(
-    messages.map(async (m) => {
+  const unavailable: UnavailableAttachment[][] = messages.map(() => []);
+  const attachments = await Promise.all(
+    messages.map(async (m, mi) => {
       const metas = Array.isArray(m.attachments) ? (m.attachments as InboxAttachmentMeta[]) : [];
       const out: LocalAttachment[] = [];
       for (const meta of metas) {
         if (!meta || typeof meta.id !== "string") continue;
         // Size guard mirrors the upload cap — never write more than the cap to disk.
         if (typeof meta.size_bytes === "number" && meta.size_bytes > ATTACHMENT_MAX_BYTES) {
+          unavailable[mi].push({ id: meta.id, filename: sanitizeFilename(typeof meta.filename === "string" ? meta.filename : meta.id), reason: "too-large" });
           continue;
         }
         const filename = sanitizeFilename(typeof meta.filename === "string" ? meta.filename : meta.id);
         const localPath = attachmentLocalPath(meta.id, filename, config);
+        const miss = (reason: UnavailableAttachment["reason"]) => unavailable[mi].push({ id: meta.id, filename, reason });
         try {
           if (deliveredOnly || !fs.existsSync(localPath)) {
             const { bytes } = deliveredOnly
               ? await client.downloadDeliveredAttachment(String(m.message_id), meta.id)
               : await client.downloadAttachment(meta.id);
-            if (bytes.length > ATTACHMENT_MAX_BYTES) continue; // defence: trust decoded length too
+            if (bytes.length > ATTACHMENT_MAX_BYTES) { miss("too-large"); continue; } // defence: trust decoded length too
             ensureDir();
             fs.writeFileSync(localPath, bytes, { mode: 0o600 });
           }
@@ -100,12 +110,15 @@ async function resolveLocalAttachments(
             local_path: localPath
           });
         } catch {
-          // One bad attachment must not fail the inbox read — skip it silently.
+          // One bad attachment must not fail the inbox read, but it is reported
+          // (reason only, no error text) instead of vanishing (#114).
+          miss("download-failed");
         }
       }
       return out;
     })
   );
+  return { attachments, unavailable };
 }
 
 const EKHO_SEND_DESCRIPTION =
@@ -412,7 +425,7 @@ const plugin = defineToolPlugin({
         // every poll. Each download is isolated: one bad attachment never fails
         // the whole inbox read. Bytes are written 0o600 under an id-prefixed,
         // sanitized filename (no collisions, no path traversal).
-        const localAttachments = await resolveLocalAttachments(messages, client, config, recovered);
+        const { attachments: localAttachments, unavailable: unavailableAttachments } = await resolveLocalAttachments(messages, client, config, recovered);
 
         return {
           count: messages.length,
@@ -441,6 +454,7 @@ const plugin = defineToolPlugin({
             inboxMessageView(e.message as unknown as Record<string, unknown>, e.verification, {
               operatorTrusted,
               attachments: localAttachments[i],
+              attachmentsUnavailable: unavailableAttachments[i],
               // A project-mode room's own budget (or "no limit") wins for its conversation.
               peerTurnBudget: effectiveConversationBudget(
                 { conversation_budgets: conversationBudgets },

@@ -1,5 +1,6 @@
 import path from "node:path";
 import dotenv from "dotenv";
+import { clampFetchWaitSeconds } from "./fetch-wait";
 
 dotenv.config();
 
@@ -83,8 +84,10 @@ export const config = {
   // inbox_stalled at read time. turnIntervalCapSeconds is the longest one
   // reported turn may count for (the adapters' default turn timeout), and how
   // long a turn with no reported end is assumed to have run.
-  inboxStaleSeconds: resolveNumber(process.env.EKHO_INBOX_STALE_SECONDS, 120),
-  turnIntervalCapSeconds: resolveNumber(process.env.EKHO_TURN_INTERVAL_CAP_SECONDS, 900),
+  // Both are clamped to [0, 86400] seconds so an extreme finite value cannot
+  // push the read-time date window out of range.
+  inboxStaleSeconds: clampFetchWaitSeconds(resolveNumber(process.env.EKHO_INBOX_STALE_SECONDS, 120)),
+  turnIntervalCapSeconds: clampFetchWaitSeconds(resolveNumber(process.env.EKHO_TURN_INTERVAL_CAP_SECONDS, 900)),
 
   // Quarantine automation
   heartbeatLivenessThreshold: resolveNumber(process.env.EKHO_HEARTBEAT_LIVENESS_THRESHOLD, 3),

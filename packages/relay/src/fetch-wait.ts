@@ -16,9 +16,26 @@
  *    clamped to within 24 h of relay time when it was recorded). No per-agent
  *    clock offset is applied yet; that needs the adapter's `last_poll_at`
  *    heartbeat metric, which no adapter sends today.
- *  - a dropped or never-sent report makes busy time read as `inbox_stalled`,
- *    so `adapter_busy` is a lower bound.
+ *  - a dropped or never-sent report makes busy time read as `inbox_stalled`.
+ *  - a turn with no reported end is assumed to run for the full cap, so a turn
+ *    that really ended earlier but never reported it can read `adapter_busy`
+ *    for time the recipient was idle. Both errors are possible: `adapter_busy`
+ *    is neither a lower nor an upper bound, and a reasoned guess at best.
  */
+
+/** Largest value either fetch_wait setting may take: one day, in seconds. */
+export const FETCH_WAIT_MAX_SECONDS = 86_400;
+
+/**
+ * Bring a fetch_wait threshold (seconds) into [0, FETCH_WAIT_MAX_SECONDS].
+ * Without a bound an operator typo such as 1e15 made `seconds * 1000` fall
+ * outside Date's range, so every status read containing a long-gap delivery
+ * threw `RangeError: Invalid time value`. Non-finite input reads as 0.
+ */
+export function clampFetchWaitSeconds(seconds: number): number {
+  if (!Number.isFinite(seconds)) return 0;
+  return Math.min(FETCH_WAIT_MAX_SECONDS, Math.max(0, seconds));
+}
 
 export type FetchWait = "prompt" | "adapter_busy" | "inbox_stalled";
 
