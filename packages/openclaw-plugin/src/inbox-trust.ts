@@ -227,6 +227,8 @@ export function inboxMessageView(
   opts: {
     operatorTrusted: boolean;
     attachments?: unknown[];
+    /** Advertised attachments that could not be downloaded (#114). */
+    attachmentsUnavailable?: unknown[];
     peerTurnBudget?: number;
     peerTurnsUsed?: Record<string, number>;
   }
@@ -256,7 +258,8 @@ export function inboxMessageView(
     },
     ...(mentions.length ? { mentions: message.mentions } : {}),
     ...(message.reply_to ? { reply_to: message.reply_to } : {}),
-    ...(attachments.length ? { attachments } : {})
+    ...(attachments.length ? { attachments } : {}),
+    ...(opts.attachmentsUnavailable?.length ? { attachments_unavailable: opts.attachmentsUnavailable } : {})
   };
   // A failed signature carries the hard downgrade whatever the sender tier, so
   // it takes the labelled branch alongside feeds and the operator.
