@@ -8,7 +8,7 @@ import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
 import { deriveAgentHealth, buildAttentionItems } from "./fleet-health";
 import type { DeliveryPhase } from "./types";
-import { classifyFetchWait, fetchGap, type FetchWait, type TurnInterval } from "./fetch-wait";
+import { classifyFetchWait, clampFetchWaitSeconds, fetchGap, type FetchWait, type TurnInterval } from "./fetch-wait";
 import {
   keyId as deriveKeyId,
   verifyCanonical,
@@ -2649,8 +2649,10 @@ export class EkhoDb {
       deliveredAt: (d.delivered_at as string | null) ?? null,
       deliveryAttempts: Number(d.delivery_attempts ?? 0)
     };
-    const staleMs = config.inboxStaleSeconds * 1000;
-    const capMs = config.turnIntervalCapSeconds * 1000;
+    // Clamped again here so a config object changed after startup cannot
+    // push `new Date(...)` below out of range either.
+    const staleMs = clampFetchWaitSeconds(config.inboxStaleSeconds) * 1000;
+    const capMs = clampFetchWaitSeconds(config.turnIntervalCapSeconds) * 1000;
     const gap = fetchGap(timing);
     let intervals: TurnInterval[] = [];
     if (gap && gap.end - gap.start > Math.max(0, staleMs)) {

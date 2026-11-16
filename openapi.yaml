@@ -440,8 +440,10 @@ components:
             more than once (the wait then includes a retry). Approximate: the
             wait is relay clock and the reported turns are adapter clock, with
             no clock-offset correction, and a recipient that reports no turns
-            reads `inbox_stalled` for every long wait, so `adapter_busy` is a
-            lower bound. It says nothing about whether the delivery was
+            reads `inbox_stalled` for every long wait. A turn with no reported end
+            is assumed to run for the full `EKHO_TURN_INTERVAL_CAP_SECONDS`,
+            so `adapter_busy` can also be a false positive; it is neither a
+            lower nor an upper bound. It says nothing about whether the delivery was
             answered.
         acked_at:
           type: string
