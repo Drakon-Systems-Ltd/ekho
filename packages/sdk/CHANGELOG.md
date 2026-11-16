@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Abortable inbox poll (part of #164).** `EkhoAgentClient.getInbox(limit = 25, signal?)` accepts an optional `AbortSignal` and passes it to `fetch`. Calls without a signal behave exactly as before. Note that `GET /v1/inbox` consumes (queued to delivered): aborting after the relay has committed can leave a delivered batch the caller never saw. No caller passes a signal yet.
+
 ## [0.9.0] - 2026-11-15
 
 No SDK changes. Version kept in step with the relay: 0.9.0 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026; no SDK update is required. The SDK has no method for `POST /v1/delivery-phases` in this release. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.

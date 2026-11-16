@@ -6,6 +6,10 @@ All notable changes to Ekho are documented here.
 
 ### Added
 
+- **SDK: abortable `getInbox` (part of #164).** `EkhoAgentClient.getInbox(limit = 25, signal?)` takes an optional `AbortSignal` and passes it to `fetch`; existing calls are unchanged. `GET /v1/inbox` consumes (queued to delivered), so aborting after the relay has committed can leave a delivered batch the caller never saw. SDK only: no caller passes a signal yet, and the OpenClaw plugin is unchanged.
+
+### Added
+
 - **Relay: `fetch_wait` on message status (#155 slice).** Each delivery in `GET /v1/messages/{id}/status` now carries `fetch_wait`, which says why the recipient took as long as it did to collect the delivery: `prompt` (collected within `EKHO_INBOX_STALE_SECONDS`, default 120, of being queued), `adapter_busy` (a longer wait, at least 80 % of which is covered by turns the recipient reported through `POST /v1/delivery-phases`), `inbox_stalled` (any other longer wait), or `null` when it is unknown (not collected yet, or collected more than once, so the wait includes a retry). The label is derived on every read and never stored, so a turn report that arrives late changes it; there is no migration. A single reported turn counts for at most `EKHO_TURN_INTERVAL_CAP_SECONDS` (default 900), which is also the assumed length of a turn with no reported end. Both settings are detection thresholds only and change no polling, delivery, retry or turn-taking behaviour.
 - **Limits of this slice.** The label is approximate: the wait is measured on the relay clock and reported turns on the adapter clock, with no clock-offset correction yet. No adapter sends turn reports in this release, so every long wait reads `inbox_stalled` until one does, and `adapter_busy` is a lower bound afterwards. It says nothing about whether a delivery was answered. The reply-latency issue (#155) remains open.
 
