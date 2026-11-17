@@ -43,13 +43,14 @@ export class EkhoAgentClient {
     };
   }
 
-  private async request<T>(method: string, routePath: string, payload?: unknown): Promise<T> {
+  private async request<T>(method: string, routePath: string, payload?: unknown, signal?: AbortSignal): Promise<T> {
     const body = payload ? JSON.stringify(payload) : "";
     const signaturePath = routePath.split("?")[0] ?? routePath;
     const response = await fetch(`${this.credentials.relayBaseUrl}${routePath}`, {
       method,
       headers: this.signedHeaders(method, signaturePath, body),
-      body: method === "GET" ? undefined : body
+      body: method === "GET" ? undefined : body,
+      ...(signal ? { signal } : {})
     });
 
     if (!response.ok) {
@@ -82,8 +83,23 @@ export class EkhoAgentClient {
     );
   }
 
-  getInbox(limit = 25) {
-    return this.request<InboxResponse>("GET", `/v1/inbox?limit=${limit}`);
+  /**
+   * Fetch up to `limit` queued messages for this agent.
+   *
+   * Pass an optional `signal` to cancel the request. If the signal is already
+   * aborted, or aborts while the request is in flight, the returned promise
+   * rejects with the signal's abort error (as `fetch` does). Without a signal
+   * the call behaves exactly as before.
+   *
+   * Hazard: `GET /v1/inbox` consumes. The relay moves each returned message
+   * from queued to delivered when it serves the batch, not when the caller
+   * acks. Aborting after the relay has committed that change (the response was
+   * already on its way, or the caller never read it) leaves a batch marked
+   * delivered that this caller never saw. Abort only when losing a batch is
+   * acceptable, or when the caller can recover delivered messages another way.
+   */
+  getInbox(limit = 25, signal?: AbortSignal) {
+    return this.request<InboxResponse>("GET", `/v1/inbox?limit=${limit}`, undefined, signal);
   }
 
   /** Register (or rotate) this agent's Ed25519 identity public key for
