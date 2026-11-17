@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS agents (
   peer_autoreply INTEGER NOT NULL DEFAULT 1,
   peer_turn_budget INTEGER NOT NULL DEFAULT 0,
   last_inbox_poll_at TEXT,
+  phase_invalid_holder_reports INTEGER NOT NULL DEFAULT 0,
+  phase_refused_attempt_reports INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 
@@ -108,6 +110,7 @@ CREATE TABLE IF NOT EXISTS message_deliveries (
   first_reply_at TEXT,
   first_reply_turn_id TEXT,
   phase_recorded_at TEXT,
+  phase_time_clamped INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   retry_count INTEGER NOT NULL DEFAULT 0,
   next_retry_at TEXT,
@@ -127,6 +130,7 @@ CREATE TABLE IF NOT EXISTS delivery_turn_attempts (
   outcome TEXT,
   category TEXT,
   phase_recorded_at TEXT NOT NULL,
+  time_clamped INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (message_id, recipient_agent_id, turn_id),
   UNIQUE (message_id, recipient_agent_id, attempt),
   FOREIGN KEY (message_id) REFERENCES messages(id),

@@ -2543,9 +2543,31 @@ export class EkhoDb {
       .run(at, turnId, agentId, turnId, at);
   }
 
+  /**
+   * #155 phase reports (design §2.2, §2.4). Besides the phase columns this
+   * keeps three diagnostics, all written in the same transaction as the report:
+   *  - `phase_time_clamped` on the delivery and `time_clamped` on the attempt
+   *    row: an adapter time more than 24 h from relay time (or unparseable) was
+   *    replaced by relay time AND stored. A report that stores nothing (a
+   *    retransmit, a refusal) flags nothing. Sticky; never cleared.
+   *  - `agents.phase_invalid_holder_reports`: a floor_wait whose holder is not
+   *    an agent of the caller's fleet was stored with a null holder.
+   *  - `agents.phase_refused_attempt_reports`: a report was refused by the
+   *    eight-attempt cap. It counts reports, so a retransmitted ninth attempt
+   *    counts again.
+   * The counters go on the CALLER's own agent row and are read back only on
+   * operator fleet health. The return value does not depend on them: a valid
+   * and an invalid holder produce the same counts.
+   */
   recordDeliveryPhases(fleetId: string, agentId: string, phases: DeliveryPhase[]): { recorded: number; refused: number } {
     let recorded = 0;
     let refused = 0;
+    const markDeliveryClamped = this.db.prepare(
+      "UPDATE message_deliveries SET phase_time_clamped = 1 WHERE message_id = ? AND recipient_agent_id = ?");
+    const countInvalidHolder = this.db.prepare(
+      "UPDATE agents SET phase_invalid_holder_reports = phase_invalid_holder_reports + 1 WHERE id = ? AND fleet_id = ?");
+    const countRefusedAttempt = this.db.prepare(
+      "UPDATE agents SET phase_refused_attempt_reports = phase_refused_attempt_reports + 1 WHERE id = ? AND fleet_id = ?");
     const tx = this.db.transaction(() => {
       for (const phase of phases) {
         const delivery = this.db.prepare(`SELECT d.id, d.message_id, d.latest_attempt, d.attempts_capped, d.adapter_dead_lettered_at,
@@ -2557,8 +2579,8 @@ export class EkhoDb {
         if (!delivery) { refused++; continue; }
         const receivedAt = nowIso();
         const parsedAt = Date.parse(phase.at);
-        const reportedAt = !Number.isFinite(parsedAt) || Math.abs(parsedAt - Date.parse(receivedAt)) > 86400000
-          ? receivedAt : phase.at;
+        const clamped = !Number.isFinite(parsedAt) || Math.abs(parsedAt - Date.parse(receivedAt)) > 86400000;
+        const reportedAt = clamped ? receivedAt : phase.at;
         if (phase.phase === "floor_wait") {
           const holder = this.db.prepare("SELECT id FROM agents WHERE id = ? AND fleet_id = ?").get(phase.holder_agent_id, fleetId) as { id: string } | undefined;
           const prior = this.db.prepare(`SELECT floor_wait_started_at FROM message_deliveries
@@ -2567,6 +2589,8 @@ export class EkhoDb {
           this.db.prepare(`UPDATE message_deliveries SET floor_wait_started_at = COALESCE(floor_wait_started_at, ?),
             floor_holder_agent_id = COALESCE(floor_holder_agent_id, ?), phase_recorded_at = ?
             WHERE message_id = ? AND recipient_agent_id = ?`).run(reportedAt, holder?.id ?? null, receivedAt, phase.message_id, agentId);
+          if (clamped) markDeliveryClamped.run(phase.message_id, agentId);
+          if (!holder) countInvalidHolder.run(agentId, fleetId);
         } else if (phase.phase === "floor_granted" || phase.phase === "floor_overrun" || phase.phase === "dead_lettered") {
           const column = phase.phase === "floor_granted" ? "floor_granted_at" : phase.phase === "floor_overrun" ? "floor_overrun_at" : "adapter_dead_lettered_at";
           const prior = this.db.prepare(`SELECT ${column} AS at FROM message_deliveries
@@ -2575,6 +2599,7 @@ export class EkhoDb {
           this.db.prepare(`UPDATE message_deliveries SET ${column} = COALESCE(${column}, ?),
             adapter_dead_letter_reason = COALESCE(adapter_dead_letter_reason, ?), phase_recorded_at = ?
             WHERE message_id = ? AND recipient_agent_id = ?`).run(reportedAt, phase.phase === "dead_lettered" ? phase.reason : null, receivedAt, phase.message_id, agentId);
+          if (clamped) markDeliveryClamped.run(phase.message_id, agentId);
         } else {
           const existing = this.db.prepare(`SELECT attempt, started_at, ended_at FROM delivery_turn_attempts
             WHERE message_id = ? AND recipient_agent_id = ? AND turn_id = ?`)
@@ -2589,6 +2614,7 @@ export class EkhoDb {
             if (collision) { refused++; continue; }
             if (phase.attempt! > 8) {
               this.db.prepare(`UPDATE message_deliveries SET attempts_capped = 1 WHERE message_id = ? AND recipient_agent_id = ?`).run(phase.message_id, agentId);
+              countRefusedAttempt.run(agentId, fleetId);
               refused++; continue;
             }
             const terminal = delivery.adapter_dead_lettered_at ||
@@ -2598,6 +2624,7 @@ export class EkhoDb {
               WHERE message_id = ? AND recipient_agent_id = ?`).get(phase.message_id, agentId) as { n: number };
             if (count.n >= 8) {
               this.db.prepare(`UPDATE message_deliveries SET attempts_capped = 1 WHERE message_id = ? AND recipient_agent_id = ?`).run(phase.message_id, agentId);
+              countRefusedAttempt.run(agentId, fleetId);
               refused++; continue;
             }
             this.db.prepare(`INSERT INTO delivery_turn_attempts
@@ -2607,9 +2634,13 @@ export class EkhoDb {
           const isStart = phase.phase === "turn_started";
           this.db.prepare(`UPDATE delivery_turn_attempts SET
             started_at = COALESCE(started_at, ?), ended_at = COALESCE(ended_at, ?),
-            outcome = COALESCE(outcome, ?), category = COALESCE(category, ?)
+            outcome = COALESCE(outcome, ?), category = COALESCE(category, ?),
+            time_clamped = CASE WHEN ? = 1 THEN 1 ELSE time_clamped END
             WHERE message_id = ? AND recipient_agent_id = ? AND turn_id = ?`)
-            .run(isStart ? reportedAt : null, isStart ? null : reportedAt, phase.outcome ?? null, phase.category ?? null, phase.message_id, agentId, phase.turn_id);
+            .run(isStart ? reportedAt : null, isStart ? null : reportedAt, phase.outcome ?? null, phase.category ?? null, clamped ? 1 : 0, phase.message_id, agentId, phase.turn_id);
+          // Reached only when this report's time is the one being stored (a
+          // repeat of an already-filled column returned above).
+          if (clamped) markDeliveryClamped.run(phase.message_id, agentId);
           const attempt = this.db.prepare(`SELECT * FROM delivery_turn_attempts WHERE message_id = ? AND recipient_agent_id = ? AND turn_id = ?`)
             .get(phase.message_id, agentId, phase.turn_id) as Record<string, unknown>;
           if (delivery.latest_attempt === null || phase.attempt! >= delivery.latest_attempt) {
@@ -2686,7 +2717,7 @@ export class EkhoDb {
               d.adapter_dead_lettered_at, d.adapter_dead_letter_reason, d.turn_attempts,
               d.latest_attempt, d.latest_turn_id, d.latest_turn_started_at,
               d.latest_turn_outcome, d.latest_turn_category, d.attempts_capped,
-              d.first_reply_at, d.first_reply_turn_id, d.phase_recorded_at,
+              d.first_reply_at, d.first_reply_turn_id, d.phase_recorded_at, d.phase_time_clamped,
               dl.failure_reason AS dead_letter_reason, dl.dead_lettered_at
        FROM message_deliveries d
        LEFT JOIN dead_letters dl ON dl.original_delivery_id = d.id
@@ -2734,6 +2765,10 @@ export class EkhoDb {
         first_reply_at: (d.first_reply_at as string | null) ?? null,
         first_reply_turn_id: (d.first_reply_turn_id as string | null) ?? null,
         phase_recorded_at: (d.phase_recorded_at as string | null) ?? null,
+        // #155: at least one adapter-reported time stored for this delivery
+        // (a phase time above or one of its turn attempts) was more than 24 h
+        // from relay time and was replaced by relay time.
+        phase_time_clamped: Boolean(d.phase_time_clamped),
         delivery_attempts: Number(d.delivery_attempts ?? 0),
         retry_count: Number(d.retry_count ?? 0),
         last_failure_reason: (d.last_failure_reason as string | null) ?? null,
@@ -3271,7 +3306,8 @@ export class EkhoDb {
     const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
     const agents = this.db.prepare(
       `SELECT id, display_name, runtime, status, last_seen_at, consecutive_missed_heartbeats,
-              operator_trusted, peer_autoreply, peer_turn_budget, last_inbox_poll_at
+              operator_trusted, peer_autoreply, peer_turn_budget, last_inbox_poll_at,
+              phase_invalid_holder_reports, phase_refused_attempt_reports
        FROM agents WHERE fleet_id = ? AND runtime != 'operator'
        ORDER BY display_name`
     ).all(fleetId) as Array<Record<string, unknown>>;
@@ -3357,6 +3393,12 @@ export class EkhoDb {
         // connection + model axis; Phase 2 derives inbox.state from this.
         last_inbox_poll_at: (a.last_inbox_poll_at as string | null) ?? null,
         inbox,
+        // #155: lifetime counts of this agent's own phase reports that named
+        // an invalid floor holder or were refused by the attempt cap.
+        phase_reports: {
+          invalid_holder: Number(a.phase_invalid_holder_reports) || 0,
+          refused_attempts: Number(a.phase_refused_attempt_reports) || 0
+        },
         metrics,
         health,
         active_conversations: activeConversations,
