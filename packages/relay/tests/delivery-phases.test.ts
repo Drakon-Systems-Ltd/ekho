@@ -438,6 +438,157 @@ describe("#155 phase 1b: bounded relay phase reports", () => {
     expect((await status(a, id))[0].turn_attempts).toBe(0);
   });
 
+  // #155 clamp flag and counters (design §2.2, §2.4; migration 027).
+  const rawDelivery = (id: string, recipient: string) => relay.db.raw()
+    .prepare("SELECT phase_time_clamped FROM message_deliveries WHERE message_id = ? AND recipient_agent_id = ?")
+    .get(id, recipient) as { phase_time_clamped: number };
+  const rawAttempt = (id: string, turn: string) => relay.db.raw()
+    .prepare("SELECT started_at, ended_at, time_clamped FROM delivery_turn_attempts WHERE message_id = ? AND turn_id = ?")
+    .get(id, turn) as { started_at: string | null; ended_at: string | null; time_clamped: number };
+  const rawCounters = (agentId: string) => relay.db.raw()
+    .prepare("SELECT phase_invalid_holder_reports AS invalid_holder, phase_refused_attempt_reports AS refused_attempts FROM agents WHERE id = ?")
+    .get(agentId) as { invalid_holder: number; refused_attempts: number };
+  async function healthRow(agentId: string) {
+    const res = await relay.operatorRequest("GET", "/v1/operator/fleet-health");
+    expect(res.status).toBe(200);
+    return (res.body.agents as Array<Record<string, unknown>>).find((r) => r.id === agentId)!;
+  }
+  const farPast = () => new Date(Date.now() - 2 * 86400000).toISOString();
+  const farFuture = () => new Date(Date.now() + 2 * 86400000).toISOString();
+
+  it("stores a flag when a delivery phase time was clamped, and none for an in-range time", async () => {
+    const a = await relay.enrollAgent("clamp-d-a");
+    const b = await relay.enrollAgent("clamp-d-b");
+    const honest = await direct(a, b);
+    const skewed = await direct(a, b);
+    expect((await report(b, [{ message_id: honest, phase: "floor_wait", at: at(), holder_agent_id: a.agent_id }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    expect((await status(a, honest))[0].phase_time_clamped).toBe(false);
+    expect(rawDelivery(honest, b.agent_id).phase_time_clamped).toBe(0);
+    // A retransmit with a wild time changes nothing (first write wins), so it flags nothing.
+    expect((await report(b, [{ message_id: honest, phase: "floor_wait", at: farPast(), holder_agent_id: a.agent_id }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    expect((await status(a, honest))[0].phase_time_clamped).toBe(false);
+
+    expect((await status(a, skewed))[0].phase_time_clamped).toBe(false); // nothing reported yet
+    expect((await report(b, [{ message_id: skewed, phase: "floor_wait", at: at(), holder_agent_id: a.agent_id }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    expect((await report(b, [{ message_id: skewed, phase: "floor_granted", at: farFuture() }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    const d = (await status(a, skewed))[0];
+    expect(d.phase_time_clamped).toBe(true);
+    expect(Date.parse(d.floor_granted_at as string)).toBeLessThanOrEqual(Date.now()); // the stored time is relay time
+    // The flag is sticky: a later in-range phase on the same delivery does not clear it.
+    expect((await report(b, [{ message_id: skewed, phase: "floor_overrun", at: at() }])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((await status(a, skewed))[0].phase_time_clamped).toBe(true);
+    // Another delivery of the same agent is untouched.
+    expect(rawDelivery(honest, b.agent_id).phase_time_clamped).toBe(0);
+  });
+
+  it("stores the clamp flag on the attempt row whose time was clamped, and on its delivery", async () => {
+    const a = await relay.enrollAgent("clamp-t-a");
+    const b = await relay.enrollAgent("clamp-t-b");
+    const id = await direct(a, b);
+    const one = { message_id: id, phase: "turn_started", at: at(), turn_id: "clamp.1", attempt: 1 };
+    expect((await report(b, [one])).body).toEqual({ recorded: 1, refused: 0 });
+    expect(rawAttempt(id, "clamp.1").time_clamped).toBe(0);
+    expect((await status(a, id))[0].phase_time_clamped).toBe(false);
+    // A retransmitted start with a wild time is ignored and flags nothing.
+    expect((await report(b, [{ ...one, at: farPast() }])).body).toEqual({ recorded: 1, refused: 0 });
+    expect(rawAttempt(id, "clamp.1").time_clamped).toBe(0);
+    // Attempt 1's END is clamped: the row is flagged although its start was honest.
+    expect((await report(b, [{ ...one, phase: "turn_ended", at: farPast(), outcome: "error", category: "exit_1" }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    const first = rawAttempt(id, "clamp.1");
+    expect(first.time_clamped).toBe(1);
+    expect(Date.parse(first.ended_at as string)).toBeGreaterThan(Date.now() - 60_000);
+    expect((await status(a, id))[0].phase_time_clamped).toBe(true);
+    // A second, honest attempt has its own unflagged row; the delivery flag stays.
+    const two = { message_id: id, phase: "turn_started", at: at(), turn_id: "clamp.2", attempt: 2 };
+    expect((await report(b, [two, { ...two, phase: "turn_ended", outcome: "completed" }])).body).toEqual({ recorded: 2, refused: 0 });
+    expect(rawAttempt(id, "clamp.2").time_clamped).toBe(0);
+    expect((await status(a, id))[0].phase_time_clamped).toBe(true);
+    // A start that is clamped on first write flags its row.
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: farFuture(), turn_id: "clamp.3", attempt: 3 }])).body)
+      .toEqual({ recorded: 1, refused: 0 });
+    expect(rawAttempt(id, "clamp.3").time_clamped).toBe(1);
+  });
+
+  it("does not flag a refused report: a clamped time that is never stored leaves no flag", async () => {
+    const a = await relay.enrollAgent("clamp-r-a");
+    const b = await relay.enrollAgent("clamp-r-b");
+    const id = await direct(a, b);
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: farPast(), turn_id: "nine", attempt: 9 }])).body)
+      .toEqual({ recorded: 0, refused: 1 });
+    expect((await status(a, id))[0]).toMatchObject({ attempts_capped: true, phase_time_clamped: false });
+  });
+
+  it("counts an invalid floor holder on the reporting agent only, with the same response as a valid holder", async () => {
+    const a = await relay.enrollAgent("count-h-a");
+    const b = await relay.enrollAgent("count-h-b");
+    const c = await relay.enrollAgent("count-h-c");
+    const otherFleet = await createTestRelay();
+    try {
+      const foreign = await otherFleet.enrollAgent("count-h-foreign");
+      const valid = await direct(a, b);
+      const unknown = await direct(a, b);
+      const crossFleet = await direct(a, b);
+      const phase = (message_id: string, holder_agent_id: string) => ({ message_id, phase: "floor_wait", at: at(), holder_agent_id });
+      const okRes = await report(b, [phase(valid, a.agent_id)]);
+      expect(rawCounters(b.agent_id)).toEqual({ invalid_holder: 0, refused_attempts: 0 });
+      const unknownRes = await report(b, [phase(unknown, "agt_nonexistent")]);
+      const foreignRes = await report(b, [phase(crossFleet, foreign.agent_id)]);
+      // Response equivalence (§2.2): status and body are identical whether or not the holder is valid.
+      for (const res of [unknownRes, foreignRes]) {
+        expect(res.status).toBe(okRes.status);
+        expect(res.body).toEqual(okRes.body);
+      }
+      expect(okRes.body).toEqual({ recorded: 1, refused: 0 });
+      expect(rawCounters(b.agent_id)).toEqual({ invalid_holder: 2, refused_attempts: 0 });
+      // A retransmit of an already-recorded floor_wait stores nothing and counts nothing, valid or not.
+      expect((await report(b, [phase(unknown, "agt_nonexistent"), phase(valid, "agt_nonexistent")])).body).toEqual({ recorded: 2, refused: 0 });
+      expect(rawCounters(b.agent_id).invalid_holder).toBe(2);
+      // Counted on the reporter, never on a teammate or the named holder.
+      expect(rawCounters(a.agent_id)).toEqual({ invalid_holder: 0, refused_attempts: 0 });
+      expect(rawCounters(c.agent_id)).toEqual({ invalid_holder: 0, refused_attempts: 0 });
+      // A report for a delivery that is not the caller's is refused before the holder is looked at.
+      expect((await report(c, [phase(valid, "agt_nonexistent")])).body).toEqual({ recorded: 0, refused: 1 });
+      expect(rawCounters(c.agent_id).invalid_holder).toBe(0);
+      // Operator read-back on fleet health; the sender's status read-back never carries it.
+      expect((await healthRow(b.agent_id)).phase_reports).toEqual({ invalid_holder: 2, refused_attempts: 0 });
+      expect((await healthRow(a.agent_id)).phase_reports).toEqual({ invalid_holder: 0, refused_attempts: 0 });
+      const senderView = JSON.stringify((await relay.agentRequest(a.agent_id, a.secret, "GET", `/v1/messages/${unknown}/status`)).body);
+      expect(senderView).not.toContain("invalid_holder");
+      expect(senderView).not.toContain("phase_reports");
+      expect(senderView).not.toContain("floor_holder_agent_id");
+    } finally { otherFleet.cleanup(); }
+  });
+
+  it("counts a refused over-cap attempt report on the agent, and no other kind of refusal", async () => {
+    const a = await relay.enrollAgent("count-c-a");
+    const b = await relay.enrollAgent("count-c-b");
+    const id = await direct(a, b);
+    const phases = Array.from({ length: 8 }, (_, i) => ({ message_id: id, phase: "turn_started", at: at(), turn_id: `count.${i + 1}`, attempt: i + 1 }));
+    expect((await report(b, phases)).body).toEqual({ recorded: 8, refused: 0 });
+    // Refusals that are not the attempt cap: a collision, a foreign id, a changed attempt number.
+    expect((await report(b, [{ ...phases[7], turn_id: "count.collision" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect((await report(b, [{ ...phases[0], message_id: "msg_foreign" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect((await report(b, [{ ...phases[0], attempt: 2 }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect(rawCounters(b.agent_id)).toEqual({ invalid_holder: 0, refused_attempts: 0 });
+    expect((await status(a, id))[0].attempts_capped).toBe(false);
+    // The ninth attempt is refused, flags the delivery and is counted. Each refused report counts.
+    expect((await report(b, [{ ...phases[7], attempt: 9, turn_id: "count.9" }])).body).toEqual({ recorded: 0, refused: 1 });
+    expect(rawCounters(b.agent_id)).toEqual({ invalid_holder: 0, refused_attempts: 1 });
+    expect((await report(b, [{ ...phases[7], attempt: 9, turn_id: "count.9" }, { ...phases[7], attempt: 10, turn_id: "count.10" }])).body)
+      .toEqual({ recorded: 0, refused: 2 });
+    expect(rawCounters(b.agent_id).refused_attempts).toBe(3);
+    expect((await status(a, id))[0].attempts_capped).toBe(true);
+    expect(rawCounters(a.agent_id)).toEqual({ invalid_holder: 0, refused_attempts: 0 });
+    expect((await healthRow(b.agent_id)).phase_reports).toEqual({ invalid_holder: 0, refused_attempts: 3 });
+    // Agent-signed callers cannot read the counters.
+    expect((await relay.agentRequest(b.agent_id, b.secret, "GET", "/v1/operator/fleet-health")).status).toBe(401);
+  });
+
   it("retains a terminal spawn error and refuses a new turn", async () => {
     const a = await relay.enrollAgent("phase-spawn-a");
     const b = await relay.enrollAgent("phase-spawn-b");
