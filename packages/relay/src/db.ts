@@ -6,7 +6,7 @@ import { schemaSql } from "./schema";
 import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
-import { deriveAgentHealth, buildAttentionItems } from "./fleet-health";
+import { deriveAgentHealth, deriveInboxState, buildAttentionItems } from "./fleet-health";
 import type { DeliveryPhase } from "./types";
 import { classifyFetchWait, clampFetchWaitSeconds, fetchGap, type FetchWait, type TurnInterval } from "./fetch-wait";
 import {
@@ -3287,6 +3287,19 @@ export class EkhoDb {
        WHERE m.fleet_id = ? AND d.recipient_agent_id = ? AND d.queued_at >= ?`
     );
 
+    // #155 Phase 2: one scoped aggregate per agent over the existing
+    // (recipient_agent_id, status, queued_at) index. No migration.
+    const inboxStmt = this.db.prepare(
+      `SELECT SUM(CASE WHEN d.status = 'queued' THEN 1 ELSE 0 END) AS queued,
+              MIN(CASE WHEN d.status = 'queued' THEN d.queued_at END) AS oldest_queued_at,
+              SUM(CASE WHEN d.status = 'delivered' THEN 1 ELSE 0 END) AS delivered_unacked,
+              SUM(CASE WHEN d.floor_wait_started_at IS NOT NULL AND d.floor_granted_at IS NULL
+                        AND d.floor_overrun_at IS NULL AND d.turn_attempts = 0 THEN 1 ELSE 0 END) AS floor_waits
+       FROM message_deliveries d JOIN messages m ON m.id = d.message_id
+       WHERE m.fleet_id = ? AND d.recipient_agent_id = ? AND d.status IN ('queued', 'delivered')`
+    );
+    const inboxStaleSeconds = clampFetchWaitSeconds(config.inboxStaleSeconds);
+
     return agents.map((a) => {
       const id = String(a.id);
       const hb = latestHb.get(id) as { metrics_json?: string; received_at?: string } | undefined;
@@ -3309,6 +3322,25 @@ export class EkhoDb {
         consecutive_missed_heartbeats: Number(a.consecutive_missed_heartbeats) || 0,
         metrics
       });
+      const inboxRow = inboxStmt.get(fleetId, id) as {
+        queued: number | null; oldest_queued_at: string | null; delivered_unacked: number | null; floor_waits: number | null;
+      };
+      const queued = Number(inboxRow.queued) || 0;
+      const lastPollAt = (a.last_inbox_poll_at as string | null) ?? null;
+      const inbox = {
+        state: deriveInboxState({
+          queued,
+          oldest_queued_at: inboxRow.oldest_queued_at ?? null,
+          last_poll_at: lastPollAt,
+          floor_waits: Number(inboxRow.floor_waits) || 0,
+          stale_seconds: inboxStaleSeconds,
+          metrics
+        }),
+        queued,
+        oldest_queued_at: inboxRow.oldest_queued_at ?? null,
+        delivered_unacked: Number(inboxRow.delivered_unacked) || 0,
+        last_poll_at: lastPollAt
+      };
       return {
         id,
         display_name: a.display_name,
@@ -3324,6 +3356,7 @@ export class EkhoDb {
         // polled). Deliberately NOT an input to `health`, which stays the
         // connection + model axis; Phase 2 derives inbox.state from this.
         last_inbox_poll_at: (a.last_inbox_poll_at as string | null) ?? null,
+        inbox,
         metrics,
         health,
         active_conversations: activeConversations,

@@ -48,6 +48,15 @@ All line references are to the tree at 0a2ebe8.
   than once reads `null` (unknown), because its gap includes a retry. No
   adapter emits turn reports yet, so every long gap reads `inbox_stalled`
   until one does.
+- **Phase 2 shipped, reduced scope (§3.1, §3.2).** Pure `deriveInboxState` in
+  `fleet-health.ts`; `getFleetHealth` adds `inbox: { state, queued,
+  oldest_queued_at, delivered_unacked, last_poll_at }`; no migration. **Not**
+  in this slice: the `inbox_unresponsive` attention item (before adapters
+  report turn state it would raise a critical alarm for an agent that is only
+  busy), the `activity` object, `floor_wait_long`, `fetched_1h`, the "recv" to
+  "queued" label, and any console change. Until Phase 3 an agent inside a long
+  turn with work queued can read `unresponsive_inbox`; `working` and
+  `floor_wait` cannot occur on live data.
 
 ---
 

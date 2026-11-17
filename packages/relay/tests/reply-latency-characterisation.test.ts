@@ -165,7 +165,7 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     expect((await floor(b, convX)).body.granted).toBe(false);
   });
 
-  it("reports an inbox that heartbeats but never fetches as healthy (FLIPS under #155: unresponsive inbox)", async () => {
+  it("reports an inbox that heartbeats but never fetches: health stays ok, inbox.state is unresponsive_inbox (flipped by #155 Phase 2)", async () => {
     const live = await relay.enrollAgent("lat-live");
     const hb = await relay.agentRequest(live.agent_id, live.secret, "POST", "/v1/heartbeats", { status: "healthy", metrics: {} });
     expect(hb.status).toBe(200);
@@ -175,6 +175,10 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     await relay.agentRequest(live.agent_id, live.secret, "POST", "/v1/heartbeats", { status: "healthy", metrics: {} });
 
     expect(deliveryStatus(messageId, live.agent_id)).toBe("queued");
+
+    // Age the queued delivery past the inbox threshold (relay clock).
+    const aged = new Date(Date.now() - (config.inboxStaleSeconds + 5) * 1000).toISOString();
+    relay.db.raw().prepare("UPDATE message_deliveries SET queued_at = ? WHERE message_id = ? AND recipient_agent_id = ?").run(aged, messageId, live.agent_id);
 
     const health = await relay.operatorRequest("GET", "/v1/operator/fleet-health");
     const row = health.body.agents.find((x: { id: string }) => x.id === live.agent_id);
@@ -188,6 +192,8 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
     // Phase 1a (#155): the relay now records the agent's last /v1/inbox poll,
     // and this agent never polled. Phase 2 turns this into inbox.state.
     expect(row.last_inbox_poll_at).toBeNull();
+    // Phase 2 (#155): the second axis. `health` above is unchanged.
+    expect(row.inbox).toEqual({ state: "unresponsive_inbox", queued: 1, oldest_queued_at: aged, delivered_unacked: 0, last_poll_at: null });
 
     // Nothing in the Needs-You queue either.
     const attention = await relay.operatorRequest("GET", "/v1/operator/attention");
