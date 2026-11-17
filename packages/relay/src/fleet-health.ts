@@ -85,6 +85,71 @@ export function deriveAgentHealth(input: AgentHealthInput, now: number = Date.no
 // human — dead/degraded models, stalled hand-offs, and dropped deliveries —
 // into one ranked to-do list. Pure so the ranking/shape is unit-tested.
 
+// ---------------------------------------------------------------------------
+// #155 Phase 2: per-agent INBOX state, a second axis next to `health`.
+//
+// `health` proves the connection (heartbeats) and the model (turn outcomes).
+// It cannot see an inbox that heartbeats but never fetches. This derives one
+// state from relay-observed delivery data. Heartbeat freshness is deliberately
+// NOT an input, so a heartbeating agent that never polls still reads
+// unresponsive_inbox.
+//
+// Limit: no adapter reports adapter_state / turn_started_at / turn_deadline_at
+// yet (Phase 3). Until then an agent inside a long turn with work queued behind
+// it can read unresponsive_inbox, and `working` / `floor_wait` cannot occur on
+// live data.
+// ---------------------------------------------------------------------------
+
+export type InboxState = "unresponsive_inbox" | "working" | "floor_wait" | "queued" | "idle";
+
+export interface InboxStateInput {
+  /** Deliveries with status 'queued' (not yet fetched). */
+  queued: number;
+  oldest_queued_at?: string | null;
+  /** Relay time of the agent's last GET /v1/inbox; null = never polled. */
+  last_poll_at?: string | null;
+  /** Deliveries waiting on a floor: wait started, never granted/overrun, no turn attempt. */
+  floor_waits?: number;
+  /** Detection threshold in seconds (the existing clamped inboxStaleSeconds). */
+  stale_seconds: number;
+  /** Parsed heartbeat metrics; adapter_state / turn_* read only when strings. */
+  metrics?: Record<string, unknown> | null;
+}
+
+// Grace after a reported turn deadline before the turn counts as wedged.
+export const TURN_DEADLINE_GRACE_MS = 60_000;
+
+function strMetric(m: Record<string, unknown> | null | undefined, key: string): string | null {
+  const v = m?.[key];
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
+export function deriveInboxState(input: InboxStateInput, now: number = Date.now()): InboxState {
+  const staleMs = Math.max(0, Number(input.stale_seconds) || 0) * 1000;
+  const queued = Math.max(0, Number(input.queued) || 0);
+  const adapterState = strMetric(input.metrics, "adapter_state");
+  const turnRunning = adapterState === "turn_running";
+  const deadline = strMetric(input.metrics, "turn_deadline_at");
+  const deadlineMs = deadline ? Date.parse(deadline) : NaN;
+  const wedged = turnRunning && Number.isFinite(deadlineMs) && now > deadlineMs + TURN_DEADLINE_GRACE_MS;
+
+  const oldestAge = ageMs(input.oldest_queued_at, now);
+  const pollAge = ageMs(input.last_poll_at, now);
+  const pollStale = pollAge === null || pollAge > staleMs;
+
+  // 1. Queued work, old, and nothing is fetching it.
+  if (queued > 0 && oldestAge !== null && oldestAge > staleMs && ((pollStale && !turnRunning) || wedged)) {
+    return "unresponsive_inbox";
+  }
+  // 2. A reported running turn: the busy wait, named.
+  if (turnRunning) return "working";
+  // 3. Waiting on a conversation floor.
+  if ((input.floor_waits ?? 0) > 0) return "floor_wait";
+  // 4. Queued, within the threshold.
+  if (queued > 0) return "queued";
+  return "idle";
+}
+
 export type AttentionSeverity = "critical" | "warn";
 export type AttentionKind = "agent_down" | "agent_degraded" | "stalled" | "dead_letter";
 

@@ -3173,6 +3173,45 @@ paths:
                             heartbeats but never fetches shows a fresh
                             `last_heartbeat_at` and a stale or null
                             `last_inbox_poll_at`. Not an input to `health`.
+                        inbox:
+                          type: object
+                          description: >
+                            Second axis next to `health` (#155 Phase 2), derived
+                            from relay-observed delivery data. Heartbeat
+                            freshness is not an input. Limit: no adapter
+                            reports `adapter_state` yet, so an agent that is
+                            inside a long turn with work queued behind it can
+                            read `unresponsive_inbox` until the adapters report
+                            turn state; `working` and `floor_wait` cannot occur
+                            on live data until then.
+                          properties:
+                            state:
+                              type: string
+                              enum: [unresponsive_inbox, working, floor_wait, queued, idle]
+                              description: >
+                                `unresponsive_inbox`: queued work older than
+                                `EKHO_INBOX_STALE_SECONDS` and no recent poll
+                                (or a reported turn past its deadline plus
+                                60 s). `working`: the heartbeat reports
+                                `adapter_state=turn_running`. `floor_wait`:
+                                deliveries waiting on a floor. `queued`: queued
+                                work within the threshold. `idle`: none of
+                                these.
+                            queued:
+                              type: integer
+                              description: Deliveries not yet fetched (status `queued`).
+                            oldest_queued_at:
+                              type: string
+                              format: date-time
+                              nullable: true
+                            delivered_unacked:
+                              type: integer
+                              description: Deliveries fetched but not yet acknowledged.
+                            last_poll_at:
+                              type: string
+                              format: date-time
+                              nullable: true
+                              description: Same value as `last_inbox_poll_at`.
                         consecutive_missed_heartbeats:
                           type: integer
         "401":
