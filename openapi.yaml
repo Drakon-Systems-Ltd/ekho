@@ -3203,11 +3203,18 @@ paths:
                                 `unresponsive_inbox`: queued work older than
                                 `EKHO_INBOX_STALE_SECONDS` and no recent poll
                                 (or a reported turn past its deadline plus
-                                60 s). `working`: the heartbeat reports
-                                `adapter_state=turn_running`. `floor_wait`:
-                                deliveries waiting on a floor. `queued`: queued
-                                work within the threshold. `idle`: none of
-                                these.
+                                60 s; when the turn reports no parseable
+                                `turn_deadline_at`, past `turn_started_at` plus
+                                `EKHO_TURN_INTERVAL_CAP_SECONDS` plus 60 s, or,
+                                with no parseable start either, queued work
+                                older than that cap plus 60 s). `working`: the
+                                heartbeat reports `adapter_state=turn_running`.
+                                `floor_wait`: deliveries waiting on a floor,
+                                counted over both `queued` and `delivered`
+                                rows (a floor wait never granted or overrun,
+                                with no turn attempt reported). `queued`:
+                                queued work within the threshold. `idle`: none
+                                of these.
                             queued:
                               type: integer
                               description: Deliveries not yet fetched (status `queued`).

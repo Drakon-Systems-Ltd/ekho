@@ -3325,6 +3325,8 @@ export class EkhoDb {
 
     // #155 Phase 2: one scoped aggregate per agent over the existing
     // (recipient_agent_id, status, queued_at) index. No migration.
+    // floor_waits counts rows in status 'queued' AND 'delivered' (the WHERE
+    // below): an adapter may report a floor wait before or after it fetches.
     const inboxStmt = this.db.prepare(
       `SELECT SUM(CASE WHEN d.status = 'queued' THEN 1 ELSE 0 END) AS queued,
               MIN(CASE WHEN d.status = 'queued' THEN d.queued_at END) AS oldest_queued_at,
@@ -3335,6 +3337,7 @@ export class EkhoDb {
        WHERE m.fleet_id = ? AND d.recipient_agent_id = ? AND d.status IN ('queued', 'delivered')`
     );
     const inboxStaleSeconds = clampFetchWaitSeconds(config.inboxStaleSeconds);
+    const turnCapSeconds = clampFetchWaitSeconds(config.turnIntervalCapSeconds);
 
     return agents.map((a) => {
       const id = String(a.id);
@@ -3370,6 +3373,7 @@ export class EkhoDb {
           last_poll_at: lastPollAt,
           floor_waits: Number(inboxRow.floor_waits) || 0,
           stale_seconds: inboxStaleSeconds,
+          turn_cap_seconds: turnCapSeconds,
           metrics
         }),
         queued,

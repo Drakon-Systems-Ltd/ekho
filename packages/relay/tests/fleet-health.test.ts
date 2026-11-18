@@ -170,6 +170,50 @@ describe("deriveInboxState (#155 Phase 2)", () => {
     expect(deriveInboxState({ ...base, queued: 0, metrics }, T0)).toBe("working");
   });
 
+  describe("turn_running with no usable deadline (#186): bounded fallback, never masks an unresponsive inbox", () => {
+    const CAP_MS = 900_000; // default turn cap (EKHO_TURN_INTERVAL_CAP_SECONDS)
+    const bound = CAP_MS + TURN_DEADLINE_GRACE_MS;
+    const q = (age: number) => ({ ...base, queued: 1, oldest_queued_at: iso(T0 - age), last_poll_at: recentPoll });
+
+    it("falls back to turn_started_at + cap when turn_deadline_at is absent", () => {
+      const wedged = { adapter_state: "turn_running", turn_started_at: iso(T0 - bound - 1) };
+      const within = { adapter_state: "turn_running", turn_started_at: iso(T0 - bound) };
+      expect(deriveInboxState({ ...q(bound + 5000), metrics: wedged }, T0)).toBe("unresponsive_inbox");
+      expect(deriveInboxState({ ...q(bound + 5000), metrics: within }, T0)).toBe("working");
+    });
+
+    it("falls back to turn_started_at + cap when turn_deadline_at is unparseable", () => {
+      const metrics = { adapter_state: "turn_running", turn_deadline_at: "not-a-date", turn_started_at: iso(T0 - bound - 1) };
+      expect(deriveInboxState({ ...q(bound + 5000), metrics }, T0)).toBe("unresponsive_inbox");
+    });
+
+    it("with no usable start either, bounds on the age of the oldest queued delivery", () => {
+      const metrics = { adapter_state: "turn_running" };
+      expect(deriveInboxState({ ...q(bound + 1), metrics }, T0)).toBe("unresponsive_inbox");
+      expect(deriveInboxState({ ...q(bound), metrics }, T0)).toBe("working");
+      const garbage = { adapter_state: "turn_running", turn_deadline_at: "x", turn_started_at: "y" };
+      expect(deriveInboxState({ ...q(bound + 1), metrics: garbage }, T0)).toBe("unresponsive_inbox");
+    });
+
+    it("honours a configured cap (turn_cap_seconds)", () => {
+      const metrics = { adapter_state: "turn_running" };
+      const cap = 300;
+      const b = cap * 1000 + TURN_DEADLINE_GRACE_MS;
+      expect(deriveInboxState({ ...q(b + 1), turn_cap_seconds: cap, metrics }, T0)).toBe("unresponsive_inbox");
+      expect(deriveInboxState({ ...q(b), turn_cap_seconds: cap, metrics }, T0)).toBe("working");
+    });
+
+    it("a reported, parseable deadline still wins over the fallback", () => {
+      const metrics = { adapter_state: "turn_running", turn_started_at: iso(T0 - bound - 1), turn_deadline_at: iso(T0 + 600_000) };
+      expect(deriveInboxState({ ...q(bound + 5000), metrics }, T0)).toBe("working");
+    });
+
+    it("nothing queued is still working, however long the turn", () => {
+      const metrics = { adapter_state: "turn_running", turn_started_at: iso(T0 - 10 * bound) };
+      expect(deriveInboxState({ ...base, queued: 0, metrics }, T0)).toBe("working");
+    });
+  });
+
   it("is floor_wait when deliveries wait on a floor and no turn is running", () => {
     expect(deriveInboxState({ ...base, queued: 0, floor_waits: 1 }, T0)).toBe("floor_wait");
   });
