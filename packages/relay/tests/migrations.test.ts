@@ -102,6 +102,96 @@ describe("transactional migrations (M6)", () => {
     expect(versions(db)).toEqual(before);
   });
 
+  // #155 clamp flag and counters: migration 027 adds four defaulted columns.
+  describe("migration 027 — phase clamp flags and per-agent report counters", () => {
+    const NEW_COLUMNS: Array<[string, string]> = [
+      ["message_deliveries", "phase_time_clamped"],
+      ["delivery_turn_attempts", "time_clamped"],
+      ["agents", "phase_invalid_holder_reports"],
+      ["agents", "phase_refused_attempt_reports"]
+    ];
+    const count = (db: Database.Database, table: string, col: string) =>
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).filter((c) => c.name === col).length;
+
+    it("is the next migration file and adds only the four columns", () => {
+      const files = fs.readdirSync(REAL_MIGRATIONS_DIR).filter((f) => f.startsWith("027_"));
+      expect(files).toEqual(["027_phase_clamp_flags_and_counters.sql"]);
+      const sql = fs.readFileSync(path.join(REAL_MIGRATIONS_DIR, files[0]), "utf8");
+      const statements = sql.split(";").map((s) => s.replace(/--.*$/gm, "").trim()).filter(Boolean);
+      expect(statements).toHaveLength(4);
+      for (const s of statements) expect(s).toMatch(/^ALTER TABLE \w+ ADD COLUMN \w+ INTEGER NOT NULL DEFAULT 0$/);
+    });
+
+    it("upgrades a 026 database: existing rows read 0, nothing else changes, and a re-run is a no-op", () => {
+      const db = new Database(":memory:");
+      db.exec(schemaSql);
+      const before027 = fs.mkdtempSync(path.join(os.tmpdir(), "ekho-before-027-"));
+      try {
+        for (const f of fs.readdirSync(REAL_MIGRATIONS_DIR).filter((n) => n.endsWith(".sql") && Number(n.slice(0, 3)) < 27))
+          fs.copyFileSync(path.join(REAL_MIGRATIONS_DIR, f), path.join(before027, f));
+        runMigrationsOn(db, before027);
+        // schema.ts already defines the new columns; drop them to get the real 026 shape.
+        for (const [table, col] of NEW_COLUMNS) db.exec(`ALTER TABLE ${table} DROP COLUMN ${col}`);
+        for (const [table, col] of NEW_COLUMNS) expect(hasColumn(db, table, col)).toBe(false);
+        expect(versions(db)).not.toContain(27);
+        db.exec(`INSERT INTO fleets (id, name, created_at) VALUES ('f027', 'old', '2026-11-01T00:00:00.000Z');
+          INSERT INTO agents (id, fleet_id, display_name, runtime, status, policy_profile, created_at, last_inbox_poll_at)
+            VALUES ('a027', 'f027', 'old', 'custom', 'active', 'default', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:01.000Z');
+          INSERT INTO messages (id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+            message_type, priority, body_json, ttl_seconds, created_at, expires_at, status)
+            VALUES ('m027', 'f027', 'old-conv', 'old-cor', 'a027', 'agent', 'a027', 'direct', 'normal', '{"text":"old"}',
+              3600, '2026-11-01T00:00:00.000Z', '2026-11-01T01:00:00.000Z', 'acked');
+          INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, floor_wait_started_at, turn_attempts,
+            latest_attempt, latest_turn_id, attempts_capped, phase_recorded_at, status)
+            VALUES ('d027', 'm027', 'a027', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:02.000Z', 1, 1, 'old.1', 1,
+              '2026-11-01T00:00:03.000Z', 'acked');
+          INSERT INTO delivery_turn_attempts (delivery_id, message_id, recipient_agent_id, turn_id, attempt, started_at, phase_recorded_at)
+            VALUES ('d027', 'm027', 'a027', 'old.1', 1, '2026-11-01T00:00:02.500Z', '2026-11-01T00:00:03.000Z')`);
+        const snapshot = () => ({
+          delivery: db.prepare(`SELECT id, queued_at, floor_wait_started_at, turn_attempts, latest_attempt, latest_turn_id,
+            attempts_capped, phase_recorded_at, status FROM message_deliveries WHERE id = 'd027'`).get(),
+          attempt: db.prepare("SELECT turn_id, attempt, started_at, phase_recorded_at FROM delivery_turn_attempts WHERE delivery_id = 'd027'").get(),
+          agent: db.prepare("SELECT display_name, status, last_inbox_poll_at FROM agents WHERE id = 'a027'").get()
+        });
+        const before = snapshot();
+
+        runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+
+        expect(versions(db)).toContain(27);
+        for (const [table, col] of NEW_COLUMNS) expect(count(db, table, col)).toBe(1);
+        expect(snapshot()).toEqual(before);
+        // Pre-upgrade rows are not known to have been clamped or miscounted: they read 0, never backfilled.
+        expect(db.prepare("SELECT phase_time_clamped FROM message_deliveries WHERE id = 'd027'").get()).toEqual({ phase_time_clamped: 0 });
+        expect(db.prepare("SELECT time_clamped FROM delivery_turn_attempts WHERE delivery_id = 'd027'").get()).toEqual({ time_clamped: 0 });
+        expect(db.prepare("SELECT phase_invalid_holder_reports AS h, phase_refused_attempt_reports AS r FROM agents WHERE id = 'a027'").get())
+          .toEqual({ h: 0, r: 0 });
+
+        db.prepare("UPDATE agents SET phase_invalid_holder_reports = 3 WHERE id = 'a027'").run();
+        const applied = db.prepare("SELECT applied_at FROM schema_migrations WHERE version = 27").all();
+        runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+        expect(db.prepare("SELECT applied_at FROM schema_migrations WHERE version = 27").all()).toEqual(applied);
+        expect(db.prepare("SELECT phase_invalid_holder_reports AS h FROM agents WHERE id = 'a027'").get()).toEqual({ h: 3 });
+      } finally {
+        fs.rmSync(before027, { recursive: true, force: true });
+        db.close();
+      }
+    });
+
+    it("is a no-op on a fresh schema.ts database: each column exists exactly once with default 0", () => {
+      const db = new Database(":memory:");
+      db.exec(schemaSql);
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      expect(versions(db)).toContain(27);
+      for (const [table, col] of NEW_COLUMNS) {
+        expect(count(db, table, col)).toBe(1);
+        const info = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; notnull: number; dflt_value: string | null }>)
+          .find((c) => c.name === col)!;
+        expect({ notnull: info.notnull, dflt: info.dflt_value }).toEqual({ notnull: 1, dflt: "0" });
+      }
+      db.close();
+    });
+  });
+
   // Peer auto-reply ON by default: migration 015 flips the existing live fleet on
   // (peer_autoreply 0 -> 1) while leaving already-on agents untouched.
   it("migration 015 flips existing peer_autoreply=0 rows to 1", () => {

@@ -480,6 +480,17 @@ components:
           description: Relay clock time of the earliest output sent by a covering turn. This does not establish that the output answered the delivery.
         first_reply_turn_id: { type: [string, "null"] }
         phase_recorded_at: { type: [string, "null"], format: date-time }
+        phase_time_clamped:
+          type: boolean
+          description: >
+            True when at least one adapter-reported time stored for this
+            delivery (`floor_wait_started_at`, `floor_granted_at`,
+            `floor_overrun_at`, `adapter_dead_lettered_at`, or the start or end
+            of one of its turn attempts) was more than 24 hours from relay
+            time, or unparseable, and was replaced by the relay's receive time.
+            It does not say which time. Once set it stays set. A report that
+            stored nothing (a repeat or a refused report) never sets it. False
+            for deliveries reported before the relay tracked it.
         delivery_attempts:
           type: integer
         retry_count:
@@ -1961,7 +1972,7 @@ paths:
       operationId: reportDeliveryPhases
       tags: [Agent]
       summary: Report bounded delivery and turn phases
-      description: Reports refer only to the authenticated agent's own delivery rows. Unknown or foreign ids are refused without disclosing existence. Timestamps are adapter clock and are clamped to relay time beyond 24 hours. Replies mean turn sent output, not answered. Attempts 1 through 8 may be retained; new overflow attempts 9 through 65535 are refused and set attempts_capped. Values outside 1 through 65535 are invalid.
+      description: Reports refer only to the authenticated agent's own delivery rows. Unknown or foreign ids are refused without disclosing existence. Timestamps are adapter clock and are clamped to relay time beyond 24 hours; when a clamped time is stored, the delivery's `phase_time_clamped` is set. A `floor_wait` whose `holder_agent_id` is not an agent of the caller's fleet is recorded with no holder and counted on the caller; the response is the same as for a valid holder. Replies mean turn sent output, not answered. Attempts 1 through 8 may be retained; new overflow attempts 9 through 65535 are refused, set attempts_capped and are counted on the caller. Both counts are returned only to operators, on `GET /v1/operator/fleet-health` (`phase_reports`). Values outside 1 through 65535 are invalid.
       security:
         - AgentHMAC: []
       requestBody:
@@ -3212,6 +3223,33 @@ paths:
                               format: date-time
                               nullable: true
                               description: Same value as `last_inbox_poll_at`.
+                        phase_reports:
+                          type: object
+                          description: >
+                            Lifetime counts of this agent's own
+                            `POST /v1/delivery-phases` reports that the relay
+                            could not take at face value (#155). Diagnostic
+                            only: not an input to `health` or `inbox.state`,
+                            never reset, and zero for reports made before the
+                            relay counted them. Operator sessions only; no
+                            agent-facing response carries them.
+                          properties:
+                            invalid_holder:
+                              type: integer
+                              minimum: 0
+                              description: >
+                                `floor_wait` reports stored with no holder
+                                because `holder_agent_id` did not name an agent
+                                in this fleet. A repeat of an already recorded
+                                `floor_wait` is not counted.
+                            refused_attempts:
+                              type: integer
+                              minimum: 0
+                              description: >
+                                Turn reports refused by the eight-attempt cap
+                                (the same refusals that set `attempts_capped`).
+                                It counts reports, so a resent report counts
+                                again.
                         consecutive_missed_heartbeats:
                           type: integer
         "401":
@@ -3246,7 +3284,7 @@ paths:
       summary: Who talked to whom
       description: >
         Message-flow graph for the fleet over a recent window. Each node is the
-        agent's fleet-health row, so it also carries `last_inbox_poll_at` (see
+        agent's fleet-health row, so it also carries `last_inbox_poll_at` and `phase_reports` (see
         `GET /v1/operator/fleet-health`); operator sessions only.
       security:
         - OperatorBearer: []

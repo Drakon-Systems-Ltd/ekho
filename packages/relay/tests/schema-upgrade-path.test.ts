@@ -156,7 +156,7 @@ describe("migration 025 on an existing database, in boot order", () => {
       expect(raw.name).toBe(dbPath);
 
       // The migration ran, once, and added exactly one of each column.
-      expect(versions(raw)).toEqual([...expectedBefore, 25, 26]);
+      expect(versions(raw)).toEqual([...expectedBefore, 25, 26, 27]); // every later migration applies on the same boot
       expect(columns(raw, "agents").filter((c) => c === "last_inbox_poll_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "ack_recorded_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "first_reply_at")).toHaveLength(1);
@@ -266,7 +266,8 @@ describe("migration 026 from an existing 025 database", () => {
         expect(raw.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get()).toEqual({ version: 25 });
         expect((raw.prepare("PRAGMA table_info(message_deliveries)").all() as Array<{ name: string }>).some((c) => c.name === "first_reply_at")).toBe(false);
         runMigrationsOn(raw, MIGRATIONS_DIR);
-        expect(raw.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get()).toEqual({ version: 26 });
+        // 026 applied (later migrations apply on the same run, so the newest version is not pinned here).
+        expect(raw.prepare("SELECT COUNT(*) AS n FROM schema_migrations WHERE version = 26").get()).toEqual({ n: 1 });
         expect(raw.prepare("SELECT acked_at, ack_recorded_at, first_reply_at, turn_attempts FROM message_deliveries WHERE id = 'd026'").get())
           .toEqual({ acked_at: "2026-11-01T00:00:05.000Z", ack_recorded_at: "2026-11-01T00:00:06.000Z", first_reply_at: null, turn_attempts: 0 });
         expect(raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_turn_replies'").get()).toBeTruthy();

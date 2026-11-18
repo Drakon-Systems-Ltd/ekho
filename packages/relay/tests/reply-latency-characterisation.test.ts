@@ -113,7 +113,8 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
       "dead_letter_reason", "dead_lettered_at", "delivered_at", "delivery_attempts", "fetch_wait", "first_reply_at",
       "first_reply_turn_id", "floor_granted_at", "floor_overrun_at", "floor_wait_started_at",
       "last_failure_reason", "latest_attempt", "latest_turn_category", "latest_turn_id", "latest_turn_outcome",
-      "latest_turn_started_at", "phase_recorded_at", "queued_at", "recipient_agent_id", "retry_count", "status", "turn_attempts"
+      "latest_turn_started_at", "phase_recorded_at", "phase_time_clamped", "queued_at", "recipient_agent_id", "retry_count",
+      "status", "turn_attempts"
     ]);
     expect(d.ack_recorded_at).toBeTruthy();
     for (const k of ["first_reply_at", "first_reply_turn_id", "floor_wait_started_at",
@@ -121,6 +122,7 @@ describe("#155 reply latency: relay transport vs floor vs health (characterises 
       "latest_turn_outcome", "latest_turn_category", "phase_recorded_at", "adapter_dead_lettered_at"]) expect(d[k]).toBeNull();
     expect(d.turn_attempts).toBe(0);
     expect(d.attempts_capped).toBe(false);
+    expect(d.phase_time_clamped).toBe(false); // no adapter time was stored, so none was clamped
     // fetch_wait (#155) labels how long the FETCH took, nothing more: a
     // promptly collected, never-answered delivery reads "prompt".
     expect(d.fetch_wait).toBe("prompt");
