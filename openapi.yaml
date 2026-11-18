@@ -3207,7 +3207,12 @@ paths:
                                 `turn_deadline_at`, past `turn_started_at` plus
                                 `EKHO_TURN_INTERVAL_CAP_SECONDS` plus 60 s, or,
                                 with no parseable start either, queued work
-                                older than that cap plus 60 s). `working`: the
+                                older than that cap plus 60 s). A reported
+                                `turn_deadline_at` later than now plus that cap
+                                plus 60 s, or a `turn_started_at` more than 60 s
+                                ahead of relay time, counts as unparseable. A
+                                cap of 0, negative or non-finite uses the 900 s
+                                default. `working`: the
                                 heartbeat reports `adapter_state=turn_running`.
                                 `floor_wait`: deliveries waiting on a floor,
                                 counted over both `queued` and `delivered`

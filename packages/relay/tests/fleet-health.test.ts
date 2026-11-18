@@ -214,6 +214,70 @@ describe("deriveInboxState (#155 Phase 2)", () => {
     });
   });
 
+  describe("implausible reported turn timestamps are treated as unparseable (#155 follow-up to #188)", () => {
+    const CAP_MS = 900_000;
+    const bound = CAP_MS + TURN_DEADLINE_GRACE_MS;
+    const q = (age: number) => ({ ...base, queued: 1, oldest_queued_at: iso(T0 - age), last_poll_at: recentPoll });
+
+    it("a deadline far in the future with no start is unresponsive_inbox", () => {
+      const metrics = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + 365 * 86_400_000) };
+      expect(deriveInboxState({ ...q(bound + 5000), metrics }, T0)).toBe("unresponsive_inbox");
+    });
+
+    it("a deadline exactly at now + cap + 60 s is honoured; one millisecond later is not", () => {
+      const at = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + bound) };
+      const past = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + bound + 1) };
+      expect(deriveInboxState({ ...q(bound + 5000), metrics: at }, T0)).toBe("working");
+      expect(deriveInboxState({ ...q(bound + 5000), metrics: past }, T0)).toBe("unresponsive_inbox");
+    });
+
+    it("an implausible deadline falls through to the start bound", () => {
+      const far = iso(T0 + 365 * 86_400_000);
+      const young = { adapter_state: "turn_running", turn_deadline_at: far, turn_started_at: iso(T0 - bound) };
+      const old = { adapter_state: "turn_running", turn_deadline_at: far, turn_started_at: iso(T0 - bound - 1) };
+      expect(deriveInboxState({ ...q(bound + 5000), metrics: young }, T0)).toBe("working");
+      expect(deriveInboxState({ ...q(bound + 5000), metrics: old }, T0)).toBe("unresponsive_inbox");
+    });
+
+    it("a start beyond now + 60 s with no deadline falls through to the oldest-queued bound", () => {
+      const metrics = { adapter_state: "turn_running", turn_started_at: iso(T0 + TURN_DEADLINE_GRACE_MS + 1) };
+      expect(deriveInboxState({ ...q(bound + 1), metrics }, T0)).toBe("unresponsive_inbox");
+      expect(deriveInboxState({ ...q(1000), metrics }, T0)).toBe("working");
+    });
+
+    it("a start up to 60 s ahead of relay time is usable (clock skew)", () => {
+      const metrics = { adapter_state: "turn_running", turn_started_at: iso(T0 + TURN_DEADLINE_GRACE_MS) };
+      // Usable start: deadline of start + cap + grace is in the future, so working,
+      // even though the oldest queued delivery is older than the bound.
+      expect(deriveInboxState({ ...q(bound + 5000), metrics }, T0)).toBe("working");
+    });
+
+    it("an implausible deadline with nothing queued is working", () => {
+      const metrics = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + 365 * 86_400_000) };
+      expect(deriveInboxState({ ...base, queued: 0, metrics }, T0)).toBe("working");
+    });
+
+    it("the horizon uses the passed turn_cap_seconds, not the default", () => {
+      const cap = 300;
+      const b = cap * 1000 + TURN_DEADLINE_GRACE_MS;
+      const at = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + b) };
+      const past = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + b + 1) };
+      expect(deriveInboxState({ ...q(b + 5000), turn_cap_seconds: cap, metrics: at }, T0)).toBe("working");
+      expect(deriveInboxState({ ...q(b + 5000), turn_cap_seconds: cap, metrics: past }, T0)).toBe("unresponsive_inbox");
+    });
+
+    it("turn_cap_seconds of 0, negative or NaN uses the 900 s default (pin)", () => {
+      for (const cap of [0, -5, Number.NaN]) {
+        const noDeadline = { adapter_state: "turn_running" };
+        expect(deriveInboxState({ ...q(bound), turn_cap_seconds: cap, metrics: noDeadline }, T0)).toBe("working");
+        expect(deriveInboxState({ ...q(bound + 1), turn_cap_seconds: cap, metrics: noDeadline }, T0)).toBe("unresponsive_inbox");
+        // Horizon too: a deadline at now + 900 s + 60 s is the edge for a zero/negative/NaN cap.
+        const at = { adapter_state: "turn_running", turn_deadline_at: iso(T0 + bound) };
+        expect(deriveInboxState({ ...q(bound + 5000), turn_cap_seconds: cap, metrics: at }, T0)).toBe("working");
+      }
+    });
+  });
+
   it("is floor_wait when deliveries wait on a floor and no turn is running", () => {
     expect(deriveInboxState({ ...base, queued: 0, floor_waits: 1 }, T0)).toBe("floor_wait");
   });

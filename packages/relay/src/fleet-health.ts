@@ -99,7 +99,9 @@ export function deriveAgentHealth(input: AgentHealthInput, now: number = Date.no
 // it can read unresponsive_inbox, and `working` / `floor_wait` cannot occur on
 // live data. Once an adapter reports turn_running, a missing or unparseable
 // turn_deadline_at is bounded by turn_started_at + the turn cap (or, with no
-// start either, by the age of the oldest queued delivery); see deriveInboxState.
+// start either, by the age of the oldest queued delivery); a deadline later than
+// now + cap + 60 s or a start later than now + 60 s counts as unparseable; see
+// deriveInboxState.
 // ---------------------------------------------------------------------------
 
 export type InboxState = "unresponsive_inbox" | "working" | "floor_wait" | "queued" | "idle";
@@ -155,10 +157,23 @@ export function deriveInboxState(input: InboxStateInput, now: number = Date.now(
   // oldest queued delivery (an adapter does not poll during a turn, and no turn
   // may run longer than the cap, so work queued longer than cap + grace has
   // outlived any turn that could be holding it).
+  //
+  // Zero cap: a turn_cap_seconds of 0, negative or non-finite uses the 900 s
+  // default (honouring 0 would shrink every bound to the 60 s grace and flag
+  // any reported turn longer than a minute).
+  // Limit: an adapter that keeps reporting a fresh, plausible deadline on every
+  // heartbeat still reads `working`; the deadline wins by design.
   let wedged = false;
   if (turnRunning) {
-    const deadlineMs = Date.parse(strMetric(input.metrics, "turn_deadline_at") ?? "");
-    const startedMs = Date.parse(strMetric(input.metrics, "turn_started_at") ?? "");
+    // An implausible reported time is treated exactly like an unparseable one.
+    // No turn may run longer than the cap, so a real deadline is never further
+    // ahead of relay time than cap + grace, and a real start is never ahead of
+    // relay time by more than the grace (clock skew). Otherwise one bad
+    // timestamp would hide a stuck inbox indefinitely.
+    let deadlineMs = Date.parse(strMetric(input.metrics, "turn_deadline_at") ?? "");
+    if (deadlineMs > now + capMs + TURN_DEADLINE_GRACE_MS) deadlineMs = NaN;
+    let startedMs = Date.parse(strMetric(input.metrics, "turn_started_at") ?? "");
+    if (startedMs > now + TURN_DEADLINE_GRACE_MS) startedMs = NaN;
     if (Number.isFinite(deadlineMs)) wedged = now > deadlineMs + TURN_DEADLINE_GRACE_MS;
     else if (Number.isFinite(startedMs)) wedged = now > startedMs + capMs + TURN_DEADLINE_GRACE_MS;
     else wedged = oldestAge !== null && oldestAge > capMs + TURN_DEADLINE_GRACE_MS;
