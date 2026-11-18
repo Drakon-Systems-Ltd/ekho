@@ -97,7 +97,9 @@ export function deriveAgentHealth(input: AgentHealthInput, now: number = Date.no
 // Limit: no adapter reports adapter_state / turn_started_at / turn_deadline_at
 // yet (Phase 3). Until then an agent inside a long turn with work queued behind
 // it can read unresponsive_inbox, and `working` / `floor_wait` cannot occur on
-// live data.
+// live data. Once an adapter reports turn_running, a missing or unparseable
+// turn_deadline_at is bounded by turn_started_at + the turn cap (or, with no
+// start either, by the age of the oldest queued delivery); see deriveInboxState.
 // ---------------------------------------------------------------------------
 
 export type InboxState = "unresponsive_inbox" | "working" | "floor_wait" | "queued" | "idle";
@@ -108,8 +110,18 @@ export interface InboxStateInput {
   oldest_queued_at?: string | null;
   /** Relay time of the agent's last GET /v1/inbox; null = never polled. */
   last_poll_at?: string | null;
-  /** Deliveries waiting on a floor: wait started, never granted/overrun, no turn attempt. */
+  /**
+   * Deliveries waiting on a floor: wait started, never granted/overrun, no turn
+   * attempt. Counts rows in status `queued` AND `delivered` (see the SQL in
+   * getFleetHealth); a floor wait is reported by the adapter and can start
+   * before or after the delivery is fetched.
+   */
   floor_waits?: number;
+  /**
+   * Longest a turn may run, in seconds (the clamped EKHO_TURN_INTERVAL_CAP_SECONDS).
+   * Bounds a `turn_running` report that carries no usable deadline. Default 900.
+   */
+  turn_cap_seconds?: number;
   /** Detection threshold in seconds (the existing clamped inboxStaleSeconds). */
   stale_seconds: number;
   /** Parsed heartbeat metrics; adapter_state / turn_* read only when strings. */
@@ -118,6 +130,9 @@ export interface InboxStateInput {
 
 // Grace after a reported turn deadline before the turn counts as wedged.
 export const TURN_DEADLINE_GRACE_MS = 60_000;
+// Default turn cap, matching the adapters' TURN_TIMEOUT and the relay's
+// EKHO_TURN_INTERVAL_CAP_SECONDS default.
+export const DEFAULT_TURN_CAP_SECONDS = 900;
 
 function strMetric(m: Record<string, unknown> | null | undefined, key: string): string | null {
   const v = m?.[key];
@@ -129,11 +144,26 @@ export function deriveInboxState(input: InboxStateInput, now: number = Date.now(
   const queued = Math.max(0, Number(input.queued) || 0);
   const adapterState = strMetric(input.metrics, "adapter_state");
   const turnRunning = adapterState === "turn_running";
-  const deadline = strMetric(input.metrics, "turn_deadline_at");
-  const deadlineMs = deadline ? Date.parse(deadline) : NaN;
-  const wedged = turnRunning && Number.isFinite(deadlineMs) && now > deadlineMs + TURN_DEADLINE_GRACE_MS;
-
   const oldestAge = ageMs(input.oldest_queued_at, now);
+  const capMs = (Number.isFinite(Number(input.turn_cap_seconds)) && Number(input.turn_cap_seconds) > 0
+    ? Number(input.turn_cap_seconds) : DEFAULT_TURN_CAP_SECONDS) * 1000;
+
+  // A reported turn is wedged once it is past its deadline plus grace. A
+  // `turn_running` report with no parseable deadline must not mask an
+  // unresponsive inbox forever (#186), so it is bounded instead: by the reported
+  // start plus the cap, or, with no usable start either, by the age of the
+  // oldest queued delivery (an adapter does not poll during a turn, and no turn
+  // may run longer than the cap, so work queued longer than cap + grace has
+  // outlived any turn that could be holding it).
+  let wedged = false;
+  if (turnRunning) {
+    const deadlineMs = Date.parse(strMetric(input.metrics, "turn_deadline_at") ?? "");
+    const startedMs = Date.parse(strMetric(input.metrics, "turn_started_at") ?? "");
+    if (Number.isFinite(deadlineMs)) wedged = now > deadlineMs + TURN_DEADLINE_GRACE_MS;
+    else if (Number.isFinite(startedMs)) wedged = now > startedMs + capMs + TURN_DEADLINE_GRACE_MS;
+    else wedged = oldestAge !== null && oldestAge > capMs + TURN_DEADLINE_GRACE_MS;
+  }
+
   const pollAge = ageMs(input.last_poll_at, now);
   const pollStale = pollAge === null || pollAge > staleMs;
 
