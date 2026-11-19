@@ -192,6 +192,103 @@ describe("stop() during an in-flight poll (reviewer probe)", () => {
   });
 });
 
+// #164: stop() cancels the inbox poll in flight instead of only waiting for it.
+// The stub poll here behaves as fetch does with a signal: it settles only when
+// the signal aborts, and then rejects with the abort reason.
+describe("stop() cancels the poll in flight (#164)", () => {
+  function abortablePoll(relay: ReturnType<typeof stubRelay>) {
+    const seen = { inFlight: 0, max: 0, signals: [] as Array<AbortSignal | undefined> };
+    (relay.client.getInbox as any).mockImplementation((_limit?: number, signal?: AbortSignal) => {
+      seen.signals.push(signal);
+      seen.inFlight++;
+      seen.max = Math.max(seen.max, seen.inFlight);
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          seen.inFlight--;
+          reject(signal.reason);
+        });
+      });
+    });
+    return seen;
+  }
+
+  it("aborts the poll, so stop() settles without waiting out the drain bound", async () => {
+    const relay = stubRelay();
+    const warnings: string[] = [];
+    const records: any[] = [];
+    const seen = abortablePoll(relay);
+    const stop = start(relay, records, warnings);
+    await tick();
+    expect(seen.inFlight).toBe(1);
+    expect(seen.signals[0]).toBeInstanceOf(AbortSignal);
+    expect(seen.signals[0]!.aborted).toBe(false);
+
+    hoisted.stopped = true;
+    let drained = false;
+    void stop().then(() => {
+      drained = true;
+    });
+    expect(seen.signals[0]!.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(drained).toBe(true);
+    expect(seen.inFlight).toBe(0);
+    expect(warnings.some((w) => w.includes("in-flight tick still running"))).toBe(false);
+    // A cancelled poll is not a poll failure, and nothing was acked or held.
+    expect(warnings.some((w) => w.includes("poll failed"))).toBe(false);
+    expect(relay.after()).toEqual([]);
+    expect(records).toEqual([]);
+  });
+
+  it("a poll held beyond STOP_DRAIN_MS + POLL_MS never overlaps the next loop's poll", async () => {
+    const relay = stubRelay();
+    const seen = abortablePoll(relay);
+    const stop = start(relay, []);
+    await tick();
+    expect(seen.inFlight).toBe(1);
+
+    hoisted.stopped = true;
+    await Promise.all([stop(), vi.advanceTimersByTimeAsync(STOP_DRAIN_MS)]);
+    const stop2 = start(relay, []); // the replacement loop, same relay client
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS + POLL_MS * 2);
+    expect(relay.client.getInbox.mock.calls.length).toBeGreaterThanOrEqual(2); // it does poll
+    expect(seen.max).toBe(1);
+    expect(seen.inFlight).toBe(1); // the replacement's own
+    await Promise.all([stop2(), vi.advanceTimersByTimeAsync(0)]);
+    expect(seen.inFlight).toBe(0);
+  });
+
+  it("a poll that completes normally is not aborted afterwards", async () => {
+    const relay = stubRelay();
+    const signals: Array<AbortSignal | undefined> = [];
+    (relay.client.getInbox as any).mockImplementation(async (_limit?: number, signal?: AbortSignal) => {
+      signals.push(signal);
+      return { messages: [] };
+    });
+    const stop = start(relay, []);
+    await tick();
+    await tick();
+    await Promise.all([stop(), vi.advanceTimersByTimeAsync(0)]);
+    expect(signals).toHaveLength(2);
+    expect(signals.every((s) => s instanceof AbortSignal && !s.aborted)).toBe(true);
+  });
+
+  it("cancels only the poll: an ack in flight at stop is given no signal and its batch is dead-lettered", async () => {
+    const relay = stubRelay();
+    const records: any[] = [];
+    relay.client.getInbox.mockResolvedValueOnce({ messages: [peer("m1", "free-conv")], peer_autoreply: true });
+    relay.client.ackMessages.mockImplementationOnce((() => new Promise(() => {})) as any);
+    const stop = start(relay, records);
+    await tick();
+    expect(relay.client.ackMessages).toHaveBeenCalledTimes(1);
+
+    hoisted.stopped = true;
+    void stop();
+    expect(relay.client.ackMessages.mock.calls[0]).toHaveLength(1);
+    expect(records.map((r) => [r.message.message_id, r.reason])).toEqual([["m1", INFLIGHT_LOOP_STOPPED_REASON]]);
+    await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS);
+  });
+});
+
 describe("stop() later in the tick", () => {
   it("between the ack and the turn: the acked batch is dead-lettered before stop returns, and gets no turn", async () => {
     const relay = stubRelay();

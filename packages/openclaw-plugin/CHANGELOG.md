@@ -4,6 +4,11 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **A stopped auto-reply loop cancels its inbox poll (part of #164).** When the loop stops (plugin unload, reload, a newer generation taking over, or the same copy being re-registered) it now aborts the `GET /v1/inbox` request it has in flight, using the SDK's `getInbox` signal, instead of only waiting up to 4 s (`STOP_DRAIN_MS`) for it. Before, a poll the relay held longer than that was left outstanding, and the next loop's first poll could run beside it: two inbox requests for one agent. Now the stopped loop's request is gone before the next loop polls, and the unload promise the host awaits settles without waiting out the bound. Only the poll is cancelled. Acks and floor calls are not, and messages already acknowledged are still dead-lettered before stop returns, as before.
+- **What a cancelled poll means for messages.** `GET /v1/inbox` marks messages delivered when the relay serves them. If the relay had already done that when the request was cut, those messages are delivered but unacknowledged, and the relay re-queues them after its delivery timeout (`EKHO_DELIVERY_TIMEOUT_SECONDS`, default 120) with its usual retry count and backoff. This is the same outcome as before for a poll that answered after stop: a stopped loop never acknowledged or processed that batch. If the relay had not yet served the batch, the messages stay queued. The plugin logs one info line when it cancels a poll.
+- **Limits.** The 4 s bound still applies to a tick waiting on an ack or a floor call, and to a client whose `getInbox` ignores the signal. No relay, SDK, trust or verification change.
+
 ## [0.9.0] - 2026-11-15
 
 No OpenClaw plugin changes. Version kept in step with the relay: 0.9.0 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026; no OpenClaw plugin update is required. The plugin does not send delivery phase reports in this release. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.

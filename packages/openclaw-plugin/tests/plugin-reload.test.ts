@@ -18,7 +18,10 @@ const relay = vi.hoisted(() => ({
   stopped: false,
   afterStop: [] as string[],
   // Overridable inbox; the default is an empty batch.
-  inbox: null as null | (() => Promise<unknown>),
+  inbox: null as null | ((signal?: AbortSignal) => Promise<unknown>),
+  // Inbox requests outstanding right now, and the most ever outstanding at once.
+  inFlight: 0,
+  maxInFlight: 0,
   floorFree: (conv: string) => conv !== "held-conv",
   spawnsAfterStop: 0,
   recovered: null as null | Record<string, unknown>,
@@ -50,9 +53,15 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
       relay.heartbeats.push({ client: this.n, metrics: { ...(payload.metrics ?? {}) } });
       return {};
     }
-    async getInbox() {
+    async getInbox(_limit?: number, signal?: AbortSignal) {
       relay.polls.push(this.n);
-      return relay.inbox ? relay.inbox() : { messages: [] };
+      relay.inFlight++;
+      relay.maxInFlight = Math.max(relay.maxInFlight, relay.inFlight);
+      try {
+        return await (relay.inbox ? relay.inbox(signal) : { messages: [] });
+      } finally {
+        relay.inFlight--;
+      }
     }
     async ackMessages() {
       if (relay.stopped) relay.afterStop.push("ack");
@@ -228,6 +237,8 @@ beforeEach(() => {
   relay.stopped = false;
   relay.afterStop.length = 0;
   relay.inbox = null;
+  relay.inFlight = 0;
+  relay.maxInFlight = 0;
   relay.spawnsAfterStop = 0;
   relay.recovered = null;
   relay.scopedDownloads.length = 0;
@@ -1055,6 +1066,100 @@ describe("unload with work in flight", () => {
     expect(deadLetters()).toHaveLength(1);
     expect(relay.afterStop).toEqual([]);
     expect(await producersOver(POLL_MS * 4)).toEqual({ heartbeat: [], poll: [], beats: 0 });
+  });
+});
+
+// #164: a stopped loop cancels its inbox poll, so a poll the relay holds longer
+// than the bounded drain is not left outstanding beside the next loop's. The
+// hung poll here settles only as fetch does with a signal: on abort, rejecting.
+describe("a poll held beyond STOP_DRAIN_MS + POLL_MS (#164)", () => {
+  const HOLD = STOP_DRAIN_MS + POLL_MS * 3;
+
+  /** Poll number `n` (1-based) hangs until its signal aborts; the rest answer empty. */
+  function hangPoll(n: number) {
+    const seen = { served: 0, aborted: 0 };
+    relay.inbox = (signal) => {
+      seen.served++;
+      if (seen.served !== n) return Promise.resolve({ messages: [] });
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          seen.aborted++;
+          reject(signal.reason);
+        });
+      });
+    };
+    return seen;
+  }
+
+  it("supersede then dispose: the resumed generation polls again with never more than one inbox request in flight", async () => {
+    const seen = hangPoll(2);
+    const a = await loadPluginCopy();
+    const hostA = fakeApi(true);
+    a.plugin.register(hostA.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2); // A: tick 1 answered, tick 2 in flight
+    expect(relay.inFlight).toBe(1);
+
+    const b = await loadPluginCopy(); // supersedes A with A's poll outstanding
+    const hostB = fakeApi(true);
+    b.plugin.register(hostB.api);
+    await untilConnected(b.conn);
+    const cancelledAtSupersede = seen.aborted;
+    await Promise.all(hostB.dispose()); // B disposed before it polls: A resumes
+
+    const held = await producersOver(HOLD);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([1]); // the resumed loop is polling
+    expect(relay.maxInFlight).toBe(1);
+    expect(relay.inFlight).toBe(0);
+    expect(cancelledAtSupersede).toBe(1); // cancelled by the hand-off itself, not later
+    expect(deadLetters()).toEqual([]);
+  });
+
+  it("same module copy, re-registered: the rebound loop polls with never more than one inbox request in flight", async () => {
+    const seen = hangPoll(2);
+    const copy = await loadPluginCopy();
+    const oldHost = fakeApi(true);
+    copy.plugin.register(oldHost.api);
+    await untilConnected(copy.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2); // tick 2's poll in flight
+    expect(relay.inFlight).toBe(1);
+
+    const newHost = fakeApi(true); // the host registers the SAME copy again
+    copy.plugin.register(newHost.api);
+    await untilConnected(copy.conn);
+    const unloads = oldHost.dispose(); // stale dispose: the loop rebinds to the live api
+
+    const held = await producersOver(HOLD);
+    await Promise.all(unloads);
+    expect(held.heartbeat).toEqual([1]);
+    expect(held.poll).toEqual([1]);
+    expect(relay.polls.length).toBeGreaterThanOrEqual(2);
+    expect(relay.maxInFlight).toBe(1);
+    expect(relay.inFlight).toBe(0);
+    expect(seen.aborted).toBe(1);
+    expect(deadLetters()).toEqual([]);
+    expect(await newHost.inbox()).toMatchObject({ listener: "up" });
+  });
+
+  it("host unload: the poll is cancelled and the unload promise settles before the drain bound", async () => {
+    const seen = hangPoll(1);
+    const a = await loadPluginCopy();
+    const host = fakeApi(true);
+    a.plugin.register(host.api);
+    await untilConnected(a.conn);
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(relay.inFlight).toBe(1);
+
+    let settled = false;
+    void Promise.all(host.dispose()).then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(seen.aborted).toBe(1);
+    expect(settled).toBe(true);
+    expect(relay.inFlight).toBe(0);
+    expect(await producersOver(HOLD)).toEqual({ heartbeat: [], poll: [], beats: 0 });
   });
 });
 
