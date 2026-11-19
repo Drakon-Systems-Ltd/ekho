@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenClaw plugin: a stopped auto-reply loop cancels its inbox poll (part of #164).** On stop (unload, reload, a newer generation taking over, or a re-register of the same copy) the loop aborts the `GET /v1/inbox` request it has in flight through the SDK's `getInbox` signal (#184), instead of only waiting up to 4 s for it. A poll the relay held longer than that used to stay outstanding, so the next loop's first poll could overlap it; now at most one inbox request per agent is in flight across the hand-off, and the host's unload wait ends at once. Only the poll is cancelled; acks and floor calls are not. A batch the relay had already marked delivered when the request was cut is unacknowledged and is re-queued by the relay after its delivery timeout (default 120 s), the same outcome as before for a poll answering after stop. The 4 s bound still covers acks, floor calls and a client that ignores the signal. Plugin only: no relay, SDK, trust or verification change. Details in `packages/openclaw-plugin/CHANGELOG.md`.
+
 ### Added
 
 - **Relay: implausible reported turn timestamps no longer mask an unresponsive inbox (#155 follow-up to #188).** In `inbox.state`, a reported `turn_deadline_at` later than relay time plus the turn cap plus 60 s, or a `turn_started_at` more than 60 s ahead of relay time, is now treated like an unparseable one and falls through to the existing start bound, then to the oldest-queued bound. A turn cap of 0, negative or non-finite still uses the 900 s default (now pinned by a test). Limit: an adapter that keeps reporting a fresh, plausible deadline on every heartbeat still reads `working`. No API shape, migration or setting changes. No adapter reports `adapter_state` yet. The reply-latency issue (#155) remains open.

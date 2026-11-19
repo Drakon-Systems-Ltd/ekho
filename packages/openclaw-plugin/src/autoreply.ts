@@ -275,6 +275,9 @@ export const DEFERRED_LOOP_STOPPED_REASON = "deferred_loop_stopped";
 export const INFLIGHT_LOOP_STOPPED_REASON = "inflight_loop_stopped";
 // How long a stop() waits for an in-flight tick to settle. Under OpenClaw's
 // 5 s budget for an unload hook, so the host never cuts the wait short.
+// stop() also cancels the tick's inbox poll (#164), so a tick parked on a slow
+// poll settles at once; the bound is for the awaits stop() does not cancel
+// (acks, floor calls) and for a client that ignores the abort signal.
 export const STOP_DRAIN_MS = 4_000;
 
 const SEEN_CAP = 500; // FIFO-evicted dedupe set (Part C, rule 3)
@@ -2212,8 +2215,9 @@ async function triggerTurn(
  * qualifying inbound message it wakes the agent (which replies via ekho_send).
  * Spends zero LLM tokens unless a real message arrives. Returns an idempotent
  * stop(): it clears the timer and dead-letters every acked message still held
- * in memory before returning, and its promise settles once the tick in flight
- * has (bounded). A stopped loop acks, stashes and spawns nothing more.
+ * in memory before returning, cancels the inbox poll in flight, and its promise
+ * settles once the tick in flight has (bounded). A stopped loop acks, stashes
+ * and spawns nothing more.
  */
 export function startAutoReply(opts: {
   client: EkhoAgentClient;
@@ -2288,6 +2292,10 @@ export function startAutoReply(opts: {
   let stopped = false;
   // The tick in flight, for stop() to wait on.
   let currentTick: Promise<void> | null = null;
+  // Cancels the inbox poll in flight, if any (#164). Only the poll: it is a
+  // read whose result a stopped loop discards anyway. Acks and floor calls
+  // are never cancelled, because their outcome decides what stop() owes.
+  let pollAbort: AbortController | null = null;
   let stopping: Promise<void> | null = null;
   // Messages the tick in flight has acked (or is acking) but not yet handed to
   // a turn or the stash. In that window they exist only in this tick's memory.
@@ -2332,12 +2340,31 @@ export function startAutoReply(opts: {
     // an invariant check, not a race guard.
     if (state.inFlight) return; // serialize turns (Part C, rule 6)
     let batch: InboxBatch;
+    const poll = new AbortController();
+    pollAbort = poll;
     try {
-      batch = (await client.getInbox()) as unknown as InboxBatch; // consumes: queued→delivered
+      // consumes: queued→delivered. `undefined` keeps the SDK's default limit.
+      batch = (await client.getInbox(undefined, poll.signal)) as unknown as InboxBatch;
     } catch (err) {
-      if (stopped) return;
+      if (stopped) {
+        // stop() cancelled this poll (or it failed on its own after stop).
+        // Nothing was acked. If the relay had already marked a batch
+        // delivered when the request was cut, it re-queues those messages
+        // after its delivery timeout, exactly as for a batch that arrives
+        // after stop (below); if it had not, they were never taken.
+        if (poll.signal.aborted) {
+          quietly(
+            "info",
+            `[ekho-autoreply] cancelled the inbox poll in flight at stop; nothing was acked, and the relay ` +
+              `redelivers anything it had already marked delivered after its delivery timeout`
+          );
+        }
+        return;
+      }
       log?.warn?.(`[ekho-autoreply] poll failed: ${String(err)}`);
       return;
+    } finally {
+      if (pollAbort === poll) pollAbort = null;
     }
     if (!batch || !Array.isArray(batch.messages)) return;
     if (stopped) {
@@ -2790,6 +2817,16 @@ export function startAutoReply(opts: {
     stopped = true;
     clearInterval(timer);
     flushOnStop();
+    // After the flush, so acked work is on disk before anything else happens.
+    // With the poll cancelled the tick settles as soon as the rejection is
+    // delivered, and no inbox request from this loop stays outstanding for a
+    // later loop's poll to overlap (#164).
+    try {
+      pollAbort?.abort();
+    } catch {
+      /* stop() never throws */
+    }
+    pollAbort = null;
     quietly("info", `[ekho-autoreply] stopped listening as ${selfAgentId}`);
     const inFlight = currentTick;
     stopping = inFlight
