@@ -58,6 +58,8 @@ interface RuntimeRegistry {
   reloadServed?: Map<string, ReloadServedLedger>;
   /** Last loop epoch handed out (#111); see nextReloadEpoch. */
   reloadEpochs?: number;
+  /** Newest epoch recorded in any served ledger dropped WHOLE (#111). */
+  reloadServedFloor?: { key?: number; nonce?: number };
 }
 
 function registry(): RuntimeRegistry {
@@ -328,6 +330,12 @@ function isHandoffEntry(e: unknown): e is ReloadHandoffEntry {
 function pruneHandoffs(list: ReloadHandoffEntry[], nowMs: number): ReloadHandoffDropped[] {
   const dropped: ReloadHandoffDropped[] = [];
   for (let i = list.length - 1; i >= 0; i--) {
+    // Not an entry at all (another bundle version wrote it): it can never be
+    // taken, and must not make every later take and deposit throw.
+    if (!isHandoffEntry(list[i])) {
+      list.splice(i, 1);
+      continue;
+    }
     if (nowMs - list[i].depositedAtMs > RELOAD_HANDOFF_MAX_AGE_MS) {
       dropped.push({ entry: list[i], why: "unclaimed_too_long" });
       list.splice(i, 1);
@@ -351,7 +359,8 @@ export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date
   const touched = new Set<string>();
   for (const e of entries) {
     if (!isHandoffEntry(e)) continue;
-    const list = store.get(e.agentId) ?? [];
+    const held = store.get(e.agentId);
+    const list = Array.isArray(held) ? held : [];
     list.push(e);
     store.set(e.agentId, list);
     touched.add(e.agentId);
@@ -384,7 +393,10 @@ export function takeReloadHandoff(
   if (r.byAgent.get(agentId)?.generation !== takerGeneration) return { taken: [], dropped: [] };
   const store = handoffStore();
   const list = store.get(agentId);
-  if (!list) return { taken: [], dropped: [] };
+  if (!Array.isArray(list)) {
+    store.delete(agentId);
+    return { taken: [], dropped: [] };
+  }
   const dropped = pruneHandoffs(list, nowMs);
   const taken: ReloadHandoffEntry[] = [];
   const left: ReloadHandoffEntry[] = [];
@@ -489,6 +501,10 @@ export function noteReloadServed(
     while (store.size > RELOAD_SERVED_DOMAINS) {
       const oldest = store.keys().next().value as string | undefined;
       if (oldest === undefined) break;
+      // A ledger dropped whole takes its evidence with it. Keep the newest
+      // epoch it held as a process-wide floor: which domain it belonged to is
+      // not remembered, so every domain's older hand-offs are withheld.
+      forgetDomain(store.get(oldest));
       store.delete(oldest);
     }
   }
@@ -507,11 +523,35 @@ export function noteReloadServed(
  * by an EARLIER loop than that cannot be shown to be unserved any more: the
  * record that would call it a duplicate may be the one that was dropped. The
  * hand-off withholds such an entry (with a record) instead of risking a
- * second turn. A domain the per-process bound dropped whole reads as nothing
- * forgotten; it takes 64 other connection identities in one process to get there.
+ * second turn. A domain the per-process bound dropped whole (64 other
+ * connection identities in one process) leaves its newest epoch as a floor
+ * that applies to every domain.
  */
 export function reloadServedForgotten(agentId: string, owner: string, kind: "key" | "nonce"): number | undefined {
-  return registry().reloadServed?.get(servedDomain(agentId, owner))?.forgotten?.[kind];
+  const r = registry();
+  const own = r.reloadServed?.get(servedDomain(agentId, owner))?.forgotten?.[kind];
+  const floor = r.reloadServedFloor?.[kind];
+  if (typeof own !== "number") return typeof floor === "number" ? floor : undefined;
+  return typeof floor === "number" ? Math.max(own, floor) : own;
+}
+
+/** Fold a ledger that is being dropped whole into the process-wide floor. */
+function forgetDomain(ledger: ReloadServedLedger | undefined): void {
+  if (!ledger) return;
+  const r = registry();
+  const floor = (r.reloadServedFloor ??= {});
+  const raise = (kind: "key" | "nonce", epoch: unknown): void => {
+    if (typeof epoch !== "number" || !Number.isFinite(epoch)) return;
+    floor[kind] = Math.max(floor[kind] ?? epoch, epoch);
+  };
+  try {
+    raise("key", ledger.forgotten?.key);
+    raise("nonce", ledger.forgotten?.nonce);
+    for (const e of ledger.keys?.values?.() ?? []) raise("key", e?.generation);
+    for (const e of ledger.nonces?.values?.() ?? []) raise("nonce", e?.generation);
+  } catch {
+    /* a ledger another bundle version shaped differently: nothing to fold */
+  }
 }
 
 /** The newest generation that took ownership of `value` (a heldKey, or a

@@ -2712,7 +2712,11 @@ export function startAutoReply(opts: {
         // so it does not reach a second turn through the fresh route.
         if (ledger ? servedAfter("key", key, from) : state.seen.has(key)) {
           duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}already_served` });
-          markSeen(state, m);
+          // Only the relay's copy in THIS batch is consumed with it. Not
+          // marked seen otherwise: the loop that served it may itself still
+          // hand it on unserved (its own stop), and that newer copy must be
+          // decided on its merits, not refused as seen.
+          if (fresh.has(key)) markSeen(state, m);
           continue;
         }
         // Whether this loop already took this exact message off a fresh poll

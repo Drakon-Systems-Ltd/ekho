@@ -1929,6 +1929,34 @@ describe("reload hand-off of held work (#111)", () => {
     expect(reloadHandoffCount("agent_reload")).toBe(0);
   });
 
+  it("an older loop's copy called already-served does not shut out the serving loop's own later, unserved copy", async () => {
+    const cfg = defaultConfig();
+    const { nextReloadEpoch, noteReloadServed, reloadHandoffCount } = await registry();
+    nextReloadEpoch(); // loop A
+    nextReloadEpoch(); // loop B
+    const c = await startCopy(cfg); // loop C: epoch 3
+    await poll();
+    const m1 = heldPeer("m1");
+    const owner = c.conn.connectedInboxContext(await c.conn.ensureConnected(cfg as never)).split(".")[0];
+    const { heldKey } = await import("../src/autoreply");
+    // B took the relay's redelivery of m1 (so the ledger says B owns it) but
+    // was stopped before any turn got it.
+    noteReloadServed("agent_reload", owner, 2, { keys: [heldKey(m1)] });
+    relay.floorFree = () => true;
+    await plant(c, cfg, [m1], { fromEpoch: 1 }); // A's late flush lands first
+    await poll(2);
+    expect(records()).toEqual([["m1", "reload_duplicate:already_served"]]);
+    expect(deliveredCount("held text m1")).toBe(0);
+    await plant(c, cfg, [structuredClone(m1)], { fromEpoch: 2 }); // then B's own late flush
+    await poll(3);
+    expect(deliveredCount("held text m1")).toBe(1);
+    expect(records()).toEqual([
+      ["m1", "reload_duplicate:already_served"],
+      ["m1", "reload_readmitted"]
+    ]);
+    expect(reloadHandoffCount("agent_reload")).toBe(0);
+  });
+
   it("a withheld hand-off decision holds for the relay's later redelivery too: no turn in a later poll", async () => {
     // No deadline: the hand-off withholds it. The fresh route has no deadline
     // check, so the relay's identical copy must not get past this decision.

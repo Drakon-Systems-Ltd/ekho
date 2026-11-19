@@ -198,4 +198,27 @@ describe("reload served ledger (#111)", () => {
     expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBe(3);
     expect(reloadServedForgotten("agent_x", "conn-b", "key")).toBeUndefined(); // another connection identity
   });
+
+  it("a served ledger dropped whole (more connection identities than the bound) leaves its newest epoch as a floor for every domain", async () => {
+    const { noteReloadServed, reloadServedBy, reloadServedForgotten } = await import("../src/runtime-registry");
+    noteReloadServed("agent_x", "conn-a", 7, { keys: ["m"], nonces: ["n"] }, NOW);
+    for (let i = 0; i < 64; i++) noteReloadServed("agent_x", `other-${i}`, 1, { keys: ["k"] }, NOW);
+    expect(reloadServedBy("agent_x", "conn-a", "key", "m")).toBeUndefined(); // the whole domain is gone
+    expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBe(7);
+    expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBe(7);
+    expect(reloadServedForgotten("agent_x", "other-63", "key")).toBe(7); // which domain it was is not remembered
+  });
+
+  it("a stored value that is not an entry, or not a list, cannot jam the hand-off: valid work is still taken", async () => {
+    const { older, newer } = holders();
+    depositReloadHandoff([entry({ fromGeneration: older })], NOW);
+    const store = (globalThis as unknown as Record<symbol, { reloadHandoffs: Map<string, unknown> }>)[KEY].reloadHandoffs;
+    (store.get("agent_x") as unknown[]).unshift(null, 7);
+    expect(() => depositReloadHandoff([entry({ fromGeneration: older, message: { message_id: "m2", conversation_id: "c" } })], NOW)).not.toThrow();
+    expect(takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW).taken).toHaveLength(2);
+    store.set("agent_x", "not a list");
+    expect(takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW).taken).toEqual([]);
+    expect(() => depositReloadHandoff([entry({ fromGeneration: older })], NOW)).not.toThrow();
+    expect(takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW).taken).toHaveLength(1);
+  });
 });
