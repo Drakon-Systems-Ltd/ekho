@@ -424,6 +424,9 @@ const RELOAD_SERVED_DOMAINS = 64;
 interface ReloadServedLedger {
   keys: Map<string, { generation: number; atMs: number }>;
   nonces: Map<string, { generation: number; atMs: number }>;
+  /** Newest loop epoch among the records the bounds have pushed out, per
+   *  kind. Past it the ledger can no longer say "nobody later served this". */
+  forgotten?: { key?: number; nonce?: number };
 }
 
 function servedStore(): Map<string, ReloadServedLedger> {
@@ -436,7 +439,16 @@ function servedStore(): Map<string, ReloadServedLedger> {
 
 const servedDomain = (agentId: string, owner: string): string => `${agentId}\u0000${owner}`;
 
-function noteInto(map: ReloadServedLedger["keys"], values: string[], generation: number, nowMs: number): void {
+function noteInto(
+  map: ReloadServedLedger["keys"],
+  values: string[],
+  generation: number,
+  nowMs: number
+): number | undefined {
+  let forgotten: number | undefined;
+  const forget = (e: { generation: number } | undefined): void => {
+    if (e && Number.isFinite(e.generation)) forgotten = Math.max(forgotten ?? e.generation, e.generation);
+  };
   for (const v of values) {
     if (typeof v !== "string" || !v) continue;
     const prior = map.get(v);
@@ -446,13 +458,16 @@ function noteInto(map: ReloadServedLedger["keys"], values: string[], generation:
   }
   for (const [v, e] of map) {
     if (nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
+    forget(e);
     map.delete(v);
   }
   while (map.size > RELOAD_SERVED_CAP) {
     const oldest = map.keys().next().value as string | undefined;
     if (oldest === undefined) break;
+    forget(map.get(oldest));
     map.delete(oldest);
   }
+  return forgotten;
 }
 
 /** Record that `generation` took ownership of these messages (heldKeys) and
@@ -477,8 +492,26 @@ export function noteReloadServed(
       store.delete(oldest);
     }
   }
-  noteInto(ledger.keys, served.keys ?? [], generation, nowMs);
-  noteInto(ledger.nonces, served.nonces ?? [], generation, nowMs);
+  const lostKey = noteInto(ledger.keys, served.keys ?? [], generation, nowMs);
+  const lostNonce = noteInto(ledger.nonces, served.nonces ?? [], generation, nowMs);
+  if (lostKey !== undefined || lostNonce !== undefined) {
+    const f = (ledger.forgotten ??= {});
+    if (lostKey !== undefined) f.key = Math.max(f.key ?? lostKey, lostKey);
+    if (lostNonce !== undefined) f.nonce = Math.max(f.nonce ?? lostNonce, lostNonce);
+  }
+}
+
+/**
+ * The newest loop epoch whose ownership record of some message (or signature)
+ * the ledger's bounds have already pushed out, if any. A hand-off entry left
+ * by an EARLIER loop than that cannot be shown to be unserved any more: the
+ * record that would call it a duplicate may be the one that was dropped. The
+ * hand-off withholds such an entry (with a record) instead of risking a
+ * second turn. A domain the per-process bound dropped whole reads as nothing
+ * forgotten; it takes 64 other connection identities in one process to get there.
+ */
+export function reloadServedForgotten(agentId: string, owner: string, kind: "key" | "nonce"): number | undefined {
+  return registry().reloadServed?.get(servedDomain(agentId, owner))?.forgotten?.[kind];
 }
 
 /** The newest generation that took ownership of `value` (a heldKey, or a

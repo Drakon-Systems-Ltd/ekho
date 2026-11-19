@@ -31,6 +31,7 @@ import {
   putEnrolOperatorKeys,
   releaseAgentRuntime,
   reloadServedBy,
+  reloadServedForgotten,
   withdrawAgentRuntimeStandby,
   runEnrolmentExclusive,
   takeEnrolOperatorKeys,
@@ -764,7 +765,8 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
       // What this loop served, so a later one can refuse an earlier
       // producer's late copy of it. Ownership only: no verdict, no payload.
       noteServed: (owner, served) => noteReloadServed(agentId, owner, loopEpoch, served),
-      servedBy: (owner, kind, value) => reloadServedBy(agentId, owner, kind, value)
+      servedBy: (owner, kind, value) => reloadServedBy(agentId, owner, kind, value),
+      servedForgotten: (owner, kind) => reloadServedForgotten(agentId, owner, kind)
     }
   });
   autoReplyApi = api;

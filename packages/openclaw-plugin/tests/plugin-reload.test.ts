@@ -1906,6 +1906,110 @@ describe("reload hand-off of held work (#111)", () => {
     expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
   });
 
+  // ---- Exact-head review of the replacement: evidence bounds, replay parity,
+  // ---- later-poll redelivery.
+
+  it("a hand-off entry is withheld once the bounded served ledger has dropped records newer than its depositor: no turn on missing evidence", async () => {
+    const cfg = defaultConfig();
+    const b = await startCopy(cfg);
+    await poll();
+    const m1 = heldPeer("m1");
+    const owner = b.conn.connectedInboxContext(await b.conn.ensureConnected(cfg as never)).split(".")[0];
+    const { noteReloadServed, RELOAD_SERVED_CAP, reloadHandoffCount } = await registry();
+    const { heldKey } = await import("../src/autoreply");
+    // A later loop than the depositor served m1, then enough other messages
+    // that the ledger no longer remembers it.
+    noteReloadServed("agent_reload", owner, 1, { keys: [heldKey(m1)] });
+    noteReloadServed("agent_reload", owner, 1, { keys: Array.from({ length: RELOAD_SERVED_CAP }, (_, i) => `other-${i}`) });
+    relay.floorFree = () => true;
+    await plant(b, cfg, [m1]); // an older loop's late copy (epoch 0)
+    await poll(3);
+    expect(deliveredCount("held text m1")).toBe(0);
+    expect(records()).toEqual([["m1", "reload_withheld:served_evidence_lost"]]);
+    expect(reloadHandoffCount("agent_reload")).toBe(0);
+  });
+
+  it("a withheld hand-off decision holds for the relay's later redelivery too: no turn in a later poll", async () => {
+    // No deadline: the hand-off withholds it. The fresh route has no deadline
+    // check, so the relay's identical copy must not get past this decision.
+    const m1 = heldPeer("m1", { deadline_at: undefined });
+    serve([{ messages: [m1], peer_autoreply: true }]);
+    const a = await startCopy();
+    await poll();
+    a.host.fire("gateway_stop", { reason: "plugin replacement" });
+
+    relay.floorFree = () => true;
+    await startCopy();
+    await poll(2);
+    expect(records()).toEqual([
+      ["m1", "deferred_loop_stopped"],
+      ["m1", "reload_withheld:no_deadline"]
+    ]);
+    serve([{ messages: [structuredClone(m1)], peer_autoreply: true }]); // a LATER poll
+    await poll(3);
+    expect(deliveredCount("held text m1")).toBe(0);
+  });
+
+  it("a signature this loop already accepted on another message is a replay for the hand-off too, as for a fresh delivery", async () => {
+    const { publicKeyB64urlFromSeed, keyId, signCanonical, sha256Hex } = await import("../src/identity");
+    const { agentKeyEndorsementPayload } = await import("@drakon-systems/ekho-sdk/identity");
+    const op = await operatorKey(7);
+    const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+    const peerSeed = new Uint8Array(32).fill(8);
+    const peerPub = publicKeyB64urlFromSeed(peerSeed);
+    const peerKid = keyId(Buffer.from(peerPub, "base64url"));
+    const roster = [
+      {
+        agent_id: "peer",
+        display_name: "Peer",
+        identity_public_key: peerPub,
+        key_id: peerKid,
+        endorsed_by_key_id: op.kid,
+        endorsement_sig: signCanonical(agentKeyEndorsementPayload(FLEET, "peer", peerKid, peerPub), op.seed)
+      }
+    ];
+    // One signature (nonce N), carried by two relay messages.
+    const text = "signed peer text";
+    const canonical = {
+      v: 1,
+      fleet_id: FLEET,
+      sender_agent_id: "peer",
+      key_id: peerKid,
+      recipient: { kind: "agent", id: "agent_reload" },
+      conversation_id: "held-conv",
+      body_sha256: sha256Hex(text),
+      sent_at: new Date().toISOString(),
+      nonce: "nonce-N"
+    };
+    const carrying = (id: string) => ({
+      ...heldPeer(id),
+      body: { text },
+      agent_sig: signCanonical(canonical, peerSeed),
+      operator_sig: null,
+      key_id: peerKid,
+      sig_canonical: canonical
+    });
+    // x1 arrives fresh behind five other triggers from the same peer: it
+    // verifies (its nonce is now spent in this loop) and the rate gate drops it.
+    relay.floorFree = () => true;
+    const others = Array.from({ length: 5 }, (_, i) => heldPeer(`r${i}`, { conversation_id: "busy-conv" }));
+    serve([{ messages: [...others, carrying("x1")], fleet_id: FLEET, roster, peer_autoreply: true }], {
+      messages: [],
+      fleet_id: FLEET,
+      roster
+    });
+    const c = await startCopy(cfg);
+    await poll(3);
+    expect(await label(c, text)).toBe("verified");
+    expect(deliveredCount(text)).toBe(0);
+
+    // An older loop's late copy of the SAME signature under another message id.
+    await plant(c, cfg, [carrying("x2")]);
+    await poll(3);
+    expect(deliveredCount(text)).toBe(0);
+    expect(records().filter(([id]) => id === "x2")).toEqual([["x2", "reload_withheld:verification:replay"]]);
+  });
+
   it("a redelivered held message behind this generation's closed latch is withheld once, with a record — not called a duplicate", async () => {
     relay.floorFree = () => true;
     const cfg = { ...defaultConfig(), peerTurnBudget: 1 };

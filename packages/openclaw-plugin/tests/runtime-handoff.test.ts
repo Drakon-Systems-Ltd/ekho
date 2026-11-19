@@ -184,4 +184,18 @@ describe("reload served ledger (#111)", () => {
     expect(taken.map((e) => (e.message as { message_id: string }).message_id)).toEqual(["earlier"]);
     expect(takeReloadHandoff("agent_x", "conn-a", 9, e3 + 5, NOW).taken).toEqual([]); // generation 9 does not hold the agent
   });
+
+  it("remembers the newest loop whose served record its bounds dropped, per kind", async () => {
+    const { noteReloadServed, reloadServedBy, reloadServedForgotten, RELOAD_SERVED_CAP } = await import("../src/runtime-registry");
+    expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBeUndefined();
+    noteReloadServed("agent_x", "conn-a", 3, { keys: ["m"], nonces: ["n"] }, NOW);
+    noteReloadServed("agent_x", "conn-a", 2, { keys: Array.from({ length: RELOAD_SERVED_CAP }, (_, i) => `k${i}`) }, NOW);
+    expect(reloadServedBy("agent_x", "conn-a", "key", "m")).toBeUndefined(); // pushed out by the cap
+    expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBe(3);
+    expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBeUndefined(); // nonces are bounded separately
+    // Age-out counts the same way.
+    noteReloadServed("agent_x", "conn-a", 5, { nonces: ["later"] }, NOW + RELOAD_HANDOFF_MAX_AGE_MS + 1);
+    expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBe(3);
+    expect(reloadServedForgotten("agent_x", "conn-b", "key")).toBeUndefined(); // another connection identity
+  });
 });

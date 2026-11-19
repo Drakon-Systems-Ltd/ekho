@@ -752,12 +752,17 @@ export function recordTerminalRejects(
 ): void {
   const cache = inboxCache(agentId, context);
   for (const { message, verdict } of rejects) {
-    if (!verdict || verdict.verified) continue;
-    const digest = materialDigest(message);
-    if (digest.startsWith(UNCOMPARABLE_PREFIX)) continue;
-    cache.rejects.set(digest, verdict);
-    const entry = typeof message?.message_id === "string" ? cache.entries.get(message.message_id) : undefined;
-    if (entry && sameSignedMaterial(entry.message, message)) entry.verification = verdict;
+    // Each on its own: one that throws must not keep the rest unpublished.
+    try {
+      if (!verdict || verdict.verified) continue;
+      const digest = materialDigest(message);
+      if (digest.startsWith(UNCOMPARABLE_PREFIX)) continue;
+      cache.rejects.set(digest, verdict);
+      const entry = typeof message?.message_id === "string" ? cache.entries.get(message.message_id) : undefined;
+      if (entry && sameSignedMaterial(entry.message, message)) entry.verification = verdict;
+    } catch {
+      /* the rest are still published */
+    }
   }
 }
 
@@ -2347,6 +2352,10 @@ export function startAutoReply(opts: {
     take: (owner: string) => { taken: ReloadHandoffEntry[]; dropped: ReloadHandoffDropped[] };
     noteServed?: (owner: string, served: { keys: string[]; nonces: string[] }) => void;
     servedBy?: (owner: string, kind: "key" | "nonce", value: string) => number | undefined;
+    // The newest loop whose served record the ledger's bounds have dropped.
+    // An entry left by an earlier loop than that is withheld: nothing can
+    // show any more that a later loop did not already serve it.
+    servedForgotten?: (owner: string, kind: "key" | "nonce") => number | undefined;
   };
 }): () => Promise<void> {
   const { client, api, selfAgentId, log } = opts;
@@ -2607,6 +2616,16 @@ export function startAutoReply(opts: {
         return false;
       }
     };
+    // The ledger is bounded. Once it has dropped a record made by a loop later
+    // than an entry's depositor, "no later loop served this" is unknowable.
+    const evidenceLost = (kind: "key" | "nonce", generation: number): boolean => {
+      try {
+        const lost = handoff.servedForgotten?.(owner, kind);
+        return typeof lost === "number" && lost > generation;
+      } catch {
+        return false;
+      }
+    };
     const messageOf = (entry: unknown): unknown => {
       try {
         return (entry as { message?: unknown } | null | undefined)?.message ?? null;
@@ -2693,19 +2712,33 @@ export function startAutoReply(opts: {
         // so it does not reach a second turn through the fresh route.
         if (ledger ? servedAfter("key", key, from) : state.seen.has(key)) {
           duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}already_served` });
-          if (fresh.has(key)) markSeen(state, m);
+          markSeen(state, m);
           continue;
         }
+        // Whether this loop already took this exact message off a fresh poll
+        // (and gave it no turn: a served one is in the ledger, above). Read
+        // before the decision below marks it.
+        const sawFresh = state.seen.has(key);
         const decision = ((): { withhold: string; keyId?: string | null } | { admit: VerifyResult | null } => {
           // The relay's deadline, unsigned. Missing or unparseable fails
           // closed: with no deadline nothing says the message is still wanted.
           const deadline = typeof m.deadline_at === "string" ? Date.parse(m.deadline_at) : Number.NaN;
           if (Number.isNaN(deadline)) return { withhold: "no_deadline" };
           if (deadline <= nowMs) return { withhold: "expired" };
+          // One turn at most: a later loop may have served this and the
+          // bounded ledger no longer remembers. Withheld with a record rather
+          // than re-admitted on missing evidence.
+          if (ledger && (evidenceLost("key", from) || (signatureNonce(m) !== undefined && evidenceLost("nonce", from)))) {
+            return { withhold: "served_evidence_lost" };
+          }
           let v: VerifyResult | null = null;
           if (opts.identity) {
+            // The same replay guard as a fresh delivery: every signature this
+            // loop has accepted. One exception: this loop saw THIS message
+            // fresh and gave it no turn (the rate gate dropped it), so the
+            // nonce it remembers is this message's own, not a replay of it.
             const guard = new Set(spent);
-            if (!ledger) for (const n of state.seenNonces) guard.add(n);
+            if (!sawFresh) for (const n of state.seenNonces) guard.add(n);
             v = verifyBatch([m], {
               identity: opts.identity,
               selfAgentId,
@@ -2748,8 +2781,9 @@ export function startAutoReply(opts: {
           }
           return { admit: v };
         })();
-        // Decided, either way: a fresh copy of it in this batch is not a second chance.
-        if (fresh.has(key)) markSeen(state, m);
+        // Decided, either way, for this loop: a copy the relay redelivers, in
+        // this batch or a later poll, is not a second chance.
+        markSeen(state, m);
         if ("withhold" in decision) {
           withheld.push({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}${decision.withhold}`, keyId: decision.keyId });
           continue;

@@ -376,6 +376,14 @@ re-admits each one on its own terms:
   hand-off, for both copies. The redelivered copy is not admitted separately
   and cannot slip past the deadline, latch or signature checks, and the held
   copy is not dropped just because a redelivery arrived.
+  The decision stands for as long as the new copy runs: the same message
+  redelivered in a later poll gets no second decision from it.
+- A signature the new copy has already accepted on a different message is a
+  replay, exactly as for a fresh delivery.
+- The record of which copy served what is bounded (2,000 messages and 2,000
+  signatures per connection, about a day). Once it has dropped a record newer
+  than the copy that left a message, that message is withheld as
+  `served_evidence_lost` instead of being re-admitted on missing evidence.
 - Several old copies can leave the same message: one stopped two reloads
   earlier, and the copy after it, which queued the message but stopped before
   serving it. They are decided once, as one message, on the newest copy's
@@ -409,7 +417,7 @@ Each outcome is appended to the dead-letter file next to the stop's own record:
 |---|---|
 | `reload_readmitted` | Re-admitted; the message waits for the floor like any held-back message. |
 | `reload_duplicate:already_served` | A newer copy already handed this exact message to a turn or the held-back queue; nothing was lost. |
-| `reload_withheld:<why>` | Not re-admitted: it gets no turn. `<why>` is `expired`, `no_deadline`, `verification:<reason>`, `unsigned-require-signed`, `unverifiable-require-signed`, `not_admissible:<reason>`, `peer_latch_closed`, `malformed`, `stash_failed`, `handoff_overflow` or `handoff_unclaimed_too_long`. `not_admissible:seen` means this copy already received the relay's copy and gave it no turn (rate limit or closed latch). |
+| `reload_withheld:<why>` | Not re-admitted: it gets no turn. `<why>` is `expired`, `no_deadline`, `served_evidence_lost`, `verification:<reason>`, `unsigned-require-signed`, `unverifiable-require-signed`, `not_admissible:<reason>`, `peer_latch_closed`, `malformed`, `stash_failed`, `handoff_overflow` or `handoff_unclaimed_too_long`. `not_admissible:seen` means this copy already received the relay's copy and gave it no turn (rate limit or closed latch). |
 
 The dead-letter file is evidence only. Nothing reads it back as work, and
 editing it re-admits nothing.
