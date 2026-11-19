@@ -24,12 +24,17 @@ import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./
 import {
   claimAgentRuntime,
   agentRuntimeGeneration,
+  depositReloadHandoff,
+  nextReloadEpoch,
   nextRuntimeGeneration,
+  noteReloadServed,
   putEnrolOperatorKeys,
   releaseAgentRuntime,
+  reloadServedBy,
   withdrawAgentRuntimeStandby,
   runEnrolmentExclusive,
-  takeEnrolOperatorKeys
+  takeEnrolOperatorKeys,
+  takeReloadHandoff
 } from "./runtime-registry.js";
 
 export interface EkhoPluginConfig {
@@ -706,10 +711,15 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     log?.info?.("[ekho-autoreply] disabled in this process (EKHO_AUTOREPLY_DISABLE)");
     return;
   }
+  const agentId = connection.credentials.agentId;
+  // #111: this loop's place in the order loops run in for this process. Not
+  // the module generation: a resumed (#160) or re-bound loop is a later loop
+  // of an equal or OLDER generation.
+  const loopEpoch = nextReloadEpoch();
   stopAutoReply = startAutoReply({
     client: connection.client,
     api,
-    selfAgentId: connection.credentials.agentId,
+    selfAgentId: agentId,
     cacheContext: () => connectedInboxContext(connection!),
     log,
     peerEnabled: config?.peerAutoreply ?? true,
@@ -740,6 +750,21 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     onDeadLetter: (records) => {
       if (!identityConfigDir) return;
       appendDeadLetters(identityConfigDir, records);
+    },
+    // #111: acked work this generation lets go of at stop is left, in memory,
+    // for the next generation of the SAME agent in this process, which
+    // re-admits it under its own trust root (runtime-registry.ts). Ordered by
+    // loop epoch; the registry only lets the current holder's loop take.
+    reloadHandoff: {
+      deposit: (owner, entries) =>
+        depositReloadHandoff(
+          entries.map((e) => ({ ...e, owner, agentId, fromGeneration: generation, fromEpoch: loopEpoch, depositedAtMs: Date.now() }))
+        ),
+      take: (owner) => takeReloadHandoff(agentId, owner, generation, loopEpoch),
+      // What this loop served, so a later one can refuse an earlier
+      // producer's late copy of it. Ownership only: no verdict, no payload.
+      noteServed: (owner, served) => noteReloadServed(agentId, owner, loopEpoch, served),
+      servedBy: (owner, kind, value) => reloadServedBy(agentId, owner, kind, value)
     }
   });
   autoReplyApi = api;
