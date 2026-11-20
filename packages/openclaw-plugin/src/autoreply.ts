@@ -233,6 +233,8 @@ const TURN_TIMEOUT_SECONDS = (() => {
   const raw = Number(process.env.EKHO_AUTOREPLY_TURN_TIMEOUT_SECONDS);
   return Number.isFinite(raw) && raw >= 60 ? raw : 900;
 })();
+export const turnWindowEnv = (startMs = Date.now()) => // #155: a turn's start and timeout deadline, keyed as its child's env carries them
+  Object.freeze({ EKHO_TURN_STARTED_AT: new Date(startMs).toISOString(), EKHO_TURN_DEADLINE_AT: new Date(startMs + TURN_TIMEOUT_SECONDS * 1000).toISOString() });
 // The floor must outlive the longest turn or a teammate barges in mid-reply.
 // Exported so the deferred-window tests assert against the PRODUCTION constant
 // instead of re-deriving it — a re-derived copy agrees with itself no matter
@@ -866,6 +868,7 @@ export interface AutoReplyState {
   seenNonceOrder: string[];
   recentInboundByPeer: Map<string, { count: number; windowStart: number }>;
   inFlight: boolean;
+  turn?: ReturnType<typeof turnWindowEnv>; // #155: the running turn's window, set and cleared beside inFlight
   // conversation_id -> count of times a peer has woken this agent in it.
   peerTurnsByConversation: Map<string, number>;
   // Conversations we've already raised a stall escalation for (escalate at most
@@ -2107,6 +2110,7 @@ async function runExpiredDeferredTurn(opts: ServiceDeferredOptions): Promise<num
   );
   let started = false;
   state.inFlight = true;
+  state.turn = turnWindowEnv();
   try {
     started = await opts.runTurn({
       conversationId: conv,
@@ -2119,6 +2123,7 @@ async function runExpiredDeferredTurn(opts: ServiceDeferredOptions): Promise<num
   } finally {
     // Nothing to release: an overrun turn never took a floor.
     state.inFlight = false;
+    state.turn = undefined;
   }
   if (!started) {
     log?.warn?.(
@@ -2172,6 +2177,7 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
     );
     let started = false;
     state.inFlight = true;
+    state.turn = turnWindowEnv();
     try {
       started = await opts.runTurn({
         conversationId: conv,
@@ -2184,6 +2190,7 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
       started = false;
     } finally {
       state.inFlight = false;
+      state.turn = undefined;
     }
     if (!started) {
       // The stash is already out of the map and the messages were acked: a turn
@@ -2227,7 +2234,7 @@ async function triggerTurn(
   peerTurnBudget?: number,
   peerBudgetRemaining?: Record<string, number>,
   deferredCtx?: DeferredTurnContext,
-  snapshotVerifier?: SnapshotVerifier
+  snapshotVerifier?: SnapshotVerifier, turnEnv?: AutoReplyState["turn"]
 ): Promise<boolean> {
   const prompt = buildPrompt(
     messages,
@@ -2266,6 +2273,7 @@ async function triggerTurn(
         stdio: "ignore",
         env: {
           ...process.env,
+          ...turnEnv,
           EKHO_AUTOREPLY_DISABLE: "1",
           // The child has no copy of the parent inbox ring. These IDs are only
           // hints: the relay still requires its own delivered recipient row.
@@ -2318,6 +2326,7 @@ export function startAutoReply(opts: {
   cacheContext?: () => string;
   log?: Logger;
   pollIntervalMs?: number;
+  turnState?: (read: () => { turn: AutoReplyState["turn"]; deferred: number }) => void; // #155: handed one read-only reader, for the heartbeat
   peerEnabled?: boolean;
   peerTurnBudget?: number;
   // The agent's identity enables cryptographic verification; onIdentityChanged
@@ -2366,6 +2375,7 @@ export function startAutoReply(opts: {
   const requireSigned: RequireSignedMode = opts.requireSigned ?? "warn";
 
   const state = createAutoReplyState();
+  opts.turnState?.(() => ({ turn: state.turn, deferred: state.deferredByConversation.size }));
 
   // Logging on the stop path. stop() promises to secure acked work and never
   // reject; a host logger that throws must not break either promise.
@@ -3124,7 +3134,7 @@ export function startAutoReply(opts: {
         // #16: tell the turn it is late, and how late. Without this it answers a
         // long-stale message as if it were the thread head.
         deferred,
-        snapshotVerifier
+        snapshotVerifier, state.turn
       );
     };
     const serviceDeferred = () =>
@@ -3267,6 +3277,7 @@ export function startAutoReply(opts: {
       }
       let started = false;
       state.inFlight = true;
+      state.turn = turnWindowEnv();
       covering = new Set(cover.coveredConversationIds);
       try {
         const flooredBatch: InboxBatch = {
@@ -3283,13 +3294,14 @@ export function startAutoReply(opts: {
           eff.peerTurnBudget,
           peerBudgetRemaining,
           cover.deferred,
-          snapshotVerifier
+          snapshotVerifier, state.turn
         );
       } catch (err) {
         log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
         started = false;
       } finally {
         state.inFlight = false;
+        state.turn = undefined;
         // The spawn is decided: settle who owns the covered stash NOW, before
         // the floor releases below. Those are network awaits that can outlast
         // stop()'s drain bound, and a stash exempt from stop()'s flush across

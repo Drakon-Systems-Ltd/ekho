@@ -31,6 +31,7 @@ const relay = vi.hoisted(() => ({
   batches: [] as unknown[],
   floorFree: true,
   turns: [] as Turn[],
+  spawnAttempts: 0,
   spawnThrows: false
 }));
 
@@ -40,6 +41,7 @@ vi.mock("node:child_process", async () => {
   const { EventEmitter } = await import("node:events");
   return {
     spawn: (_cmd: string, _args: string[], opts: { env?: Record<string, string | undefined> } = {}) => {
+      relay.spawnAttempts++;
       if (relay.spawnThrows) throw new Error("synthetic spawn throw");
       const child = new EventEmitter() as InstanceType<typeof EventEmitter> & { kill: () => void };
       child.kill = () => {};
@@ -160,7 +162,7 @@ const peerMessage = (id: string, conversation: string) => ({
 
 /** Start the plugin and let one operator message wake a turn that stays open. */
 async function startWithRunningTurn(): Promise<{ conn: Conn; turn: Turn; before: number; after: number }> {
-  relay.batches.push({ messages: [operatorMessage("m1")] });
+  relay.batches.push({ messages: [operatorMessage("m1")], operator_trusted: true });
   const conn = await startPlugin();
   const before = Date.now();
   await vi.advanceTimersByTimeAsync(POLL_MS);
@@ -177,6 +179,7 @@ beforeEach(() => {
   relay.batches.length = 0;
   relay.floorFree = true;
   relay.turns.length = 0;
+  relay.spawnAttempts = 0;
   relay.spawnThrows = false;
   vi.stubEnv("HOME", mkScratch("home"));
   vi.stubEnv("EKHO_AUTOREPLY_DISABLE", "");
@@ -250,12 +253,11 @@ describe("heartbeat turn state: the process that runs the loop", () => {
     const { turn } = await startWithRunningTurn();
     expect((await nextBeat()).adapter_state).toBe("turn_running");
     turn.exit(0);
-    expect(await nextBeat()).toEqual({
-      turn_health: "unknown",
-      model_calls_1h: "0",
-      adapter_state: "idle",
-      deferred_conversations: "0"
-    });
+    const beat = await nextBeat();
+    expect(beat).toMatchObject({ adapter_state: "idle", deferred_conversations: "0" });
+    expect(turnKeysOf(beat)).toEqual(["adapter_state", "deferred_conversations"]);
+    // The finished turn is what the existing turn-health keys now describe.
+    expect(beat.turn_health).toBe("ok");
   });
 
   it("goes back to idle when the turn exits non-zero", async () => {
@@ -287,9 +289,10 @@ describe("heartbeat turn state: the process that runs the loop", () => {
 
   it("is idle after a spawn that throws", async () => {
     relay.spawnThrows = true;
-    relay.batches.push({ messages: [operatorMessage("m1")] });
+    relay.batches.push({ messages: [operatorMessage("m1")], operator_trusted: true });
     await startPlugin();
     await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(relay.spawnAttempts).toBe(1); // a turn was really attempted
     const beat = await nextBeat();
     expect(beat.adapter_state).toBe("idle");
     expect(turnKeysOf(beat)).toEqual(["adapter_state", "deferred_conversations"]);
@@ -368,6 +371,16 @@ describe("heartbeat turn state: no loop, no keys", () => {
     await conn.ensureConnected(config() as never);
     await vi.advanceTimersByTimeAsync(POLL_MS * 2);
     expect(relay.polls).toBe(0);
+    expect(turnKeysOf(await nextBeat())).toEqual([]);
+  });
+
+  it("turn times in the environment of a process that is not a turn child (loop not disabled, no loop running) are ignored", async () => {
+    vi.stubEnv(START_ENV, "2026-11-20T10:00:00.000Z");
+    vi.stubEnv(DEADLINE_ENV, "2026-11-20T10:15:00.000Z");
+    vi.resetModules();
+    const conn = await import("../src/connection");
+    loaded.push(conn);
+    await conn.ensureConnected(config() as never);
     expect(turnKeysOf(await nextBeat())).toEqual([]);
   });
 

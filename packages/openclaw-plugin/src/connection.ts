@@ -88,6 +88,10 @@ let connecting: Promise<EkhoConnection> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let stopAutoReply: (() => Promise<void>) | null = null;
 let autoReplyApi: PluginApi | null = null;
+// #155: the running loop's read-only turn snapshot. The loop hands it over when
+// it starts (maybeStartAutoReply) and it is dropped wherever the loop handle is
+// cleared, so it is null whenever this copy runs no loop.
+let readTurnState: (() => { turn?: TurnTimesEnv; deferred: number }) | null = null;
 let rebindInFlight: Promise<void> | null = null;
 // The last stop's drain (see shutdown), handed to every later shutdown call:
 // the host may fire more than one unload signal and await each.
@@ -668,6 +672,44 @@ function resumeRuntime(agentId: string, successorDrain: Promise<void>): boolean 
   return true;
 }
 
+type TurnTimesEnv = Readonly<Record<string, string | undefined>>;
+
+/** Both turn times out of a turn-window env (autoreply.ts turnWindowEnv), as ISO strings; null unless both parse and the deadline is later. */
+function turnTimes(env: TurnTimesEnv | undefined): { turn_started_at: string; turn_deadline_at: string } | null {
+  const start = Date.parse(env?.EKHO_TURN_STARTED_AT ?? "");
+  const deadline = Date.parse(env?.EKHO_TURN_DEADLINE_AT ?? "");
+  if (!(deadline > start)) return null; // NaN fails this too
+  return { turn_started_at: new Date(start).toISOString(), turn_deadline_at: new Date(deadline).toISOString() };
+}
+
+/**
+ * #155: whether an auto-reply turn is running right now, for the relay's inbox
+ * state. "Busy now" only: it times no delivery and says nothing about floor
+ * waiting (`deferred_conversations` counts held-back work, whatever holds it).
+ *
+ * - A copy running the loop reports the loop's own snapshot: `turn_running`
+ *   with the turn's start and timeout deadline, or `idle`, plus the count.
+ * - The one-shot turn child runs no loop but heartbeats as the same agent, and
+ *   the relay reads only the latest beat. It repeats the two times its parent
+ *   put in its environment, so it cannot overwrite a running turn with nothing.
+ * - Anything else (no loop, or a child without two usable times) sends none of
+ *   these keys: no loop is not the same as `idle`.
+ *
+ * Never throws: a broken reader costs these keys, not the heartbeat.
+ */
+function turnStateMetrics(): Record<string, string> {
+  try {
+    if (readTurnState) {
+      const { turn, deferred } = readTurnState();
+      return { adapter_state: turn ? "turn_running" : "idle", ...turnTimes(turn), deferred_conversations: String(deferred) };
+    }
+    const inherited = process.env.EKHO_AUTOREPLY_DISABLE === "1" ? turnTimes(process.env) : null;
+    return inherited ? { adapter_state: "turn_running", ...inherited } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Start the heartbeat exactly once per (non-retired) module copy. */
 function maybeStartHeartbeat(log?: Logger, config?: EkhoPluginConfig) {
   if (heartbeatTimer || !connection) return;
@@ -687,7 +729,8 @@ function maybeStartHeartbeat(log?: Logger, config?: EkhoPluginConfig) {
     }),
     // Truthful cognitive-health signal so a brain-dead-but-connected agent
     // (model 404/auth failing every turn) reads red, not green.
-    ...turnHealthMetrics()
+    ...turnHealthMetrics(),
+    ...turnStateMetrics()
   });
   // #97: who this agent is running, for the console's version line. Read per
   // beat so a host api that arrives after the first connect is picked up.
@@ -734,6 +777,9 @@ function maybeStartAutoReply(api: PluginApi | undefined, log?: Logger, config?: 
     // Env beats config so an operator can flip one box without a config deploy.
     requireSigned: parseRequireSignedMode(process.env.EKHO_REQUIRE_SIGNED ?? config?.requireSigned),
     identity: identity ?? undefined,
+    turnState: (read) => {
+      readTurnState = read;
+    },
     onIdentityChanged: (id) => {
       if (identityConfigDir) saveIdentity(identityConfigDir, id);
     },
@@ -783,6 +829,7 @@ export function rebindAutoReply(api: PluginApi, log?: Logger, config?: EkhoPlugi
   if (stopAutoReply && autoReplyApi === api) return Promise.resolve();
   const stop = stopAutoReply;
   stopAutoReply = null;
+  readTurnState = null;
   autoReplyApi = null;
   const drain = stop ? stop() : Promise.resolve();
   if (stop) stopDrain = drain;
@@ -824,6 +871,7 @@ export function shutdown(reason = "shutdown", log?: Logger): Promise<void> {
   if (stopAutoReply) {
     stopDrain = stopAutoReply();
     stopAutoReply = null;
+    readTurnState = null;
     autoReplyApi = null;
   }
   // A pending resume gate must not start a loop in a copy that just stopped.
