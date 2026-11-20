@@ -2608,23 +2608,25 @@ export function startAutoReply(opts: {
     // Served ledger (#111): the newest generation that took ownership of a
     // message or accepted a signature. Without one, only this loop's own sets.
     const ledger = typeof handoff.servedBy === "function";
-    const servedAfter = (kind: "key" | "nonce", value: string, generation: number): boolean => {
+    // One ledger read (#192): a loop epoch, undefined when nothing is
+    // remembered, or null when the read threw or answered anything else. A
+    // failed read is lost evidence, never "not served": the ledger exists to
+    // stop a second turn, so the candidate is withheld, not re-admitted.
+    const ledgerEpoch = (read: () => unknown): number | undefined | null => {
       try {
-        const by = handoff.servedBy?.(owner, kind, value);
-        return typeof by === "number" && by > generation;
+        const by = read();
+        if (by === undefined || by === null) return undefined;
+        return typeof by === "number" && Number.isFinite(by) ? by : null;
       } catch {
-        return false;
+        return null;
       }
     };
+    const servedBy = (kind: "key" | "nonce", value: string) => ledgerEpoch(() => handoff.servedBy?.(owner, kind, value));
     // The ledger is bounded. Once it has dropped a record made by a loop later
     // than an entry's depositor, "no later loop served this" is unknowable.
-    const evidenceLost = (kind: "key" | "nonce", generation: number): boolean => {
-      try {
-        const lost = handoff.servedForgotten?.(owner, kind);
-        return typeof lost === "number" && lost > generation;
-      } catch {
-        return false;
-      }
+    const evidenceLost = (kind: "key" | "nonce", epoch: number): boolean => {
+      const lost = ledgerEpoch(() => handoff.servedForgotten?.(owner, kind));
+      return lost === null || (lost !== undefined && lost > epoch);
     };
     const messageOf = (entry: unknown): unknown => {
       try {
@@ -2710,7 +2712,8 @@ export function startAutoReply(opts: {
         // of this exact material: every copy here is the duplicate. Its fresh
         // copy in this batch, if any, is the same message — consumed with it,
         // so it does not reach a second turn through the fresh route.
-        if (ledger ? servedAfter("key", key, from) : state.seen.has(key)) {
+        const keyBy = ledger ? servedBy("key", key) : undefined;
+        if (ledger ? typeof keyBy === "number" && keyBy > from : state.seen.has(key)) {
           duplicates.push({ message: m, reason: `${RELOAD_DUPLICATE_PREFIX}already_served` });
           // Only the relay's copy in THIS batch is consumed with it. Not
           // marked seen otherwise: the loop that served it may itself still
@@ -2732,7 +2735,9 @@ export function startAutoReply(opts: {
           // One turn at most: a later loop may have served this and the
           // bounded ledger no longer remembers. Withheld with a record rather
           // than re-admitted on missing evidence.
-          if (ledger && (evidenceLost("key", from) || (signatureNonce(m) !== undefined && evidenceLost("nonce", from)))) {
+          // The same when the ledger could not be read at all (#192).
+          const lost = ledger && (keyBy === null || evidenceLost("key", from) || (signatureNonce(m) !== undefined && evidenceLost("nonce", from)));
+          if (lost) {
             return { withhold: "served_evidence_lost" };
           }
           let v: VerifyResult | null = null;
@@ -2740,9 +2745,12 @@ export function startAutoReply(opts: {
             // The same replay guard as a fresh delivery: every signature this
             // loop has accepted. One exception: this loop saw THIS message
             // fresh and gave it no turn (the rate gate dropped it), so the
-            // nonce it remembers is this message's own, not a replay of it.
+            // nonce it remembers for it is this message's own, not a replay of
+            // it. Only that one nonce is left out (#192): every other
+            // signature the loop accepted still counts against the candidate.
             const guard = new Set(spent);
-            if (!sawFresh) for (const n of state.seenNonces) guard.add(n);
+            const own = sawFresh ? signatureNonce(m) : undefined;
+            for (const n of state.seenNonces) if (n !== own) guard.add(n);
             v = verifyBatch([m], {
               identity: opts.identity,
               selfAgentId,
@@ -2753,8 +2761,10 @@ export function startAutoReply(opts: {
             })[m.message_id] ?? null;
             // A signature a newer generation already accepted is a replay.
             const nonce = signatureNonce(m);
-            if (v?.verified && nonce && ledger && servedAfter("nonce", nonce, from)) {
-              v = { verified: false, kind: v.kind, reason: "replay", keyId: v.keyId };
+            if (v?.verified && nonce && ledger) {
+              const nonceBy = servedBy("nonce", nonce);
+              if (nonceBy === null) return { withhold: "served_evidence_lost" };
+              if (nonceBy !== undefined && nonceBy > from) v = { verified: false, kind: v.kind, reason: "replay", keyId: v.keyId };
             }
           }
           // Rejected signed material stays rejected, whatever verifies now (#115).
@@ -2793,7 +2803,6 @@ export function startAutoReply(opts: {
           continue;
         }
         const v = decision.admit;
-        markSeen(state, m);
         const nonce = v?.verified ? signatureNonce(m) : undefined;
         if (nonce) {
           markNonceSeen(state, nonce);

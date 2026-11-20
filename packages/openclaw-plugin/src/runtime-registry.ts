@@ -313,62 +313,95 @@ function handoffStore(): Map<string, ReloadHandoffEntry[]> {
   return store;
 }
 
-function isHandoffEntry(e: unknown): e is ReloadHandoffEntry {
-  if (!e || typeof e !== "object") return false;
-  const x = e as Record<string, unknown>;
-  return (
-    typeof x.owner === "string" && x.owner !== "" &&
-    typeof x.agentId === "string" && x.agentId !== "" &&
-    typeof x.fromGeneration === "number" && Number.isFinite(x.fromGeneration) &&
-    typeof x.fromEpoch === "number" && Number.isFinite(x.fromEpoch) &&
-    typeof x.conversationId === "string" &&
-    typeof x.depositedAtMs === "number" && Number.isFinite(x.depositedAtMs)
-  );
+/**
+ * The entry a stored or deposited value describes, as a plain copy, or null.
+ * The registry is shared by every bundle version in the process, so a value in
+ * it may have any shape, including a property accessor that throws (#192).
+ * Each field is read exactly ONCE, in isolation: a value that is not an entry,
+ * or whose read throws, is simply not an entry. Nothing after this — the
+ * bounds, the take, the caller's report of what was dropped — reads the
+ * original object again, so an accessor that answers its first read and throws
+ * on a later one has no later read to throw on. `message` is carried as found:
+ * it stays untrusted and is re-verified on admission, as before.
+ */
+function readHandoffEntry(e: unknown): ReloadHandoffEntry | null {
+  if (!e || typeof e !== "object") return null;
+  try {
+    const { owner, agentId, fromGeneration, fromEpoch, reason, conversationId, message, firstDeferredAtMs, depositedAtMs } =
+      e as ReloadHandoffEntry;
+    const ok =
+      typeof owner === "string" && owner !== "" &&
+      typeof agentId === "string" && agentId !== "" &&
+      typeof fromGeneration === "number" && Number.isFinite(fromGeneration) &&
+      typeof fromEpoch === "number" && Number.isFinite(fromEpoch) &&
+      typeof conversationId === "string" &&
+      typeof depositedAtMs === "number" && Number.isFinite(depositedAtMs);
+    return ok ? { owner, agentId, fromGeneration, fromEpoch, reason, conversationId, message, firstDeferredAtMs, depositedAtMs } : null;
+  } catch {
+    return null;
+  }
 }
 
-/** Drop entries past the age bound or the per-agent cap (oldest first). */
-function pruneHandoffs(list: ReloadHandoffEntry[], nowMs: number): ReloadHandoffDropped[] {
-  const dropped: ReloadHandoffDropped[] = [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    // Not an entry at all (another bundle version wrote it): it can never be
-    // taken, and must not make every later take and deposit throw.
-    if (!isHandoffEntry(list[i])) {
-      list.splice(i, 1);
-      continue;
-    }
-    if (nowMs - list[i].depositedAtMs > RELOAD_HANDOFF_MAX_AGE_MS) {
-      dropped.push({ entry: list[i], why: "unclaimed_too_long" });
-      list.splice(i, 1);
-    }
+/**
+ * One isolated pass over what is held for an agent, plus `added`: the entries
+ * that remain, as plain copies in a NEW list, and what the bounds pushed out
+ * (past the age bound, then oldest first past the per-agent cap). The stored
+ * list is copied once and never touched again; if even that throws (#192: it
+ * cannot be walked) nothing in it is kept, so the caller replaces the agent's
+ * slot instead of failing every later take and deposit.
+ */
+function pruneHandoffs(
+  held: unknown,
+  nowMs: number,
+  added: ReloadHandoffEntry[] = []
+): { kept: ReloadHandoffEntry[]; dropped: ReloadHandoffDropped[] } {
+  let all: unknown[] = added;
+  try {
+    if (Array.isArray(held)) all = [...held, ...added];
+  } catch {
+    /* an unwalkable list: only `added` is considered */
   }
-  while (list.length > RELOAD_HANDOFF_CAP) {
-    const oldest = list.shift();
+  const kept: ReloadHandoffEntry[] = [];
+  const dropped: ReloadHandoffDropped[] = [];
+  for (let i = all.length - 1; i >= 0; i--) {
+    // Not an entry at all, or one that cannot be read (another bundle version
+    // wrote it): it can never be taken, and must not make every later take
+    // and deposit throw. It is dropped alone and is not reported.
+    const entry = readHandoffEntry(all[i]);
+    if (!entry) continue;
+    if (nowMs - entry.depositedAtMs > RELOAD_HANDOFF_MAX_AGE_MS) dropped.push({ entry, why: "unclaimed_too_long" });
+    else kept.push(entry);
+  }
+  kept.reverse();
+  while (kept.length > RELOAD_HANDOFF_CAP) {
+    const oldest = kept.shift();
     if (oldest) dropped.push({ entry: oldest, why: "overflow" });
   }
-  return dropped;
+  return { kept, dropped };
 }
 
 /**
  * Leave `entries` for a successor of the same agent. Synchronous, so a stop
  * that deposits has done so before it returns. Never throws. Returns what the
- * bounds pushed out (the oldest entries first), which the caller reports.
+ * bounds pushed out, which the caller reports: entries past the age bound
+ * (newest first), then entries past the per-agent cap (oldest first).
  */
 export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date.now()): ReloadHandoffDropped[] {
   const store = handoffStore();
   const dropped: ReloadHandoffDropped[] = [];
-  const touched = new Set<string>();
-  for (const e of entries) {
-    if (!isHandoffEntry(e)) continue;
-    const held = store.get(e.agentId);
-    const list = Array.isArray(held) ? held : [];
+  const added = new Map<string, ReloadHandoffEntry[]>();
+  for (const raw of entries) {
+    const e = readHandoffEntry(raw);
+    if (!e) continue;
+    const list = added.get(e.agentId) ?? [];
     list.push(e);
-    store.set(e.agentId, list);
-    touched.add(e.agentId);
+    added.set(e.agentId, list);
   }
-  for (const agentId of touched) {
-    const list = store.get(agentId) ?? [];
-    dropped.push(...pruneHandoffs(list, nowMs));
-    if (list.length === 0) store.delete(agentId);
+  for (const [agentId, list] of added) {
+    const pruned = pruneHandoffs(store.get(agentId), nowMs, list);
+    dropped.push(...pruned.dropped);
+    if (pruned.kept.length > 0) store.set(agentId, pruned.kept);
+    else store.delete(agentId);
   }
   return dropped;
 }
@@ -380,6 +413,7 @@ export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date
  * connection domain (a different relay, fleet or signing key) are left where
  * they are, untouched, for their own owner or the bounds. Take-and-delete is
  * one synchronous step, so two takers can never both receive an entry.
+ * Never throws.
  */
 export function takeReloadHandoff(
   agentId: string,
@@ -392,16 +426,12 @@ export function takeReloadHandoff(
   if (!agentId || !owner) return { taken: [], dropped: [] };
   if (r.byAgent.get(agentId)?.generation !== takerGeneration) return { taken: [], dropped: [] };
   const store = handoffStore();
-  const list = store.get(agentId);
-  if (!Array.isArray(list)) {
-    store.delete(agentId);
-    return { taken: [], dropped: [] };
-  }
-  const dropped = pruneHandoffs(list, nowMs);
+  const { kept, dropped } = pruneHandoffs(store.get(agentId), nowMs);
   const taken: ReloadHandoffEntry[] = [];
   const left: ReloadHandoffEntry[] = [];
-  for (const e of list) {
-    if (isHandoffEntry(e) && e.agentId === agentId && e.owner === owner && e.fromEpoch < takerEpoch) {
+  // `kept` holds only plain copies the prune just made: these reads cannot throw.
+  for (const e of kept) {
+    if (e.agentId === agentId && e.owner === owner && e.fromEpoch < takerEpoch) {
       taken.push(e);
     } else {
       left.push(e);
@@ -426,6 +456,12 @@ export function takeReloadHandoff(
 // What it records is ownership, never trust: no verdict, no payload. It is
 // bounded and in memory only, like the hand-off itself; it is consulted by the
 // hand-off alone, not by fresh relay deliveries.
+//
+// "Generation" above is history: what orders loops is the loop EPOCH (see the
+// hand-off notes), and that is what these functions take and return. The
+// stored record keeps its field name, `generation`: the records live in the
+// process-wide registry and are read by whichever bundle versions are loaded,
+// so renaming the field would hide one version's records from another.
 
 /** Most keys (and, separately, nonces) remembered per connection domain. Four
  *  times the most a hand-off can hold, so the evidence outlives the entries. */
@@ -454,44 +490,57 @@ const servedDomain = (agentId: string, owner: string): string => `${agentId}\u00
 function noteInto(
   map: ReloadServedLedger["keys"],
   values: string[],
-  generation: number,
+  epoch: number,
   nowMs: number
 ): number | undefined {
   let forgotten: number | undefined;
   const forget = (e: { generation: number } | undefined): void => {
     if (e && Number.isFinite(e.generation)) forgotten = Math.max(forgotten ?? e.generation, e.generation);
   };
+  // A stored record's two fields, each read once, in isolation (#192). One
+  // that cannot be read is lost evidence, not "nobody served this": what it
+  // said is unknowable, so every earlier loop's hand-offs are withheld.
+  const read = (e: unknown): { generation: number; atMs: number } | undefined => {
+    try {
+      const { generation, atMs } = (e ?? {}) as { generation: number; atMs: number };
+      return { generation, atMs };
+    } catch {
+      forgotten = Number.POSITIVE_INFINITY;
+      return undefined;
+    }
+  };
   for (const v of values) {
     if (typeof v !== "string" || !v) continue;
-    const prior = map.get(v);
+    const prior = read(map.get(v));
     // Re-insert so iteration stays oldest-first; keep the newest owner.
     map.delete(v);
-    map.set(v, { generation: Math.max(generation, prior?.generation ?? generation), atMs: nowMs });
+    map.set(v, { generation: Math.max(epoch, prior?.generation ?? epoch), atMs: nowMs });
   }
-  for (const [v, e] of map) {
-    if (nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
+  for (const [v, raw] of map) {
+    const e = read(raw);
+    if (e && nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
     forget(e);
     map.delete(v);
   }
   while (map.size > RELOAD_SERVED_CAP) {
     const oldest = map.keys().next().value as string | undefined;
     if (oldest === undefined) break;
-    forget(map.get(oldest));
+    forget(read(map.get(oldest)));
     map.delete(oldest);
   }
   return forgotten;
 }
 
-/** Record that `generation` took ownership of these messages (heldKeys) and
- *  accepted these signatures (nonces). Never throws. */
+/** Record that the loop with this `epoch` took ownership of these messages
+ *  (heldKeys) and accepted these signatures (nonces). */
 export function noteReloadServed(
   agentId: string,
   owner: string,
-  generation: number,
+  epoch: number,
   served: { keys?: string[]; nonces?: string[] },
   nowMs = Date.now()
 ): void {
-  if (!agentId || !owner || !Number.isFinite(generation)) return;
+  if (!agentId || !owner || !Number.isFinite(epoch)) return;
   const store = servedStore();
   const domain = servedDomain(agentId, owner);
   let ledger = store.get(domain);
@@ -508,8 +557,8 @@ export function noteReloadServed(
       store.delete(oldest);
     }
   }
-  const lostKey = noteInto(ledger.keys, served.keys ?? [], generation, nowMs);
-  const lostNonce = noteInto(ledger.nonces, served.nonces ?? [], generation, nowMs);
+  const lostKey = noteInto(ledger.keys, served.keys ?? [], epoch, nowMs);
+  const lostNonce = noteInto(ledger.nonces, served.nonces ?? [], epoch, nowMs);
   if (lostKey !== undefined || lostNonce !== undefined) {
     const f = (ledger.forgotten ??= {});
     if (lostKey !== undefined) f.key = Math.max(f.key ?? lostKey, lostKey);
@@ -541,7 +590,8 @@ function forgetDomain(ledger: ReloadServedLedger | undefined): void {
   const r = registry();
   const floor = (r.reloadServedFloor ??= {});
   const raise = (kind: "key" | "nonce", epoch: unknown): void => {
-    if (typeof epoch !== "number" || !Number.isFinite(epoch)) return;
+    // +Infinity is the lost-evidence mark (#192): it must survive the fold.
+    if (typeof epoch !== "number" || Number.isNaN(epoch) || epoch === Number.NEGATIVE_INFINITY) return;
     floor[kind] = Math.max(floor[kind] ?? epoch, epoch);
   };
   try {
@@ -554,8 +604,8 @@ function forgetDomain(ledger: ReloadServedLedger | undefined): void {
   }
 }
 
-/** The newest generation that took ownership of `value` (a heldKey, or a
- *  signature nonce) in this connection domain, if any is remembered. */
+/** The epoch of the newest loop that took ownership of `value` (a heldKey, or
+ *  a signature nonce) in this connection domain, if any is remembered. */
 export function reloadServedBy(
   agentId: string,
   owner: string,

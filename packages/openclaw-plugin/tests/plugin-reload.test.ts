@@ -2370,4 +2370,197 @@ describe("reload hand-off of held work (#111)", () => {
       ["m1", "reload_readmitted"]
     ]);
   });
+
+  // ---- #192: hardening follow-ups to the hand-off (nonce replay across three
+  // ---- loops, the narrowed sawFresh guard, served-ledger reads that fail).
+
+  it("a signature a later loop accepted under ANOTHER message id is a replay for an older loop's late copy: three loops, cross-loop nonce guard", async () => {
+    const op = await operatorKey(7);
+    const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+    const m1 = await signedOperator("m1", op, { text: "held text m1" });
+    const nudge = await signedOperator("op1", op, { text: "operator nudge" });
+    // p1 is held with m1 and is never redelivered: unserved work that must
+    // still reach a turn through the same late flush.
+    serve(
+      [
+        { messages: [heldPeer("p1"), m1], fleet_id: FLEET, peer_autoreply: true },
+        { messages: [nudge], fleet_id: FLEET, operator_trusted: true, peer_autoreply: true }
+      ],
+      { messages: [], fleet_id: FLEET }
+    );
+    const a = await startCopy(cfg);
+    await poll(); // p1 and m1 deferred and stashed
+    relay.failNextSpawns = 1;
+    await poll(); // the nudge's turn covers the stash; its spawn is undecided
+    a.host.fire("gateway_stop", { reason: "plugin replacement" });
+    expect(records()).toEqual([]); // A's covering turn still owns the stash
+
+    // The relay hands B the SAME signed material under a new message id. It
+    // is a different message to every key-based check (heldKey includes the
+    // id); only the signature's nonce says it is the same signature.
+    relay.floorFree = () => true;
+    const m1b = { ...structuredClone(m1), message_id: "m1b" };
+    serve([{ messages: [m1b], fleet_id: FLEET, peer_autoreply: true }], { messages: [], fleet_id: FLEET });
+    const b = await startCopy(cfg);
+    await poll(2);
+    expect(deliveredCount("held text m1")).toBe(2); // A's undecided covering prompt, and B's turn
+    b.host.fire("gateway_stop", { reason: "plugin replacement" });
+    expect(records()).toEqual([]); // B served it: nothing left to hand on
+
+    // C holds the agent when A's covering spawn finally fails. C itself has
+    // never seen this signature: only the served ledger knows B accepted it.
+    const c = await startCopy(cfg);
+    await poll();
+    relay.heldFailures.shift()!();
+    await vi.advanceTimersByTimeAsync(0);
+    await poll(3);
+    expect(deliveredCount("held text m1")).toBe(2); // no third turn, from C
+    expect(deliveredCount("held text p1")).toBe(2); // A's undecided prompt, then C's turn
+    expect(records().filter(([id]) => id === "m1")).toEqual([
+      ["m1", "deferred_loop_stopped"],
+      ["m1", "reload_withheld:verification:replay"]
+    ]);
+    expect(records().filter(([id]) => id === "p1")).toEqual([
+      ["p1", "deferred_loop_stopped"],
+      ["p1", "reload_readmitted"]
+    ]);
+    expect(c.conn.runtimeGeneration()).toBeGreaterThan(b.conn.runtimeGeneration());
+    expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
+  });
+
+  it("seeing a candidate fresh leaves out only that candidate's own nonce: a different signature this loop accepted still counts against it", async () => {
+    const { publicKeyB64urlFromSeed, keyId, signCanonical, sha256Hex } = await import("../src/identity");
+    const { agentKeyEndorsementPayload } = await import("@drakon-systems/ekho-sdk/identity");
+    const op = await operatorKey(7);
+    const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+    const peerSeed = new Uint8Array(32).fill(8);
+    const peerPub = publicKeyB64urlFromSeed(peerSeed);
+    const peerKid = keyId(Buffer.from(peerPub, "base64url"));
+    const roster = [
+      {
+        agent_id: "peer",
+        display_name: "Peer",
+        identity_public_key: peerPub,
+        key_id: peerKid,
+        endorsed_by_key_id: op.kid,
+        endorsement_sig: signCanonical(agentKeyEndorsementPayload(FLEET, "peer", peerKid, peerPub), op.seed)
+      }
+    ];
+    const signedPeer = (id: string, text: string, nonce: unknown) => {
+      const canonical = {
+        v: 1,
+        fleet_id: FLEET,
+        sender_agent_id: "peer",
+        key_id: peerKid,
+        recipient: { kind: "agent", id: "agent_reload" },
+        conversation_id: "held-conv",
+        body_sha256: sha256Hex(text),
+        sent_at: new Date().toISOString(),
+        nonce
+      };
+      return {
+        ...heldPeer(id),
+        body: { text },
+        agent_sig: signCanonical(canonical, peerSeed),
+        operator_sig: null,
+        key_id: peerKid,
+        sig_canonical: canonical
+      };
+    };
+    // The verifier compares a nonce as text. x1 signs the NUMBER 5, so this
+    // loop remembers no nonce of x1's own; y1 signs the text "5".
+    const x1 = signedPeer("x1", "signed text x1", 5);
+    const y1 = signedPeer("y1", "signed text y1", "5");
+    // x1 arrives fresh behind five other triggers from the same peer: it
+    // verifies and the rate gate drops it. Then y1 arrives and is accepted.
+    relay.floorFree = () => true;
+    const others = Array.from({ length: 5 }, (_, i) => heldPeer(`r${i}`, { conversation_id: "busy-conv" }));
+    serve(
+      [
+        { messages: [...others, x1], fleet_id: FLEET, roster, peer_autoreply: true },
+        { messages: [y1], fleet_id: FLEET, roster, peer_autoreply: true }
+      ],
+      { messages: [], fleet_id: FLEET, roster }
+    );
+    const c = await startCopy(cfg);
+    await poll(3);
+    expect(await label(c, "signed text x1")).toBe("verified");
+    expect(await label(c, "signed text y1")).toBe("verified");
+    expect(deliveredCount("signed text x1")).toBe(0);
+
+    // An older loop's copy of x1 itself: this loop saw it fresh. The nonce
+    // this loop accepted since then is y1's, not x1's own, and is not left
+    // out of the guard — exactly as a fresh redelivery of x1 would be judged.
+    await plant(c, cfg, [structuredClone(x1)]);
+    await poll(3);
+    expect(deliveredCount("signed text x1")).toBe(0);
+    expect(records().filter(([id]) => id === "x1")).toEqual([["x1", "reload_withheld:verification:replay"]]);
+  });
+
+  // A served-ledger read that fails is lost evidence: withheld, never admitted.
+  const ledgerOf = async (owner: string) => {
+    type Rec = Map<string, unknown>;
+    const store = (globalThis as unknown as Record<symbol, { reloadServed: Map<string, { keys: Rec; nonces: Rec; forgotten?: unknown }> }>)[
+      Symbol.for("ekho-adapter.runtime")
+    ].reloadServed;
+    return store.get(`agent_reload\u0000${owner}`)!;
+  };
+  const throwingRecord = (field: string): unknown =>
+    Object.defineProperty({ generation: 0, atMs: Date.now(), key: 0, nonce: 0 }, field, {
+      get() {
+        throw new Error(`poisoned ${field}`);
+      }
+    });
+  const failingReads = [
+    ["the key record's read throws", "key", () => throwingRecord("generation")],
+    ["the key record answers something that is not an epoch", "key", () => ({ generation: "9", atMs: Date.now() })],
+    ["the key record answers NaN", "key", () => ({ generation: Number.NaN, atMs: Date.now() })],
+    ["the nonce record's read throws", "nonce", () => throwingRecord("generation")],
+    ["the nonce record answers something that is not an epoch", "nonce", () => ({ generation: {}, atMs: Date.now() })],
+    ["the dropped-evidence mark's read throws", "forgotten", () => throwingRecord("key")]
+  ] as const;
+  for (const [name, where, bad] of failingReads) {
+    it(`a served-ledger read that fails withholds the candidate as served_evidence_lost, never admits it (${name})`, async () => {
+      const op = await operatorKey(7);
+      const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+      serve([], { messages: [], fleet_id: FLEET });
+      relay.floorFree = () => true;
+      const b = await startCopy(cfg);
+      await poll();
+      const o1 = await signedOperator("o1", op);
+      const owner = b.conn.connectedInboxContext(await b.conn.ensureConnected(cfg as never)).split(".")[0];
+      const { noteReloadServed } = await registry();
+      const { heldKey } = await import("../src/autoreply");
+      // An EARLIER loop than the depositor (epoch -1 < plant's 0) is on record
+      // for both: readable, neither record would stop the candidate.
+      noteReloadServed("agent_reload", owner, -1, { keys: [heldKey(o1)], nonces: ["nonce-o1"] });
+      const ledger = await ledgerOf(owner);
+      if (where === "key") ledger.keys.set(heldKey(o1), bad());
+      else if (where === "nonce") ledger.nonces.set("nonce-o1", bad());
+      else ledger.forgotten = bad();
+
+      await plant(b, cfg, [o1]);
+      await poll(3);
+      expect(deliveredCount("signed text o1")).toBe(0);
+      expect(records()).toEqual([["o1", "reload_withheld:served_evidence_lost"]]);
+      expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
+    });
+  }
+
+  it("with the same records readable, the same candidate is re-admitted (the control for the cases above)", async () => {
+    const op = await operatorKey(7);
+    const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+    serve([], { messages: [], fleet_id: FLEET });
+    relay.floorFree = () => true;
+    const b = await startCopy(cfg);
+    await poll();
+    const o1 = await signedOperator("o1", op);
+    const owner = b.conn.connectedInboxContext(await b.conn.ensureConnected(cfg as never)).split(".")[0];
+    const { heldKey } = await import("../src/autoreply");
+    (await registry()).noteReloadServed("agent_reload", owner, -1, { keys: [heldKey(o1)], nonces: ["nonce-o1"] });
+    await plant(b, cfg, [o1]);
+    await poll(3);
+    expect(deliveredCount("signed text o1")).toBe(1);
+    expect(records()).toEqual([["o1", "reload_readmitted"]]);
+  });
 });
