@@ -313,31 +313,72 @@ function handoffStore(): Map<string, ReloadHandoffEntry[]> {
   return store;
 }
 
-function isHandoffEntry(e: unknown): e is ReloadHandoffEntry {
-  if (!e || typeof e !== "object") return false;
-  const x = e as Record<string, unknown>;
-  return (
-    typeof x.owner === "string" && x.owner !== "" &&
-    typeof x.agentId === "string" && x.agentId !== "" &&
-    typeof x.fromGeneration === "number" && Number.isFinite(x.fromGeneration) &&
-    typeof x.fromEpoch === "number" && Number.isFinite(x.fromEpoch) &&
-    typeof x.conversationId === "string" &&
-    typeof x.depositedAtMs === "number" && Number.isFinite(x.depositedAtMs)
-  );
+/** Entries this module copy built itself (readHandoffEntry): frozen, plain
+ *  data properties, so they are not read field by field again. */
+const ownHandoffEntries = new WeakSet<object>();
+
+/**
+ * The entry a stored or deposited value describes, as a frozen plain copy, or
+ * null when it is not one. The registry is shared by every bundle version in
+ * the process, so a value in it may have any shape, including a property
+ * accessor that throws (#192). Each field is therefore read exactly ONCE, in
+ * isolation: a value that is not an entry, or whose read throws, is simply not
+ * an entry. Nothing downstream — the bounds, the take, the caller's report of
+ * what was dropped — ever reads the original object again, so an accessor
+ * that behaves on its first read and throws on a later one has no later read
+ * to throw on. `message` is carried as it was found: it stays untrusted and is
+ * re-verified on admission, as before.
+ */
+function readHandoffEntry(e: unknown): ReloadHandoffEntry | null {
+  if (!e || typeof e !== "object") return null;
+  if (ownHandoffEntries.has(e)) return e as ReloadHandoffEntry;
+  try {
+    const { owner, agentId, fromGeneration, fromEpoch, reason, conversationId, message, firstDeferredAtMs, depositedAtMs } =
+      e as Record<string, unknown>;
+    if (
+      !(typeof owner === "string" && owner !== "") ||
+      !(typeof agentId === "string" && agentId !== "") ||
+      !(typeof fromGeneration === "number" && Number.isFinite(fromGeneration)) ||
+      !(typeof fromEpoch === "number" && Number.isFinite(fromEpoch)) ||
+      typeof conversationId !== "string" ||
+      !(typeof depositedAtMs === "number" && Number.isFinite(depositedAtMs))
+    ) {
+      return null;
+    }
+    const entry = Object.freeze({
+      owner,
+      agentId,
+      fromGeneration,
+      fromEpoch,
+      reason: reason as string,
+      conversationId,
+      message,
+      firstDeferredAtMs: firstDeferredAtMs as number | null,
+      depositedAtMs
+    });
+    ownHandoffEntries.add(entry);
+    return entry;
+  } catch {
+    return null;
+  }
 }
 
-/** Drop entries past the age bound or the per-agent cap (oldest first). */
+/** Drop entries past the age bound or the per-agent cap (oldest first). What
+ *  is left in `list` afterwards is this module's own plain copies only. */
 function pruneHandoffs(list: ReloadHandoffEntry[], nowMs: number): ReloadHandoffDropped[] {
   const dropped: ReloadHandoffDropped[] = [];
   for (let i = list.length - 1; i >= 0; i--) {
-    // Not an entry at all (another bundle version wrote it): it can never be
-    // taken, and must not make every later take and deposit throw.
-    if (!isHandoffEntry(list[i])) {
+    // Not an entry at all, or one that cannot be read (another bundle version
+    // wrote it): it can never be taken, and must not make every later take
+    // and deposit throw.
+    const entry = readHandoffEntry(list[i]);
+    if (!entry) {
       list.splice(i, 1);
       continue;
     }
-    if (nowMs - list[i].depositedAtMs > RELOAD_HANDOFF_MAX_AGE_MS) {
-      dropped.push({ entry: list[i], why: "unclaimed_too_long" });
+    list[i] = entry;
+    if (nowMs - entry.depositedAtMs > RELOAD_HANDOFF_MAX_AGE_MS) {
+      dropped.push({ entry, why: "unclaimed_too_long" });
       list.splice(i, 1);
     }
   }
@@ -357,8 +398,9 @@ export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date
   const store = handoffStore();
   const dropped: ReloadHandoffDropped[] = [];
   const touched = new Set<string>();
-  for (const e of entries) {
-    if (!isHandoffEntry(e)) continue;
+  for (const raw of entries) {
+    const e = readHandoffEntry(raw);
+    if (!e) continue;
     const held = store.get(e.agentId);
     const list = Array.isArray(held) ? held : [];
     list.push(e);
@@ -400,8 +442,9 @@ export function takeReloadHandoff(
   const dropped = pruneHandoffs(list, nowMs);
   const taken: ReloadHandoffEntry[] = [];
   const left: ReloadHandoffEntry[] = [];
+  // The prune left only this module's own plain copies: these reads cannot throw.
   for (const e of list) {
-    if (isHandoffEntry(e) && e.agentId === agentId && e.owner === owner && e.fromEpoch < takerEpoch) {
+    if (e.agentId === agentId && e.owner === owner && e.fromEpoch < takerEpoch) {
       taken.push(e);
     } else {
       left.push(e);
@@ -426,6 +469,23 @@ export function takeReloadHandoff(
 // What it records is ownership, never trust: no verdict, no payload. It is
 // bounded and in memory only, like the hand-off itself; it is consulted by the
 // hand-off alone, not by fresh relay deliveries.
+//
+// "Generation" above is history: what orders loops is the loop EPOCH (see the
+// hand-off notes), and that is what every function here takes and returns. The
+// stored record keeps its field name, `generation`, because the records live
+// in the process-wide registry and are read by whichever bundle versions are
+// loaded: renaming the field would hide one version's records from another.
+//
+// Unreadable records (#192). The ledger is in that shared registry, so a
+// record may have any shape, including a property accessor that throws. A read
+// that throws is never allowed out of these functions, and it is never read as
+// "nobody served this": the ledger exists to stop a second turn, so evidence
+// it cannot read is evidence LOST. A lookup that hits such a record answers
+// "served by a later loop" (+Infinity); the note path drops the record and
+// marks the domain's evidence as lost for every earlier loop. Either way the
+// hand-off withholds, with a record, instead of re-admitting. A record that
+// reads without throwing but is not a record keeps its earlier treatment (it
+// is no evidence).
 
 /** Most keys (and, separately, nonces) remembered per connection domain. Four
  *  times the most a hand-off can hold, so the evidence outlives the entries. */
@@ -451,51 +511,100 @@ function servedStore(): Map<string, ReloadServedLedger> {
 
 const servedDomain = (agentId: string, owner: string): string => `${agentId}\u0000${owner}`;
 
+/** A served record that could not be read: its accessor threw (#192). */
+const UNREADABLE = Symbol("unreadable");
+
+/** A stored served record's two fields, each read once, in isolation.
+ *  `undefined`: not a record at all. UNREADABLE: reading it threw. */
+function readServedRecord(e: unknown): { generation: number; atMs: number } | undefined | typeof UNREADABLE {
+  if (!e || typeof e !== "object") return undefined;
+  try {
+    const { generation, atMs } = e as { generation: number; atMs: number };
+    return { generation, atMs };
+  } catch {
+    return UNREADABLE;
+  }
+}
+
 function noteInto(
   map: ReloadServedLedger["keys"],
   values: string[],
-  generation: number,
+  epoch: number,
   nowMs: number
 ): number | undefined {
   let forgotten: number | undefined;
-  const forget = (e: { generation: number } | undefined): void => {
-    if (e && Number.isFinite(e.generation)) forgotten = Math.max(forgotten ?? e.generation, e.generation);
+  const forget = (e: { generation: number } | undefined | typeof UNREADABLE): void => {
+    // What an unreadable record said is unknowable: every earlier loop's
+    // evidence counts as lost.
+    if (e === UNREADABLE) forgotten = Number.POSITIVE_INFINITY;
+    else if (e && Number.isFinite(e.generation)) forgotten = Math.max(forgotten ?? e.generation, e.generation);
   };
   for (const v of values) {
     if (typeof v !== "string" || !v) continue;
-    const prior = map.get(v);
+    const prior = readServedRecord(map.get(v));
+    // An unreadable prior owner may have been a later loop than this one.
+    if (prior === UNREADABLE) forget(prior);
+    const priorEpoch = prior === UNREADABLE ? undefined : prior?.generation;
     // Re-insert so iteration stays oldest-first; keep the newest owner.
     map.delete(v);
-    map.set(v, { generation: Math.max(generation, prior?.generation ?? generation), atMs: nowMs });
+    map.set(v, { generation: Math.max(epoch, priorEpoch ?? epoch), atMs: nowMs });
   }
-  for (const [v, e] of map) {
-    if (nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
+  for (const [v, raw] of map) {
+    const e = readServedRecord(raw);
+    if (e !== UNREADABLE && e !== undefined && nowMs - e.atMs <= RELOAD_HANDOFF_MAX_AGE_MS) break;
     forget(e);
     map.delete(v);
   }
   while (map.size > RELOAD_SERVED_CAP) {
     const oldest = map.keys().next().value as string | undefined;
     if (oldest === undefined) break;
-    forget(map.get(oldest));
+    forget(readServedRecord(map.get(oldest)));
     map.delete(oldest);
   }
   return forgotten;
 }
 
-/** Record that `generation` took ownership of these messages (heldKeys) and
- *  accepted these signatures (nonces). Never throws. */
+/** The domain's ledger if it can be used as one. `null`: there is none.
+ *  UNREADABLE: something is stored there that is not a ledger, or that throws
+ *  when read. */
+function readServedLedger(store: Map<string, ReloadServedLedger>, domain: string): ReloadServedLedger | null | typeof UNREADABLE {
+  const held: unknown = store.get(domain);
+  if (held === undefined) return null;
+  if (!held || typeof held !== "object") return UNREADABLE;
+  try {
+    const { keys, nonces } = held as ReloadServedLedger;
+    return keys instanceof Map && nonces instanceof Map ? (held as ReloadServedLedger) : UNREADABLE;
+  } catch {
+    return UNREADABLE;
+  }
+}
+
+/** Record that the loop with this `epoch` took ownership of these messages
+ *  (heldKeys) and accepted these signatures (nonces). Never throws. */
 export function noteReloadServed(
   agentId: string,
   owner: string,
-  generation: number,
+  epoch: number,
   served: { keys?: string[]; nonces?: string[] },
   nowMs = Date.now()
 ): void {
-  if (!agentId || !owner || !Number.isFinite(generation)) return;
+  if (!agentId || !owner || !Number.isFinite(epoch)) return;
   const store = servedStore();
   const domain = servedDomain(agentId, owner);
-  let ledger = store.get(domain);
-  if (!ledger) {
+  const held = readServedLedger(store, domain);
+  let ledger: ReloadServedLedger;
+  if (held === UNREADABLE) {
+    // Whatever it recorded cannot be read back: start again, with every
+    // earlier loop's evidence marked lost, rather than fail every later note.
+    ledger = {
+      keys: new Map(),
+      nonces: new Map(),
+      forgotten: { key: Number.POSITIVE_INFINITY, nonce: Number.POSITIVE_INFINITY }
+    };
+    store.set(domain, ledger);
+  } else if (held) {
+    ledger = held;
+  } else {
     ledger = { keys: new Map(), nonces: new Map() };
     store.set(domain, ledger);
     while (store.size > RELOAD_SERVED_DOMAINS) {
@@ -508,12 +617,21 @@ export function noteReloadServed(
       store.delete(oldest);
     }
   }
-  const lostKey = noteInto(ledger.keys, served.keys ?? [], generation, nowMs);
-  const lostNonce = noteInto(ledger.nonces, served.nonces ?? [], generation, nowMs);
+  const lostKey = noteInto(ledger.keys, served.keys ?? [], epoch, nowMs);
+  const lostNonce = noteInto(ledger.nonces, served.nonces ?? [], epoch, nowMs);
   if (lostKey !== undefined || lostNonce !== undefined) {
-    const f = (ledger.forgotten ??= {});
-    if (lostKey !== undefined) f.key = Math.max(f.key ?? lostKey, lostKey);
-    if (lostNonce !== undefined) f.nonce = Math.max(f.nonce ?? lostNonce, lostNonce);
+    // The mark itself is replaced, not updated in place, when it cannot be
+    // read: an unreadable mark already means "everything earlier is lost".
+    let f: { key?: number; nonce?: number };
+    try {
+      const { key, nonce } = ledger.forgotten ?? {};
+      f = { key, nonce };
+    } catch {
+      f = { key: Number.POSITIVE_INFINITY, nonce: Number.POSITIVE_INFINITY };
+    }
+    if (lostKey !== undefined) f.key = Math.max(typeof f.key === "number" ? f.key : lostKey, lostKey);
+    if (lostNonce !== undefined) f.nonce = Math.max(typeof f.nonce === "number" ? f.nonce : lostNonce, lostNonce);
+    ledger.forgotten = f;
   }
 }
 
@@ -529,8 +647,16 @@ export function noteReloadServed(
  */
 export function reloadServedForgotten(agentId: string, owner: string, kind: "key" | "nonce"): number | undefined {
   const r = registry();
-  const own = r.reloadServed?.get(servedDomain(agentId, owner))?.forgotten?.[kind];
-  const floor = r.reloadServedFloor?.[kind];
+  let own: unknown;
+  let floor: unknown;
+  try {
+    const store: unknown = r.reloadServed;
+    own = store instanceof Map ? store.get(servedDomain(agentId, owner))?.forgotten?.[kind] : undefined;
+    floor = r.reloadServedFloor?.[kind];
+  } catch {
+    // A mark that cannot be read (#192) cannot show the evidence is intact.
+    return Number.POSITIVE_INFINITY;
+  }
   if (typeof own !== "number") return typeof floor === "number" ? floor : undefined;
   return typeof floor === "number" ? Math.max(own, floor) : own;
 }
@@ -554,16 +680,26 @@ function forgetDomain(ledger: ReloadServedLedger | undefined): void {
   }
 }
 
-/** The newest generation that took ownership of `value` (a heldKey, or a
- *  signature nonce) in this connection domain, if any is remembered. */
+/** The epoch of the newest loop that took ownership of `value` (a heldKey, or
+ *  a signature nonce) in this connection domain, if any is remembered. Never
+ *  throws: a record that cannot be read answers +Infinity — served by a later
+ *  loop than any that could ask (#192). */
 export function reloadServedBy(
   agentId: string,
   owner: string,
   kind: "key" | "nonce",
   value: string
 ): number | undefined {
-  const ledger = registry().reloadServed?.get(servedDomain(agentId, owner));
-  return (kind === "key" ? ledger?.keys : ledger?.nonces)?.get(value)?.generation;
+  try {
+    const store: unknown = registry().reloadServed;
+    if (!(store instanceof Map)) return undefined;
+    const ledger = store.get(servedDomain(agentId, owner)) as ReloadServedLedger | undefined;
+    const map: unknown = kind === "key" ? ledger?.keys : ledger?.nonces;
+    if (!(map instanceof Map)) return undefined;
+    return map.get(value)?.generation;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 /** Test seam: how many hand-off entries are held for `agentId`. */
