@@ -102,13 +102,18 @@ describe("operator DM conversation event query (#196)", () => {
     }
   }
 
-  function referenceDm(order: "ASC" | "DESC", limit: number, offset: number) {
+  /** The old single-statement read, with optional extra filters ANDed on exactly as getConversation appends them. */
+  function referenceDm(
+    order: "ASC" | "DESC", limit: number, offset: number,
+    sortBy = "created_at", extra: { sql: string; params: Array<string | number> } = { sql: "", params: [] }
+  ) {
     const raw = relay.db.raw();
-    const params = [relay.fleetId, relay.fleetId, opId, agentX, agentX, opId, dm];
+    const where = REFERENCE_DM_WHERE + (extra.sql ? ` AND ${extra.sql}` : "");
+    const params = [relay.fleetId, relay.fleetId, opId, agentX, agentX, opId, dm, ...extra.params];
     const rows = raw.prepare(
-      `SELECT ${EVENT_ID_COLUMNS} FROM events WHERE ${REFERENCE_DM_WHERE} ORDER BY created_at ${order}, id ${order} LIMIT ? OFFSET ?`
+      `SELECT ${EVENT_ID_COLUMNS} FROM events WHERE ${where} ORDER BY ${sortBy} ${order}, id ${order} LIMIT ? OFFSET ?`
     ).all(...params, limit, offset) as Row[];
-    const total = (raw.prepare(`SELECT COUNT(*) AS count FROM events WHERE ${REFERENCE_DM_WHERE}`).get(...params) as { count: number }).count;
+    const total = (raw.prepare(`SELECT COUNT(*) AS count FROM events WHERE ${where}`).get(...params) as { count: number }).count;
     return { ids: rows.map((r) => String(r.id)), total };
   }
 
@@ -215,6 +220,44 @@ describe("operator DM conversation event query (#196)", () => {
         expect((got.items as Row[]).map((r) => String(r.id)), `${order} ${limit}/${offset}`).toEqual(ref.ids);
         expect(got.total, `${order} ${limit}/${offset}`).toBe(ref.total);
       }
+    }
+  });
+
+  it("orders by every sortable column exactly as the old query did", () => {
+    for (const sortBy of ["created_at", "event_type", "actor_id", "resource_kind"]) {
+      for (const order of ["ASC", "DESC"] as const) {
+        for (const [limit, offset] of [[100, 0], [4, 5]] as const) {
+          const ref = referenceDm(order, limit, offset, sortBy);
+          const got = relay.db.getConversation(relay.fleetId, dm, { sortBy, sortOrder: order.toLowerCase(), limit, offset });
+          expect((got.items as Row[]).map((r) => String(r.id)), `${sortBy} ${order} ${limit}/${offset}`).toEqual(ref.ids);
+          expect(got.total, `${sortBy} ${order} ${limit}/${offset}`).toBe(ref.total);
+        }
+      }
+    }
+  });
+
+  it("combines type, date, keyset and search filters exactly as the old query did", () => {
+    // Every optional filter at once: this is the longest parameter list the
+    // statement takes, so a placeholder out of order shows up here.
+    const cursorAt = "2026-11-01T10:00:06.000Z";
+    const cursorId = `evt-${tag}-life-006`;
+    const extra = {
+      sql: "event_type LIKE ? AND created_at >= ? AND created_at <= ? AND (created_at < ? OR (created_at = ? AND id < ?))"
+        + " AND (LOWER(event_type) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(actor_id, '')) LIKE ? ESCAPE '\\' OR LOWER(resource_kind) LIKE ? ESCAPE '\\'"
+        + " OR LOWER(COALESCE(resource_id, '')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(payload_json, '')) LIKE ? ESCAPE '\\')",
+      params: ["message.%", "2026-11-01T00:00:00.000Z", "2026-11-01T23:59:59.999Z", cursorAt, cursorAt, cursorId,
+        "%acked%", "%acked%", "%acked%", "%acked%", "%acked%"]
+    };
+    for (const order of ["ASC", "DESC"] as const) {
+      const ref = referenceDm(order, 100, 0, "event_type", extra);
+      const got = relay.db.getConversation(relay.fleetId, dm, {
+        type: "message", dateFrom: "2026-11-01", dateTo: "2026-11-01", beforeAt: cursorAt, beforeId: cursorId,
+        search: "acked", sortBy: "event_type", sortOrder: order.toLowerCase(), limit: 100, offset: 0
+      });
+      expect(ref.ids.length, order).toBeGreaterThan(0); // the combination really selects something
+      expect(ref.ids.length, order).toBeLessThan(8);     // …and really excludes something
+      expect((got.items as Row[]).map((r) => String(r.id)), order).toEqual(ref.ids);
+      expect(got.total, order).toBe(ref.total);
     }
   });
 
