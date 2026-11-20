@@ -4013,11 +4013,11 @@ export class EkhoDb {
     // already carries the rowid, so no branch touches an events row), and only
     // those rows are then fetched. CROSS JOIN is deliberate: SQLite never
     // reorders it, so messages drive the events lookup and the rowid set
-    // drives the final fetch whatever the statistics say. The fleet check stays on the outer query
-    // only — repeating it inside a message branch would offer the planner the
-    // fleet index for the inner loop. UNION (not UNION ALL) so an event that a
-    // message branch and the conversation branch both match is returned and
-    // counted once.
+    // drives the final fetch whatever the statistics say. The fleet check
+    // stays on the outer query only — repeating it inside a message branch
+    // would offer the planner the fleet index for the inner loop. UNION (not
+    // UNION ALL) so an event that a message branch and the conversation branch
+    // both match is returned and counted once.
     let withSql = "";
     let fromSql = "events";
     let sourceParams: Array<string | number> = [];
