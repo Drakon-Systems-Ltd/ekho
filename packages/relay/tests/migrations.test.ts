@@ -218,8 +218,10 @@ describe("transactional migrations (M6)", () => {
     db.exec("CREATE TABLE a2a_task_messages (task_id TEXT, message_id TEXT, PRIMARY KEY (task_id, message_id))");
     db.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, fleet_id TEXT, sender_agent_id TEXT, created_at TEXT)");
     // …and events/heartbeats (migration 001) so migration 022 (retention indexes
-    // on events(event_type, created_at) and heartbeats(received_at)) applies cleanly.
-    db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT)");
+    // on events(event_type, created_at) and heartbeats(received_at)) and migration
+    // 029 (events indexes on resource_id and fleet_id/conversation_id/created_at)
+    // apply cleanly.
+    db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, resource_id TEXT, conversation_id TEXT, created_at TEXT)");
     db.exec("CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT)");
     // …and fleet_operator_keys in its pre-024 shape, so migration 024 (ALTER TABLE
     // fleet_operator_keys ADD COLUMN revoked_by_key_id/revocation_sig) applies cleanly.
@@ -260,7 +262,7 @@ describe("transactional migrations (M6)", () => {
       CREATE TABLE agents (id TEXT PRIMARY KEY, peer_turn_budget INTEGER NOT NULL DEFAULT 6);
       CREATE TABLE rooms (id TEXT PRIMARY KEY, project_turn_budget INTEGER NOT NULL DEFAULT 100);
       -- events (001) and heartbeats (001), which migration 022 indexes.
-      CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT);
+      CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, resource_id TEXT, conversation_id TEXT, created_at TEXT);
       CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT);
       -- fleet_operator_keys in its pre-024 shape, which migration 024 adds two columns to.
       CREATE TABLE fleet_operator_keys (fleet_id TEXT, key_id TEXT, public_key TEXT, label TEXT, created_at TEXT, last_used_at TEXT, revoked_at TEXT, endorsed_by_key_id TEXT, endorsement_sig TEXT, PRIMARY KEY (fleet_id, key_id));
@@ -303,7 +305,7 @@ describe("transactional migrations (M6)", () => {
       db.exec("CREATE TABLE agents (id TEXT PRIMARY KEY, peer_turn_budget INTEGER NOT NULL DEFAULT 6)");
       db.exec("CREATE TABLE rooms (id TEXT PRIMARY KEY, project_mode INTEGER NOT NULL DEFAULT 0, project_turn_budget INTEGER NOT NULL DEFAULT 100)");
       // events/heartbeats (001) are what migration 022 adds its retention indexes to.
-      db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, created_at TEXT)");
+      db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, resource_id TEXT, conversation_id TEXT, created_at TEXT)");
       db.exec("CREATE TABLE heartbeats (id TEXT PRIMARY KEY, agent_id TEXT, status TEXT, received_at TEXT)");
       // fleet_operator_keys in its pre-024 shape, which migration 024 adds two columns to.
       db.exec("CREATE TABLE fleet_operator_keys (fleet_id TEXT, key_id TEXT, public_key TEXT, label TEXT, created_at TEXT, last_used_at TEXT, revoked_at TEXT, endorsed_by_key_id TEXT, endorsement_sig TEXT, PRIMARY KEY (fleet_id, key_id))");
@@ -365,5 +367,165 @@ describe("transactional migrations (M6)", () => {
       expect(colDefault("agents", "peer_turn_budget")).toBe("0");
       expect(colDefault("rooms", "project_turn_budget")).toBe("0");
     });
+  });
+});
+
+// #196 — migration 029 adds the two events indexes the operator conversation
+// views need. Index-only, so there is no data to convert; what has to hold is
+// that every way a database can arrive at it ends in the same two definitions.
+describe("migration 029 — events indexes for operator conversation views", () => {
+  const INDEXES: Record<string, string> = {
+    idx_events_resource: "CREATE INDEX idx_events_resource ON events(resource_id)",
+    idx_events_fleet_conversation: "CREATE INDEX idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at)"
+  };
+  const indexSql = (db: Database.Database, name: string) =>
+    (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ? AND tbl_name = 'events'").get(name) as { sql: string } | undefined)?.sql;
+  const expectBothIndexes = (db: Database.Database) => {
+    for (const [name, sql] of Object.entries(INDEXES)) expect(indexSql(db, name)).toBe(sql);
+  };
+  const eventsIndexNames = (db: Database.Database) =>
+    (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events' ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+
+  /** A database at exactly migration 028: schema + every earlier migration, without the two new indexes. */
+  function dbAt028(): { db: Database.Database; before029: string } {
+    const db = new Database(":memory:");
+    db.exec(schemaSql);
+    const before029 = fs.mkdtempSync(path.join(os.tmpdir(), "ekho-before-029-"));
+    for (const f of fs.readdirSync(REAL_MIGRATIONS_DIR).filter((n) => n.endsWith(".sql") && Number(n.slice(0, 3)) < 29))
+      fs.copyFileSync(path.join(REAL_MIGRATIONS_DIR, f), path.join(before029, f));
+    runMigrationsOn(db, before029);
+    // schema.ts already defines the new indexes; drop them to get the real 028 shape.
+    for (const name of Object.keys(INDEXES)) db.exec(`DROP INDEX ${name}`);
+    for (const name of Object.keys(INDEXES)) expect(indexSql(db, name)).toBeUndefined();
+    expect(versions(db)).toContain(28);
+    expect(versions(db)).not.toContain(29);
+    db.exec(`INSERT INTO fleets (id, name, created_at) VALUES ('f029', 'old', '2026-11-01T00:00:00.000Z');
+      INSERT INTO events (id, fleet_id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at)
+        VALUES ('e029a', 'f029', 'message.queued', 'agent', 'a', 'message', 'm1', 'conv-old', '{"k":1}', '2026-11-01T00:00:01.000Z'),
+               ('e029b', 'f029', 'agent.status', 'agent', 'a', 'agent', NULL, NULL, '{}', '2026-11-01T00:00:02.000Z')`);
+    return { db, before029 };
+  }
+  const eventRows = (db: Database.Database) => db.prepare("SELECT * FROM events ORDER BY id").all();
+
+  it("is the next migration file and creates exactly the two indexes, guarded", () => {
+    const files = fs.readdirSync(REAL_MIGRATIONS_DIR).filter((f) => f.startsWith("029_"));
+    expect(files).toEqual(["029_events_conversation_indexes.sql"]);
+    const sql = fs.readFileSync(path.join(REAL_MIGRATIONS_DIR, files[0]), "utf8");
+    const statements = sql.split(";").map((s) => s.replace(/--.*$/gm, "").trim()).filter(Boolean);
+    expect(statements).toEqual([
+      "CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id)",
+      "CREATE INDEX IF NOT EXISTS idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at)"
+    ]);
+    // The runner splits on ';' — a ';' inside the comment block would cut a
+    // statement in half.
+    expect(sql.split("\n").filter((l) => l.startsWith("--")).join("\n")).not.toContain(";");
+  });
+
+  it("upgrades a 028 database: both indexes appear, rows are untouched, and a re-run is a no-op", () => {
+    const { db, before029 } = dbAt028();
+    try {
+      const rowsBefore = eventRows(db);
+      const indexesBefore = eventsIndexNames(db);
+
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      expect(versions(db)).toContain(29);
+      expectBothIndexes(db);
+      expect(eventsIndexNames(db)).toEqual([...indexesBefore, ...Object.keys(INDEXES)].sort());
+      expect(eventRows(db)).toEqual(rowsBefore);
+      expect(db.prepare("PRAGMA integrity_check").pluck().get()).toBe("ok");
+      expect(db.inTransaction).toBe(false);
+
+      const appliedAt = db.prepare("SELECT applied_at FROM schema_migrations WHERE version = 29").pluck().get();
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      expect(db.prepare("SELECT applied_at FROM schema_migrations WHERE version = 29").pluck().get()).toBe(appliedAt);
+      expect(db.prepare("SELECT COUNT(*) FROM schema_migrations WHERE version = 29").pluck().get()).toBe(1);
+      expectBothIndexes(db);
+    } finally {
+      fs.rmSync(before029, { recursive: true, force: true });
+      db.close();
+    }
+  });
+
+  it("only records its version on a database that already has the indexes and its own statistics", () => {
+    // The relay that hit #196 had both indexes created by hand, then ANALYZE.
+    const { db, before029 } = dbAt028();
+    try {
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id);
+        CREATE INDEX IF NOT EXISTS idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at);
+        ANALYZE events`);
+      const stats = () => db.prepare("SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl, idx").all();
+      const statsBefore = stats();
+      expect(statsBefore.length).toBeGreaterThan(0);
+      const indexesBefore = eventsIndexNames(db);
+
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      expect(versions(db)).toContain(29);
+      expect(eventsIndexNames(db)).toEqual(indexesBefore);
+      expect(indexSql(db, "idx_events_resource")).toBe("CREATE INDEX idx_events_resource ON events(resource_id)");
+      expect(indexSql(db, "idx_events_fleet_conversation")).toBe("CREATE INDEX idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at)");
+      expect(stats()).toEqual(statsBefore); // the migration gathers and discards no statistics
+    } finally {
+      fs.rmSync(before029, { recursive: true, force: true });
+      db.close();
+    }
+  });
+
+  it("round trip: a build without 029 still boots on the migrated file, and coming back changes nothing", () => {
+    const { db, before029 } = dbAt028();
+    try {
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      const versionsAfter = versions(db);
+      const rowsAfter = eventRows(db);
+
+      // The previous build's boot: schema first, then only the migrations it knows.
+      const previousSchema = schemaSql.split("\n").filter((l) => !/idx_events_(resource|fleet_conversation)\b/.test(l)).join("\n");
+      expect(previousSchema).not.toBe(schemaSql);
+      db.exec(previousSchema);
+      runMigrationsOn(db, before029);
+      expect(versions(db)).toEqual(versionsAfter); // 29 stays recorded, nothing re-applied
+      expectBothIndexes(db);
+      db.exec(`INSERT INTO events (id, fleet_id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at)
+        VALUES ('e029c', 'f029', 'message.acked', 'agent', 'a', 'message', 'm1', 'conv-old', '{}', '2026-11-01T00:00:03.000Z')`);
+
+      // Back on this build.
+      db.exec(schemaSql);
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      expect(versions(db)).toEqual(versionsAfter);
+      expectBothIndexes(db);
+      expect(eventRows(db).length).toBe(rowsAfter.length + 1);
+      // A row written by the older build is reachable through both new indexes.
+      expect(db.prepare("SELECT id FROM events INDEXED BY idx_events_resource WHERE resource_id = 'm1' ORDER BY id").pluck().all()).toEqual(["e029a", "e029c"]);
+      expect(db.prepare("SELECT id FROM events INDEXED BY idx_events_fleet_conversation WHERE fleet_id = 'f029' AND conversation_id = 'conv-old' ORDER BY created_at").pluck().all()).toEqual(["e029a", "e029c"]);
+      expect(db.prepare("PRAGMA integrity_check").pluck().get()).toBe("ok");
+    } finally {
+      fs.rmSync(before029, { recursive: true, force: true });
+      db.close();
+    }
+  });
+
+  it("undo is a plain DROP INDEX, and the migration statements restore both", () => {
+    const { db, before029 } = dbAt028();
+    try {
+      runMigrationsOn(db, REAL_MIGRATIONS_DIR);
+      const rows = eventRows(db);
+      for (const name of Object.keys(INDEXES)) db.exec(`DROP INDEX IF EXISTS ${name}`);
+      for (const name of Object.keys(INDEXES)) expect(indexSql(db, name)).toBeUndefined();
+      expect(eventRows(db)).toEqual(rows);
+      db.exec(fs.readFileSync(path.join(REAL_MIGRATIONS_DIR, "029_events_conversation_indexes.sql"), "utf8"));
+      expectBothIndexes(db);
+    } finally {
+      fs.rmSync(before029, { recursive: true, force: true });
+      db.close();
+    }
+  });
+
+  it("a fresh schema.ts database and a migrated one end with identical definitions", () => {
+    const fresh = new Database(":memory:");
+    fresh.exec(schemaSql);
+    expectBothIndexes(fresh); // before any migration: schema.ts alone
+    runMigrationsOn(fresh, REAL_MIGRATIONS_DIR);
+    expectBothIndexes(fresh);
+    expect(versions(fresh)).toContain(29);
+    fresh.close();
   });
 });

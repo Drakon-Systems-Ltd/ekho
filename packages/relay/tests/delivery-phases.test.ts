@@ -273,6 +273,8 @@ describe("#155 phase 1a: relay-observed delivery timing", () => {
       db.exec(`CREATE TABLE message_deliveries (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, recipient_agent_id TEXT NOT NULL,
                  delivery_attempts INTEGER NOT NULL DEFAULT 0, queued_at TEXT NOT NULL, delivered_at TEXT, acked_at TEXT,
                  status TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, last_failure_reason TEXT)`);
+      // …and events (migration 001), which migration 029 indexes on the same boot.
+      db.exec("CREATE TABLE events (id TEXT PRIMARY KEY, fleet_id TEXT, event_type TEXT, resource_id TEXT, conversation_id TEXT, created_at TEXT)");
       db.exec("INSERT INTO agents (id, fleet_id, display_name, runtime, status, policy_profile, created_at) VALUES ('ag_1', 'f', 'one', 'openclaw', 'active', 'default', '2026-11-01T00:00:00.000Z')");
       db.exec("INSERT INTO message_deliveries (id, message_id, recipient_agent_id, queued_at, acked_at, status) VALUES ('d_1', 'm_1', 'ag_1', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:05.000Z', 'acked')");
       const mark = db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)");

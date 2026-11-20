@@ -1,0 +1,36 @@
+-- Operator conversation views read events by message and by conversation (#196).
+-- Neither column was indexed, so the canonical DM view
+-- (GET /v1/operator/conversations/dm-<fleet>-<agent>) walked
+-- idx_events_fleet_created_at, which is every event the fleet has recorded,
+-- once for the page and once more for the COUNT. better-sqlite3 is
+-- synchronous, so on a fleet with several hundred thousand events one polling
+-- console tab kept the event loop busy and the relay stopped accepting
+-- connections.
+--
+--   idx_events_resource            the message-level half of the DM merge
+--                                  (events for a set of message ids)
+--   idx_events_fleet_conversation  the conversation-level half, and every
+--                                  ordinary single-conversation read
+--
+-- schema.ts defines the same two indexes and is executed before migrations on
+-- every boot, so on a normal boot it is schema.ts that creates them, on fresh
+-- and existing databases alike, outside this migration's transaction, and this
+-- file then only records its version. It builds them itself only when
+-- migrations are run without the schema. Both statements are IF NOT EXISTS and
+-- use the exact names and column lists of the indexes that were created by
+-- hand on the relay that hit this, so there nothing is rebuilt either way.
+--
+-- Wherever they are created, each index is built with its own pass over the
+-- events table, during boot, on a database that does not have it yet. How long
+-- that takes on a large database has not been measured.
+--
+-- No ANALYZE and no PRAGMA optimize, on purpose. The indexes alone were not
+-- enough for the old query: without statistics the planner still chose the
+-- fleet walk. Rather than depend on statistics being present and fresh, the DM
+-- read in db.ts fixes its join order and reaches events only through index
+-- seeks. Which messages index a branch uses is still the planner's choice.
+-- Statistics an operator has gathered are left exactly as they are.
+--
+-- To undo: DROP INDEX IF EXISTS on both names. An older build ignores them.
+CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id);
+CREATE INDEX IF NOT EXISTS idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at);

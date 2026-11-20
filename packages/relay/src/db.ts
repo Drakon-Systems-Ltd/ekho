@@ -4002,14 +4002,43 @@ export class EkhoDb {
     // also holds op↔otherAgent messages can never bleed the other agent in. Plus
     // any conversation-level events (stall/resume) under the canonical id itself.
     // Every other id reads its single conversation exactly as before.
-    let convClause: string;
-    let convParams: Array<string | number>;
+    //
+    // The merge is a union of three indexed branches, not one OR predicate over
+    // events (#196). Written as `fleet_id = ? AND (resource_id IN (…) OR
+    // conversation_id = ?)`, SQLite walks idx_events_fleet_created_at — every
+    // event the fleet has — unless planner statistics happen to be present and
+    // fresh, and this runs synchronously on the event loop for the page and
+    // again for the COUNT. Here the matching events are collected first as
+    // rowids, each branch through an index from migration 029 (an index entry
+    // already carries the rowid, so no branch touches an events row), and only
+    // those rows are then fetched. CROSS JOIN is deliberate: SQLite never
+    // reorders it, so messages drive the events lookup and the rowid set
+    // drives the final fetch whatever the statistics say (which messages
+    // index a message branch uses is still the planner's choice). The fleet
+    // check stays on the outer query only — repeating it inside a message
+    // branch would offer the planner the fleet index for the inner loop. UNION
+    // (not UNION ALL) so an event that a message branch and the conversation
+    // branch both match is returned and counted once.
+    let withSql = "";
+    let fromSql = "events";
+    let sourceParams: Array<string | number> = [];
+    let convClause = "";
+    let convParams: Array<string | number> = [];
     if (conversationId.startsWith(`dm-${fleetId}-`)) {
       const agentX = conversationId.slice(`dm-${fleetId}-`.length);
       const opId = `op_${fleetId}`;
-      convClause =
-        "(resource_id IN (SELECT id FROM messages WHERE fleet_id = ? AND recipient_kind = 'agent' AND ((sender_agent_id = ? AND recipient_id = ?) OR (sender_agent_id = ? AND recipient_id = ?))) OR conversation_id = ?)";
-      convParams = [fleetId, opId, agentX, agentX, opId, conversationId];
+      withSql = `WITH dm_event_rowids(event_rowid) AS MATERIALIZED (
+         SELECT ev.rowid FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
+          WHERE m.fleet_id = ? AND m.recipient_kind = 'agent' AND m.recipient_id = ? AND m.sender_agent_id = ?
+         UNION
+         SELECT ev.rowid FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
+          WHERE m.fleet_id = ? AND m.sender_agent_id = ? AND m.recipient_kind = 'agent' AND m.recipient_id = ?
+         UNION
+         SELECT rowid FROM events WHERE fleet_id = ? AND conversation_id = ?
+       )
+       `;
+      fromSql = "dm_event_rowids CROSS JOIN events ON events.rowid = dm_event_rowids.event_rowid";
+      sourceParams = [fleetId, agentX, opId, fleetId, agentX, opId, fleetId, conversationId];
     } else {
       convClause = "conversation_id = ?";
       convParams = [conversationId];
@@ -4027,7 +4056,7 @@ export class EkhoDb {
         : ""
     ].filter(Boolean).join(" AND ");
 
-    const params: Array<string | number> = [fleetId, ...convParams];
+    const params: Array<string | number> = [...sourceParams, fleetId, ...convParams];
     if (type) params.push(type);
     if (dateFrom) params.push(dateFrom);
     if (dateTo) params.push(dateTo);
@@ -4035,8 +4064,8 @@ export class EkhoDb {
     if (search) params.push(search, search, search, search, search);
 
     const rows = this.db.prepare(
-      `SELECT id, event_type, actor_kind, actor_id, resource_kind, resource_id, payload_json, created_at
-       FROM events
+      `${withSql}SELECT id, event_type, actor_kind, actor_id, resource_kind, resource_id, payload_json, created_at
+       FROM ${fromSql}
        WHERE ${where}
        ORDER BY ${sortBy} ${sortOrder}, id ${sortOrder}
        LIMIT ? OFFSET ?`
@@ -4104,8 +4133,8 @@ export class EkhoDb {
     }
 
     const totalRow = this.db.prepare(
-      `SELECT COUNT(*) AS count
-       FROM events
+      `${withSql}SELECT COUNT(*) AS count
+       FROM ${fromSql}
        WHERE ${where}`
     ).get(...params) as { count: number };
 
