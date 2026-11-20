@@ -12,6 +12,7 @@ import { loadLicense, registerExtension } from "./license";
 import { registerSecurityHeaders } from "./security-headers";
 import { registerUiRoutes } from "./ui-routes";
 import { RELAY_VERSION, relayBuildSha } from "./version";
+import { serviceInfo } from "./service-info";
 
 async function buildServer() {
   assertOperatorSecret(config.operatorSessionSecret, Boolean(process.env.EKHO_DEV_INSECURE));
@@ -81,23 +82,13 @@ async function buildServer() {
   }
 
   // #97: resolve the build SHA once at boot (it may run `git rev-parse`), so
-  // no request ever waits on it.
+  // no request ever waits on it. It is logged here and served on the
+  // operator-authenticated GET /v1/operator/build-info only: the
+  // unauthenticated GET / must not fingerprint the deployment's commit.
   app.log.info({ version: RELAY_VERSION, build_sha: relayBuildSha() }, "relay build");
 
   registerHealthRoutes(app);
-  app.get("/", async () => ({
-    service: "ekho-relay",
-    version: RELAY_VERSION,
-    build_sha: relayBuildSha(),
-    tier: license.tier,
-    setup_required: !db.findFleetByName("default"),
-    docs: {
-      architecture: "/ARCHITECTURE.md",
-      ui: "/ui/",
-      a2a_agent_card: "/.well-known/agent-card.json",
-      metrics: "/metrics"
-    }
-  }));
+  app.get("/", async () => serviceInfo({ tier: license.tier, setupRequired: !db.findFleetByName("default") }));
 
   await registerAgentRoutes(app);
   await registerOperatorRoutes(app);

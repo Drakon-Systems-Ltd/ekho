@@ -41,12 +41,18 @@ export function buildLine(relay, consoleBuild = CONSOLE_BUILD) {
   return `relay ${ver(relay?.version)} (${shortSha(relay?.build_sha)}) · console ${ver(consoleBuild?.version)} (${shortSha(consoleBuild?.sha)})`;
 }
 
-/** The stale-console banner text, or null when there is nothing to say. */
+/**
+ * The build-mismatch banner text, or null when there is nothing to say. Two
+ * commits that differ do not say which side is behind (a console rebuilt ahead
+ * of a relay that was never restarted looks the same), so the text names both
+ * fixes.
+ */
 export function staleBuildMessage(relay, consoleBuild = CONSOLE_BUILD) {
   if (!buildMismatch(consoleBuild?.sha, relay?.build_sha)) return null;
   return (
-    `Console build is stale: this console was built from ${shortSha(consoleBuild.sha)}, ` +
-    `the relay is running ${shortSha(relay.build_sha)}. Run \`npm run ui:build -w @ekho/relay\` on the relay host, then reload.`
+    `Relay and console builds differ: this console was built from ${shortSha(consoleBuild.sha)}, ` +
+    `the relay is running ${shortSha(relay.build_sha)}. Rebuild the console (\`npm run ui:build -w @ekho/relay\` on the relay host, then reload) ` +
+    `and/or restart the relay so both run the same commit.`
   );
 }
 
@@ -64,6 +70,10 @@ const ADAPTER_LABEL = {
 };
 const HOST_LABEL = { openclaw: "OpenClaw", hermes: "Hermes", node: "Node", python: "Python" };
 
+// Own keys only: the name is whatever the agent reported, and "constructor" or
+// "toString" must render as that name, not as something off Object.prototype.
+const labelFor = (labels, name) => (typeof name === "string" && Object.hasOwn(labels, name) ? labels[name] : name);
+
 /**
  * What an agent card says about the agent's software, from the relay's
  * `identity` block: "plugin 0.8.0 · OpenClaw 2026.9.8", or "version unknown"
@@ -73,10 +83,10 @@ const HOST_LABEL = { openclaw: "OpenClaw", hermes: "Hermes", node: "Node", pytho
 export function agentVersionInfo(identity) {
   const id = identity && typeof identity === "object" ? identity : {};
   const parts = [];
-  if (id.adapter_version) parts.push(`${ADAPTER_LABEL[id.adapter] ?? id.adapter ?? "adapter"} ${id.adapter_version}`);
-  else if (id.adapter) parts.push(`${ADAPTER_LABEL[id.adapter] ?? id.adapter} version unknown`);
+  if (id.adapter_version) parts.push(`${labelFor(ADAPTER_LABEL, id.adapter) ?? "adapter"} ${id.adapter_version}`);
+  else if (id.adapter) parts.push(`${labelFor(ADAPTER_LABEL, id.adapter)} version unknown`);
   if (id.host_runtime) {
-    const host = HOST_LABEL[id.host_runtime] ?? id.host_runtime;
+    const host = labelFor(HOST_LABEL, id.host_runtime);
     parts.push(id.host_runtime_version ? `${host} ${id.host_runtime_version}` : host);
   }
   const label = parts.length ? parts.join(" · ") : "version unknown";

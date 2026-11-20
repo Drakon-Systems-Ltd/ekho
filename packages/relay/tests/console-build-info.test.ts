@@ -33,7 +33,9 @@ describe("stale console banner (#97)", () => {
 
   it("tells the operator what to run, naming both commits", () => {
     const msg = staleBuildMessage({ version: "0.9.0", build_sha: B }, { version: "0.9.0", sha: A });
-    expect(msg).toContain("Console build is stale");
+    expect(msg).toContain("Relay and console builds differ");
+    expect(msg).not.toContain("stale"); // differing commits do not say which side is behind
+    expect(msg).toContain("restart the relay");
     expect(msg).toContain("0123456");
     expect(msg).toContain("fedcba9");
     expect(msg).toContain("npm run ui:build -w @ekho/relay");
@@ -100,5 +102,12 @@ describe("agent card version (#97)", () => {
       .toBe("plugin version unknown · OpenClaw 2026.7.1");
     expect(agentVersionInfo({ adapter: "sdk", adapter_version: "0.9.0", host_runtime: "node", host_runtime_version: "22.23.5" }).label)
       .toBe("sdk 0.9.0 · Node 22.23.5");
+  });
+
+  it("renders a reported name that is an Object.prototype key as the raw name", () => {
+    expect(agentVersionInfo({ adapter: "constructor", adapter_version: "1.0.0", host_runtime: "toString", host_runtime_version: "2" }).label)
+      .toBe("constructor 1.0.0 · toString 2");
+    expect(agentVersionInfo({ adapter: "constructor", host_runtime: "valueOf" }).label).toBe("constructor version unknown · valueOf");
+    expect(card({ adapter: "constructor", adapter_version: "1.0.0" })).toContain("constructor 1.0.0");
   });
 });

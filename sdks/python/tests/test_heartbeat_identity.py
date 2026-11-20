@@ -57,6 +57,26 @@ def test_a_named_adapter_owns_the_adapter_fields():
     assert body["instance_id"] == INSTANCE_ID
 
 
+def test_an_explicit_none_identity_field_counts_as_absent():
+    body = with_heartbeat_identity(
+        {
+            "status": "idle",
+            "adapter": None,
+            "adapter_version": None,
+            "sdk_version": None,
+            "instance_id": None,
+            "current_task": None,
+        }
+    )
+    assert body["adapter"] == "python-sdk"
+    assert body["adapter_version"] == ekho.__version__
+    assert body["host_runtime"] == "python"
+    assert body["sdk_version"] == ekho.__version__
+    assert body["instance_id"] == INSTANCE_ID
+    # Only identity fields are filtered: any other None goes out as given.
+    assert "current_task" in body and body["current_task"] is None
+
+
 def test_instance_id_is_stable_within_the_process():
     a = with_heartbeat_identity({"status": "idle"})
     b = with_heartbeat_identity({"status": "busy"})

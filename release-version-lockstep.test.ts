@@ -82,8 +82,10 @@ describe("release version lockstep", () => {
 
   it("serves the relay version from version.ts only, with no second copy to drift (#97)", () => {
     // GET /, /metrics and the A2A agent card used to carry three literals.
-    expect(read("packages/relay/src/server.ts")).toMatch(/service: "ekho-relay",\s*version: RELAY_VERSION,/);
-    for (const rel of ["packages/relay/src/server.ts", "packages/relay/src/metrics.ts", "packages/relay/src/a2a/agent-card.ts"]) {
+    // The GET / body lives in service-info.ts so it can be tested without starting the server.
+    expect(read("packages/relay/src/service-info.ts")).toMatch(/service: "ekho-relay",\s*version: RELAY_VERSION,/);
+    expect(read("packages/relay/src/server.ts")).toMatch(/app\.get\("\/", async \(\) => serviceInfo\(/);
+    for (const rel of ["packages/relay/src/server.ts", "packages/relay/src/service-info.ts", "packages/relay/src/metrics.ts", "packages/relay/src/a2a/agent-card.ts"]) {
       const source = read(rel);
       expect(source, rel).toMatch(/import \{[^}]*\bRELAY_VERSION\b[^}]*\} from "\.{1,2}\/(?:\.\.\/)?version";/);
       expect(source, rel).not.toMatch(/RELAY_VERSION = "/);

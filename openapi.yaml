@@ -1297,9 +1297,6 @@ components:
         version:
           type: string
           example: 0.9.0
-        build_sha:
-          type: string
-          description: Short git commit the relay is running, or `unknown` (#97).
         tier:
           type: string
         setup_required:

@@ -51,7 +51,7 @@ export function StaleBuildBanner({ relay }) {
   return (
     <div className="ekho-stale-banner" role="alert">
       <span className="ekho-stale-banner__text">{message}</span>
-      <button className="ekho-stale-banner__close" onClick={dismiss} aria-label="Dismiss stale console warning">✕</button>
+      <button className="ekho-stale-banner__close" onClick={dismiss} aria-label="Dismiss build mismatch warning">✕</button>
     </div>
   );
 }
@@ -62,7 +62,7 @@ export function StaleBuildBanner({ relay }) {
 export function StaleBuildFlag({ relay }) {
   const message = staleBuildMessage(relay, CONSOLE_BUILD);
   if (!message) return null;
-  return <span className="ekho-stale-flag" role="alert" title={message}>CONSOLE STALE · RUN UI:BUILD</span>;
+  return <span className="ekho-stale-flag" role="alert" title={message}>BUILDS DIFFER · REBUILD OR RESTART</span>;
 }
 
 /** "plugin 0.8.0 · OpenClaw 2026.9.8" plus an "outdated" chip, for agent cards. */

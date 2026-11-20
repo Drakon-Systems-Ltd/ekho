@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createTestRelay, type TestRelay } from "./setup";
+import { readFileSync } from "node:fs";
+import { serviceInfo } from "../src/service-info";
 import { adapterOutdated, compareSemver, parseSemver } from "../src/agent-identity";
 import { LATEST_ADAPTER_VERSIONS, RELAY_VERSION, normalizeBuildSha, resolveRelayBuildSha } from "../src/version";
 
@@ -185,5 +187,16 @@ describe("heartbeat identity round trip (#97)", () => {
 
     const anon = await relay.app.inject({ method: "GET", url: "/v1/operator/build-info" });
     expect(anon.statusCode).toBe(401);
+  });
+
+  it("does not expose the build SHA on the unauthenticated GET /", () => {
+    // server.ts starts listening on import, so the route's body is tested
+    // through the function it returns.
+    const body = serviceInfo({ tier: "community", setupRequired: false });
+    expect(body).toMatchObject({ service: "ekho-relay", version: RELAY_VERSION, tier: "community", setup_required: false });
+    expect(body).not.toHaveProperty("build_sha");
+    expect(JSON.stringify(body)).not.toMatch(/sha/i);
+    const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+    expect(server).toContain('app.get("/", async () => serviceInfo(');
   });
 });

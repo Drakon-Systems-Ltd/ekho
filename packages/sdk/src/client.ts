@@ -34,10 +34,13 @@ function nodeRuntime(): { host_runtime?: string; host_runtime_version?: string }
  * `instance_id` are always present unless the caller supplies them. The adapter
  * fields travel as a group: a caller that names its `adapter` (a plugin) owns
  * the whole group, so a plugin is never labelled with the SDK's defaults.
+ * A field set to `undefined` counts as absent, so `{ adapter: undefined }`
+ * gets the defaults instead of erasing the adapter name they come with.
  */
 export function withHeartbeatIdentity(payload: HeartbeatPayload, instanceId: string = INSTANCE_ID): HeartbeatPayload {
-  const adapter = payload.adapter ? {} : { adapter: "sdk", adapter_version: SDK_VERSION, ...nodeRuntime() };
-  return { sdk_version: SDK_VERSION, instance_id: instanceId, ...adapter, ...payload };
+  const given = Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined)) as HeartbeatPayload;
+  const adapter = given.adapter ? {} : { adapter: "sdk", adapter_version: SDK_VERSION, ...nodeRuntime() };
+  return { sdk_version: SDK_VERSION, instance_id: instanceId, ...adapter, ...given };
 }
 
 const DEFAULT_POLL_INTERVAL = 5;

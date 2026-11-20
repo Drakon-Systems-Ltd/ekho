@@ -37,6 +37,18 @@ from .types import (
 INSTANCE_ID = uuid.uuid4().hex
 
 
+_IDENTITY_FIELDS = frozenset(
+    {
+        "adapter",
+        "adapter_version",
+        "sdk_version",
+        "host_runtime",
+        "host_runtime_version",
+        "instance_id",
+    }
+)
+
+
 def with_heartbeat_identity(
     payload: HeartbeatInput, instance_id: str = INSTANCE_ID
 ) -> Dict[str, Any]:
@@ -45,9 +57,16 @@ def with_heartbeat_identity(
     ``sdk_version`` and ``instance_id`` are always present unless the caller
     supplies them. The adapter fields travel as a group: a caller that names
     its ``adapter`` (a plugin) owns the whole group, so a plugin is never
-    labelled with the SDK's own defaults.
+    labelled with the SDK's own defaults. An identity field set to ``None``
+    counts as absent, so ``{"adapter": None}`` gets the defaults instead of
+    erasing the adapter name they come with. Other ``None`` values are sent
+    as given.
     """
-    body: Dict[str, Any] = dict(payload)
+    body: Dict[str, Any] = {
+        key: value
+        for key, value in dict(payload).items()
+        if not (value is None and key in _IDENTITY_FIELDS)
+    }
     out: Dict[str, Any] = {"sdk_version": SDK_VERSION, "instance_id": instance_id}
     if not body.get("adapter"):
         out.update(

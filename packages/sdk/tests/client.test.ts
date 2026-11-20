@@ -126,6 +126,19 @@ describe("@drakon-systems/ekho-sdk", () => {
       });
     });
 
+    it("treats an explicitly undefined identity field as absent", () => {
+      const body = withHeartbeatIdentity({ status: "idle", adapter: undefined, adapter_version: undefined, sdk_version: undefined, instance_id: undefined });
+      expect(body).toMatchObject({
+        status: "idle",
+        adapter: "sdk",
+        adapter_version: SDK_VERSION,
+        sdk_version: SDK_VERSION,
+        host_runtime: "node",
+        instance_id: INSTANCE_ID
+      });
+      expect(Object.values(body)).not.toContain(undefined);
+    });
+
     it("raises a stall notice and dedups idempotently", async () => {
       const creds = await relay.enrollAgent("sdk-notice");
       const client = new EkhoAgentClient({
