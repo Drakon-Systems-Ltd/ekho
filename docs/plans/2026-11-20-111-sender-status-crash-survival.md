@@ -110,7 +110,7 @@ What is missing is everything around it:
   inbox message shape including `agent_sig` / `operator_sig`, `key_id`,
   `sig_canonical` and `deadline_at` (= `expires_at`). Today it is used by
   `index.ts` for spawned turns that have no inbox ring.
-- **To verify in slice 2:** that the returned shape is sufficient for the
+- **To verify in S6:** that the returned shape is sufficient for the
   plugin's existing verification pipeline without a second code path, and that
   the relay keeps acked rows readable for the whole deadline window.
 
@@ -340,7 +340,7 @@ from reload), and only when the journal option is on:
    the option is on, and only for those whose turn had not been marked.
 5. The upstream full-swap question (one config key change replaces the whole
    plugin) is unchanged.
-6. Senders still need a reader for the status route (S3 is optional); until it
+6. Senders still need a reader for the status route (the optional reader in S1); until it
    exists they must call the HTTP route directly.
 7. Hermes (Python) plugin parity is not covered; it would need its own issue.
 8. Nothing here verifies behaviour on a live gateway or relay. All acceptance is
