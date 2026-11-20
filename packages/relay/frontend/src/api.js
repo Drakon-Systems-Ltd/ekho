@@ -137,6 +137,7 @@ export const endorseAgentKey = (token, agentId, { keyId, endorsedByKeyId, signat
   });
 
 export const getFleetHealth = (token) => request("/v1/operator/fleet-health", { token });
+export const getBuildInfo = (token) => request("/v1/operator/build-info", { token });
 export const getAttention = (token) => request("/v1/operator/attention", { token });
 export const getTopology = (token, { windowMinutes } = {}) =>
   request(`/v1/operator/topology${windowMinutes ? `?window_minutes=${windowMinutes}` : ""}`, { token });

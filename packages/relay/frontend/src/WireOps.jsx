@@ -8,6 +8,7 @@ import SecurityScreen from "./SecurityScreen.jsx";
 import { humanizeEvent, parsePayload } from "./consoleState.js";
 import { budgetLabel } from "./budget.js";
 import { WireAvatar, presenceOf } from "./wireIdentity.jsx";
+import { AgentVersion, BuildLine } from "./versionUi.jsx";
 
 /* ---------- shared bits ---------- */
 
@@ -377,7 +378,7 @@ const SECTIONS = [
   ["sec", "Security"],
 ];
 
-export function OpsCenter({ S, section, setSection, onClose, onOpenConversation, onResumeThread, needsCount, density, setDensity }) {
+export function OpsCenter({ S, section, setSection, onClose, onOpenConversation, onResumeThread, needsCount, density, setDensity, relayBuild }) {
   const healthAgents = useMemo(() => {
     const rank = { down: 0, degraded: 1, ok: 2 };
     return [...(S.fleetHealth || [])].sort((a, b) => (rank[healthLevel(a)] ?? 2) - (rank[healthLevel(b)] ?? 2));
@@ -402,6 +403,7 @@ export function OpsCenter({ S, section, setSection, onClose, onOpenConversation,
               Density: {density === "compact" ? "compact" : "comfortable"}
             </button>
           ) : null}
+          <BuildLine relay={relayBuild} />
         </div>
       </nav>
       <div className="ops-body">
@@ -435,6 +437,7 @@ export function OpsCenter({ S, section, setSection, onClose, onOpenConversation,
                     <div className="stats">
                       ↑{a.sent_1h ?? 0} ↓{a.received_1h ?? 0} (1h) · {(a.active_conversations || []).length} active conv · hb {a.last_heartbeat_at ? relativeTime(a.last_heartbeat_at) : "—"}
                     </div>
+                    <div className="stats"><AgentVersion identity={a.identity} /></div>
                   </div>
                   <span className={`vd ${lv}`}>{lv === "ok" ? "OK" : lv === "degraded" ? "Degraded" : "Down"}</span>
                 </div>

@@ -20,6 +20,7 @@ import { OpsCenter, LedgerItems, WirePolicyModal } from "./WireOps.jsx";
 import { dmChannelKey, groupConversationsByChannel } from "./channels.js";
 import { resumeConversation as apiResumeConversation } from "./api.js";
 import { budgetInputValue, budgetLabel, parseBudgetInput, savedBudget } from "./budget.js";
+import { AgentVersion, StaleBuildBanner, useRelayBuild } from "./versionUi.jsx";
 
 /* ================= small utilities ================= */
 
@@ -329,6 +330,7 @@ function InfoPanel({ S, active, pins, togglePin, onClose, onOpenDm }) {
           <div className="ihead">Health</div>
           <div className="irow"><span className="lab healthline"><span className={`hdot ${lv !== "ok" ? lv : ""}`} />{lv === "ok" ? "All checks green" : (health.health?.reason || `Agent is ${agent.status}`)}</span></div>
           {health.metrics?.model ? <div className="irow"><span className="lab">Model</span><span className="val">{health.metrics.model}{health.metrics.provider ? ` · ${health.metrics.provider}` : ""}</span></div> : null}
+          <div className="irow"><span className="lab">Version</span><span className="val"><AgentVersion identity={health.identity} /></span></div>
           <div className="irow"><span className="lab">Status</span><span className="val">{agent.status}</span></div>
           <div className="irow"><span className="lab">Agent id</span><span className="val mono">{agent.id}</span></div>
         </div>
@@ -523,6 +525,7 @@ function WireRoomModal({ S, onClose }) {
 
 export default function WireApp() {
   const S = useConsoleState();
+  const relayBuild = useRelayBuild(S.session.token);
 
   // --- Wire-only preferences ---
   const [theme, setTheme] = useLocalPref("ekho.theme.v1", "auto");
@@ -833,6 +836,7 @@ export default function WireApp() {
 
   return (
     <div className={`app${S.mobileView === "chat" ? " chat-open" : ""}${infoOpen && active ? " info-open" : ""}`}>
+      <StaleBuildBanner relay={relayBuild} />
       <header className="topbar">
         <div className="brand"><span className="mark">{I.logo}</span>Ekho <small className="mono">{S.session.fleetId ? S.session.fleetId.slice(0, 12) : ""}</small></div>
         <div className="tb-search"><input type="search" placeholder="Search chats" aria-label="Search chats" value={chatSearch} onChange={(e) => setChatSearch(e.target.value)} /></div>
@@ -1039,7 +1043,8 @@ export default function WireApp() {
             onOpenConversation={openFromOps}
             onResumeThread={ledgerResume}
             needsCount={needsCount}
-            density={density} setDensity={setDensity} />
+            density={density} setDensity={setDensity}
+            relayBuild={relayBuild} />
         ) : null}
       </div>
 
