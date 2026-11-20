@@ -258,6 +258,11 @@ CREATE INDEX IF NOT EXISTS idx_events_fleet_created_at ON events(fleet_id, creat
 -- idx_events_fleet_created_at leads on fleet_id, so without this the sweep
 -- full-scans the whole events table every tick.
 CREATE INDEX IF NOT EXISTS idx_events_type_created_at ON events(event_type, created_at);
+-- Operator conversation views (#196): events by message id and by conversation.
+-- Without these the canonical DM view walks idx_events_fleet_created_at, the
+-- whole fleet, on every poll. Mirrors migrations/029.
+CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id);
+CREATE INDEX IF NOT EXISTS idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_approvals_fleet_status ON approvals(fleet_id, status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_controls_target ON control_actions(fleet_id, target_kind, target_id, created_at);
 

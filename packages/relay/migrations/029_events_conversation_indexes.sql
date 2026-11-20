@@ -1,0 +1,31 @@
+-- Operator conversation views read events by message and by conversation (#196).
+-- Neither column was indexed, so the canonical DM view
+-- (GET /v1/operator/conversations/dm-<fleet>-<agent>) walked
+-- idx_events_fleet_created_at, which is every event the fleet has recorded,
+-- once for the page and once more for the COUNT. better-sqlite3 is
+-- synchronous, so on a fleet with several hundred thousand events one polling
+-- console tab kept the event loop busy and the relay stopped accepting
+-- connections.
+--
+--   idx_events_resource            the message-level half of the DM merge
+--                                  (events for a set of message ids)
+--   idx_events_fleet_conversation  the conversation-level half, and every
+--                                  ordinary single-conversation read
+--
+-- Existing databases get them here, fresh ones get them from schema.ts. Both
+-- statements are IF NOT EXISTS and use the exact names and column lists of the
+-- indexes that were created by hand on the relay that hit this, so on that
+-- database the migration only records its version.
+--
+-- No ANALYZE and no PRAGMA optimize, on purpose. The indexes alone were not
+-- enough for the old query: without statistics the planner still chose the
+-- fleet walk. Rather than make the plan depend on statistics being present and
+-- fresh, the DM read in db.ts is written as a union of indexed branches whose
+-- shape does not change with them. Statistics an operator has gathered are left
+-- exactly as they are.
+--
+-- Building the two indexes reads the whole events table once, inside the
+-- migration transaction at boot. To undo: DROP INDEX IF EXISTS on both names.
+-- An older build ignores them.
+CREATE INDEX IF NOT EXISTS idx_events_resource ON events(resource_id);
+CREATE INDEX IF NOT EXISTS idx_events_fleet_conversation ON events(fleet_id, conversation_id, created_at);

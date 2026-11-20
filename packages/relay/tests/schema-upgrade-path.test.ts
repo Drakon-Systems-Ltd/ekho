@@ -160,7 +160,7 @@ describe("migration 025 on an existing database, in boot order", () => {
       expect(raw.name).toBe(dbPath);
 
       // The migration ran, once, and added exactly one of each column.
-      expect(versions(raw)).toEqual([...expectedBefore, 25, 26, 27, 28]); // every later migration applies on the same boot
+      expect(versions(raw)).toEqual([...expectedBefore, 25, 26, 27, 28, 29]); // every later migration applies on the same boot
       expect(columns(raw, "agents").filter((c) => c === "last_inbox_poll_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "ack_recorded_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "first_reply_at")).toHaveLength(1);
