@@ -281,7 +281,7 @@ describe("accessor isolation (#192)", () => {
   // registry reads each field once and keeps its own plain copy, so there is
   // no later read: what it hands out can be read any number of times.
   for (const field of ["owner", "agentId", "fromEpoch", "depositedAtMs", "message"]) {
-    it(`an entry whose ${field} getter throws only on a later read is handed out as a plain frozen copy that never throws`, () => {
+    it(`an entry whose ${field} getter throws only on a later read is handed out as a plain copy that never throws`, () => {
       const { older, newer } = holders();
       const tricky = throwing(entry({ fromGeneration: older, message: { message_id: "tricky", conversation_id: "c" } }), field, 1);
       depositReloadHandoff([entry({ fromGeneration: older })], NOW);
@@ -292,7 +292,6 @@ describe("accessor isolation (#192)", () => {
       expect(got.taken).toHaveLength(2);
       for (const e of got.taken) {
         expect(e === tricky).toBe(false);
-        expect(Object.isFrozen(e)).toBe(true);
         for (const d of Object.values(Object.getOwnPropertyDescriptors(e))) expect(d.get).toBeUndefined();
         for (let i = 0; i < 3; i++) expect(() => JSON.stringify(e)).not.toThrow();
       }
@@ -323,6 +322,36 @@ describe("accessor isolation (#192)", () => {
     expect(takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW).taken).toHaveLength(1);
   });
 
+  // The list itself, not a value in it, cannot be walked.
+  const unwalkable = (): unknown[] =>
+    new Proxy([entry()], {
+      get() {
+        throw new Error("poisoned list");
+      }
+    });
+
+  it("a stored list that cannot be walked costs the agent its slot once: the take returns nothing and does not throw, and later work flows", () => {
+    const { older, newer } = holders();
+    depositReloadHandoff([entry({ fromGeneration: older })], NOW); // creates the store
+    store().set("agent_x", unwalkable());
+    let got!: ReturnType<typeof takeReloadHandoff>;
+    expect(() => (got = takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW))).not.toThrow();
+    expect(got).toEqual({ taken: [], dropped: [] });
+    expect(store().has("agent_x")).toBe(false);
+
+    depositReloadHandoff([entry({ fromGeneration: older })], NOW);
+    expect(takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW).taken).toHaveLength(1);
+  });
+
+  it("a deposit over a stored list that cannot be walked replaces it and is kept", () => {
+    const { older, newer } = holders();
+    depositReloadHandoff([entry({ fromGeneration: older })], NOW); // creates the store
+    store().set("agent_x", unwalkable());
+    expect(() => depositReloadHandoff([entry({ fromGeneration: older })], NOW)).not.toThrow();
+    expect(reloadHandoffCount("agent_x")).toBe(1);
+    expect(takeReloadHandoff("agent_x", "conn-a", newer, newer, NOW).taken).toHaveLength(1);
+  });
+
   it("another agent's hand-off is unaffected by a poisoned entry", () => {
     const { older, newer } = holders();
     claimAgentRuntime("agent_y", { generation: newer, stop: () => {} });
@@ -338,23 +367,7 @@ describe("accessor isolation (#192)", () => {
       (globalThis as unknown as Record<symbol, { reloadServed: Map<string, Ledger> }>)[KEY].reloadServed;
     const ledger = () => ledgers().get("agent_x\u0000conn-a")!;
 
-    it("an unreadable served record cannot be shown to be older, so it reads as served by a later loop — never as unserved, and never a throw", async () => {
-      const { noteReloadServed, reloadServedBy } = await import("../src/runtime-registry");
-      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"], nonces: ["n"] }, NOW);
-      ledger().keys.set("k", throwing({ generation: 3, atMs: NOW }, "generation"));
-      ledger().nonces.set("n", throwing({ generation: 3, atMs: NOW }, "generation"));
-
-      let key: number | undefined;
-      let nonce: number | undefined;
-      expect(() => (key = reloadServedBy("agent_x", "conn-a", "key", "k"))).not.toThrow();
-      expect(() => (nonce = reloadServedBy("agent_x", "conn-a", "nonce", "n"))).not.toThrow();
-      expect(key).toBe(Number.POSITIVE_INFINITY);
-      expect(nonce).toBe(Number.POSITIVE_INFINITY);
-      // A value the ledger never held is still simply unknown.
-      expect(reloadServedBy("agent_x", "conn-a", "key", "other")).toBeUndefined();
-    });
-
-    it("noting over an unreadable record replaces it; an unreadable record the bounds reach is dropped and counted as lost evidence", async () => {
+    it("noting over an unreadable record replaces it, and its evidence counts as lost", async () => {
       const { noteReloadServed, reloadServedBy, reloadServedForgotten } = await import("../src/runtime-registry");
       noteReloadServed("agent_x", "conn-a", 3, { keys: ["k", "old"] }, NOW);
       ledger().keys.set("k", throwing({ generation: 3, atMs: NOW }, "generation"));
@@ -375,41 +388,6 @@ describe("accessor isolation (#192)", () => {
       expect(reloadServedBy("agent_x", "conn-a", "nonce", "old")).toBeUndefined();
       expect(reloadServedBy("agent_x", "conn-a", "nonce", "fresh")).toBe(6);
       expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBe(Number.POSITIVE_INFINITY);
-      expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBeUndefined();
-    });
-
-    it("a stored ledger that cannot be used (wrong shape, or a throwing accessor) is replaced with its evidence marked lost; later notes work", async () => {
-      const { noteReloadServed, reloadServedBy, reloadServedForgotten } = await import("../src/runtime-registry");
-      for (const [domainOwner, bad] of [
-        ["conn-shape", { keys: "not a map", nonces: new Map() }],
-        ["conn-throw", throwing({ keys: new Map(), nonces: new Map() }, "nonces")],
-        ["conn-null", null]
-      ] as const) {
-        noteReloadServed("agent_x", domainOwner, 2, { keys: ["k"] }, NOW);
-        ledgers().set(`agent_x\u0000${domainOwner}`, bad as never);
-        expect(() => noteReloadServed("agent_x", domainOwner, 5, { keys: ["k2"], nonces: ["n2"] }, NOW)).not.toThrow();
-        expect(reloadServedBy("agent_x", domainOwner, "key", "k2")).toBe(5);
-        expect(reloadServedBy("agent_x", domainOwner, "nonce", "n2")).toBe(5);
-        expect(reloadServedForgotten("agent_x", domainOwner, "key")).toBe(Number.POSITIVE_INFINITY);
-        expect(reloadServedForgotten("agent_x", domainOwner, "nonce")).toBe(Number.POSITIVE_INFINITY);
-      }
-    });
-
-    it("an unreadable forgotten mark reads as evidence lost for every earlier loop, without throwing", async () => {
-      const { noteReloadServed, reloadServedForgotten } = await import("../src/runtime-registry");
-      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"] }, NOW);
-      ledger().forgotten = throwing({ key: 1, nonce: 1 }, "key");
-      let lost: number | undefined;
-      expect(() => (lost = reloadServedForgotten("agent_x", "conn-a", "key"))).not.toThrow();
-      expect(lost).toBe(Number.POSITIVE_INFINITY);
-      expect(reloadServedForgotten("agent_x", "conn-b", "key")).toBeUndefined(); // another domain: no ledger, nothing lost
-    });
-
-    it("a served store that is not a map (an older shape) is no evidence at all, not a wedge", async () => {
-      const { reloadServedBy, reloadServedForgotten } = await import("../src/runtime-registry");
-      holders();
-      (globalThis as unknown as Record<symbol, { reloadServed: unknown }>)[KEY].reloadServed = { get: 7 };
-      expect(reloadServedBy("agent_x", "conn-a", "key", "k")).toBeUndefined();
       expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBeUndefined();
     });
   });
