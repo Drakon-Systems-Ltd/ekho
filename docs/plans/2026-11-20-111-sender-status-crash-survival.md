@@ -157,7 +157,7 @@ no later generation or recovery can still serve it:
 | Stop with no hand-off available (no registry, deposit refused) and flush writes `inflight_loop_stopped` / `deferred_loop_stopped` | Yes, best effort inside the stop budget | `inflight_loop_stopped` / `deferred_loop_stopped` (the latter already in the enum) |
 | Existing stash drops (`deferred_evicted_cap`, `deferred_overflow_per_conv`, `deferred_expired_spawn_failed`, `deferred_retry_spawn_failed`) | Yes | existing values |
 | Re-admitted and served | No. Turn phases carry it once wired. | none |
-| Crash recovery refetch returns 404 (Part B) | Yes | `recovery_unavailable` (not `deadline_passed`: a 404 also covers withdrawn room membership, a missing room, an unknown id, or a delivery state outside `delivered | acked`, so expiry is not established) |
+| Crash recovery refetch returns 404 (Part B) | Yes | `recovery_unavailable` (not `deadline_passed`: a 404 also covers withdrawn room membership, a missing room, an unknown id, or a delivery state other than `delivered` or `acked`, so expiry is not established) |
 | Crash recovery refetch returns a message whose relay `deadline_at` has passed | Yes | `deadline_passed` |
 | Crash recovery withholds (Part B) | Yes | `withheld_by_recipient` |
 
@@ -293,8 +293,13 @@ with mode `0600`, next to but separate from the dead-letter file.
    disposition.
 4. Bounds: at most 500 records (`RELOAD_HANDOFF_CAP`) and 24 h 5 min age
    (`RELOAD_HANDOFF_MAX_AGE_MS`), the same bounds as the hand-off. Over the
-   bound, the oldest are dropped, and each drop is reported as
-   `handoff_unclaimed`-class loss where the relay is reachable.
+   bound, the oldest **journal records** are evicted. Eviction is journal-only:
+   it removes crash protection for that message and nothing else. The live
+   message (stash or in-flight) is untouched and is still served normally, so
+   eviction is **not** a disposition, is **not** reported to the sender as
+   not-served, and is logged once per eviction. A message whose record was
+   evicted and that is then lost to a crash is the same unreported loss as
+   today, which is stated in section 6.
 
 Cost: a flushed append per acked batch that keeps anything. That is a measurable
 latency cost on the poll tick and is why the journal ships behind an option that
@@ -367,7 +372,8 @@ from reload), and only when the journal option is on:
 3. Reasons shown to senders are coarse by design; precise reasons stay in the
    recipient's log and dead-letter file.
 4. Crash survival exists only for messages journaled before the ack, only when
-   the option is on, and only for those whose turn had not been marked.
+   the option is on, only for those whose turn had not been marked, and only
+   while their journal record has not been evicted by the bound.
 5. The upstream full-swap question (one config key change replaces the whole
    plugin) is unchanged.
 6. Senders still need a reader for the status route (the optional reader in S1); until it
@@ -450,11 +456,15 @@ labelled as such, not counted as proof of the change.
   spawned; a failed `marked` write spawns nothing and the message stays pending;
   a torn last line is ignored and an earlier intact record is still recovered;
   compaction interrupted before the rename leaves the old file intact.
-- Bounds hold at 500 records and the age limit.
+- Bounds hold at 500 records and the age limit. Evicting a record leaves the
+  live message served as normal and sends no report to the sender.
 
 **S6**
 - Cold start with unmarked records inside deadline and valid trust: each is
-  re-admitted once; a second cold start does not replay it.
+  re-admitted once. Once its mark is durable or it has reached a final
+  disposition, a later cold start does not replay it; while it is still pending
+  in the stash, a later cold start recovers it again (see the floor-deferred
+  case below).
 - Records with `turn_marked` are never replayed and never reported lost.
 - Returned copy past its deadline: not served, `deadline_passed` reported, record
   retired.
