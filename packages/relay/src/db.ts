@@ -4008,11 +4008,12 @@ export class EkhoDb {
     // conversation_id = ?)`, SQLite walks idx_events_fleet_created_at — every
     // event the fleet has — unless planner statistics happen to be present and
     // fresh, and this runs synchronously on the event loop for the page and
-    // again for the COUNT. Here the event ids are collected first, each branch
-    // through an index from migration 029, and the events rows are then fetched
-    // by primary key. CROSS JOIN is deliberate: SQLite never reorders it, so
-    // messages drive the events lookup and the id set drives the final fetch
-    // whatever the statistics say. The fleet check stays on the outer query
+    // again for the COUNT. Here the matching events are collected first as
+    // rowids, each branch through an index from migration 029 (an index entry
+    // already carries the rowid, so no branch touches an events row), and only
+    // those rows are then fetched. CROSS JOIN is deliberate: SQLite never
+    // reorders it, so messages drive the events lookup and the rowid set
+    // drives the final fetch whatever the statistics say. The fleet check stays on the outer query
     // only — repeating it inside a message branch would offer the planner the
     // fleet index for the inner loop. UNION (not UNION ALL) so an event that a
     // message branch and the conversation branch both match is returned and
@@ -4025,17 +4026,17 @@ export class EkhoDb {
     if (conversationId.startsWith(`dm-${fleetId}-`)) {
       const agentX = conversationId.slice(`dm-${fleetId}-`.length);
       const opId = `op_${fleetId}`;
-      withSql = `WITH dm_event_ids(event_id) AS MATERIALIZED (
-         SELECT ev.id FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
+      withSql = `WITH dm_event_rowids(event_rowid) AS MATERIALIZED (
+         SELECT ev.rowid FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
           WHERE m.fleet_id = ? AND m.recipient_kind = 'agent' AND m.recipient_id = ? AND m.sender_agent_id = ?
          UNION
-         SELECT ev.id FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
+         SELECT ev.rowid FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
           WHERE m.fleet_id = ? AND m.sender_agent_id = ? AND m.recipient_kind = 'agent' AND m.recipient_id = ?
          UNION
-         SELECT id FROM events WHERE fleet_id = ? AND conversation_id = ?
+         SELECT rowid FROM events WHERE fleet_id = ? AND conversation_id = ?
        )
        `;
-      fromSql = "dm_event_ids CROSS JOIN events ON events.id = dm_event_ids.event_id";
+      fromSql = "dm_event_rowids CROSS JOIN events ON events.rowid = dm_event_rowids.event_rowid";
       sourceParams = [fleetId, agentX, opId, fleetId, agentX, opId, fleetId, conversationId];
     } else {
       convClause = "conversation_id = ?";

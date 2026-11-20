@@ -91,11 +91,12 @@ describe("operator DM conversation event query (#196)", () => {
       // No full table scan of events, and nothing left to a transient index.
       expect(plan.join("\n"), text).not.toMatch(/SCAN (events|ev)\b/);
       expect(plan.join("\n"), text).not.toMatch(/AUTOMATIC/);
-      // Every events access is a seek on one of: the two indexes migration 029
-      // adds, or the primary key.
+      // Every events access is a seek: on one of the two indexes migration 029
+      // adds, or a fetch of one row by rowid.
       for (const step of steps) {
-        expect(step, text).toMatch(/USING (COVERING )?INDEX (idx_events_resource|idx_events_fleet_conversation|sqlite_autoindex_events_1) /);
+        expect(step, text).toMatch(/USING ((COVERING )?INDEX (idx_events_resource|idx_events_fleet_conversation) |INTEGER PRIMARY KEY \(rowid=\?\))/);
       }
+      expect(steps.some((s) => /^SEARCH events USING INTEGER PRIMARY KEY \(rowid=\?\)/.test(s)), text).toBe(true);
       expect(steps.some((s) => /idx_events_resource \(resource_id=\?\)/.test(s)), text).toBe(true);
       expect(steps.some((s) => /idx_events_fleet_conversation \(fleet_id=\? AND conversation_id=\?/.test(s)), text).toBe(true);
     }
