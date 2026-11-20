@@ -11,6 +11,7 @@ import { sendAttachment } from "./routes-agent";
 import { loginThrottle, resolveClientIp } from "./login-throttle";
 import { issueOperatorSession } from "./operator-session";
 import { sign } from "./utils";
+import { LATEST_ADAPTER_VERSIONS, RELAY_VERSION, relayBuildSha } from "./version";
 
 function parsePagination(query: Record<string, unknown>) {
   const limitRaw = Number(query.limit ?? 20);
@@ -85,6 +86,17 @@ export async function registerOperatorRoutes(app: FastifyInstance) {
     const profile = db.setOperatorDisplayName(request.operator.id, parsed.data.display_name);
     if (!profile) return reply.code(404).send({ error: "operator not found" });
     return reply.send(profile);
+  });
+
+  // #97: the relay's own build, for the console's footer and its stale-build
+  // banner, plus the newest adapter release the relay knows of (its own,
+  // bundled; no registry lookup).
+  app.get("/v1/operator/build-info", { preHandler: requireOperatorAuth }, async (request, reply) => {
+    if (!request.operator) return reply.code(401).send({ error: "unauthorized" });
+    return reply.send({
+      relay: { version: RELAY_VERSION, build_sha: relayBuildSha() },
+      latest_adapter_versions: LATEST_ADAPTER_VERSIONS
+    });
   });
 
   app.get("/v1/operator/overview", { preHandler: requireOperatorAuth }, async (request, reply) => {

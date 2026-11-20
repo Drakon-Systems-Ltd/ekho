@@ -29,58 +29,25 @@ describe("release version lockstep", () => {
       ["packages/shieldcortex-bridge/package.json", readJson("packages/shieldcortex-bridge/package.json").version],
       ["openclaw.plugin.json", readJson("packages/openclaw-plugin/openclaw.plugin.json").version],
       [
-        "relay GET / version",
-        capture(
-          read("packages/relay/src/server.ts"),
-          /app\.get\("\/", async \(\) => \(\{\s*service: "ekho-relay",\s*version: "([^"]+)"/,
-          "relay root response"
-        )
-      ],
-      [
-        "metrics RELAY_VERSION",
-        capture(read("packages/relay/src/metrics.ts"), /^const RELAY_VERSION = "([^"]+)";$/m, "metrics RELAY_VERSION")
-      ],
-      [
-        "A2A RELAY_VERSION",
-        capture(read("packages/relay/src/a2a/agent-card.ts"), /^const RELAY_VERSION = "([^"]+)";$/m, "A2A RELAY_VERSION")
-      ],
-      [
-        "Helm Chart.yaml version",
-        capture(read("deploy/helm/ekho/Chart.yaml"), /^version:\s*(.+)$/m, "Helm version")
-      ],
-      [
-        "Helm Chart.yaml appVersion",
-        capture(read("deploy/helm/ekho/Chart.yaml"), /^appVersion:\s*(.+)$/m, "Helm appVersion")
-      ],
-      [
-        "Helm values image.tag",
-        capture(read("deploy/helm/ekho/values.yaml"), /^image:\n(?:[ \t].+\n)*?[ \t]+tag:\s*(.+)$/m, "Helm image.tag")
-      ],
-      [
-        "OpenAPI info.version",
-        capture(read("openapi.yaml"), /^info:\n(?:[ \t].+\n)*?[ \t]+version:\s*(.+)$/m, "OpenAPI info.version")
-      ],
-      [
-        "OpenAPI ServiceInfo example",
-        capture(
-          read("openapi.yaml"),
-          /ServiceInfoResponse:[\s\S]*?\n[ \t]+version:\n[ \t]+type: string\n[ \t]+example:\s*(.+)/,
-          "OpenAPI example"
-        )
-      ],
-      [
-        "README release version",
-        capture(read("README.md"), /\*\*Release version:\*\* `v([^`]+)`/, "README release version")
-      ],
-      [
-        "README project status",
-        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is the release version\./, "README project status")
+        "relay RELAY_VERSION (version.ts)",
+        capture(read("packages/relay/src/version.ts"), /^export const RELAY_VERSION = "([^"]+)";$/m, "relay RELAY_VERSION")
       ],
       ...workspace
     ];
 
     for (const [label, actual] of surfaces) {
       expect(actual, label).toBe(expected);
+    }
+  });
+
+  it("serves the relay version from version.ts only, with no second copy to drift (#97)", () => {
+    // GET /, /metrics and the A2A agent card used to carry three literals.
+    expect(read("packages/relay/src/server.ts")).toMatch(/service: "ekho-relay",\s*version: RELAY_VERSION,/);
+    for (const rel of ["packages/relay/src/server.ts", "packages/relay/src/metrics.ts", "packages/relay/src/a2a/agent-card.ts"]) {
+      const source = read(rel);
+      expect(source, rel).toMatch(/import \{[^}]*\bRELAY_VERSION\b[^}]*\} from "\.{1,2}\/(?:\.\.\/)?version";/);
+      expect(source, rel).not.toMatch(/RELAY_VERSION = "/);
+      expect(source, rel).not.toMatch(/version: "\d+\.\d+\.\d+"/);
     }
   });
 

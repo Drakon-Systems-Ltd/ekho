@@ -7,6 +7,7 @@ import { writeAttachmentBytes } from "./attachments";
 import { parseFeed, type FeedItem } from "./feeds";
 import { addSeconds, hashPassword, hashSecret, id, nowIso, verifyPassword } from "./utils";
 import { deriveAgentHealth, deriveInboxState, buildAttentionItems } from "./fleet-health";
+import { hasAnyIdentity, identityView, IDENTITY_COLUMNS_SQL, reportedIdentity, withIdentity, type ReportedIdentity } from "./agent-identity";
 import type { DeliveryPhase } from "./types";
 import { classifyFetchWait, clampFetchWaitSeconds, fetchGap, type FetchWait, type TurnInterval } from "./fetch-wait";
 import {
@@ -2937,7 +2938,15 @@ export class EkhoDb {
     return updated;
   }
 
-  insertHeartbeat(agentId: string, status: string, metrics: JsonValue) {
+  /**
+   * `identity` (#97) is the adapter's self-reported identity from this
+   * heartbeat. The latest heartbeat always wins, so a heartbeat without it (an
+   * older plugin, or a downgrade) clears the stored values back to "unknown"
+   * rather than leaving a newer claim in place. When any field is present the
+   * heartbeat row keeps a copy, so a rollout can be checked from the database
+   * (for example two instance_ids heartbeating for one agent).
+   */
+  insertHeartbeat(agentId: string, status: string, metrics: JsonValue, identity?: ReportedIdentity) {
     const agent = this.db.prepare("SELECT fleet_id, status AS agent_status, quarantine_reason FROM agents WHERE id = ?").get(agentId) as Record<string, unknown> | undefined;
     if (!agent) {
       return;
@@ -2945,12 +2954,30 @@ export class EkhoDb {
     const receivedAt = nowIso();
     const newStatus = status === "healthy" ? "healthy" : "degraded";
     const tx = this.db.transaction(() => {
+      const reported = identity ?? reportedIdentity({});
+      const row =
+        hasAnyIdentity(reported) && metrics && typeof metrics === "object" && !Array.isArray(metrics)
+          ? { ...metrics, identity: reported }
+          : metrics;
       this.db.prepare("INSERT INTO heartbeats (id, agent_id, status, metrics_json, received_at) VALUES (?, ?, ?, ?, ?)").run(
         id("hbt"),
         agentId,
         status,
-        JSON.stringify(metrics),
+        JSON.stringify(row),
         receivedAt
+      );
+      this.db.prepare(
+        `UPDATE agents SET reported_adapter = ?, reported_adapter_version = ?, reported_sdk_version = ?,
+           reported_host_runtime = ?, reported_host_runtime_version = ?, reported_instance_id = ?
+         WHERE id = ?`
+      ).run(
+        reported.adapter,
+        reported.adapter_version,
+        reported.sdk_version,
+        reported.host_runtime,
+        reported.host_runtime_version,
+        reported.instance_id,
+        agentId
       );
 
       // Auto-restore from heartbeat-timeout quarantine
@@ -3307,7 +3334,7 @@ export class EkhoDb {
     const agents = this.db.prepare(
       `SELECT id, display_name, runtime, status, last_seen_at, consecutive_missed_heartbeats,
               operator_trusted, peer_autoreply, peer_turn_budget, last_inbox_poll_at,
-              phase_invalid_holder_reports, phase_refused_attempt_reports
+              phase_invalid_holder_reports, phase_refused_attempt_reports, ${IDENTITY_COLUMNS_SQL}
        FROM agents WHERE fleet_id = ? AND runtime != 'operator'
        ORDER BY display_name`
     ).all(fleetId) as Array<Record<string, unknown>>;
@@ -3405,6 +3432,8 @@ export class EkhoDb {
         },
         metrics,
         health,
+        // #97: what the agent's adapter last said it is (null fields = unknown).
+        identity: identityView(a),
         active_conversations: activeConversations,
         sent_1h: (sentStmt.get(fleetId, id, since) as { c: number }).c,
         received_1h: (recvStmt.get(fleetId, id, since) as { c: number }).c
@@ -3725,13 +3754,14 @@ export class EkhoDb {
     if (search) params.push(search, search, search);
 
     const rows = (this.db.prepare(
-      `SELECT id, display_name, runtime, status, last_seen_at, operator_trusted, peer_autoreply, peer_turn_budget
+      `SELECT id, display_name, runtime, status, last_seen_at, operator_trusted, peer_autoreply, peer_turn_budget,
+              ${IDENTITY_COLUMNS_SQL}
        FROM agents
        WHERE ${where}
        ORDER BY ${sortBy} ${sortOrder}
        LIMIT ? OFFSET ?`
     ).all(...params, options.limit, options.offset) as Array<Record<string, unknown>>).map((row) => ({
-      ...row,
+      ...withIdentity(row),
       operator_trusted: Boolean(row.operator_trusted),
       peer_autoreply: Boolean(row.peer_autoreply),
       peer_turn_budget: turnBudgetOut(row.peer_turn_budget)
@@ -3842,13 +3872,15 @@ export class EkhoDb {
   }
 
   getAgentDetail(fleetId: string, agentId: string) {
-    const agent = this.db.prepare(
-      "SELECT id, display_name, runtime, status, hostname, policy_profile, created_at, last_seen_at FROM agents WHERE fleet_id = ? AND id = ?"
+    const row = this.db.prepare(
+      `SELECT id, display_name, runtime, status, hostname, policy_profile, created_at, last_seen_at, ${IDENTITY_COLUMNS_SQL}
+       FROM agents WHERE fleet_id = ? AND id = ?`
     ).get(fleetId, agentId) as Record<string, unknown> | undefined;
 
-    if (!agent) {
+    if (!row) {
       return null;
     }
+    const agent = withIdentity(row);
 
     const recentEvents = this.db.prepare(
       `SELECT event_type, resource_kind, resource_id, conversation_id, payload_json, created_at

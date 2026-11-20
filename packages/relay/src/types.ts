@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { heartbeatIdentityFields } from "./agent-identity";
 
 export const recipientSchema = z.object({
   kind: z.enum(["agent", "group", "broadcast"]),
@@ -69,7 +70,10 @@ export const noticeSchema = z.object({
 export const heartbeatSchema = z.object({
   status: z.enum(["healthy", "degraded", "busy", "idle"]),
   active_conversation_ids: z.array(z.string()).optional().default([]),
-  metrics: z.record(z.string(), z.unknown()).optional().default({})
+  metrics: z.record(z.string(), z.unknown()).optional().default({}),
+  // #97: optional self-reported adapter identity. Invalid values are dropped,
+  // never a reason to refuse the heartbeat (see agent-identity.ts).
+  ...heartbeatIdentityFields
 });
 
 export const identityKeySchema = z.object({

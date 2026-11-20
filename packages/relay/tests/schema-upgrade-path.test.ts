@@ -69,6 +69,8 @@ describe("schema.sql is exec-safe on a pre-migration (existing) database", () =>
 // broke, the first inbox poll after an upgrade would fail on a missing column.
 describe("migration 025 on an existing database, in boot order", () => {
   const ALL_MIGRATIONS = fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
+  const REPORTED_IDENTITY_COLUMNS = ["reported_adapter", "reported_adapter_version", "reported_sdk_version",
+    "reported_host_runtime", "reported_host_runtime_version", "reported_instance_id"];
 
   const columns = (db: Database.Database, table: string) =>
     (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
@@ -98,6 +100,8 @@ describe("migration 025 on an existing database, in boot order", () => {
       "adapter_dead_lettered_at", "adapter_dead_letter_reason", "turn_attempts", "latest_attempt", "latest_turn_id",
       "latest_turn_started_at", "latest_turn_outcome", "latest_turn_category", "attempts_capped", "first_reply_at",
       "first_reply_turn_id", "phase_recorded_at"]) seed.exec(`ALTER TABLE message_deliveries DROP COLUMN ${column}`);
+    // #97: migration 028's columns, so that only the migration can add them.
+    for (const column of REPORTED_IDENTITY_COLUMNS) seed.prepare(`ALTER TABLE agents DROP COLUMN ${column}`).run();
 
     // Rows written before the upgrade: an agent that polled and acked on the
     // previous build, which recorded neither relay-clock time.
@@ -156,7 +160,7 @@ describe("migration 025 on an existing database, in boot order", () => {
       expect(raw.name).toBe(dbPath);
 
       // The migration ran, once, and added exactly one of each column.
-      expect(versions(raw)).toEqual([...expectedBefore, 25, 26, 27]); // every later migration applies on the same boot
+      expect(versions(raw)).toEqual([...expectedBefore, 25, 26, 27, 28]); // every later migration applies on the same boot
       expect(columns(raw, "agents").filter((c) => c === "last_inbox_poll_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "ack_recorded_at")).toHaveLength(1);
       expect(columns(raw, "message_deliveries").filter((c) => c === "first_reply_at")).toHaveLength(1);
@@ -167,6 +171,14 @@ describe("migration 025 on an existing database, in boot order", () => {
       const oldAgent = raw.prepare("SELECT display_name, last_inbox_poll_at FROM agents WHERE id = 'agt_old_recipient'").get() as
         { display_name: string; last_inbox_poll_at: string | null };
       expect(oldAgent).toEqual({ display_name: "old-recipient", last_inbox_poll_at: null });
+      // #97 (migration 028): each identity column added exactly once, nullable,
+      // and an agent from before the upgrade reads "version unknown" (null).
+      for (const column of REPORTED_IDENTITY_COLUMNS) {
+        expect(seeded.agentColumns, column).not.toContain(column);
+        expect(columns(raw, "agents").filter((c) => c === column), column).toHaveLength(1);
+      }
+      expect(raw.prepare(`SELECT ${REPORTED_IDENTITY_COLUMNS.join(", ")} FROM agents WHERE id = 'agt_old_recipient'`).get())
+        .toEqual(Object.fromEntries(REPORTED_IDENTITY_COLUMNS.map((c) => [c, null])));
       const oldDelivery = raw.prepare("SELECT status, acked_at, ack_recorded_at FROM message_deliveries WHERE id = 'dlv_old'").get() as
         { status: string; acked_at: string; ack_recorded_at: string | null };
       expect(oldDelivery).toEqual({ status: "acked", acked_at: "2026-11-01T00:00:05.000Z", ack_recorded_at: null });

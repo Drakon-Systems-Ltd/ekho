@@ -11,6 +11,7 @@ import { startSweepJob } from "./sweep";
 import { loadLicense, registerExtension } from "./license";
 import { registerSecurityHeaders } from "./security-headers";
 import { registerUiRoutes } from "./ui-routes";
+import { RELAY_VERSION, relayBuildSha } from "./version";
 
 async function buildServer() {
   assertOperatorSecret(config.operatorSessionSecret, Boolean(process.env.EKHO_DEV_INSECURE));
@@ -79,10 +80,15 @@ async function buildServer() {
     }
   }
 
+  // #97: resolve the build SHA once at boot (it may run `git rev-parse`), so
+  // no request ever waits on it.
+  app.log.info({ version: RELAY_VERSION, build_sha: relayBuildSha() }, "relay build");
+
   registerHealthRoutes(app);
   app.get("/", async () => ({
     service: "ekho-relay",
-    version: "0.9.0",
+    version: RELAY_VERSION,
+    build_sha: relayBuildSha(),
     tier: license.tier,
     setup_required: !db.findFleetByName("default"),
     docs: {
