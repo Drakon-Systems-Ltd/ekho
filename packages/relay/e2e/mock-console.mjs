@@ -42,11 +42,22 @@ const node = (a, o = {}) => ({
   active_conversations: [LONG_ID], sent_1h: 12, received_1h: 9, ...o,
 });
 const QUAR_ID = "agent-quarantined-" + "q".repeat(36);
+// #97: agent identity — one outdated plugin with long versions, one agent that reports nothing.
+const IDENTITY = {
+  adapter: "openclaw-plugin", adapter_version: "0.8.0-rc.12+build.20261120", sdk_version: "0.8.0",
+  host_runtime: "openclaw", host_runtime_version: "2026.11.20-beta.3+nightly.abcdef", instance_id: "3f2b8c1e-5d4a-4e7b-9c1a-2b3c4d5e6f70",
+  latest_adapter_version: "0.9.0", outdated: true,
+};
+const UNKNOWN_IDENTITY = {
+  adapter: null, adapter_version: null, sdk_version: null, host_runtime: null,
+  host_runtime_version: null, instance_id: null, latest_adapter_version: null, outdated: null,
+};
+const identityFor = (i) => (i === 0 ? IDENTITY : UNKNOWN_IDENTITY);
 const topology = {
   generated_at: iso(0), window_minutes: 60,
   nodes: [
-    node(agents[0]),
-    node(agents[1], { runtime: "claude-code", operator_trusted: false, peer_autoreply: false, sent_1h: 3, received_1h: 40 }),
+    node(agents[0], { identity: IDENTITY }),
+    node(agents[1], { identity: UNKNOWN_IDENTITY, runtime: "claude-code", operator_trusted: false, peer_autoreply: false, sent_1h: 3, received_1h: 40 }),
     node({ id: QUAR_ID, display_name: "Quarantined unit with a remarkably long display name" }, { status: "quarantined", sent_1h: 0, received_1h: 1 }),
   ],
   edges: [{ source: agents[0].id, target: agents[1].id, count: 7, last_at: iso(2) }],
@@ -66,7 +77,9 @@ const api = (p) => {
   if (p.startsWith("/v1/operator/approvals")) return { approvals: [], total: 0 };
   if (p.startsWith("/v1/operator/rooms")) return { rooms: [] };
   if (p.startsWith("/v1/operator/feeds")) return { feeds: [] };
-  if (p.startsWith("/v1/operator/fleet-health")) return { agents: agents.map((a) => ({ ...a, health: { level: "ok" } })) };
+  if (p.startsWith("/v1/operator/fleet-health")) return { agents: agents.map((a, i) => ({ ...a, health: { level: "ok" }, identity: identityFor(i) })) };
+  // A relay on a different commit than the bundle: the stale-console banner shows on every surface.
+  if (p.startsWith("/v1/operator/build-info")) return { relay: { version: "0.9.0", build_sha: "fedcba987654" }, latest_adapter_versions: { "openclaw-plugin": "0.9.0" } };
   if (p.startsWith("/v1/operator/attention")) return { items: [], counts: {} };
   if (p.startsWith("/v1/operator/profile")) return { display_name: "Michael", email: "m@example.com" };
   if (p.startsWith("/v1/operator/keys")) return { keys: [] };

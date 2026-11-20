@@ -973,3 +973,13 @@ select { appearance: none; cursor: pointer; background-image: linear-gradient(45
 @media (max-width:760px),(pointer:coarse) and (max-width:1024px){
   input:not([type=checkbox]):not([type=radio]):not([type=range]),textarea,select{font-size:16px !important}
 }
+
+/* ---- #97 versions: build line, stale-console banner, agent version ---- */
+.ekho-build-line { font-family: var(--mono); font-size: 11px; color: var(--faint); padding: 10px 14px; border-top: 1px solid var(--hair); margin-top: auto; word-break: break-word; }
+.ekho-stale-banner { flex: none; display: flex; gap: 10px; align-items: flex-start; padding: 8px 14px; background: var(--raised-2); color: var(--warn);
+  border-bottom: 1px solid var(--warn); font-family: var(--mono); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.ekho-stale-banner__text { flex: 1; }
+.ekho-stale-banner__close { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 14px; padding: 0 2px; }
+.ekho-ver { font-family: var(--mono); font-size: 11.5px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ekho-ver--unknown { color: var(--faint); }
+.ekho-ver__chip { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; padding: 1px 6px; border-radius: 999px; color: var(--warn); border: 1px solid var(--warn); background: rgba(251, 191, 36, 0.1); }

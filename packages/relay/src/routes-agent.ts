@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply } from "fastify";
 import fs from "node:fs";
 import { db, canonicalDmId, MessagePolicyDeniedError } from "./db";
 import { actionResultSchema, ackSchema, agentCreateRoomSchema, attachmentUploadSchema, deliveryPhasesSchema, enrollSchema, heartbeatSchema, identityKeySchema, noticeSchema, proposeActionSchema, sendMessageSchema } from "./types";
+import { reportedIdentity } from "./agent-identity";
 import { requireAgentAuth } from "./auth";
 import { ATTACHMENT_UPLOAD_BODY_LIMIT, config } from "./config";
 import { decodeBase64Strict, isAllowedMime, isImageMime, sanitizeFilename, sniffImageMatches } from "./attachments";
@@ -426,10 +427,15 @@ export async function registerAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.success ? "unauthorized" : parsed.error.flatten() });
     }
 
-    db.insertHeartbeat(request.agent.id, parsed.data.status, {
-      active_conversation_ids: parsed.data.active_conversation_ids,
-      metrics: parsed.data.metrics
-    });
+    db.insertHeartbeat(
+      request.agent.id,
+      parsed.data.status,
+      {
+        active_conversation_ids: parsed.data.active_conversation_ids,
+        metrics: parsed.data.metrics
+      },
+      reportedIdentity(parsed.data)
+    );
     return reply.send({ ok: true, next_heartbeat_due_seconds: config.heartbeatIntervalSeconds });
   });
 

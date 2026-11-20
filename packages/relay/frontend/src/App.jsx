@@ -29,6 +29,7 @@ import {
 } from "./components";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { budgetInputValue, budgetLabel, parseBudgetInput, savedBudget } from "./budget.js";
+import { AgentVersion, BuildLine, StaleBuildBanner, useRelayBuild } from "./versionUi.jsx";
 // The console's entire state/logic layer lives in consoleState.js (useConsoleState),
 // shared with the Wire renderer. This file is the classic render layer only.
 import {
@@ -193,6 +194,7 @@ export default function App() {
     helpOpen,
     setHelpOpen,
   } = useConsoleState();
+  const relayBuild = useRelayBuild(session.token);
 
   /* ---------------- login screen ---------------- */
 
@@ -232,6 +234,7 @@ export default function App() {
 
   return (
     <div className={`app app--${mobileView}${opsOpen ? " app--ops" : ""}`}>
+      <StaleBuildBanner relay={relayBuild} />
       <header className="appbar grid-tex">
         <div className="appbar__brand">
           <span className="brand-mark">E</span>
@@ -365,6 +368,7 @@ export default function App() {
               )}
             </div>
           </div>
+          <BuildLine relay={relayBuild} className="rail__build" />
         </aside>
         {/* Collapse handle — sits on the rail/center divider, revealed on rail hover. */}
         <button className="rail-collapse rail-collapse--left" onClick={toggleLeftRail} aria-label="Collapse fleet sidebar" title="Collapse fleet sidebar">‹</button>
@@ -1034,6 +1038,7 @@ function AgentTab({ agent, detail, rateLimits, onControl, onTrace }) {
           <span><span className="mono">{agent.runtime || "custom"}</span></span>
           <span>seen {relativeTime(agent.last_seen_at)}</span>
         </div>
+        <div className="rcard__statline"><AgentVersion identity={agent.identity} /></div>
         <div className="rcard__actions">
           <button className="button button--sm button--warn" onClick={() => onControl(agent.id, "pause")}>Pause</button>
           <button className="button button--sm button--ghost" onClick={() => onControl(agent.id, "resume")}>Resume</button>
@@ -1443,6 +1448,7 @@ function HealthTab({ agents, initialized }) {
                     <span className="muted"> · model —</span>
                   )}
                 </div>
+                <div className="rcard__meta"><AgentVersion identity={a.identity} /></div>
               </div>
               <Badge tone={tone}>{HEALTH_LABEL[h.level] || "?"}</Badge>
             </div>

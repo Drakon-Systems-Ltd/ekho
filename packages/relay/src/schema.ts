@@ -37,6 +37,12 @@ CREATE TABLE IF NOT EXISTS agents (
   last_inbox_poll_at TEXT,
   phase_invalid_holder_reports INTEGER NOT NULL DEFAULT 0,
   phase_refused_attempt_reports INTEGER NOT NULL DEFAULT 0,
+  reported_adapter TEXT,
+  reported_adapter_version TEXT,
+  reported_sdk_version TEXT,
+  reported_host_runtime TEXT,
+  reported_host_runtime_version TEXT,
+  reported_instance_id TEXT,
   FOREIGN KEY (fleet_id) REFERENCES fleets(id)
 );
 

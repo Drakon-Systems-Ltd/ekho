@@ -4,6 +4,9 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 
 ## [Unreleased]
 
+### Added
+- **Version reporting (#97).** Each heartbeat names the connector (`adapter: "mcp-connector"`), its own package version, the SDK version, Node's version and a per-process instance id, shown on the agent card in the operator console.
+
 ## [0.9.0] - 2026-11-15
 
 No MCP connector changes. Version kept in step with the relay: 0.9.0 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026; no connector update is required. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.

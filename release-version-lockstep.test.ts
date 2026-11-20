@@ -29,20 +29,16 @@ describe("release version lockstep", () => {
       ["packages/shieldcortex-bridge/package.json", readJson("packages/shieldcortex-bridge/package.json").version],
       ["openclaw.plugin.json", readJson("packages/openclaw-plugin/openclaw.plugin.json").version],
       [
-        "relay GET / version",
-        capture(
-          read("packages/relay/src/server.ts"),
-          /app\.get\("\/", async \(\) => \(\{\s*service: "ekho-relay",\s*version: "([^"]+)"/,
-          "relay root response"
-        )
+        "relay RELAY_VERSION (version.ts)",
+        capture(read("packages/relay/src/version.ts"), /^export const RELAY_VERSION = "([^"]+)";$/m, "relay RELAY_VERSION")
       ],
       [
-        "metrics RELAY_VERSION",
-        capture(read("packages/relay/src/metrics.ts"), /^const RELAY_VERSION = "([^"]+)";$/m, "metrics RELAY_VERSION")
+        "SDK_VERSION (sent as sdk_version on heartbeats)",
+        capture(read("packages/sdk/src/version.ts"), /^export const SDK_VERSION = "([^"]+)";$/m, "SDK_VERSION")
       ],
       [
-        "A2A RELAY_VERSION",
-        capture(read("packages/relay/src/a2a/agent-card.ts"), /^const RELAY_VERSION = "([^"]+)";$/m, "A2A RELAY_VERSION")
+        "Hermes plugin ADAPTER_VERSION (sent as adapter_version on heartbeats)",
+        capture(read("packages/hermes-plugin/ekho_hermes/version.py"), /^ADAPTER_VERSION = "([^"]+)"$/m, "Hermes ADAPTER_VERSION")
       ],
       [
         "Helm Chart.yaml version",
@@ -81,6 +77,19 @@ describe("release version lockstep", () => {
 
     for (const [label, actual] of surfaces) {
       expect(actual, label).toBe(expected);
+    }
+  });
+
+  it("serves the relay version from version.ts only, with no second copy to drift (#97)", () => {
+    // GET /, /metrics and the A2A agent card used to carry three literals.
+    // The GET / body lives in service-info.ts so it can be tested without starting the server.
+    expect(read("packages/relay/src/service-info.ts")).toMatch(/service: "ekho-relay",\s*version: RELAY_VERSION,/);
+    expect(read("packages/relay/src/server.ts")).toMatch(/app\.get\("\/", async \(\) => serviceInfo\(/);
+    for (const rel of ["packages/relay/src/server.ts", "packages/relay/src/service-info.ts", "packages/relay/src/metrics.ts", "packages/relay/src/a2a/agent-card.ts"]) {
+      const source = read(rel);
+      expect(source, rel).toMatch(/import \{[^}]*\bRELAY_VERSION\b[^}]*\} from "\.{1,2}\/(?:\.\.\/)?version";/);
+      expect(source, rel).not.toMatch(/RELAY_VERSION = "/);
+      expect(source, rel).not.toMatch(/version: "\d+\.\d+\.\d+"/);
     }
   });
 

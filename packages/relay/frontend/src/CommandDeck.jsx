@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { loadSession, clearSession, getTopology, getActivity, controlAgent, setAgentTrust, setPeerAutoreply, sendOperatorMessage } from "./api";
 import { usePageVisible } from "./hooks";
 import { budgetLabel } from "./budget.js";
+import { AgentVersion, BuildLine, StaleBuildFlag, useRelayBuild } from "./versionUi.jsx";
 import "./deck.css";
 
 const POLL_MS = 5000;
@@ -129,6 +130,7 @@ function intelLine(e, nameOf) {
 /* ---------- component ---------- */
 export default function CommandDeck() {
   const session = loadSession();
+  const relayBuild = useRelayBuild(session.token);
   const reduced = usePrefersReducedMotion();
   const visible = usePageVisible();
   // Hidden tab → unmount every animated layer (sweep, ping, nanofield, tracers,
@@ -374,6 +376,7 @@ export default function CommandDeck() {
               <div className="opscard__row"><span>STATUS</span><b style={{ color: a.tone === "warn" ? "var(--ember)" : undefined }}>{(a.status || "—").toUpperCase()}</b></div>
               <div className="opscard__row"><span>THROUGHPUT 1H</span><b>{a.sent_1h || 0}↑ {a.received_1h || 0}↓</b></div>
               <div className="opscard__row"><span>ACTIVE CONV</span><b>{a.active_conversations?.length || 0}</b></div>
+              <div className="opscard__row"><span>BUILD</span><AgentVersion identity={a.identity} /></div>
               <div className="flags">
                 {a.operator_trusted ? <span className="flag">TRUSTED</span> : null}
                 {a.peer_autoreply ? <span className="flag flag--c">DELEGATION · {budgetLabel(a.peer_turn_budget).toUpperCase()}</span> : <span className="flag">SOLO</span>}
@@ -432,7 +435,7 @@ export default function CommandDeck() {
       <div className="dossier__cap">
         <div className="dossier__id">
           <div className={`hexframe ${selected.tone === "c" ? "c" : ""}`}><span>{initials(selected)}</span></div>
-          <div><div className="dossier__name">{NAME(selected)}</div><div className="dossier__rt mono">{(selected.runtime || "custom").toUpperCase()} · {selected.model || "model —"}</div></div>
+          <div><div className="dossier__name">{NAME(selected)}</div><div className="dossier__rt mono">{(selected.runtime || "custom").toUpperCase()} · {selected.model || "model —"}</div><AgentVersion identity={selected.identity} /></div>
         </div>
         <button className="exit" onClick={() => setSelectedId("")} aria-label="Close dossier">✕</button>
       </div>
@@ -510,6 +513,8 @@ export default function CommandDeck() {
           <span>WINDOW <b>{topo.window_minutes}m</b></span>
           <span className="grow tick"><span>{`// ${online}/${agents.length} UNITS REPORTING · ${topo.edges.length} ACTIVE LINKS · ${alerts} ALERTS · ${trusted} TRUSTED · DELEGATION BOUNDED · ${stale ? "RELAY LINK DEGRADED" : "SECTOR NOMINAL"} ${"  "}`.repeat(2)}</span></span>
           <span>THRPT <b>{msgHr}/h</b></span>
+          <StaleBuildFlag relay={relayBuild} />
+          <BuildLine relay={relayBuild} />
         </footer>
       </div>
     </div>

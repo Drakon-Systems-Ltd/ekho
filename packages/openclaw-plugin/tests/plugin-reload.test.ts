@@ -12,7 +12,7 @@ import { DEFERRED_RETRY_TTL_MS, STOP_DRAIN_MS } from "../src/autoreply";
 
 const relay = vi.hoisted(() => ({
   nextClient: 0,
-  heartbeats: [] as Array<{ client: number; metrics: Record<string, string> }>,
+  heartbeats: [] as Array<{ client: number; metrics: Record<string, string>; payload: Record<string, unknown> }>,
   polls: [] as number[],
   // Set once the test has told the plugin to stop; relay calls note it.
   stopped: false,
@@ -66,7 +66,7 @@ vi.mock("@drakon-systems/ekho-sdk", () => ({
       return {};
     }
     async heartbeat(payload: { metrics?: Record<string, string> }) {
-      relay.heartbeats.push({ client: this.n, metrics: { ...(payload.metrics ?? {}) } });
+      relay.heartbeats.push({ client: this.n, metrics: { ...(payload.metrics ?? {}) }, payload: { ...payload } });
       return {};
     }
     async getInbox(_limit?: number, signal?: AbortSignal) {
@@ -286,6 +286,31 @@ afterEach(() => {
   vi.unstubAllGlobals();
   for (const d of scratch) rmSync(d, { recursive: true, force: true });
   scratch.length = 0;
+});
+
+describe("heartbeat identity (#97)", () => {
+  it("names the plugin and the OpenClaw version the host reports, and claims no version for an unstamped bundle", async () => {
+    const copy = await loadPluginCopy();
+    const host = fakeApi(true);
+    host.api.runtime = { version: "2026.9.8" };
+    copy.plugin.register(host.api);
+    await untilConnected(copy.conn);
+    const beat = relay.heartbeats.at(-1)!;
+    expect(beat.payload).toMatchObject({ status: "healthy", adapter: "openclaw-plugin", host_runtime: "openclaw", host_runtime_version: "2026.9.8" });
+    // vitest runs src/, which carries no build stamp: "version unknown", not a guess.
+    expect(beat.payload).not.toHaveProperty("adapter_version");
+    // Identity rides beside the metrics, never inside them.
+    expect(Object.keys(beat.metrics).some((k) => k.startsWith("adapter") || k.startsWith("host_"))).toBe(false);
+  });
+
+  it("omits the host version when the host does not expose one", async () => {
+    const copy = await loadPluginCopy();
+    const host = fakeApi(true);
+    copy.plugin.register(host.api);
+    await untilConnected(copy.conn);
+    expect(relay.heartbeats.at(-1)!.payload).toMatchObject({ adapter: "openclaw-plugin", host_runtime: "openclaw" });
+    expect(relay.heartbeats.at(-1)!.payload).not.toHaveProperty("host_runtime_version");
+  });
 });
 
 describe("plugin reload in one process", () => {

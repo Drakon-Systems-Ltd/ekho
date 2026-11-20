@@ -11,7 +11,10 @@ RUN npm ci
 COPY tsconfig.base.json ./
 COPY packages/ packages/
 RUN npm run build -w @drakon-systems/ekho-sdk
-RUN npm run ui:build -w @ekho/relay
+# #97: the commit this image is built from (the context has no .git). Optional;
+# without it the console and relay both report "unknown".
+ARG EKHO_BUILD_SHA=""
+RUN EKHO_BUILD_SHA="$EKHO_BUILD_SHA" npm run ui:build -w @ekho/relay
 
 # Stage 2: Runtime
 FROM node:22-alpine
@@ -48,6 +51,8 @@ RUN mkdir -p /app/data && chown -R ekho:ekho /app/data
 USER ekho
 
 EXPOSE 4000
+ARG EKHO_BUILD_SHA=""
+ENV EKHO_BUILD_SHA=$EKHO_BUILD_SHA
 ENV EKHO_HOST=0.0.0.0
 ENV EKHO_DB_PATH=/app/data/ekho.sqlite
 

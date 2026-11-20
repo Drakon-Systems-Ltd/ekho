@@ -33,6 +33,7 @@ from .credentials import (
     take_enroll_operator_keys,
 )
 from .verification import sync_pinned_operator_keys
+from .version import heartbeat_identity
 
 logger = logging.getLogger("ekho_hermes.connection")
 
@@ -195,9 +196,15 @@ def _report_metrics() -> dict:
 
 def _heartbeat_loop(client: EkhoAgentClient, interval_seconds: int) -> None:
     """Immediate beat, then every ``interval_seconds``. Survives all errors."""
+    # #97: who this agent is running, for the console's version line. Resolved
+    # once per loop: Hermes is already loaded by the time the plugin connects.
+    try:
+        identity = heartbeat_identity()
+    except Exception:  # noqa: BLE001 — identity must never stop the heartbeat
+        identity = {}
     while not _heartbeat_stop.is_set():
         try:
-            client.heartbeat({"status": "healthy", "metrics": _report_metrics()})
+            client.heartbeat({"status": "healthy", "metrics": _report_metrics(), **identity})
         except Exception as exc:  # noqa: BLE001 — a relay blip must not kill the loop
             logger.debug("[ekho] heartbeat failed: %s", exc)
         # Wake promptly on shutdown() instead of sleeping the full interval.

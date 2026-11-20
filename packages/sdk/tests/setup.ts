@@ -53,5 +53,8 @@ export async function createTestRelayForSdk() {
     app.close();
   }
 
-  return { baseUrl, fleetId, enrollAgent, cleanup };
+  /** The operator fleet-health rows, read straight from the relay's store. */
+  const fleetHealth = () => db.getFleetHealth(fleetId) as Array<Record<string, any>>;
+
+  return { baseUrl, fleetId, enrollAgent, fleetHealth, cleanup };
 }

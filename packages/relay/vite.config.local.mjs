@@ -4,6 +4,7 @@
 // production build (vite.config.js).
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { consoleBuildDefine } from "./vite.build-stamp.mjs";
 
 const target = process.env.EKHO_RELAY_ORIGIN || "http://127.0.0.1:4000";
 const proxy = { "/v1": { target, changeOrigin: true, secure: true } };
@@ -12,6 +13,7 @@ export default defineConfig({
   plugins: [react()],
   root: "frontend",
   base: "/ui/",
+  define: consoleBuildDefine(),
   build: { outDir: "../ui-dist", emptyOutDir: true },
   preview: { port: 4517, proxy },
   server: { port: 4517, proxy },

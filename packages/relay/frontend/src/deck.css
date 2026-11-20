@@ -258,3 +258,11 @@
 .cmd-deck button:focus-visible, .cmd-deck textarea:focus-visible, .cmd-deck a:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) { .cmd-deck *:not(.ctl--armed) { animation: none !important; } }
+
+/* ---- #97 versions: build line, stale-console flag, agent version ---- */
+.cmd-deck .ekho-build-line { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "Share Tech Mono", monospace; font-size: 11px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.cmd-deck .ekho-stale-flag { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--crim-hi); border: 1px solid var(--crim); padding: 1px 8px; letter-spacing: 0.1em; box-shadow: var(--glow-c); cursor: help; }
+.cmd-deck .ekho-ver { font-family: "Share Tech Mono", monospace; font-size: 11px; color: var(--gold); display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; letter-spacing: 0.04em; min-width: 0; overflow-wrap: anywhere; }
+.cmd-deck .ekho-ver--unknown { color: var(--muted); }
+.cmd-deck .ekho-ver__chip { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; padding: 0 6px; color: var(--crim-hi); border: 1px solid var(--crim); }
+@media (max-width: 860px) { .cmd-deck .footbar .ekho-build-line { display: none; } }

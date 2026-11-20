@@ -112,6 +112,20 @@ export type HeartbeatPayload = {
   status: "healthy" | "degraded" | "busy" | "idle";
   active_conversation_ids?: string[];
   metrics?: Record<string, unknown>;
+  /**
+   * Optional self-reported identity (#97), shown per agent in the operator
+   * console. `EkhoAgentClient.heartbeat` fills `sdk_version` and `instance_id`
+   * itself, and, when `adapter` is not given, reports the SDK as the adapter
+   * and Node as the host runtime. Short tokens only (letters, digits, `.`,
+   * `_`, `-`, and `+` in versions): the relay drops anything else, so never
+   * put paths, hostnames or config values here.
+   */
+  adapter?: string;
+  adapter_version?: string;
+  sdk_version?: string;
+  host_runtime?: string;
+  host_runtime_version?: string;
+  instance_id?: string;
 };
 
 export type ProposeActionPayload = {

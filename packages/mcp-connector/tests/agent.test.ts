@@ -5,6 +5,7 @@ import { verifyInbound } from "../../openclaw-plugin/src/verify";
 import { DEAD_LETTER_FILE } from "../src/dead-letter";
 import { EKHO_ORIGIN_STAMP, classify } from "../src/agent";
 import { startRelay, connectAgent, tmpDir, type LiveRelay } from "./helpers";
+import { SDK_VERSION } from "@drakon-systems/ekho-sdk";
 
 const relays: LiveRelay[] = [];
 afterEach(async () => {
@@ -159,5 +160,26 @@ describe("backpressure", () => {
     agent.store.confirm(read.cursor);
     expect((await agent.pollOnce()).map((m) => m.text)).toEqual(["three"]);
     expect(agent.store.takeUnread(10, read.cursor).messages.map((m) => m.text)).toEqual(["three"]);
+  });
+});
+
+describe("heartbeat identity (#97)", () => {
+  it("reports the connector, its own package version, the SDK and Node", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r, tmpDir());
+    await agent.heartbeatOnce();
+    const row = (await r.operatorRequest("GET", "/v1/operator/fleet-health")).body.agents.find(
+      (a: { id: string }) => a.id === agent.agentId
+    );
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")) as { version: string };
+    expect(row.identity).toMatchObject({
+      adapter: "mcp-connector",
+      adapter_version: pkg.version,
+      sdk_version: SDK_VERSION,
+      host_runtime: "node",
+      host_runtime_version: process.versions.node,
+      outdated: false
+    });
+    expect(row.identity.instance_id).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
