@@ -15,7 +15,7 @@ slice that depends on them.
 ## 1. What is still open
 
 From the CHANGELOG "Still open in #111" list, this design covers two of the
-three residuals:
+residuals and records the other two:
 
 | Residual | Covered here |
 |---|---|
@@ -41,7 +41,7 @@ three residuals:
 - **No relay-side claim about what the recipient did.** The relay can only
   record what the recipient reports about its own deliveries. Sender-visible
   fields stay labelled as recipient-reported.
-- No new protocol surface is added to anything other than what section 5 names.
+- No new protocol surface is added to anything other than the additive reason values section 4.2 proposes.
 
 ## 3. Verified current state
 
@@ -73,7 +73,7 @@ route, or an ack status". Reading `main`:
 - Both fields are already returned to the sender by the status route above.
 - The 155 design (`docs/plans/2026-11-01-155-reply-latency-design.md`, section
   2.2) specifies this phase for "wherever the adapter already dead-letters acked
-  work". Migration 026 added the columns; no further migration is needed for
+  work". Migration 026 added both columns (`026_delivery_phase_reports.sql`); no further migration is needed for
   this part.
 
 What is missing is everything around it:
