@@ -383,7 +383,8 @@ function pruneHandoffs(
 /**
  * Leave `entries` for a successor of the same agent. Synchronous, so a stop
  * that deposits has done so before it returns. Never throws. Returns what the
- * bounds pushed out (the oldest entries first), which the caller reports.
+ * bounds pushed out, which the caller reports: entries past the age bound
+ * (newest first), then entries past the per-agent cap (oldest first).
  */
 export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date.now()): ReloadHandoffDropped[] {
   const store = handoffStore();
@@ -589,7 +590,8 @@ function forgetDomain(ledger: ReloadServedLedger | undefined): void {
   const r = registry();
   const floor = (r.reloadServedFloor ??= {});
   const raise = (kind: "key" | "nonce", epoch: unknown): void => {
-    if (typeof epoch !== "number" || !Number.isFinite(epoch)) return;
+    // +Infinity is the lost-evidence mark (#192): it must survive the fold.
+    if (typeof epoch !== "number" || Number.isNaN(epoch) || epoch === Number.NEGATIVE_INFINITY) return;
     floor[kind] = Math.max(floor[kind] ?? epoch, epoch);
   };
   try {

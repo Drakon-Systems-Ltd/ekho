@@ -390,5 +390,20 @@ describe("accessor isolation (#192)", () => {
       expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBe(Number.POSITIVE_INFINITY);
       expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBeUndefined();
     });
+
+    it("lost evidence stays lost when the whole ledger is later dropped by the per-process bound", async () => {
+      const { noteReloadServed, reloadServedBy, reloadServedForgotten } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"] }, NOW);
+      ledger().keys.set("k", throwing({ generation: 3, atMs: NOW }, "generation"));
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"] }, NOW); // meets the unreadable record
+      expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBe(Number.POSITIVE_INFINITY);
+
+      for (let i = 0; i < 64; i++) noteReloadServed("agent_x", `other-${i}`, 1, { keys: ["k"] }, NOW);
+      expect(reloadServedBy("agent_x", "conn-a", "key", "k")).toBeUndefined(); // the whole domain is gone
+      // Its readable records were all epoch 3; the unreadable one could have
+      // been later than any of them, so the floor is not 3.
+      expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBe(Number.POSITIVE_INFINITY);
+      expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBeUndefined(); // the other kind lost nothing
+    });
   });
 });
