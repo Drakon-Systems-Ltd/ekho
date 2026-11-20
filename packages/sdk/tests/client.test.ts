@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { EkhoAgentClient, EkhoAgentAdapter } from "../src/index";
+import { EkhoAgentClient, EkhoAgentAdapter, INSTANCE_ID, SDK_VERSION, withHeartbeatIdentity } from "../src/index";
 import { createTestRelayForSdk } from "./setup";
 
 describe("@drakon-systems/ekho-sdk", () => {
@@ -82,6 +82,48 @@ describe("@drakon-systems/ekho-sdk", () => {
       });
       const result = await client.heartbeat({ status: "healthy" });
       expect(result.ok).toBe(true);
+    });
+
+    // #97: the relay shows what each agent runs.
+    it("reports the SDK, its version, Node and a per-process instance id on every heartbeat", async () => {
+      const creds = await relay.enrollAgent("sdk-hb-identity");
+      const client = new EkhoAgentClient({ agentId: creds.agent_id, secret: creds.secret, relayBaseUrl: creds.relayBaseUrl });
+      await client.heartbeat({ status: "healthy" });
+      const row = relay.fleetHealth().find((a) => a.id === creds.agent_id)!;
+      expect(row.identity).toMatchObject({
+        adapter: "sdk",
+        adapter_version: SDK_VERSION,
+        sdk_version: SDK_VERSION,
+        host_runtime: "node",
+        host_runtime_version: process.versions.node,
+        instance_id: INSTANCE_ID,
+        outdated: false
+      });
+    });
+
+    it("lets a plugin name itself as the adapter without inheriting the SDK's adapter or Node defaults", async () => {
+      const creds = await relay.enrollAgent("sdk-hb-plugin");
+      const client = new EkhoAgentClient({ agentId: creds.agent_id, secret: creds.secret, relayBaseUrl: creds.relayBaseUrl });
+      await client.heartbeat({ status: "healthy", adapter: "openclaw-plugin", adapter_version: "0.8.0" });
+      const row = relay.fleetHealth().find((a) => a.id === creds.agent_id)!;
+      expect(row.identity).toMatchObject({
+        adapter: "openclaw-plugin",
+        adapter_version: "0.8.0",
+        sdk_version: SDK_VERSION,
+        host_runtime: null,
+        host_runtime_version: null,
+        instance_id: INSTANCE_ID,
+        outdated: true
+      });
+    });
+
+    it("keeps one instance id per loaded SDK and lets the caller override any field", () => {
+      expect(INSTANCE_ID).toMatch(/^[0-9a-f-]{36}$/);
+      expect(withHeartbeatIdentity({ status: "idle" }).instance_id).toBe(withHeartbeatIdentity({ status: "busy" }).instance_id);
+      expect(withHeartbeatIdentity({ status: "idle", sdk_version: "x", instance_id: "mine-12345" })).toMatchObject({
+        sdk_version: "x",
+        instance_id: "mine-12345"
+      });
     });
 
     it("raises a stall notice and dedups idempotently", async () => {

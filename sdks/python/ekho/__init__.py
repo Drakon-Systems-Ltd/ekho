@@ -40,7 +40,7 @@ from .types import (
     SendMessageResult,
 )
 
-__version__ = "0.1.0"
+from ._version import __version__  # noqa: E402 — re-exported
 
 __all__ = [
     "__version__",

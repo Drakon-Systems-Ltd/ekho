@@ -7,11 +7,14 @@ match the relay's requireAgentAuth middleware byte-for-byte.
 from __future__ import annotations
 
 import json
+import platform
+import uuid
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from ._signing import signed_headers
+from ._version import __version__ as SDK_VERSION
 from .types import (
     AckInput,
     ActionDecision,
@@ -28,6 +31,34 @@ from .types import (
     SendMessageInput,
     SendMessageResult,
 )
+
+# Random per process (per import of this module). Not a secret: it only tells
+# two producers heartbeating for one agent apart in the operator console (#97).
+INSTANCE_ID = uuid.uuid4().hex
+
+
+def with_heartbeat_identity(
+    payload: HeartbeatInput, instance_id: str = INSTANCE_ID
+) -> Dict[str, Any]:
+    """The heartbeat body with this SDK's identity filled in (#97).
+
+    ``sdk_version`` and ``instance_id`` are always present unless the caller
+    supplies them. The adapter fields travel as a group: a caller that names
+    its ``adapter`` (a plugin) owns the whole group, so a plugin is never
+    labelled with the SDK's own defaults.
+    """
+    body: Dict[str, Any] = dict(payload)
+    out: Dict[str, Any] = {"sdk_version": SDK_VERSION, "instance_id": instance_id}
+    if not body.get("adapter"):
+        out.update(
+            adapter="python-sdk",
+            adapter_version=SDK_VERSION,
+            host_runtime="python",
+            host_runtime_version=platform.python_version(),
+        )
+    out.update(body)
+    return out
+
 
 DEFAULT_POLL_INTERVAL_SECONDS = 5
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
@@ -254,7 +285,7 @@ class EkhoAgentClient:
 
     def heartbeat(self, payload: HeartbeatInput) -> HeartbeatResult:
         return HeartbeatResult.from_dict(
-            self._request("POST", "/v1/heartbeats", dict(payload))
+            self._request("POST", "/v1/heartbeats", with_heartbeat_identity(payload))
         )
 
     def propose_action(self, payload: ProposeActionInput) -> ActionDecision:

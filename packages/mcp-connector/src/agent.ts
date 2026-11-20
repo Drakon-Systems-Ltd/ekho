@@ -21,6 +21,7 @@ import {
 } from "@drakon-systems/ekho-sdk/identity";
 import { credentialsState, enroll, saveCredentials, CredentialsUnavailableError, type StoredCredentials } from "./credentials.js";
 import { appendDeadLetters, type DeadLetterRecord } from "./dead-letter.js";
+import { CONNECTOR_VERSION } from "./version.js";
 import { MessageStore, type RosterSnapshot, type StoredMessage, type VerificationStatus } from "./store.js";
 
 /** Every send from this connector carries this stamp (the plugin's is
@@ -178,17 +179,27 @@ export class EkhoConnectorAgent {
     this.lastError = null;
   }
 
+  /** Send one heartbeat. The SDK client adds sdk_version and instance_id (#97). */
+  async heartbeatOnce(): Promise<void> {
+    if (!this.client) throw new Error("connect() first");
+    await this.client.heartbeat({
+      status: this.paused ? "degraded" : "healthy",
+      metrics: { paused: this.paused, queued: this.store.unreadCount(), runtime: "ekho-mcp" },
+      adapter: "mcp-connector",
+      adapter_version: CONNECTOR_VERSION,
+      host_runtime: "node",
+      host_runtime_version: process.versions.node
+    });
+    this.lastHeartbeatAt = new Date().toISOString();
+  }
+
   /** Start the background heartbeat + poll loops (after connect()). */
   start(): void {
     if (!this.client) throw new Error("connect() first");
     const client = this.client;
     const beat = async () => {
       try {
-        await client.heartbeat({
-          status: this.paused ? "degraded" : "healthy",
-          metrics: { paused: this.paused, queued: this.store.unreadCount(), runtime: "ekho-mcp" }
-        });
-        this.lastHeartbeatAt = new Date().toISOString();
+        await this.heartbeatOnce();
       } catch (err) {
         this.log.warn?.(`[ekho-mcp] heartbeat failed: ${String(err)}`);
       }

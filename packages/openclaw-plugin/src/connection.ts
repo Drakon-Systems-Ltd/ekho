@@ -20,6 +20,8 @@ import { parseRequireSignedMode, syncPinnedOperatorKeys } from "./verification.j
 import { fromB64url, keyId as deriveKeyId } from "./identity.js";
 import { inboxCacheContext, startAutoReply } from "./autoreply.js";
 import { appendDeadLetters } from "./dead-letter.js";
+import { buildIdentity } from "./build-info.js";
+import { openclawHostVersion, pluginHeartbeatIdentity } from "./heartbeat-identity.js";
 import { LEGACY_EKHO_DIR, migrateLegacyEkhoState, resolveEkhoStateDir } from "./state-dir.js";
 import {
   claimAgentRuntime,
@@ -687,7 +689,10 @@ function maybeStartHeartbeat(log?: Logger, config?: EkhoPluginConfig) {
     // (model 404/auth failing every turn) reads red, not green.
     ...turnHealthMetrics()
   });
-  const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics() }).catch(() => {}); };
+  // #97: who this agent is running, for the console's version line. Read per
+  // beat so a host api that arrives after the first connect is picked up.
+  const identity = () => pluginHeartbeatIdentity(buildIdentity(), openclawHostVersion(lastStart?.api));
+  const beat = () => { void client.heartbeat({ status: "healthy", metrics: reportMetrics(), ...identity() }).catch(() => {}); };
   beat();
   heartbeatTimer = setInterval(beat, config?.heartbeatIntervalMs ?? 30_000);
   if (typeof heartbeatTimer === "object" && "unref" in heartbeatTimer) heartbeatTimer.unref?.();

@@ -10,6 +10,7 @@ import type {
   ProposeActionPayload,
   ActionResultPayload
 } from "./types.js";
+import { SDK_VERSION } from "./version.js";
 
 export type FloorResult = {
   granted: boolean;
@@ -17,6 +18,27 @@ export type FloorResult = {
   expires_at: string;
   conversation_tail: MessageSnapshot[];
 };
+
+/** Random per loaded copy of the SDK — in practice per process start, or per
+ *  bundle reload for a host that re-imports its plugins. Not a secret: it only
+ *  tells two producers heartbeating for one agent apart. (#97) */
+export const INSTANCE_ID: string = crypto.randomUUID();
+
+function nodeRuntime(): { host_runtime?: string; host_runtime_version?: string } {
+  const version = (globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node;
+  return typeof version === "string" && version ? { host_runtime: "node", host_runtime_version: version } : {};
+}
+
+/**
+ * The heartbeat body with the SDK's identity filled in (#97). `sdk_version` and
+ * `instance_id` are always present unless the caller supplies them. The adapter
+ * fields travel as a group: a caller that names its `adapter` (a plugin) owns
+ * the whole group, so a plugin is never labelled with the SDK's defaults.
+ */
+export function withHeartbeatIdentity(payload: HeartbeatPayload, instanceId: string = INSTANCE_ID): HeartbeatPayload {
+  const adapter = payload.adapter ? {} : { adapter: "sdk", adapter_version: SDK_VERSION, ...nodeRuntime() };
+  return { sdk_version: SDK_VERSION, instance_id: instanceId, ...adapter, ...payload };
+}
 
 const DEFAULT_POLL_INTERVAL = 5;
 const DEFAULT_HEARTBEAT_INTERVAL = 30;
@@ -137,7 +159,7 @@ export class EkhoAgentClient {
   }
 
   heartbeat(payload: HeartbeatPayload) {
-    return this.request<{ ok: boolean; next_heartbeat_due_seconds: number }>("POST", "/v1/heartbeats", payload);
+    return this.request<{ ok: boolean; next_heartbeat_due_seconds: number }>("POST", "/v1/heartbeats", withHeartbeatIdentity(payload));
   }
 
   proposeAction(payload: ProposeActionPayload) {

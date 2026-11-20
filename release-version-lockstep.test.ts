@@ -32,6 +32,46 @@ describe("release version lockstep", () => {
         "relay RELAY_VERSION (version.ts)",
         capture(read("packages/relay/src/version.ts"), /^export const RELAY_VERSION = "([^"]+)";$/m, "relay RELAY_VERSION")
       ],
+      [
+        "SDK_VERSION (sent as sdk_version on heartbeats)",
+        capture(read("packages/sdk/src/version.ts"), /^export const SDK_VERSION = "([^"]+)";$/m, "SDK_VERSION")
+      ],
+      [
+        "Hermes plugin ADAPTER_VERSION (sent as adapter_version on heartbeats)",
+        capture(read("packages/hermes-plugin/ekho_hermes/version.py"), /^ADAPTER_VERSION = "([^"]+)"$/m, "Hermes ADAPTER_VERSION")
+      ],
+      [
+        "Helm Chart.yaml version",
+        capture(read("deploy/helm/ekho/Chart.yaml"), /^version:\s*(.+)$/m, "Helm version")
+      ],
+      [
+        "Helm Chart.yaml appVersion",
+        capture(read("deploy/helm/ekho/Chart.yaml"), /^appVersion:\s*(.+)$/m, "Helm appVersion")
+      ],
+      [
+        "Helm values image.tag",
+        capture(read("deploy/helm/ekho/values.yaml"), /^image:\n(?:[ \t].+\n)*?[ \t]+tag:\s*(.+)$/m, "Helm image.tag")
+      ],
+      [
+        "OpenAPI info.version",
+        capture(read("openapi.yaml"), /^info:\n(?:[ \t].+\n)*?[ \t]+version:\s*(.+)$/m, "OpenAPI info.version")
+      ],
+      [
+        "OpenAPI ServiceInfo example",
+        capture(
+          read("openapi.yaml"),
+          /ServiceInfoResponse:[\s\S]*?\n[ \t]+version:\n[ \t]+type: string\n[ \t]+example:\s*(.+)/,
+          "OpenAPI example"
+        )
+      ],
+      [
+        "README release version",
+        capture(read("README.md"), /\*\*Release version:\*\* `v([^`]+)`/, "README release version")
+      ],
+      [
+        "README project status",
+        capture(read("README.md"), /## Project Status\n\nEkho `v([^`]+)` is the release version\./, "README project status")
+      ],
       ...workspace
     ];
 

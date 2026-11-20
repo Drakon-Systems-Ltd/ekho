@@ -282,6 +282,17 @@ class HeartbeatInput(TypedDict, total=False):
     status: Literal["healthy", "degraded", "busy", "idle"]
     active_conversation_ids: List[str]
     metrics: Dict[str, Any]
+    # Optional self-reported identity (#97). ``EkhoAgentClient.heartbeat``
+    # fills sdk_version and instance_id, and, when ``adapter`` is not given,
+    # reports this SDK as the adapter and Python as the host runtime. Short
+    # tokens only: the relay drops anything else, so never put paths,
+    # hostnames or config values here.
+    adapter: str
+    adapter_version: str
+    sdk_version: str
+    host_runtime: str
+    host_runtime_version: str
+    instance_id: str
 
 
 class ProposeActionInput(TypedDict, total=False):
