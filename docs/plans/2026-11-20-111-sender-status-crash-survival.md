@@ -157,7 +157,8 @@ no later generation or recovery can still serve it:
 | Stop with no hand-off available (no registry, deposit refused) and flush writes `inflight_loop_stopped` / `deferred_loop_stopped` | Yes, best effort inside the stop budget | `inflight_loop_stopped` / `deferred_loop_stopped` (the latter already in the enum) |
 | Existing stash drops (`deferred_evicted_cap`, `deferred_overflow_per_conv`, `deferred_expired_spawn_failed`, `deferred_retry_spawn_failed`) | Yes | existing values |
 | Re-admitted and served | No. Turn phases carry it once wired. | none |
-| Crash recovery refetch is 404 or past deadline (Part B) | Yes | `deadline_passed` |
+| Crash recovery refetch returns 404 (Part B) | Yes | `recovery_unavailable` (not `deadline_passed`: a 404 also covers withdrawn room membership, a missing room, an unknown id, or a delivery state outside `delivered | acked`, so expiry is not established) |
+| Crash recovery refetch returns a message whose relay `deadline_at` has passed | Yes | `deadline_passed` |
 | Crash recovery withholds (Part B) | Yes | `withheld_by_recipient` |
 
 Why the trust and policy reasons collapse into one value: a sender-visible,
@@ -178,10 +179,13 @@ as a work or state source. The sender simply keeps `acked`.
 - A small in-memory ring (bounded, same order of size as the hand-off cap of 500)
   of pending `dead_lettered` entries, flushed once per tick with the rest of the
   tick's work, as the 155 design describes for phase reporting.
-- Feature-detected and best-effort. A relay that does not know the route
-  (404) or the reason value (400) stops reporting for the life of the process
-  and logs once. A reporting failure must never break the tick, never delay
-  an ack and never change a disposition.
+- Feature-detected and best-effort, with two separate states. **Route
+  capability:** a 404 from `POST /v1/delivery-phases` means the relay predates
+  the route; reporting stops for the life of the process and is logged once.
+  **Per-entry:** a 400 on a request carrying only a new-reason entry drops that
+  entry (logged once per reason value) and does not disable reporting or affect
+  later entries or turn-phase reports. A reporting failure must never break the
+  tick, never delay an ack and never change a disposition.
 - **Batch hazard.** `deliveryPhasesSchema` is strict and the reason is a closed
   enum, so an older relay that does not know a new reason value rejects the
   **whole** request with 400. New-reason entries therefore go in their own
@@ -211,6 +215,9 @@ as a work or state source. The sender simply keeps `acked`.
   recipient, so its absence does not prove a turn ran."
 - `deadline_passed`: "The message's deadline passed before the recipient could
   serve it."
+- `recovery_unavailable`: "After a restart the recipient could no longer
+  retrieve this message from the relay, so it was not served. The cause is not
+  known to the recipient."
 - `handoff_unclaimed`, `inflight_loop_stopped`, `deferred_loop_stopped`: "The
   recipient stopped or restarted holding this message and it was not served."
 
@@ -258,17 +265,32 @@ with mode `0600`, next to but separate from the dead-letter file.
 
 ### 5.3 Write ordering (the part that decides honesty)
 
+0. **Durability rules.** The journal is an append-only JSONL of events (`held`,
+   `marked`, `retired`), never an in-place rewrite, so an interrupted write can
+   only leave a torn last line. A torn or unparseable line is ignored, never
+   replayed and never guessed at. "Flushed" means appended and `fsync`ed (and
+   the directory `fsync`ed when the file is created). Compaction writes a
+   temporary file and renames it. If the initial flush fails, the loop **does
+   not ack that batch**: it stays unacked and the relay redelivers it after its
+   delivery timeout, so the failure costs a delay, not a message. If the
+   `marked` event cannot be made durable, the message is **not spawned** on that
+   attempt; it stays pending under the stash's existing retry and deadline rules
+   and is reported when it expires. A turn is never spawned from an unmarked
+   record.
 1. Before the ack of a batch, append (and flush) one record per `kept` message
    that is about to be held or served. An ack that fails after the journal write
    leaves a record for a message the relay will redeliver; recovery must treat
    "relay still shows it as not acked or delivered again" as already handled by
    the normal inbox path (the refetch endpoint only returns `delivered | acked`,
    so this is a no-op or a dedupe case, **to verify**).
-2. **Before** spawning a turn for a message, set `turn_marked`. A crash after the
+2. **Before** spawning a turn for a message, make `turn_marked` durable (per rule 0). A crash after the
    mark and before the spawn therefore loses the message rather than risking a
    second turn. This is the at-most-once side of the trade and is intentional.
-3. Remove a record when its message reaches any final disposition: turn spawned
-   and finished, withheld, dead-lettered with a report, or expired.
+3. Retire a record only at a final disposition: its `turn_marked` event is
+   durable and the turn has been spawned (the mark, not the finish, is what
+   protects against a second turn), or it was withheld, dead-lettered with a
+   report, or expired. Re-admission into the stash is **not** a final
+   disposition.
 4. Bounds: at most 500 records (`RELOAD_HANDOFF_CAP`) and 24 h 5 min age
    (`RELOAD_HANDOFF_MAX_AGE_MS`), the same bounds as the hand-off. Over the
    bound, the oldest are dropped, and each drop is reported as
@@ -289,12 +311,20 @@ from reload), and only when the journal option is on:
    untouched. Two live processes must never both recover the same record.
 2. For each record without `turn_marked` that is inside its age bound,
    `getDeliveredMessage(id)`:
-   - 404 or past `deadline_at` on the relay copy: report `deadline_passed`,
-     remove the record;
+   - 404: the relay no longer serves it to this agent for a reason this side
+     cannot tell apart (see 4.2). Report `recovery_unavailable` and retire the
+     record. Never report `deadline_passed` from a 404;
+   - a returned copy whose `deadline_at` has passed: report `deadline_passed`
+     and retire the record;
    - otherwise run the existing re-admission decision (fresh signature check
      under the current pins and roster, peer delegation, `requireSigned`,
      operator trust, closed latch, deadline, floor). Re-admit once or withhold,
-     with a report as in section 4.2, and remove the record.
+     with a report as in section 4.2. A **withheld** record is retired. A
+     **re-admitted** message goes into the deferred stash, where it can wait for
+     the floor before any turn is spawned, so its record **stays, unmarked,
+     until the final disposition in 5.3 step 3**. A second crash while it is
+     deferred therefore recovers it again, by the same rules, instead of
+     losing it.
 3. Records with `turn_marked` are removed without replay. They are not reported
    as lost: the sender cannot be told truthfully whether the turn finished.
 4. Recovery does not charge the per-peer rate limit or latch again (same rule as
@@ -354,7 +384,7 @@ execution is GitHub CI only; no full suite is run on the build box.
 
 | Slice | Content | Files (expected) | Needs |
 |---|---|---|---|
-| **S0** Relay: coarse reasons | Add `deadline_passed`, `withheld_by_recipient`, `handoff_unclaimed`, `inflight_loop_stopped` to the `dead_lettered` reason enum. Additive only. No migration, no `db.ts` change expected (reason column is text). | `packages/relay/src/types.ts`, `openapi.yaml`, `packages/relay/tests/delivery-phases.test.ts` | Scope question |
+| **S0** Relay: coarse reasons | Add `deadline_passed`, `withheld_by_recipient`, `handoff_unclaimed`, `inflight_loop_stopped`, `recovery_unavailable` to the `dead_lettered` reason enum. Additive only. No migration, no `db.ts` change expected (reason column is text). | `packages/relay/src/types.ts`, `openapi.yaml`, `packages/relay/tests/delivery-phases.test.ts` | Scope question |
 | **S1** SDK: `reportDeliveryPhases` | Method for `POST /v1/delivery-phases`, typed to the closed enums. Optional sender reader `getMessageStatus` in the same or a following PR. | `packages/sdk/src/client.ts`, SDK tests, `packages/sdk/CHANGELOG.md` | S0 merged and released together with the relay |
 | **S2** Plugin: report final dispositions | Ring plus per-tick flush, separate request for new reasons, 404/400 feature detection, reports at the decision points in section 4.2 only. Update the CHANGELOG limitation text that currently says a protocol addition is required. | `packages/openclaw-plugin/src/autoreply.ts`, new small reporter module, plugin tests, `packages/openclaw-plugin/CHANGELOG.md`, `CHANGELOG.md` | S0, S1 |
 | **S3** Docs | Sender-facing wording from 4.5 in `docs/agent-adapter.md`, `openapi.yaml` descriptions and the plugin README. | docs only | S2 |
@@ -368,17 +398,19 @@ Part B and are deliberately last.
 
 ## 8. Acceptance criteria (per slice)
 
-All as CI-run tests, written to fail without the change.
+All as CI-run tests. Tests for new behaviour must fail without the change. Cases
+that pin existing behaviour (marked *retained*) are regression guards and are
+labelled as such, not counted as proof of the change.
 
 **S0**
-- Each new reason is accepted for `dead_lettered`, stored, and returned in the
+- Each new reason (all five) is accepted for `dead_lettered`, stored, and returned in the
   sender's status as `adapter_dead_letter_reason`.
-- A value outside the closed set is still refused; `dead_lettered` without a
+- *(retained)* A value outside the closed set is still refused; `dead_lettered` without a
   reason, and a reason on any other phase, are still refused.
-- First write wins: a second `dead_lettered` report with a different reason does
+- *(retained)* First write wins: a second `dead_lettered` report with a different reason does
   not change the stored reason.
-- A report for another agent's delivery is refused and indistinguishable from an
-  unknown id.
+- *(retained)* A report for another agent's delivery is refused and
+  indistinguishable from an unknown id.
 
 **S1**
 - The method posts the documented body and surfaces the response counts; a 404
@@ -394,9 +426,10 @@ All as CI-run tests, written to fail without the change.
 - Stop with no hand-off available reports `inflight_loop_stopped` or
   `deferred_loop_stopped` best effort and does not exceed the stop budget with
   an unreachable relay.
-- 404 from the relay stops reporting for the process and logs once; 400 on a new
-  reason drops that entry, does not retry it and does not affect a concurrent
-  turn-phase report.
+- 404 on the route stops all reporting for the process and logs once; 400 on a
+  new-reason request drops only that entry, does not retry it, does not disable
+  reporting, and does not affect a concurrent turn-phase report or a later
+  entry with a supported reason.
 - A throwing reporter never breaks the tick, delays an ack or changes a
   disposition.
 - A second reload does not produce a duplicate report.
@@ -411,16 +444,24 @@ All as CI-run tests, written to fail without the change.
   created.
 - With it on, a record is durable before the ack call returns, holds no body,
   verdict or signature result, and file mode is `0600`.
-- `turn_marked` is written before the spawn call; a simulated crash between the
-  mark and the spawn leaves no recoverable record.
+- `turn_marked` is durable (fsync completed) before the spawn call; a simulated
+  crash between the mark and the spawn leaves no recoverable record.
+- Fault injection: a failed initial flush leaves the batch unacked and nothing
+  spawned; a failed `marked` write spawns nothing and the message stays pending;
+  a torn last line is ignored and an earlier intact record is still recovered;
+  compaction interrupted before the rename leaves the old file intact.
 - Bounds hold at 500 records and the age limit.
 
 **S6**
 - Cold start with unmarked records inside deadline and valid trust: each is
   re-admitted once; a second cold start does not replay it.
 - Records with `turn_marked` are never replayed and never reported lost.
-- Past deadline or relay 404: not served, `deadline_passed` reported, record
-  removed.
+- Returned copy past its deadline: not served, `deadline_passed` reported, record
+  retired.
+- Relay 404 (including a room membership withdrawn after the crash): not served,
+  `recovery_unavailable` reported (never `deadline_passed`), record retired.
+- A re-admitted message waiting in the stash for the floor still has its record;
+  a second crash in that state recovers it once more and never yields two turns.
 - Pinned key removed, peer un-delegated or latch closed between crash and
   restart: withheld, coarse report, no turn.
 - A tampered or garbage journal line naming an unknown id yields a 404 and no
