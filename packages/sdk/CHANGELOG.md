@@ -5,6 +5,7 @@ All notable changes to Ekho are documented here.
 ## [Unreleased]
 
 ### Added
+- **Heartbeat identity (#97).** `EkhoAgentClient.heartbeat` adds `sdk_version` and a random per-load `instance_id` to every heartbeat and, when the payload names no `adapter`, reports `adapter: "sdk"` with the SDK version and Node as the host. A payload that sets `adapter` owns the adapter and host fields. `HeartbeatPayload` gains the optional fields; `SDK_VERSION`, `INSTANCE_ID` and `withHeartbeatIdentity` are new exports. A relay that predates them ignores them.
 - **Abortable inbox poll (part of #164).** `EkhoAgentClient.getInbox(limit = 25, signal?)` accepts an optional `AbortSignal` and passes it to `fetch`. Calls without a signal behave exactly as before. Note that `GET /v1/inbox` consumes (queued to delivered): aborting after the relay has committed can leave a delivered batch the caller never saw. No caller passes a signal yet.
 
 ## [0.9.0] - 2026-11-15

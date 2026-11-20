@@ -740,6 +740,97 @@ components:
           type: object
           additionalProperties: true
           default: {}
+        adapter:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+          description: >
+            Optional (#97). The adapter sending the heartbeat, e.g.
+            `openclaw-plugin`, `hermes-plugin`, `mcp-connector`, `sdk`,
+            `python-sdk`. Each identity field is checked on its own; a value
+            that does not match its pattern is dropped (stored as unknown) and
+            never causes the heartbeat to be refused.
+        adapter_version:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$"
+          description: Optional (#97). The adapter's own release.
+        sdk_version:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$"
+          description: Optional (#97). The Ekho SDK version inside the adapter.
+        host_runtime:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+          description: Optional (#97). The host, e.g. `openclaw`, `hermes`, `node`, `python`.
+        host_runtime_version:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$"
+          description: Optional (#97). The host's version, where it exposes one.
+        instance_id:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{8,64}$"
+          description: Optional (#97). Random per adapter process start; not a secret.
+
+    AgentIdentity:
+      type: object
+      description: >
+        What the agent's adapter last reported about itself on a heartbeat
+        (#97). The latest heartbeat wins, so a heartbeat without these fields
+        resets them to null ("version unknown"). Self-reported claims, not
+        attestation.
+      required: [adapter, adapter_version, sdk_version, host_runtime, host_runtime_version, instance_id, latest_adapter_version, outdated]
+      properties:
+        adapter:
+          type: string
+          nullable: true
+        adapter_version:
+          type: string
+          nullable: true
+        sdk_version:
+          type: string
+          nullable: true
+        host_runtime:
+          type: string
+          nullable: true
+        host_runtime_version:
+          type: string
+          nullable: true
+        instance_id:
+          type: string
+          nullable: true
+        latest_adapter_version:
+          type: string
+          nullable: true
+          description: >
+            The newest release of this adapter the relay knows of: its own
+            bundled release, for the in-repo adapters only. No registry is
+            queried. Null for any other adapter.
+        outdated:
+          type: boolean
+          nullable: true
+          description: >
+            `adapter_version` is older than `latest_adapter_version` by semver
+            precedence. Null when either is missing or not strict semver.
+
+    BuildInfoResponse:
+      type: object
+      required: [relay, latest_adapter_versions]
+      properties:
+        relay:
+          type: object
+          required: [version, build_sha]
+          properties:
+            version:
+              type: string
+            build_sha:
+              type: string
+              description: >
+                Short git commit (12 hex characters, or as given in
+                `EKHO_BUILD_SHA`) the relay is running, or `unknown`.
+                Resolved once at start-up.
+        latest_adapter_versions:
+          type: object
+          additionalProperties:
+            type: string
 
     HeartbeatResponse:
       type: object
@@ -905,6 +996,8 @@ components:
           type: string
           format: date-time
           nullable: true
+        identity:
+          $ref: "#/components/schemas/AgentIdentity"
 
     AgentListResponse:
       type: object
@@ -1204,6 +1297,9 @@ components:
         version:
           type: string
           example: 0.9.0
+        build_sha:
+          type: string
+          description: Short git commit the relay is running, or `unknown` (#97).
         tier:
           type: string
         setup_required:
@@ -3262,6 +3358,8 @@ paths:
                                 (the same refusals that set `attempts_capped`).
                                 It counts reports, so a resent report counts
                                 again.
+                        identity:
+                          $ref: "#/components/schemas/AgentIdentity"
                         consecutive_missed_heartbeats:
                           type: integer
         "401":
@@ -3286,6 +3384,28 @@ paths:
               schema:
                 type: object
                 additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/operator/build-info:
+    get:
+      operationId: getBuildInfo
+      tags: [Operator]
+      summary: Relay build identity
+      description: >
+        The relay's version and the git commit it is running, for the
+        console's footer and its stale-console banner, plus the newest
+        release of each in-repo adapter the relay knows of (its own; no
+        registry lookup) (#97).
+      security:
+        - OperatorBearer: []
+      responses:
+        "200":
+          description: Build identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildInfoResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
 

@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Version reporting (#97).** Each heartbeat names the plugin (`adapter: "openclaw-plugin"`), its version from the bundle's build stamp (none for an unstamped bundle; `<version>+modified` for a bundle edited after its build), the SDK version, a per-load instance id, and OpenClaw's own version from `api.runtime.version` when the host exposes it. The operator console shows it on the agent card. No relay is required to understand the fields.
+
 ### Fixed
 - **A stopped auto-reply loop cancels its inbox poll (part of #164).** When the loop stops (plugin unload, reload, a newer generation taking over, or the same copy being re-registered) it now aborts the `GET /v1/inbox` request it has in flight, using the SDK's `getInbox` signal, instead of only waiting up to 4 s (`STOP_DRAIN_MS`) for it. Before, a poll the relay held longer than that was left outstanding, and the next loop's first poll could run beside it: two inbox requests for one agent. Now the stopped loop's request is gone before the next loop polls, and the unload promise the host awaits settles without waiting out the bound. Only the poll is cancelled. Acks and floor calls are not, and messages already acknowledged are still dead-lettered before stop returns, as before.
 - **What a cancelled poll means for messages.** `GET /v1/inbox` marks messages delivered when the relay serves them. If the relay had already done that when the request was cut, those messages are delivered but unacknowledged, and the relay re-queues them after its delivery timeout (`EKHO_DELIVERY_TIMEOUT_SECONDS`, default 120) with its usual retry count and backoff. This is the same outcome as before for a poll that answered after stop: a stopped loop never acknowledged or processed that batch. If the relay had not yet served the batch, the messages stay queued. The plugin logs one info line when it cancels a poll.
