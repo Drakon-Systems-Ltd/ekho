@@ -5,6 +5,8 @@ import path from "node:path";
 import { createTestRelay, type TestRelay } from "./setup";
 import { runMigrationsOn } from "../src/db";
 import { schemaSql } from "../src/schema";
+import fs from "node:fs";
+import * as relayTypes from "../src/types";
 
 const REAL_MIGRATIONS_DIR = path.join(__dirname, "..", "migrations");
 
@@ -754,5 +756,99 @@ describe("#155 phase 1b: bounded relay phase reports", () => {
     expect((raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ?").get(relay.fleetId) as { n: number }).n).toBe(before + 1);
     expect(raw.prepare("SELECT 1 FROM agent_turn_replies WHERE agent_id = ? AND turn_id = ?").get(b.agent_id, "join.atomic")).toBeUndefined();
     expect((await status(a, id))[0].first_reply_at).toBeNull();
+  });
+
+  // #111 S0: five more `dead_lettered` reasons (design docs/plans, section 4.3). Relay only; no client sends them yet.
+  const NEW_REASONS = ["deadline_passed", "withheld_by_recipient", "handoff_unclaimed", "inflight_loop_stopped", "recovery_unavailable"] as const;
+  const OLD_REASONS = ["deferred_evicted_cap", "deferred_overflow_per_conv", "deferred_expired_spawn_failed", "deferred_retry_spawn_failed", "deferred_loop_stopped"] as const;
+  const dead = (message_id: string, reason?: string) => ({ message_id, phase: "dead_lettered", at: at(), ...(reason ? { reason } : {}) });
+
+  it.each(NEW_REASONS)("#111 S0: records dead_lettered reason %s and shows it to the sender", async (reason) => {
+    const a = await relay.enrollAgent("s0-new-a");
+    const b = await relay.enrollAgent("s0-new-b");
+    const id = await direct(a, b);
+    const res = await report(b, [dead(id, reason)]);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ recorded: 1, refused: 0 });
+    const d = (await status(a, id))[0];
+    expect(d.adapter_dead_letter_reason).toBe(reason);
+    expect(d.adapter_dead_lettered_at).not.toBeNull();
+    expect(Number.isFinite(Date.parse(d.adapter_dead_lettered_at as string))).toBe(true);
+  });
+
+  it("#111 S0: openapi.yaml lists exactly the dead_lettered reasons the schema accepts, all ten", () => {
+    const accepted = (relayTypes as unknown as { deadLetterReasons?: readonly string[] }).deadLetterReasons;
+    expect(accepted).toEqual([...OLD_REASONS, ...NEW_REASONS]); // existing five keep their order
+    const yaml = fs.readFileSync(path.join(__dirname, "..", "..", "..", "openapi.yaml"), "utf8");
+    const section = yaml.slice(yaml.indexOf("\n  /v1/delivery-phases:\n"));
+    const line = /^\s+reason: \{ type: string, enum: \[([^\]]+)\] \}$/m.exec(section);
+    expect(line).not.toBeNull();
+    const documented = line![1].split(",").map((v) => v.trim());
+    expect(documented).toEqual([...accepted!]);
+    expect(documented).toHaveLength(10);
+  });
+
+  it("#111 S0 retained: an unknown reason, a missing reason and a reason on a turn phase are each refused with 400", async () => {
+    const a = await relay.enrollAgent("s0-r1-a");
+    const b = await relay.enrollAgent("s0-r1-b");
+    const id = await direct(a, b);
+    expect((await report(b, [dead(id, "not_a_reason")])).status).toBe(400);
+    expect((await report(b, [dead(id)])).status).toBe(400);
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "s0.r1", attempt: 1, reason: "deadline_passed" }])).status).toBe(400);
+    const d = (await status(a, id))[0];
+    expect(d).toMatchObject({ adapter_dead_lettered_at: null, adapter_dead_letter_reason: null, turn_attempts: 0 });
+  });
+
+  it("#111 S0 retained: first write wins between two new reasons", async () => {
+    const a = await relay.enrollAgent("s0-r2-a");
+    const b = await relay.enrollAgent("s0-r2-b");
+    const id = await direct(a, b);
+    expect((await report(b, [dead(id, "deadline_passed")])).body).toEqual({ recorded: 1, refused: 0 });
+    const first = (await status(a, id))[0];
+    // The repeat is counted as recorded (today's retransmit behaviour) but stores nothing.
+    expect((await report(b, [dead(id, "withheld_by_recipient")])).body).toEqual({ recorded: 1, refused: 0 });
+    const second = (await status(a, id))[0];
+    expect(second.adapter_dead_letter_reason).toBe("deadline_passed");
+    expect(second.adapter_dead_lettered_at).toBe(first.adapter_dead_lettered_at);
+  });
+
+  it("#111 S0 retained: a report by another agent records nothing and answers like an unknown id", async () => {
+    const a = await relay.enrollAgent("s0-r3-a");
+    const b = await relay.enrollAgent("s0-r3-b");
+    const c = await relay.enrollAgent("s0-r3-c");
+    const id = await direct(a, b);
+    const foreign = await report(c, [dead(id, "handoff_unclaimed")]);
+    const unknown = await report(c, [dead("msg_s0_unknown", "handoff_unclaimed")]);
+    expect(foreign.body).toEqual({ recorded: 0, refused: 1 });
+    expect(foreign.status).toBe(unknown.status);
+    expect(foreign.body).toEqual(unknown.body);
+    // The sender reporting on its own outbound message is foreign too.
+    expect((await report(a, [dead(id, "handoff_unclaimed")])).body).toEqual(unknown.body);
+    expect((await status(a, id))[0]).toMatchObject({ adapter_dead_lettered_at: null, adapter_dead_letter_reason: null });
+  });
+
+  it("#111 S0 retained: a turn_started after a new-reason dead letter is refused and no attempt is kept", async () => {
+    const a = await relay.enrollAgent("s0-r4-a");
+    const b = await relay.enrollAgent("s0-r4-b");
+    const id = await direct(a, b);
+    expect((await report(b, [dead(id, "inflight_loop_stopped")])).body).toEqual({ recorded: 1, refused: 0 });
+    expect((await report(b, [{ message_id: id, phase: "turn_started", at: at(), turn_id: "s0.r4", attempt: 1 }])).body)
+      .toEqual({ recorded: 0, refused: 1 });
+    expect((await status(a, id))[0]).toMatchObject({ turn_attempts: 0, adapter_dead_letter_reason: "inflight_loop_stopped" });
+  });
+
+  it("#111 S0 retained: one request mixing a valid turn phase with an unknown reason is rejected whole", async () => {
+    const a = await relay.enrollAgent("s0-r5-a");
+    const b = await relay.enrollAgent("s0-r5-b");
+    const turnMsg = await direct(a, b);
+    const deadMsg = await direct(a, b);
+    const res = await report(b, [
+      { message_id: turnMsg, phase: "turn_started", at: at(), turn_id: "s0.r5", attempt: 1 },
+      dead(deadMsg, "reason_from_a_newer_client")
+    ]);
+    expect(res.status).toBe(400);
+    expect((await status(a, turnMsg))[0]).toMatchObject({ turn_attempts: 0, latest_turn_id: null });
+    expect((await status(a, deadMsg))[0]).toMatchObject({ adapter_dead_lettered_at: null, adapter_dead_letter_reason: null });
+    expect((relay.db.raw().prepare("SELECT COUNT(*) AS n FROM delivery_turn_attempts WHERE message_id IN (?, ?)").get(turnMsg, deadMsg) as { n: number }).n).toBe(0);
   });
 });

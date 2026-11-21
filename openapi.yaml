@@ -2094,7 +2094,7 @@ paths:
                       outcome: { type: string, enum: [completed, error, timeout, spawn_failed] }
                       category: { type: string, description: 'timeout, spawn_error, spawn_error_retained, exit_signal, or exit_0 through exit_255' }
                       holder_agent_id: { type: string, maxLength: 64, pattern: '^[A-Za-z0-9_.:-]+$' }
-                      reason: { type: string, enum: [deferred_evicted_cap, deferred_overflow_per_conv, deferred_expired_spawn_failed, deferred_retry_spawn_failed, deferred_loop_stopped] }
+                      reason: { type: string, enum: [deferred_evicted_cap, deferred_overflow_per_conv, deferred_expired_spawn_failed, deferred_retry_spawn_failed, deferred_loop_stopped, deadline_passed, withheld_by_recipient, handoff_unclaimed, inflight_loop_stopped, recovery_unavailable] }
       responses:
         "200":
           description: Report count, including refused foreign or capped entries.
