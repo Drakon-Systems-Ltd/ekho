@@ -190,7 +190,17 @@ In-process schedules run under fake timers with a controllable heartbeat promise
 
 ## Implementation slicing
 
-- **S1** may start from current main in **new files only** (CLI package: detection, `version`, `--dry-run`). It must not edit `connection.ts`, `runtime-registry.ts`, `autoreply.ts` or Hermes `connection.py`.
+- **S1** (CLI package: detection, `version`, `--dry-run`) was first scoped as "new files only". That scope cannot produce a reviewable PR, so it is replaced by the packaging decision below. S1 is not authorised by this amendment.
+  - **Placement.** The CLI lives at `packages/<name>` inside the npm workspace. This is the only placement CI tests: root `package.json` declares `"workspaces": ["packages/*"]`, `vitest.config.ts` includes `packages/*`, and CI runs `npm ci` then `npx vitest run`. A root-level `cli/` directory is rejected, because CI would never run its tests and a green CI would say nothing about it.
+  - **Existing files S1 must then edit**, each named and checked by reading (not by running an installer):
+    - `package-lock.json`: a new workspace package adds an entry, and `npm ci` fails against a stale lock file.
+    - `CONTRIBUTING.md`: the "Project Structure" block must list every directory under `packages/`, and `docs-first-deploy.test.ts` enforces it.
+    - `docs-first-deploy.test.ts`: the CONTRIBUTING directory check above, and the assertion that the set of `bin` entries across `packages/*/package.json` is exactly `["ekho-mcp"]`. A CLI that declares a `bin` changes that set, so the assertion moves in the same PR.
+    - `ARCHITECTURE.md`: its design-document label says "there is no `ekho` CLI", and the same test checks that sentence. The label and the assertion change together.
+    - `release-version-lockstep.test.ts` surfaces (LIKELY, confirm in the slice): the test reads the relay version and compares it with workspace packages found in `package-lock.json`, so the new package's version must match the relay's version.
+  - **Barred files.** S1 must not edit `connection.ts`, `runtime-registry.ts`, `autoreply.ts` or Hermes `connection.py`. This bar is unchanged.
+  - **Private package.** The package is `"private": true`. It joins no publish list, workflow or release step. First publication of a package name stays under "Not covered".
+  - **Test inputs.** Hostile-shaped test inputs are authored and run only in CI or an isolated evaluator, never on a live guarded box.
 - **S2a** (relay verify session, R7): heartbeat schema, session table and its migration, the three queries, the outcome rule. Relay only.
 - **S2b** (R1, R3–R6): liveness predicate, holding epoch, dispatch and completion checks, load identity and nonce echo in `connection.ts`, `runtime-registry.ts`, the SDK and Hermes `connection.py`.
 - S2a and S2b wait until #121 is merged or closed, #164 is built or re-scoped and the private hrj7 fix has landed. Until both ship, `verify` reports `loaded` at most.
