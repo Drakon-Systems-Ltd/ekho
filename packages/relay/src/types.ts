@@ -36,6 +36,9 @@ export const ackSchema = z.object({
 
 const phaseId = z.string().min(1).max(64).regex(/^[A-Za-z0-9_.:-]+$/);
 const turnCategories = ["timeout", "spawn_error", "spawn_error_retained", "exit_signal", ...Array.from({ length: 256 }, (_, n) => `exit_${n}`)] as [string, ...string[]];
+// Every reason a recipient may give with a `dead_lettered` phase. Mirrored in openapi.yaml (delivery-phases.test.ts compares them).
+export const deadLetterReasons = ["deferred_evicted_cap", "deferred_overflow_per_conv", "deferred_expired_spawn_failed", "deferred_retry_spawn_failed", "deferred_loop_stopped",
+  "deadline_passed", "withheld_by_recipient", "handoff_unclaimed", "inflight_loop_stopped", "recovery_unavailable"] as const;
 const phaseEntrySchema = z.strictObject({
   message_id: phaseId,
   phase: z.enum(["floor_wait", "floor_granted", "floor_overrun", "turn_started", "turn_ended", "dead_lettered"]),
@@ -45,7 +48,7 @@ const phaseEntrySchema = z.strictObject({
   outcome: z.enum(["completed", "error", "timeout", "spawn_failed"]).optional(),
   category: z.enum(turnCategories).optional(),
   holder_agent_id: phaseId.optional(),
-  reason: z.enum(["deferred_evicted_cap", "deferred_overflow_per_conv", "deferred_expired_spawn_failed", "deferred_retry_spawn_failed", "deferred_loop_stopped"]).optional()
+  reason: z.enum(deadLetterReasons).optional()
 }).superRefine((p, ctx) => {
   const turn = p.phase === "turn_started" || p.phase === "turn_ended";
   if (turn !== Boolean(p.turn_id && p.attempt)) ctx.addIssue({ code: "custom", message: "turn_id and attempt required only for turn phases" });
