@@ -57,6 +57,13 @@ All line references are to the tree at 0a2ebe8.
   "queued" label, and any console change. Until Phase 3 an agent inside a long
   turn with work queued can read `unresponsive_inbox`; `working` and
   `floor_wait` cannot occur on live data.
+- **Phase 3b, heartbeat turn state only (OpenClaw plugin).** The plugin's
+  heartbeat sends `adapter_state`, `turn_started_at`, `turn_deadline_at` and
+  `deferred_conversations` (§2.2), so `working` can now occur for OpenClaw
+  agents. **Not** in this slice: phase reports, `turn_id`, attempt counters and
+  the SDK method (the rest of 3b), `floor_waiting`, the `last_poll_at` metric,
+  and everything Hermes (3a). `floor_wait` still cannot occur on live data, and
+  a busy gap in history still reads `inbox_stalled`.
 
 ---
 
