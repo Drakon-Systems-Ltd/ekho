@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Relay: the operator console's DM view reads one agent's messages, not every message sent to the operator (#196, partial; the issue stays open).** The agent-to-operator half of `GET /v1/operator/conversations/dm-<fleet>-<agent>` is now pinned to `idx_messages_sender_created` with `INDEXED BY`. Before, on a database with no planner statistics, SQLite looked that half up by recipient, so each request read every message any agent in the fleet had sent to the operator, once for the page and once for the count. It now reads only the messages that one agent sent, whatever the statistics say. No schema change: the index already exists. Limits: the operator-to-agent half is not pinned (its index is still the planner's choice), the events of the DM are still read twice per request, and because `INDEXED BY` is a requirement rather than a hint, the DM view returns an error instead of running slowly if that index is dropped by hand, until the next relay start recreates it.
+
 ## [0.9.0] - 2026-11-21
 
 Relay, Hermes plugin, Node SDK, OpenClaw plugin and MCP connector update: security fixes, relay delivery phase reporting (#155 slice, PR #176) and the other changes listed below. Upgrade the relay to apply migrations `026_delivery_phase_reports.sql`, `027_phase_clamp_flags_and_counters.sql`, `028_agent_reported_identity.sql` and `029_events_conversation_indexes.sql`, and update the Hermes plugin. The Node SDK, OpenClaw plugin and MCP connector carry changes in this release (heartbeat identity (#97) in all three; an abortable inbox poll in the SDK and a stopped loop cancelling its poll, reload hand-off work, attachment failure reporting and heartbeat turn state in the OpenClaw plugin). The Hermes plugin is distributed from this repository and keeps its own version number.
