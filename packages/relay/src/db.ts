@@ -4013,8 +4013,15 @@ export class EkhoDb {
     // already carries the rowid, so no branch touches an events row), and only
     // those rows are then fetched. CROSS JOIN is deliberate: SQLite never
     // reorders it, so messages drive the events lookup and the rowid set
-    // drives the final fetch whatever the statistics say (which messages
-    // index a message branch uses is still the planner's choice). The fleet
+    // drives the final fetch whatever the statistics say. The agent→operator
+    // branch is pinned with INDEXED BY idx_messages_sender_created, so it
+    // seeks on (fleet, sender = this agent) and reads that agent's messages
+    // only: left to itself with no statistics the planner seeks on recipient
+    // = operator instead, every message any agent in the fleet has sent to
+    // the operator. INDEXED BY is a hard requirement, not a hint: if that
+    // index is missing the statement fails rather than falling back (schema.ts
+    // recreates it on every boot). Which messages index the operator→agent
+    // branch uses is still the planner's choice. The fleet
     // check stays on the outer query only — repeating it inside a message
     // branch would offer the planner the fleet index for the inner loop. UNION
     // (not UNION ALL) so an event that a message branch and the conversation
@@ -4031,7 +4038,7 @@ export class EkhoDb {
          SELECT ev.rowid FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
           WHERE m.fleet_id = ? AND m.recipient_kind = 'agent' AND m.recipient_id = ? AND m.sender_agent_id = ?
          UNION
-         SELECT ev.rowid FROM messages m CROSS JOIN events ev ON ev.resource_id = m.id
+         SELECT ev.rowid FROM messages m INDEXED BY idx_messages_sender_created CROSS JOIN events ev ON ev.resource_id = m.id
           WHERE m.fleet_id = ? AND m.sender_agent_id = ? AND m.recipient_kind = 'agent' AND m.recipient_id = ?
          UNION
          SELECT rowid FROM events WHERE fleet_id = ? AND conversation_id = ?

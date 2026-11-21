@@ -325,4 +325,147 @@ describe("operator DM conversation event query (#196)", () => {
     expect((res.body.events as Array<{ id: string }>).map((e) => e.id)).toEqual(ref.ids);
     expect(res.body.total).toBe(ref.total);
   });
+
+  // #196 H1 — the agent→operator `messages` branch of the merge is pinned with
+  // INDEXED BY, so which messages index it walks no longer depends on planner
+  // statistics. Unpinned, with no statistics it seeks on recipient = operator:
+  // every message any agent in the fleet ever sent to the operator. The
+  // fixture is the shape that makes the difference visible: agents that send
+  // far more to the operator than the operator sends to anyone. None of it
+  // belongs to the operator↔X DM, so every test above reads the same rows with
+  // or without it. The operator→agent branch is deliberately NOT pinned: on
+  // this fixture the planner already seeks it by one party of the DM with and
+  // without statistics, so a pin could not be shown to change anything.
+  describe("agent→operator message branch pinned to the sender's index range (#196 H1)", () => {
+    // Unpinned: a seek bounded by one party of the DM, on either messages index.
+    const OP_TO_AGENT_STEP = /^SEARCH m USING INDEX (idx_messages_recipient_status \(fleet_id=\? AND recipient_kind=\? AND recipient_id=\?\)|idx_messages_sender_created \(fleet_id=\? AND sender_agent_id=\?\))$/;
+    const AGENT_TO_OP_STEP = "SEARCH m USING INDEX idx_messages_sender_created (fleet_id=? AND sender_agent_id=?)";
+    const NOISY_AGENTS = 8;
+    const MESSAGES_EACH = 150;
+
+    /** Plan steps on `messages` (alias m), in statement order: operator→agent branch first, agent→operator second. */
+    function messageSteps(plan: string[]): string[] {
+      return plan.filter((step) => /^(SCAN|SEARCH) m\b/.test(step));
+    }
+
+    /** The page read and the COUNT of one canonical DM read, each with its plan. */
+    function dmPlans(): Array<{ text: string; plan: string[] }> {
+      const reads = captureEventReads(() => {
+        relay.db.getConversation(relay.fleetId, dm, { sortOrder: "desc", limit: 50, offset: 0 });
+      });
+      expect(reads.length).toBe(2);
+      return reads.map((q) => {
+        const plan = planOf(q);
+        return { plan, text: `${q.sql}\n${plan.join("\n")}` };
+      });
+    }
+
+    /**
+     * Put this connection in the state of a database that was never ANALYZEd.
+     * Dropping sqlite_stat1 is not enough on its own: the build has STAT4, so
+     * ANALYZE also writes sqlite_stat4, and a connection keeps the statistics
+     * it has already loaded until told to reload them. ANALYZE sqlite_schema
+     * is that reload, and it creates the (empty) statistics tables if they are
+     * missing: so empty them, reload, and only then drop them.
+     */
+    function clearStatistics() {
+      const raw = relay.db.raw();
+      raw.exec("ANALYZE sqlite_schema; DELETE FROM sqlite_stat1; DELETE FROM sqlite_stat4; ANALYZE sqlite_schema; DROP TABLE sqlite_stat1; DROP TABLE sqlite_stat4");
+      const left = raw.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'sqlite_stat%'").get() as { n: number };
+      expect(left.n).toBe(0);
+    }
+
+    function withAnalyze(fn: () => void) {
+      relay.db.raw().exec("ANALYZE");
+      try {
+        fn();
+      } finally {
+        clearStatistics();
+      }
+    }
+
+    let beforeNoise: { ids: string[]; total: number };
+
+    beforeAll(async () => {
+      const raw = relay.db.raw();
+      beforeNoise = referenceDm("ASC", 500, 0);
+      const noisy: string[] = [];
+      for (let a = 0; a < NOISY_AGENTS; a++) noisy.push((await relay.enrollAgent(`Noisy-${a}`)).agent_id);
+      const insertMessage = raw.prepare(
+        `INSERT INTO messages (id, fleet_id, conversation_id, correlation_id, sender_agent_id, recipient_kind, recipient_id,
+                               message_type, priority, requires_approval, body_json, ttl_seconds, created_at, expires_at, status)
+         VALUES (?, ?, ?, ?, ?, 'agent', ?, 'direct', 'normal', 0, '{"text":"noise"}', 900, ?, ?, 'delivered')`
+      );
+      const insertEvent = raw.prepare(
+        `INSERT INTO events (id, fleet_id, event_type, actor_kind, actor_id, resource_kind, resource_id, conversation_id, payload_json, created_at)
+         VALUES (?, ?, 'message.delivered', 'agent', ?, 'message', ?, ?, '{}', ?)`
+      );
+      raw.transaction(() => {
+        noisy.forEach((sender, a) => {
+          for (let i = 0; i < MESSAGES_EACH; i++) {
+            const id = `msg-${tag}-noise-${a}-${i}`;
+            const at = new Date(Date.parse("2026-11-02T00:00:00.000Z") + (a * MESSAGES_EACH + i) * 1000).toISOString();
+            insertMessage.run(id, relay.fleetId, `oc-noise-${a}`, `c-noise-${a}-${i}`, sender, opId, at, at);
+            // An event per message: a branch that let another agent's
+            // operator traffic through would put these in the DM.
+            insertEvent.run(`evt-${tag}-noise-${a}-${i}`, relay.fleetId, sender, id, `oc-noise-${a}`, at);
+          }
+        });
+      })();
+    });
+
+    it("seeks the agent→operator branch on the sender index with no planner statistics", () => {
+      clearStatistics();
+      for (const { plan, text } of dmPlans()) expect(messageSteps(plan)[1], text).toBe(AGENT_TO_OP_STEP);
+    });
+
+    it("gives each message branch exactly one seek, the agent→operator one on its pinned index, with and without statistics", () => {
+      const check = (label: string) => {
+        for (const { plan, text } of dmPlans()) {
+          const where = `${label}\n${text}`;
+          const steps = messageSteps(plan);
+          expect(steps.length, where).toBe(2);
+          expect(steps[0], where).toMatch(OP_TO_AGENT_STEP);
+          expect(steps[1], where).toBe(AGENT_TO_OP_STEP);
+          expect(plan.join("\n"), where).not.toMatch(/SCAN m\b/);
+          expect(plan.join("\n"), where).not.toMatch(/AUTOMATIC/);
+        }
+      };
+      clearStatistics();
+      check("no statistics");
+      withAnalyze(() => check("after ANALYZE"));
+    });
+
+    it("returns the rows and total of the pre-#196 predicate on the skewed fixture", () => {
+      const raw = relay.db.raw();
+      const toOperator = raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ? AND recipient_id = ?").get(relay.fleetId, opId) as { n: number };
+      const fromOperator = raw.prepare("SELECT COUNT(*) AS n FROM messages WHERE fleet_id = ? AND sender_agent_id = ?").get(relay.fleetId, opId) as { n: number };
+      expect(toOperator.n).toBe(NOISY_AGENTS * MESSAGES_EACH + 1); // the fixture really is skewed…
+      expect(fromOperator.n).toBe(4);                               // …towards the operator
+      const compare = (label: string) => {
+        for (const order of ["ASC", "DESC"] as const) {
+          for (const [limit, offset] of [[500, 0], [3, 0], [5, 7]] as const) {
+            const ref = referenceDm(order, limit, offset);
+            const got = relay.db.getConversation(relay.fleetId, dm, { sortOrder: order.toLowerCase(), limit, offset });
+            const ids = (got.items as Row[]).map((r) => String(r.id));
+            expect(ids, `${label} ${order} ${limit}/${offset}`).toEqual(ref.ids);
+            expect(got.total, `${label} ${order} ${limit}/${offset}`).toBe(ref.total);
+            expect(ids.some((id) => id.includes("-noise-")), label).toBe(false);
+          }
+        }
+        expect(referenceDm("ASC", 500, 0), label).toEqual(beforeNoise); // the noise added nothing to this DM
+      };
+      expect(beforeNoise.total).toBeGreaterThan(0);
+      clearStatistics();
+      compare("no statistics");
+      withAnalyze(() => compare("after ANALYZE"));
+    });
+
+    it("has the pinned index, and the other messages index the unpinned branch may use, after a normal boot", () => {
+      const names = (relay.db.raw().prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages' AND name IN ('idx_messages_recipient_status', 'idx_messages_sender_created') ORDER BY name"
+      ).all() as Array<{ name: string }>).map((r) => r.name);
+      expect(names).toEqual(["idx_messages_recipient_status", "idx_messages_sender_created"]);
+    });
+  });
 });
