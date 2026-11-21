@@ -98,7 +98,7 @@ describe("release version lockstep", () => {
     expect(changelog, "current version changelog section").toBeTruthy();
     expect(changelog).toMatch(new RegExp(`^${expected.replace(/\./g, "\\.")}\\] - \\d{4}-\\d{2}-\\d{2}\\n`));
     expect(changelog).toMatch(
-      /\] - \d{4}-\d{2}-\d{2}\n\nRelay and Hermes plugin update: security fixes and relay delivery phase reporting \(#155 slice, PR #176\)\./
+      /\] - \d{4}-\d{2}-\d{2}\n\nRelay, Hermes plugin, Node SDK, OpenClaw plugin and MCP connector update: security fixes, relay delivery phase reporting \(#155 slice, PR #176\) and the other changes listed below\./
     );
 
     // Security copy is one generic bullet: the heading, the bullet, then the
@@ -117,6 +117,9 @@ describe("release version lockstep", () => {
     // yet, and must not present #155 as finished or an ack as an answer.
     expect(changelog).toContain("`POST /v1/delivery-phases`");
     expect(changelog).toContain("`026_delivery_phase_reports.sql`");
+    expect(changelog).toContain("`027_phase_clamp_flags_and_counters.sql`");
+    expect(changelog).toContain("`028_agent_reported_identity.sql`");
+    expect(changelog).toContain("`029_events_conversation_indexes.sql`");
     expect(changelog).toContain("`GET /v1/messages/{id}/status`");
     expect(changelog).toContain("do not send phase reports in this release");
     expect(changelog).toContain("The reply-latency issue (#155) remains open.");
@@ -128,8 +131,10 @@ describe("release version lockstep", () => {
     expect(changelog).toContain("does not reverse the migration and makes no rollback claim");
     expect(changelog).not.toMatch(/roll(?:ing)? ?back[^.]*\bis safe\b/i);
 
-    // This release changes no published npm package code.
-    expect(changelog).toContain("The Node SDK, OpenClaw plugin and MCP connector have no code changes in this release");
+    // This release carries SDK, OpenClaw plugin and MCP connector changes, so
+    // no "no changes" sentence may come back.
+    expect(changelog).toContain("The Node SDK, OpenClaw plugin and MCP connector carry changes in this release");
+    expect(changelog).not.toMatch(/have no code changes in this release|No OpenClaw plugin, Node SDK or MCP connector update is needed/);
 
     const readme = read("README.md");
     expect(readme).toContain(`**Release version:** \`v${expected}\``);
@@ -139,7 +144,8 @@ describe("release version lockstep", () => {
       `**Release version:** \`v${expected}\` adds relay delivery phase reporting (#155 slice, PR #176) and security fixes.`
     );
     const intro = readme.split("## How it works")[0];
-    expect(intro).toContain("Upgrade the relay to apply migration 026.");
+    expect(intro).toContain("Upgrade the relay to apply migrations 026 to 029.");
+    expect(intro).not.toMatch(/have no code changes in this release/);
     expect(intro).toContain("Adapters do not send these reports in this release");
     expect(intro).toContain("they do not establish that a delivery was answered");
     expect(intro).not.toMatch(/(?:closes|fixes|resolves|completes) #155/i);
@@ -157,12 +163,19 @@ describe("release version lockstep", () => {
     };
     const unpublishedLanguage = /not yet published|release candidate|is a candidate|is released|now (?:live|available) on npm/i;
 
-    // No SDK, OpenClaw plugin or MCP connector source changed in this release;
-    // each section says so, names what the release does carry, and stays
-    // generic about the security fixes.
+    // The SDK, OpenClaw plugin and MCP connector each changed in this release;
+    // each section says what it carries (a marker from its own entries), never
+    // claims "no changes", and stays generic about the security fixes.
+    const carries: Record<string, string> = {
+      "packages/sdk/CHANGELOG.md": "(#97)",
+      "packages/openclaw-plugin/CHANGELOG.md": "#192",
+      "packages/mcp-connector/CHANGELOG.md": "(#97)"
+    };
     for (const rel of ["packages/sdk/CHANGELOG.md", "packages/openclaw-plugin/CHANGELOG.md", "packages/mcp-connector/CHANGELOG.md"]) {
       const text = section(rel);
-      expect(text, rel).toMatch(/^[^\n]*\n\nNo (?:SDK|OpenClaw plugin|MCP connector) changes\. Version kept in step with the relay: /);
+      expect(text, rel).toMatch(/^[^\n]*\n\nVersion kept in step with the relay: /);
+      expect(text, rel).not.toMatch(/No (?:SDK|OpenClaw plugin|MCP connector) changes\.|update is required/);
+      expect(text, rel).toContain(carries[rel]);
       expect(text, rel).toContain("security fixes in the relay and the Hermes plugin");
       expect(text, rel).toContain("#155 slice, PR #176");
       expect(text, rel).toContain("migration 026");
