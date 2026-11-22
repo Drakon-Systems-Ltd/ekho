@@ -8,7 +8,9 @@ import type {
   SendMessagePayload,
   HeartbeatPayload,
   ProposeActionPayload,
-  ActionResultPayload
+  ActionResultPayload,
+  DeliveryPhaseEntry,
+  DeliveryPhasesResult
 } from "./types.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -187,6 +189,16 @@ export class EkhoAgentClient {
       "POST", "/v1/attachments",
       { filename: input.filename, mime: input.mime, size_bytes, data_base64: input.dataBase64 }
     );
+  }
+
+  /**
+   * Report delivery phases for messages this agent received (`POST /v1/delivery-phases`).
+   * Posts the list as given: no validation, retry or splitting. Resolves with the relay's
+   * `recorded` and `refused` counts; a non-2xx response (400 for a bad or empty list, 404 from
+   * a relay without the route) rejects.
+   */
+  reportDeliveryPhases(phases: DeliveryPhaseEntry[]) {
+    return this.request<DeliveryPhasesResult>("POST", "/v1/delivery-phases", { phases });
   }
 
   getDeliveredMessage(id: string) {

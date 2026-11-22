@@ -142,3 +142,37 @@ export type ActionResultPayload = {
   completed_at: string;
   output?: Record<string, unknown>;
 };
+
+/**
+ * Every reason a recipient may give with a `dead_lettered` delivery phase, in
+ * the relay's order. A test compares this with the relay's list.
+ */
+export const DEAD_LETTER_REASONS = [
+  "deferred_evicted_cap", "deferred_overflow_per_conv", "deferred_expired_spawn_failed", "deferred_retry_spawn_failed", "deferred_loop_stopped",
+  "deadline_passed", "withheld_by_recipient", "handoff_unclaimed", "inflight_loop_stopped", "recovery_unavailable"
+] as const;
+export type DeadLetterReason = (typeof DEAD_LETTER_REASONS)[number];
+
+export type DeliveryPhaseName = "floor_wait" | "floor_granted" | "floor_overrun" | "turn_started" | "turn_ended" | "dead_lettered";
+export type DeliveryTurnOutcome = "completed" | "error" | "timeout" | "spawn_failed";
+
+/** One delivery phase report for a message this agent received (`POST /v1/delivery-phases`). */
+export type DeliveryPhaseEntry = {
+  message_id: string;
+  phase: DeliveryPhaseName;
+  /** ISO 8601 timestamp. */
+  at: string;
+  /** Required for `turn_started` and `turn_ended`, with `attempt`; not allowed otherwise. */
+  turn_id?: string;
+  attempt?: number;
+  /** Required for `turn_ended` only. */
+  outcome?: DeliveryTurnOutcome;
+  /** `turn_ended` only. A string: the relay's list of categories is not exported and is not mirrored here. */
+  category?: string;
+  /** Required for `floor_wait` only. */
+  holder_agent_id?: string;
+  /** Required for `dead_lettered` only. */
+  reason?: DeadLetterReason;
+};
+
+export type DeliveryPhasesResult = { recorded: number; refused: number };

@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Delivery phase reports (part of #111; the issue stays open).** `EkhoAgentClient.reportDeliveryPhases` posts delivery phase reports to `POST /v1/delivery-phases` and returns the relay's `recorded` and `refused` counts. Nothing calls it yet: the OpenClaw plugin, the Hermes plugin and the MCP connector still send no phase reports, so senders see no new status from this change. Needs a relay that has the route; an older relay answers 404 and the call rejects. New exports: `DEAD_LETTER_REASONS` and the `DeadLetterReason`, `DeliveryPhaseName`, `DeliveryTurnOutcome`, `DeliveryPhaseEntry` and `DeliveryPhasesResult` types.
+
 ## [0.9.0] - 2026-11-21
 
 Version kept in step with the relay: 0.9.0 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026 and the later migrations 027, 028 and 029. The SDK has no method for `POST /v1/delivery-phases` in this release. This release adds heartbeat identity (#97) and an abortable inbox poll (part of #164); see Added below. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
