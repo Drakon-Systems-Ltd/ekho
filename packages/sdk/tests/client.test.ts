@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { EkhoAgentClient, EkhoAgentAdapter, INSTANCE_ID, SDK_VERSION, withHeartbeatIdentity } from "../src/index";
 import { createTestRelayForSdk } from "./setup";
+import http from "node:http";
+import { DEAD_LETTER_REASONS } from "../src/index";
+import { deadLetterReasons } from "../../relay/src/types";
 
 describe("@drakon-systems/ekho-sdk", () => {
   let relay: Awaited<ReturnType<typeof createTestRelayForSdk>>;
@@ -258,5 +261,90 @@ describe("@drakon-systems/ekho-sdk", () => {
       expect(received).toHaveLength(1);
       expect((received[0] as { body: { text: string } }).body.text).toBe("adapter test");
     });
+  });
+});
+
+describe("EkhoAgentClient.reportDeliveryPhases (#111 S1)", () => {
+  let relay: Awaited<ReturnType<typeof createTestRelayForSdk>>;
+  beforeAll(async () => { relay = await createTestRelayForSdk(); });
+  afterAll(() => relay.cleanup());
+
+  async function pair(tag: string) {
+    const s = await relay.enrollAgent(`${tag}-sender`);
+    const r = await relay.enrollAgent(`${tag}-recipient`);
+    const mk = (c: typeof s) => new EkhoAgentClient({ agentId: c.agent_id, secret: c.secret, relayBaseUrl: c.relayBaseUrl });
+    const sender = mk(s);
+    const recipient = mk(r);
+    const sent = await sender.sendMessage({
+      recipient: { kind: "agent", id: r.agent_id },
+      message_type: "direct",
+      body: { text: "phase test" },
+      conversation_id: `${tag}-conv`,
+      correlation_id: `${tag}-corr`
+    });
+    const inbox = await recipient.getInbox();
+    expect(inbox.messages).toHaveLength(1);
+    return { sender, recipient, messageId: sent.message_id };
+  }
+
+  const at = () => new Date().toISOString();
+
+  it("T1: a recipient reports dead_lettered with withheld_by_recipient and gets the counts", async () => {
+    const { recipient, messageId } = await pair("t1");
+    const res = await recipient.reportDeliveryPhases([
+      { message_id: messageId, phase: "dead_lettered", at: at(), reason: "withheld_by_recipient" }
+    ]);
+    expect(res).toEqual({ recorded: 1, refused: 0 });
+  });
+
+  it("T2: optional turn fields reach the relay unchanged", async () => {
+    const { recipient, messageId } = await pair("t2");
+    const res = await recipient.reportDeliveryPhases([
+      { message_id: messageId, phase: "turn_started", at: at(), turn_id: "turn-1", attempt: 1 },
+      { message_id: messageId, phase: "turn_ended", at: at(), turn_id: "turn-1", attempt: 1, outcome: "completed" }
+    ]);
+    expect(res.recorded).toBe(2);
+  });
+
+  it("T3: a report for an unknown message id resolves with refused: 1", async () => {
+    const { recipient } = await pair("t3");
+    const res = await recipient.reportDeliveryPhases([
+      { message_id: "no-such-message", phase: "dead_lettered", at: at(), reason: "deadline_passed" }
+    ]);
+    expect(res).toEqual({ recorded: 0, refused: 1 });
+  });
+
+  it("T4: an entry outside the closed set, and an empty list, reject with 400", async () => {
+    const { recipient, messageId } = await pair("t4");
+    await expect(recipient.reportDeliveryPhases([
+      { message_id: messageId, phase: "dead_lettered", at: at(), reason: "not_a_reason" as never }
+    ])).rejects.toThrow(/400/);
+    await expect(recipient.reportDeliveryPhases([])).rejects.toThrow(/400/);
+  });
+
+  it("T5: a relay without the route rejects with 404", async () => {
+    const server = http.createServer((_req, res) => { res.statusCode = 404; res.end("not found"); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const addr = server.address() as { port: number };
+      const client = new EkhoAgentClient({ agentId: "a", secret: "s", relayBaseUrl: `http://127.0.0.1:${addr.port}` });
+      await expect(client.reportDeliveryPhases([
+        { message_id: "m", phase: "floor_granted", at: at() }
+      ])).rejects.toThrow(/404/);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("T6: DEAD_LETTER_REASONS equals the relay's deadLetterReasons", () => {
+    expect([...DEAD_LETTER_REASONS]).toEqual([...deadLetterReasons]);
+  });
+
+  it("R1 (retained): a report by another agent for that delivery is refused, not thrown", async () => {
+    const { sender, messageId } = await pair("r1");
+    const res = await sender.reportDeliveryPhases([
+      { message_id: messageId, phase: "dead_lettered", at: at(), reason: "deadline_passed" }
+    ]);
+    expect(res).toEqual({ recorded: 0, refused: 1 });
   });
 });

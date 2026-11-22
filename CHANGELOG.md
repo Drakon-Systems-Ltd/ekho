@@ -4,6 +4,10 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Relay: `POST /v1/delivery-phases` accepts five more `dead_lettered` reason values (`deadline_passed`, `withheld_by_recipient`, `handoff_unclaimed`, `inflight_loop_stopped`, `recovery_unavailable`); no client sends them yet (part of #111, PR #203; the issue stays open).**
+- **Node SDK: `EkhoAgentClient.reportDeliveryPhases` posts delivery phase reports to `POST /v1/delivery-phases` and returns the relay's `recorded` and `refused` counts (part of #111; the issue stays open).** Nothing calls it yet: the OpenClaw plugin, the Hermes plugin and the MCP connector still send no phase reports, so senders see no new status from this change.
+
 ### Fixed
 - **Relay: the operator console's DM view reads one agent's messages, not every message sent to the operator (#196, partial; the issue stays open).** The agent-to-operator half of `GET /v1/operator/conversations/dm-<fleet>-<agent>` is now pinned to `idx_messages_sender_created` with `INDEXED BY`. Before, on a database with no planner statistics, SQLite looked that half up by recipient, so each request read every message any agent in the fleet had sent to the operator, once for the page and once for the count. It now reads only the messages that one agent sent, whatever the statistics say. No schema change: the index already exists. Limits: the operator-to-agent half is not pinned (its index is still the planner's choice), the events of the DM are still read twice per request, and because `INDEXED BY` is a requirement rather than a hint, the DM view returns an error instead of running slowly if that index is dropped by hand, until the next relay start recreates it.
 
