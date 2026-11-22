@@ -225,6 +225,7 @@ describe("operator controls (#208)", () => {
     const agent = await connectAgent(r);
     const peer = await r.enrollEndorsedPeer("Peer");
     await control(r, agent.agentId!, "resume");
+    await new Promise((res) => setTimeout(res, 20)); // distinct created_at: the inbox orders controls newest-first
     await control(r, agent.agentId!, "pause");
     await agent.pollOnce();
     expect(agent.health().status).toBe("paused");
@@ -240,7 +241,7 @@ describe("operator controls (#208)", () => {
     await agent.heartbeatOnce();
     await agent.pollOnce();
     await agent.heartbeatOnce();
-    expect(lastHeartbeat(r, agent.agentId!)).toMatchObject({ status: "healthy", metrics: { paused: false } });
+    expect(lastHeartbeat(r, agent.agentId!)).toMatchObject({ status: "healthy", metrics: { metrics: { paused: false } } });
   });
 
   it("guard: an operator pause holds across polls with no resume, and an operator resume clears it", async () => {
