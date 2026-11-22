@@ -405,5 +405,30 @@ describe("accessor isolation (#192)", () => {
       expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBe(Number.POSITIVE_INFINITY);
       expect(reloadServedForgotten("agent_x", "conn-a", "nonce")).toBeUndefined(); // the other kind lost nothing
     });
+
+    it("a ledger dropped whole leaves the lost-evidence mark as a floor for a second connection and for another agent's domain", async () => {
+      const { noteReloadServed, reloadServedForgotten } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"] }, NOW);
+      ledger().keys.set("k", throwing({ generation: 3, atMs: NOW }, "generation"));
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"] }, NOW); // meets the unreadable record
+      for (let i = 0; i < 64; i++) noteReloadServed("agent_x", `other-${i}`, 1, { keys: ["k"] }, NOW);
+      expect(ledgers().has("agent_x\u0000conn-a")).toBe(false);
+      for (const [agent, conn] of [["agent_x", "conn-b"], ["agent_y", "conn-c"]]) {
+        expect(reloadServedForgotten(agent, conn, "key")).toBe(Number.POSITIVE_INFINITY);
+        expect(reloadServedForgotten(agent, conn, "nonce")).toBeUndefined();
+      }
+    });
+
+    it("before any ledger is dropped whole, an unreadable record marks its own connection only", async () => {
+      const { noteReloadServed, reloadServedBy, reloadServedForgotten } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["k"] }, NOW);
+      noteReloadServed("agent_x", "conn-b", 5, { keys: ["k"] }, NOW);
+      ledger().keys.set("k", throwing({ generation: 3, atMs: NOW }, "generation"));
+      noteReloadServed("agent_x", "conn-a", 4, { keys: ["k"] }, NOW); // meets the unreadable record
+      expect(reloadServedForgotten("agent_x", "conn-a", "key")).toBe(Number.POSITIVE_INFINITY);
+      expect(reloadServedForgotten("agent_x", "conn-b", "key")).toBeUndefined();
+      expect(reloadServedForgotten("agent_x", "conn-b", "nonce")).toBeUndefined();
+      expect(reloadServedBy("agent_x", "conn-b", "key", "k")).toBe(5);
+    });
   });
 });

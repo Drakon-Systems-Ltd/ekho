@@ -2547,6 +2547,60 @@ describe("reload hand-off of held work (#111)", () => {
     });
   }
 
+  // Cross-domain and non-finite values (#198): none of these is a usable epoch.
+  const nonFinite = [
+    ["the dropped-evidence mark's key is NaN", "forgotten", { key: Number.NaN }],
+    ["the dropped-evidence mark's nonce is NaN", "forgotten", { nonce: Number.NaN }],
+    ["the dropped-evidence mark's key is +Infinity", "forgotten", { key: Number.POSITIVE_INFINITY }],
+    ["the dropped-evidence mark's key is -Infinity", "forgotten", { key: Number.NEGATIVE_INFINITY }],
+    ["the key record's generation is +Infinity", "key", { generation: Number.POSITIVE_INFINITY, atMs: Date.now() }],
+    ["the key record's generation is -Infinity", "key", { generation: Number.NEGATIVE_INFINITY, atMs: Date.now() }],
+    ["the nonce record's generation is +Infinity", "nonce", { generation: Number.POSITIVE_INFINITY, atMs: Date.now() }],
+    ["the nonce record's generation is -Infinity", "nonce", { generation: Number.NEGATIVE_INFINITY, atMs: Date.now() }]
+  ] as const;
+  for (const [name, where, bad] of nonFinite) {
+    it(`a non-finite served-ledger value withholds the candidate as served_evidence_lost (${name})`, async () => {
+      const op = await operatorKey(7);
+      const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+      serve([], { messages: [], fleet_id: FLEET });
+      relay.floorFree = () => true;
+      const b = await startCopy(cfg);
+      await poll();
+      const o1 = await signedOperator("o1", op);
+      const owner = b.conn.connectedInboxContext(await b.conn.ensureConnected(cfg as never)).split(".")[0];
+      const { noteReloadServed } = await registry();
+      const { heldKey } = await import("../src/autoreply");
+      noteReloadServed("agent_reload", owner, -1, { keys: [heldKey(o1)], nonces: ["nonce-o1"] });
+      const ledger = await ledgerOf(owner);
+      if (where === "key") ledger.keys.set(heldKey(o1), bad);
+      else if (where === "nonce") ledger.nonces.set("nonce-o1", bad);
+      else ledger.forgotten = bad;
+      await plant(b, cfg, [o1]);
+      await poll(3);
+      expect(deliveredCount("signed text o1")).toBe(0);
+      expect(records()).toEqual([["o1", "reload_withheld:served_evidence_lost"]]);
+      expect((await registry()).reloadHandoffCount("agent_reload")).toBe(0);
+    });
+  }
+
+  it("a readable finite dropped-evidence mark not later than the depositor re-admits the candidate (the control for the non-finite cases)", async () => {
+    const op = await operatorKey(7);
+    const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
+    serve([], { messages: [], fleet_id: FLEET });
+    relay.floorFree = () => true;
+    const b = await startCopy(cfg);
+    await poll();
+    const o1 = await signedOperator("o1", op);
+    const owner = b.conn.connectedInboxContext(await b.conn.ensureConnected(cfg as never)).split(".")[0];
+    const { heldKey } = await import("../src/autoreply");
+    (await registry()).noteReloadServed("agent_reload", owner, -1, { keys: [heldKey(o1)], nonces: ["nonce-o1"] });
+    (await ledgerOf(owner)).forgotten = { key: -1, nonce: -1 };
+    await plant(b, cfg, [o1]);
+    await poll(3);
+    expect(deliveredCount("signed text o1")).toBe(1);
+    expect(records()).toEqual([["o1", "reload_readmitted"]]);
+  });
+
   it("with the same records readable, the same candidate is re-admitted (the control for the cases above)", async () => {
     const op = await operatorKey(7);
     const cfg = { ...defaultConfig(), operatorPubkey: op.pub };
