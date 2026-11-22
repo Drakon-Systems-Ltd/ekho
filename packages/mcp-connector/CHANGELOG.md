@@ -4,6 +4,9 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 
 ## [Unreleased]
 
+### Fixed
+- **Paused state no longer latches (#208).** The connector now derives its local paused state from the relay's full controls snapshot on every poll, so it recovers by itself after a heartbeat auto-unquarantine and a pause issued within an hour of a resume is honoured. A failed poll or a malformed controls field keeps the previous state. The relay still enforces pause and quarantine; this only corrects the connector's local mirror.
+
 ## [0.9.0] - 2026-11-21
 
 Version kept in step with the relay: 0.9.0 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026 and the later migrations 027, 028 and 029. This release adds version reporting (#97); see Added below. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
