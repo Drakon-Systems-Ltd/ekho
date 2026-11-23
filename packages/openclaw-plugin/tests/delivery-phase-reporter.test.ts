@@ -49,7 +49,7 @@ describe("createDeadLetterReporter", () => {
     ]);
   });
 
-  it("T3: a reason outside the closed set never reaches post and is logged once per value", async () => {
+  it("T3: a reason outside the closed set never reaches post and is logged once, generically", async () => {
     const { reporter, calls, logs } = setup();
     for (let i = 0; i < 3; i++) {
       reporter.enqueue(`m${i}`, "reload_withheld:peer_latch_closed");
@@ -59,7 +59,18 @@ describe("createDeadLetterReporter", () => {
     expect(calls).toHaveLength(0);
     expect(JSON.stringify(calls)).not.toContain("peer_latch_closed");
     expect(reporter.pending()).toBe(0);
-    expect(logs).toHaveLength(2);
+    expect(logs).toHaveLength(1);
+    expect(logs.join("\n")).not.toContain("peer_latch_closed");
+    expect(logs.join("\n")).not.toContain("unverifiable");
+  });
+
+  it("T3b: many distinct invalid reasons stay bounded and are never copied into diagnostics", async () => {
+    const { reporter, calls, logs } = setup();
+    for (let i = 0; i < 50; i++) reporter.enqueue(`m${i}`, `secret-detail-${i}\u001b[31m\nforged`);
+    await reporter.flush();
+    expect(calls).toHaveLength(0);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).not.toMatch(/secret-detail|forged|\u001b|\n/);
   });
 
   it("T4: the same id is reported once, before and after a successful flush", async () => {
@@ -191,6 +202,31 @@ describe("createDeadLetterReporter", () => {
     await batch.reporter.flush();
     expect(batch.calls).toHaveLength(25);
     expect(batch.reporter.pending()).toBe(0);
+  });
+
+  it("T9b: overflow during a pending POST keeps the in-flight id reserved, so a same-id enqueue is not re-sent", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let first = true;
+    const { reporter, calls } = setup(async () => {
+      if (first) { first = false; await gate; }
+      return { recorded: 1, refused: 0 };
+    });
+    reporter.enqueue("m0", "deadline_passed");
+    const running = reporter.flush();
+    await Promise.resolve();
+    for (let i = 1; i <= 500; i++) reporter.enqueue(`m${i}`, "deadline_passed");
+    expect(reporter.pending()).toBe(500);
+    reporter.enqueue("m0", "handoff_unclaimed");
+    expect(reporter.pending()).toBe(500);
+    release();
+    await running;
+    for (let i = 0; i < 30; i++) await reporter.flush();
+    expect(reporter.pending()).toBe(0);
+    const ids = calls.map((c) => c[0]!.message_id as string);
+    expect(ids.filter((id) => id === "m0")).toHaveLength(1);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).not.toContain("m1");
   });
 
   it("T10: overlapping flush calls share one run", async () => {

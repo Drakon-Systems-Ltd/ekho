@@ -39,11 +39,13 @@ export function createDeadLetterReporter(opts: DeadLetterReporterOptions): DeadL
   const queue: Entry[] = [];
   const queued = new Set<string>();
   const sent = new Set<string>();
-  const loggedBadReasons = new Set<string>();
+  let warnedBadReason = false;
   const logged400 = new Set<string>();
   let off = false;
   let overflowed = false;
   let running: Promise<void> | null = null;
+  // The entry whose POST is pending. It stays in `queue` and `queued` until it settles, and overflow never evicts it.
+  let inflight: Entry | null = null;
 
   const log = (line: string): void => {
     try { opts.log(line); } catch { /* logging never breaks reporting */ }
@@ -63,10 +65,10 @@ export function createDeadLetterReporter(opts: DeadLetterReporterOptions): DeadL
       if (off) return;
       if (typeof messageId !== "string" || messageId.length === 0 || messageId.length > MAX_ID) return;
       if (typeof reason !== "string" || !REASONS.has(reason)) {
-        const key = String(reason).slice(0, 80);
-        if (!loggedBadReasons.has(key)) {
-          loggedBadReasons.add(key);
-          log(`delivery-phase: dropped report with a reason outside the closed set: ${key}`);
+        // Fixed text, once per instance: the rejected value is never stored or logged.
+        if (!warnedBadReason) {
+          warnedBadReason = true;
+          log("delivery-phase: dropped a report with a reason outside the closed set (further drops not logged)");
         }
         return;
       }
@@ -75,8 +77,9 @@ export function createDeadLetterReporter(opts: DeadLetterReporterOptions): DeadL
       queue.push({ id: messageId, reason, at, attempts: 0 });
       queued.add(messageId);
       if (queue.length > RING) {
-        const oldest = queue.shift()!;
-        queued.delete(oldest.id);
+        const at0 = queue[0] === inflight ? 1 : 0;
+        const [oldest] = queue.splice(at0, 1);
+        queued.delete(oldest!.id);
         overflowed = true;
       }
     } catch {
@@ -92,11 +95,14 @@ export function createDeadLetterReporter(opts: DeadLetterReporterOptions): DeadL
     for (let calls = 0; calls < MAX_CALLS_PER_FLUSH && !off; calls++) {
       const entry = queue[0];
       if (!entry) return;
+      inflight = entry;
       try {
         await opts.post([{ message_id: entry.id, phase: "dead_lettered", at: entry.at, reason: entry.reason as DeadLetterReason }]);
+        inflight = null;
         remove(entry);
         remember(entry.id);
       } catch (err) {
+        inflight = null;
         const text = err instanceof Error ? err.message : "";
         const status = Number(STATUS_RE.exec(text)?.[1] ?? 0);
         if (status === 404) {
