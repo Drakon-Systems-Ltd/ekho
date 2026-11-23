@@ -226,6 +226,46 @@ export function runMigrationsOn(rawDb: Database.Database, migrationsDir: string)
   }
 }
 
+export interface MissingSchemaIndex { name: string; table: string }
+
+/** Indexes `sql` declares whose table already exists but whose index does not:
+ *  exactly the ones the boot-time schema exec will build with a full table pass
+ *  (#196). A fresh database reports none. Names are parsed from `schemaSql`, a
+ *  repo constant, never user input. */
+export function missingSchemaIndexes(rawDb: Database.Database, sql: string): MissingSchemaIndex[] {
+  const tableExists = rawDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?");
+  const indexExists = rawDb.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?");
+  const re = /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s+ON\s+(\w+)\s*\(/gim;
+  const missing: MissingSchemaIndex[] = [];
+  for (const m of sql.matchAll(re)) {
+    if (tableExists.get(m[2]) && !indexExists.get(m[1])) missing.push({ name: m[1], table: m[2] });
+  }
+  return missing;
+}
+
+/** `rawDb.exec(sql)`, announcing first which indexes it will build and, after,
+ *  how long the whole step took. Errors propagate untouched. */
+export function execSchemaLogged(
+  rawDb: Database.Database,
+  sql: string,
+  opts: { log?: (line: string) => void; now?: () => number } = {}
+): void {
+  const log = opts.log ?? console.log;
+  const now = opts.now ?? Date.now;
+  const missing = missingSchemaIndexes(rawDb, sql);
+  if (missing.length === 0) {
+    rawDb.exec(sql);
+    return;
+  }
+  log(
+    `[ekho-relay] boot: building ${missing.length} missing index(es): ${missing.map((m) => `${m.name} on ${m.table}`).join(", ")}. ` +
+      "The relay accepts no connections until this finishes; a restart starts the build again."
+  );
+  const started = now();
+  rawDb.exec(sql);
+  log(`[ekho-relay] boot: built ${missing.length} missing index(es); schema step took ${now() - started} ms.`);
+}
+
 /**
  * Event types the retention sweep is allowed to delete (#75).
  *
@@ -326,7 +366,7 @@ export class EkhoDb {
     fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
     this.db = new Database(config.dbPath);
     this.db.pragma("journal_mode = WAL");
-    this.db.exec(schemaSql);
+    execSchemaLogged(this.db, schemaSql);
     this.runMigrations();
   }
 
