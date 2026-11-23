@@ -383,7 +383,7 @@ function pruneHandoffs(
 /**
  * Leave `entries` for a successor of the same agent. Synchronous, so a stop
  * that deposits has done so before it returns. Never throws for an array
- * argument; anything else is the caller's error, and the one caller
+ * argument; anything else is the caller's error, and the stopping loop
  * (autoreply.ts depositHandoff) catches it. Returns what the bounds pushed
  * out, which the caller reports: entries past the age bound (newest first),
  * then entries past the per-agent cap (oldest first).
@@ -596,30 +596,34 @@ function forgetDomain(ledger: ReloadServedLedger | undefined): void {
     if (typeof epoch !== "number" || Number.isNaN(epoch) || epoch === Number.NEGATIVE_INFINITY) return;
     floor[kind] = Math.max(floor[kind] ?? epoch, epoch);
   };
-  // Each kind on its own, each stored record read once, in isolation, as in
-  // noteInto (#192): what cannot be read is lost evidence for its kind.
-  const fold = (kind: "key" | "nonce", mark: () => unknown, records: () => ReloadServedLedger["keys"] | undefined): void => {
+  // Marks, then records, in the read order this fold always had. Each step is
+  // isolated and each record read once, as in noteInto (#192).
+  const isolate = (kind: "key" | "nonce", step: () => void): void => {
     try {
-      raise(kind, mark());
-      for (const e of records()?.values?.() ?? []) {
-        let epoch: unknown;
-        try {
-          epoch = e?.generation;
-        } catch {
-          epoch = Number.POSITIVE_INFINITY;
-        }
-        raise(kind, epoch);
-      }
+      step();
     } catch {
-      raise(kind, Number.POSITIVE_INFINITY);
+      try {
+        raise(kind, Number.POSITIVE_INFINITY);
+      } catch {
+        /* a floor that cannot be written: nothing to fold into */
+      }
     }
   };
-  try {
-    fold("key", () => ledger.forgotten?.key, () => ledger.keys);
-    fold("nonce", () => ledger.forgotten?.nonce, () => ledger.nonces);
-  } catch {
-    /* a floor that cannot be written: nothing to fold into */
-  }
+  const walk = (kind: "key" | "nonce", records: () => ReloadServedLedger["keys"] | undefined) => (): void => {
+    for (const e of records()?.values?.() ?? []) {
+      let epoch: unknown;
+      try {
+        epoch = e?.generation;
+      } catch {
+        epoch = Number.POSITIVE_INFINITY;
+      }
+      raise(kind, epoch);
+    }
+  };
+  isolate("key", () => raise("key", ledger.forgotten?.key));
+  isolate("nonce", () => raise("nonce", ledger.forgotten?.nonce));
+  isolate("key", walk("key", () => ledger.keys));
+  isolate("nonce", walk("nonce", () => ledger.nonces));
 }
 
 /** The epoch of the newest loop that took ownership of `value` (a heldKey, or
