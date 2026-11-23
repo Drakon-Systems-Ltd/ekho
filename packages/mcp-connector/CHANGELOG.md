@@ -5,7 +5,7 @@ All notable changes to the Ekho MCP connector are documented here. Versions are 
 ## [Unreleased]
 
 ### Fixed
-- **Paused state no longer latches (#208).** The connector now derives its local paused state from the relay's full controls snapshot on every poll, so it recovers by itself after a heartbeat auto-unquarantine and a pause issued within an hour of a resume is honoured. A failed poll or a malformed controls field keeps the previous state. The relay still enforces pause and quarantine; this only corrects the connector's local mirror.
+- **Paused state no longer latches (#208).** The connector now derives its local paused state from the relay's full controls snapshot on every poll, so it recovers by itself after a heartbeat auto-unquarantine and a pause issued within an hour of a resume is honoured. A failed poll, a malformed controls field, or any malformed control entry (validated for the whole snapshot before the mirror changes) keeps the previous state, and the message batch is still processed and acknowledged. The relay still enforces pause and quarantine; this only corrects the connector's local mirror.
 
 ## [0.9.0] - 2026-11-21
 
