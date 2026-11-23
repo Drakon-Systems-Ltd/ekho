@@ -296,4 +296,82 @@ describe("operator controls (#208)", () => {
     await agent.pollOnce();
     expect(agent.health().status).toBe("paused");
   });
+
+  it("guard: a snapshot with a malformed control entry keeps the prior state, never throws, and keeps polling", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown> } }).client;
+    const real = client.getInbox.bind(client);
+    const malformed: unknown[][] = [
+      [{}],
+      [null],
+      [undefined],
+      ["pause"],
+      [42],
+      [{ action: 5 }],
+      [{ action: null }],
+      [{ action: ["pause"] }],
+      [{ action: "resume" }, null], // valid entry first: the later bad entry must still void the snapshot
+      [null, { action: "pause", reason: "x" }], // bad entry first: order must not matter
+      [{ action: "pause", reason: "x" }, { reason: "no action" }]
+    ];
+
+    // Unpaused agent: a malformed snapshot must not pause it, even when it also carries a valid stop.
+    for (const controls of malformed) {
+      client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls });
+      await expect(agent.pollOnce()).resolves.toEqual([]);
+      expect(agent.health().status).toBe("connected");
+      expect(agent.health().error).toBeNull();
+    }
+
+    // Paused agent: a malformed snapshot with no recognisable stop must not clear the standing pause.
+    client.getInbox = real;
+    await control(r, agent.agentId!, "pause");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    for (const controls of malformed) {
+      client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls });
+      await expect(agent.pollOnce()).resolves.toEqual([]);
+      expect(agent.health().status).toBe("paused");
+      expect(agent.health().error).toBeNull();
+    }
+  });
+
+  it("guard: a malformed control entry does not stop the batch being acknowledged", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown>; ackMessages: (a: unknown[]) => Promise<unknown> } }).client;
+    const acked: unknown[][] = [];
+    client.ackMessages = async (a) => {
+      acked.push(a);
+      return {};
+    };
+    client.getInbox = async () => ({
+      fleet_id: r.fleetId,
+      messages: [{ message_id: "msg_malformed_controls_probe" }],
+      controls: [null]
+    });
+    await expect(agent.pollOnce()).resolves.toBeDefined();
+    expect(acked).toHaveLength(1);
+    expect(acked[0]).toMatchObject([{ message_id: "msg_malformed_controls_probe", status: "received" }]);
+  });
+
+  it("guard: unknown string actions are tolerated and a valid snapshot without a stop still resumes", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown> } }).client;
+    const real = client.getInbox.bind(client);
+    await control(r, agent.agentId!, "pause");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+
+    client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls: [{ action: "future-action", reason: "x" }] });
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("connected");
+
+    client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls: [{ action: "future-action" }, { action: "quarantine", reason: "q" }] });
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    client.getInbox = real;
+  });
 });
