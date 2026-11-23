@@ -382,9 +382,11 @@ function pruneHandoffs(
 
 /**
  * Leave `entries` for a successor of the same agent. Synchronous, so a stop
- * that deposits has done so before it returns. Never throws. Returns what the
- * bounds pushed out, which the caller reports: entries past the age bound
- * (newest first), then entries past the per-agent cap (oldest first).
+ * that deposits has done so before it returns. Never throws for an array
+ * argument; anything else is the caller's error, and the one caller
+ * (autoreply.ts depositHandoff) catches it. Returns what the bounds pushed
+ * out, which the caller reports: entries past the age bound (newest first),
+ * then entries past the per-agent cap (oldest first).
  */
 export function depositReloadHandoff(entries: ReloadHandoffEntry[], nowMs = Date.now()): ReloadHandoffDropped[] {
   const store = handoffStore();
@@ -594,13 +596,29 @@ function forgetDomain(ledger: ReloadServedLedger | undefined): void {
     if (typeof epoch !== "number" || Number.isNaN(epoch) || epoch === Number.NEGATIVE_INFINITY) return;
     floor[kind] = Math.max(floor[kind] ?? epoch, epoch);
   };
+  // Each kind on its own, each stored record read once, in isolation, as in
+  // noteInto (#192): what cannot be read is lost evidence for its kind.
+  const fold = (kind: "key" | "nonce", mark: () => unknown, records: () => ReloadServedLedger["keys"] | undefined): void => {
+    try {
+      raise(kind, mark());
+      for (const e of records()?.values?.() ?? []) {
+        let epoch: unknown;
+        try {
+          epoch = e?.generation;
+        } catch {
+          epoch = Number.POSITIVE_INFINITY;
+        }
+        raise(kind, epoch);
+      }
+    } catch {
+      raise(kind, Number.POSITIVE_INFINITY);
+    }
+  };
   try {
-    raise("key", ledger.forgotten?.key);
-    raise("nonce", ledger.forgotten?.nonce);
-    for (const e of ledger.keys?.values?.() ?? []) raise("key", e?.generation);
-    for (const e of ledger.nonces?.values?.() ?? []) raise("nonce", e?.generation);
+    fold("key", () => ledger.forgotten?.key, () => ledger.keys);
+    fold("nonce", () => ledger.forgotten?.nonce, () => ledger.nonces);
   } catch {
-    /* a ledger another bundle version shaped differently: nothing to fold */
+    /* a floor that cannot be written: nothing to fold into */
   }
 }
 

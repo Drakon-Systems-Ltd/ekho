@@ -4,6 +4,9 @@ All notable changes to Ekho are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenClaw: a served ledger dropped whole is folded one record at a time (part of #198, follow-up to #192).** When the per-process bound drops a connection's whole served ledger, a record or dropped-evidence mark in it that cannot be read now counts as lost evidence for its own kind (message keys or signature nonces), and the rest of the ledger is still folded; before, the fold stopped at the first unreadable record. A ledger whose records all read cleanly folds exactly as before. The lost-evidence floor is process-wide and lasts until the gateway process restarts: until then every connection's handed-off messages are withheld and recorded (`reload_withheld:served_evidence_lost`), not given a turn. No relay, SDK or wire change.
+
 ## [0.9.0] - 2026-11-21
 
 Version kept in step with the relay: 0.9.0 carries security fixes in the relay and the Hermes plugin, and relay delivery phase reporting (#155 slice, PR #176). Upgrade the relay to apply migration 026 and the later migrations 027, 028 and 029. The plugin does not send delivery phase reports in this release. This release adds version reporting (#97), heartbeat turn state (part of #155), reload hand-off work (#111, #192), a stopped loop cancelling its inbox poll (part of #164) and attachment failure reporting (#114); see Added and Fixed below. Full project changelog: <https://github.com/Drakon-Systems-Ltd/ekho/blob/main/CHANGELOG.md>.
