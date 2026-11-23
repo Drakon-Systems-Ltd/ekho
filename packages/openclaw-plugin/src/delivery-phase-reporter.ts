@@ -1,4 +1,4 @@
-import type { DeliveryPhaseEntry, DeliveryPhasesResult } from "@drakon-systems/ekho-sdk";
+import type { DeadLetterReason, DeliveryPhaseEntry, DeliveryPhasesResult } from "@drakon-systems/ekho-sdk";
 
 /**
  * Standalone best-effort reporter for the `dead_lettered` delivery phase (#111, S2a).
@@ -93,7 +93,7 @@ export function createDeadLetterReporter(opts: DeadLetterReporterOptions): DeadL
       const entry = queue[0];
       if (!entry) return;
       try {
-        await opts.post([{ message_id: entry.id, phase: "dead_lettered", at: entry.at, reason: entry.reason }]);
+        await opts.post([{ message_id: entry.id, phase: "dead_lettered", at: entry.at, reason: entry.reason as DeadLetterReason }]);
         remove(entry);
         remember(entry.id);
       } catch (err) {
