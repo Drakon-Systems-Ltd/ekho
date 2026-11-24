@@ -111,12 +111,12 @@ async function waitFor(pred: () => boolean, timeoutMs = 4000): Promise<void> {
 const quiet = { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} };
 
 /** A client whose floor is always held, serving `first` once and then nothing. */
-function heldClient(first: unknown[]) {
+function heldClient(first: unknown[], peerAutoreply = true) {
   let served = 0;
   return {
     getInbox: async () =>
       served++ === 0
-        ? { messages: first, operator_trusted: false, peer_autoreply: true, roster: [] }
+        ? { messages: first, operator_trusted: false, peer_autoreply: peerAutoreply, roster: [] }
         : { messages: [] },
     ackMessages: async () => {},
     acquireFloor: async () => ({ granted: false, holder_agent_id: "agent_holder" }),
@@ -189,7 +189,7 @@ describe("startAutoReply onDisposition", () => {
     const late = peer(1, "c1", { deadline_at: new Date(Date.now() - 1000).toISOString() });
     const policy = peer(2, "c2", { deadline_at: hourAhead() });
     const handoff = handoffWith([entry(late), entry(policy)]);
-    const { seen, records, stop } = run(heldClient([]), {
+    const { seen, records, stop } = run(heldClient([], false), {
       reloadHandoff: handoff,
       cacheContext: () => "own.gen1",
       peerEnabled: false
@@ -220,7 +220,8 @@ describe("startAutoReply onDisposition", () => {
     const dup = entry(peer(5, "c5", { deadline_at: hourAhead() }), { fromEpoch: 1 });
     const ok = entry(peer(6, "c6", { deadline_at: hourAhead() }), { fromEpoch: 5 });
     // The ledger says epoch 3 served m5 (newer than its depositor, epoch 1).
-    const handoff = handoffWith([dup, ok], [], {
+    const late = entry(peer(8, "c8", { deadline_at: new Date(Date.now() - 1000).toISOString() }), { fromEpoch: 5 });
+    const handoff = handoffWith([dup, ok, late], [], {
       servedBy: (_o: string, kind: string, value: string) => (kind === "key" && value.includes("m5") ? 3 : undefined)
     });
     const { seen, records, stop } = run(heldClient([]), { reloadHandoff: handoff, cacheContext: () => "own.gen1" });
@@ -229,29 +230,32 @@ describe("startAutoReply onDisposition", () => {
     } finally {
       await stop();
     }
-    expect(seen).toEqual([]);
+    // Only the expired control reports: the duplicate and the re-admission are silent.
+    expect(seen).toEqual([["m8", "deadline_passed"]]);
   });
 
-  it("L5: stop() with a held stash and a hand-off wired reports nothing", async () => {
+  it("L5: stop() with a held stash and a hand-off wired reports nothing (an overflow control proves the seam is live)", async () => {
+    const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
     const handoff = handoffWith([]);
-    const { seen, records, stop } = run(heldClient([peer(7, "c7")]), { reloadHandoff: handoff, cacheContext: () => "own.gen1" });
-    await waitFor(() => hoisted.calls.length === 0 && true);
-    await new Promise((r) => setTimeout(r, 100));
+    const { seen, records, stop } = run(heldClient(msgs), { reloadHandoff: handoff, cacheContext: () => "own.gen1" });
+    await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
     await stop();
     expect(records.some((r) => r.reason === DEFERRED_LOOP_STOPPED_REASON)).toBe(true);
-    expect(seen).toEqual([]);
+    expect(seen).toEqual([["m0", "deferred_overflow_per_conv"]]); // nothing added by the stop
   });
 
   it("L6: a callback that throws neither breaks the tick, the record, nor stop()", async () => {
     const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
+    let invoked = 0;
     const { records, stop } = run(heldClient(msgs), {
-      onDisposition: () => { throw new Error("callback failure"); }
+      onDisposition: () => { invoked++; throw new Error("callback failure"); }
     });
     try {
       await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
     } finally {
       await expect(stop()).resolves.toBeUndefined();
     }
+    expect(invoked).toBe(1);
     expect(records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON)).toBe(true);
   });
 });
