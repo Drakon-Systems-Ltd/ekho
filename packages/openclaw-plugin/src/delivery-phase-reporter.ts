@@ -133,7 +133,9 @@ export function createDeadLetterReporter(opts: DeadLetterReporterOptions): DeadL
 
   function flush(): Promise<void> {
     if (running) return running;
-    running = run().catch(() => undefined).finally(() => { running = null; });
+    // Deferred one microtask so `running` is published before any log/post callback can re-enter flush().
+    // A callback must not await the promise its own flush() returns (it would wait on itself).
+    running = Promise.resolve().then(run).catch(() => undefined).finally(() => { running = null; });
     return running;
   }
 

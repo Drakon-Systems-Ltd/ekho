@@ -288,3 +288,66 @@ describe("createDeadLetterReporter", () => {
     }
   });
 });
+
+describe("createDeadLetterReporter re-entrant callbacks", () => {
+  it("R1: a log callback that calls flush() joins the outer flush and the head id is sent once", async () => {
+    const ids: string[] = [];
+    let reporter!: ReturnType<typeof createDeadLetterReporter>;
+    let inner: Promise<void> | undefined;
+    let reentered = false;
+    reporter = createDeadLetterReporter({
+      post: (async (phases: Phases) => {
+        ids.push(phases[0]!.message_id as string);
+        return { recorded: 1, refused: 0 };
+      }) as never,
+      now: () => 0,
+      log: () => {
+        if (reentered) return;
+        reentered = true;
+        inner = reporter.flush();
+      }
+    });
+    for (let i = 0; i <= 500; i++) reporter.enqueue(`m${i}`, "deadline_passed");
+    const outer = reporter.flush();
+    await outer;
+    expect(reentered).toBe(true);
+    expect(inner).toBe(outer);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.filter((id) => id === "m1")).toHaveLength(1);
+  });
+
+  it("R2: a post callback that calls flush() joins the outer flush, one POST per id", async () => {
+    const ids: string[] = [];
+    let reporter!: ReturnType<typeof createDeadLetterReporter>;
+    let inner: Promise<void> | undefined;
+    let reentered = false;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let first = true;
+    reporter = createDeadLetterReporter({
+      post: (async (phases: Phases) => {
+        ids.push(phases[0]!.message_id as string);
+        if (first) {
+          first = false;
+          reentered = true;
+          inner = reporter.flush();
+          await gate;
+        }
+        return { recorded: 1, refused: 0 };
+      }) as never,
+      now: () => 0,
+      log: () => {}
+    });
+    reporter.enqueue("a", "deadline_passed");
+    reporter.enqueue("b", "deadline_passed");
+    const outer = reporter.flush();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reporter.flush()).toBe(outer);
+    release();
+    await outer;
+    expect(reentered).toBe(true);
+    expect(inner).toBe(outer);
+    expect(ids).toEqual(["a", "b"]);
+  });
+});
