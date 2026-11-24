@@ -63,8 +63,16 @@ export interface SendRequest {
 }
 
 /** A control entry is usable only if it is an object with a string `action`. */
-function isControlEntry(c: unknown): c is { action: string; reason?: string } {
+function isControlEntry(c: unknown): c is { action: string; reason?: unknown } {
   return typeof c === "object" && c !== null && typeof (c as { action?: unknown }).action === "string";
+}
+
+/**
+ * The control `reason` is display text only: log it when it is a string, else a
+ * fixed placeholder (never coerced). Pause state and acks never depend on it (#213).
+ */
+function reasonForLog(reason: unknown): string {
+  return typeof reason === "string" ? reason : "no reason given";
 }
 
 export type AgentStatus = "starting" | "connected" | "paused" | "identity_unavailable" | "error" | "stopped";
@@ -270,7 +278,7 @@ export class EkhoConnectorAgent {
         if (nowPaused !== this.paused) {
           this.log.warn?.(
             nowPaused
-              ? `[ekho-mcp] operator control: ${stopping.action} (${stopping.reason}); sends paused`
+              ? `[ekho-mcp] operator control: ${stopping.action} (${reasonForLog(stopping.reason)}); sends paused`
               : "[ekho-mcp] operator pause/quarantine no longer in the relay snapshot; sends resumed"
           );
         }

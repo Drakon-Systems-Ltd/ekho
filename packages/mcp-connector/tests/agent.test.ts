@@ -356,6 +356,29 @@ describe("operator controls (#208)", () => {
     expect(acked[0]).toMatchObject([{ message_id: "msg_malformed_controls_probe", status: "received" }]);
   });
 
+  it("logs a string reason verbatim and a fixed placeholder for an omitted or non-string reason; pause is unaffected (#213)", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const warnings: string[] = [];
+    (agent as unknown as { log: { warn: (m: string) => void } }).log = { warn: (m) => warnings.push(m) };
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown> } }).client;
+
+    const cases: Array<[unknown[], string]> = [
+      [[{ action: "pause", reason: "maintenance window" }], "(maintenance window)"],
+      [[{ action: "pause" }], "(no reason given)"],
+      [[{ action: "pause", reason: 42 }], "(no reason given)"]
+    ];
+    for (const [controls, expected] of cases) {
+      client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls: [] });
+      await agent.pollOnce(); // back to resumed so the next stop logs again
+      warnings.length = 0;
+      client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls });
+      await agent.pollOnce();
+      expect(agent.health().status).toBe("paused");
+      expect(warnings.some((w) => w.includes("operator control: pause") && w.includes(expected))).toBe(true);
+    }
+  });
+
   it("guard: unknown string actions are tolerated and a valid snapshot without a stop still resumes", async () => {
     const r = await relay();
     const agent = await connectAgent(r);

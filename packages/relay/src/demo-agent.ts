@@ -47,7 +47,7 @@ const adapter = new EkhoAgentAdapter(
       }
     },
     async onControl(control: ControlMessage) {
-      console.log(`[demo-agent] control ${control.action}: ${control.reason}`);
+      console.log(`[demo-agent] control ${control.action}: ${typeof control.reason === "string" ? control.reason : "no reason given"}`);
     },
     async onApprovalPending(approvalId: string) {
       console.log(`[demo-agent] waiting for approval ${approvalId}`);
