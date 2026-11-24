@@ -183,3 +183,195 @@ describe("heartbeat identity (#97)", () => {
     expect(row.identity.instance_id).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
+
+describe("operator controls (#208)", () => {
+  const LOCAL_REFUSAL = /paused or quarantined by the operator/;
+
+  async function control(r: LiveRelay, agentId: string, action: "pause" | "resume" | "quarantine") {
+    const res = await r.operatorRequest("POST", `/v1/operator/agents/${agentId}/${action}`, { reason: `test ${action}` });
+    expect(res.status).toBe(200);
+  }
+  /** Drive the real heartbeat-timeout auto-quarantine (as sweep-quarantine.test.ts does). */
+  function goStale(r: LiveRelay, agentId: string) {
+    const stale = new Date(Date.now() - 30_000).toISOString();
+    r.db.raw().prepare("UPDATE agents SET status = 'healthy', last_seen_at = ? WHERE id = ?").run(stale, agentId);
+    expect(r.db.sweepHeartbeatLiveness()).toBeGreaterThanOrEqual(1);
+  }
+  function lastHeartbeat(r: LiveRelay, agentId: string) {
+    const row = r.db.raw().prepare("SELECT status, metrics_json FROM heartbeats WHERE agent_id = ? ORDER BY rowid DESC LIMIT 1").get(agentId) as
+      | { status: string; metrics_json: string }
+      | undefined;
+    return row ? { status: row.status, metrics: JSON.parse(row.metrics_json) as Record<string, unknown> } : undefined;
+  }
+
+  it("recovers on its own after heartbeat auto-unquarantine, with no operator action", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const peer = await r.enrollEndorsedPeer("Peer");
+    goStale(r, agent.agentId!);
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    await expect(agent.send({ recipientAgentId: peer.agent_id, text: "while quarantined" })).rejects.toThrow(LOCAL_REFUSAL);
+
+    await agent.heartbeatOnce(); // the real auto-unquarantine path; reports degraded because still paused locally
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("connected");
+    const sent = await agent.send({ recipientAgentId: peer.agent_id, text: "back online" });
+    expect(sent.message_id).toMatch(/^msg_/);
+  });
+
+  it("a pause issued inside the one-hour resume TTL still pauses locally (newest control must win)", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const peer = await r.enrollEndorsedPeer("Peer");
+    await control(r, agent.agentId!, "resume");
+    await new Promise((res) => setTimeout(res, 20)); // distinct created_at: the inbox orders controls newest-first
+    await control(r, agent.agentId!, "pause");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    // Local refusal, not merely the relay's 403.
+    await expect(agent.send({ recipientAgentId: peer.agent_id, text: "x" })).rejects.toThrow(LOCAL_REFUSAL);
+  });
+
+  it("heartbeat reports healthy and paused:false once the quarantine has cleared", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    goStale(r, agent.agentId!);
+    await agent.pollOnce();
+    await agent.heartbeatOnce();
+    await agent.pollOnce();
+    await agent.heartbeatOnce();
+    expect(lastHeartbeat(r, agent.agentId!)).toMatchObject({ status: "healthy", metrics: { metrics: { paused: false } } });
+  });
+
+  it("guard: an operator pause holds across polls with no resume, and an operator resume clears it", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    await control(r, agent.agentId!, "pause");
+    for (let i = 0; i < 3; i++) {
+      await agent.pollOnce();
+      expect(agent.health().status).toBe("paused");
+    }
+    await control(r, agent.agentId!, "resume");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("connected");
+  });
+
+  it("guard: a heartbeat does not clear an operator quarantine", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    await control(r, agent.agentId!, "quarantine");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    await agent.heartbeatOnce();
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+  });
+
+  it("guard: a failed poll and a batch without a controls array leave a paused agent paused", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    await control(r, agent.agentId!, "pause");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown> } }).client;
+    const real = client.getInbox.bind(client);
+
+    client.getInbox = async () => {
+      throw new Error("relay unreachable");
+    };
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+
+    client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [] }); // controls missing
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+
+    client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls: "oops" }); // controls not an array
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+
+    client.getInbox = real;
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+  });
+
+  it("guard: a snapshot with a malformed control entry keeps the prior state, never throws, and keeps polling", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown> } }).client;
+    const real = client.getInbox.bind(client);
+    const malformed: unknown[][] = [
+      [{}],
+      [null],
+      [undefined],
+      ["pause"],
+      [42],
+      [{ action: 5 }],
+      [{ action: null }],
+      [{ action: ["pause"] }],
+      [{ action: "resume" }, null], // valid entry first: the later bad entry must still void the snapshot
+      [null, { action: "pause", reason: "x" }], // bad entry first: order must not matter
+      [{ action: "pause", reason: "x" }, { reason: "no action" }]
+    ];
+
+    // Unpaused agent: a malformed snapshot must not pause it, even when it also carries a valid stop.
+    for (const controls of malformed) {
+      client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls });
+      await expect(agent.pollOnce()).resolves.toEqual([]);
+      expect(agent.health().status).toBe("connected");
+      expect(agent.health().error).toBeNull();
+    }
+
+    // Paused agent: a malformed snapshot with no recognisable stop must not clear the standing pause.
+    client.getInbox = real;
+    await control(r, agent.agentId!, "pause");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    for (const controls of malformed) {
+      client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls });
+      await expect(agent.pollOnce()).resolves.toEqual([]);
+      expect(agent.health().status).toBe("paused");
+      expect(agent.health().error).toBeNull();
+    }
+  });
+
+  it("guard: a malformed control entry does not stop the batch being acknowledged", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown>; ackMessages: (a: unknown[]) => Promise<unknown> } }).client;
+    const acked: unknown[][] = [];
+    client.ackMessages = async (a) => {
+      acked.push(a);
+      return {};
+    };
+    client.getInbox = async () => ({
+      fleet_id: r.fleetId,
+      messages: [{ message_id: "msg_malformed_controls_probe" }],
+      controls: [null]
+    });
+    await expect(agent.pollOnce()).resolves.toBeDefined();
+    expect(acked).toHaveLength(1);
+    expect(acked[0]).toMatchObject([{ message_id: "msg_malformed_controls_probe", status: "received" }]);
+  });
+
+  it("guard: unknown string actions are tolerated and a valid snapshot without a stop still resumes", async () => {
+    const r = await relay();
+    const agent = await connectAgent(r);
+    const client = (agent as unknown as { client: { getInbox: (n: number) => Promise<unknown> } }).client;
+    const real = client.getInbox.bind(client);
+    await control(r, agent.agentId!, "pause");
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+
+    client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls: [{ action: "future-action", reason: "x" }] });
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("connected");
+
+    client.getInbox = async () => ({ fleet_id: r.fleetId, messages: [], controls: [{ action: "future-action" }, { action: "quarantine", reason: "q" }] });
+    await agent.pollOnce();
+    expect(agent.health().status).toBe("paused");
+    client.getInbox = real;
+  });
+});

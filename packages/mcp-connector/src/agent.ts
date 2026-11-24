@@ -62,6 +62,11 @@ export interface SendRequest {
   mentions?: string[];
 }
 
+/** A control entry is usable only if it is an object with a string `action`. */
+function isControlEntry(c: unknown): c is { action: string; reason?: string } {
+  return typeof c === "object" && c !== null && typeof (c as { action?: unknown }).action === "string";
+}
+
 export type AgentStatus = "starting" | "connected" | "paused" | "identity_unavailable" | "error" | "stopped";
 
 /** Inbox batch fields the SDK type does not (yet) declare but the relay sends. */
@@ -251,10 +256,25 @@ export class EkhoConnectorAgent {
     try {
       const batch = (await this.client.getInbox(25)) as InboxBatch;
       this.lastPollAt = new Date().toISOString();
-      for (const control of batch.controls ?? []) {
-        if (control.action === "pause" || control.action === "quarantine") this.paused = true;
-        if (control.action === "resume") this.paused = false;
-        this.log.warn?.(`[ekho-mcp] operator control: ${control.action} (${control.reason})`);
+      // The inbox serves every unexpired control on each poll, and the relay
+      // retires a standing pause/quarantine only on operator resume or heartbeat
+      // auto-unquarantine. So "is a pause/quarantine in this snapshot" IS the
+      // current state; arrival order and resume controls do not matter (#208).
+      // A missing/malformed controls field leaves the state unchanged, and so
+      // does a snapshot with ANY malformed entry (every entry is validated
+      // before the mirror is touched, so the result is order-independent).
+      // Unknown string actions are tolerated.
+      if (Array.isArray(batch.controls) && batch.controls.every(isControlEntry)) {
+        const stopping = batch.controls.find((c) => c.action === "pause" || c.action === "quarantine");
+        const nowPaused = stopping !== undefined;
+        if (nowPaused !== this.paused) {
+          this.log.warn?.(
+            nowPaused
+              ? `[ekho-mcp] operator control: ${stopping.action} (${stopping.reason}); sends paused`
+              : "[ekho-mcp] operator pause/quarantine no longer in the relay snapshot; sends resumed"
+          );
+        }
+        this.paused = nowPaused;
       }
       this.status = this.paused ? "paused" : "connected";
       const fleetId = batch.fleet_id ?? this.credentials.fleetId ?? null;
