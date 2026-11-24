@@ -430,5 +430,82 @@ describe("accessor isolation (#192)", () => {
       expect(reloadServedForgotten("agent_x", "conn-b", "nonce")).toBeUndefined();
       expect(reloadServedBy("agent_x", "conn-b", "key", "k")).toBe(5);
     });
+
+    // #198: the fold of a ledger dropped whole. Each case plants records, never
+    // re-notes the unreadable one, then drops conn-a's ledger with 64 others.
+    const record = (generation: number): unknown => ({ generation, atMs: NOW });
+    const unreadable = (): unknown => throwing({ generation: 3, atMs: NOW }, "generation");
+    /** Drop conn-a's ledger whole; the floor a second connection and another agent's domain then see. */
+    const foldedFloor = async (): Promise<Array<{ key: number | undefined; nonce: number | undefined }>> => {
+      const { noteReloadServed, reloadServedForgotten } = await import("../src/runtime-registry");
+      expect(() => {
+        for (let i = 0; i < 64; i++) noteReloadServed("agent_x", `other-${i}`, 1, { keys: ["k"] }, NOW);
+      }).not.toThrow();
+      expect(ledgers().has("agent_x\u0000conn-a")).toBe(false);
+      return [["agent_x", "conn-b"], ["agent_y", "conn-c"]].map(([agent, conn]) => ({
+        key: reloadServedForgotten(agent, conn, "key"),
+        nonce: reloadServedForgotten(agent, conn, "nonce")
+      }));
+    };
+    const both = (floor: { key: number | undefined; nonce: number | undefined }) => [floor, floor];
+
+    it("fold: an unreadable key record after a readable one is lost evidence for keys; the nonces are still folded", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 50, { keys: ["a"] }, NOW);
+      noteReloadServed("agent_x", "conn-a", 5, { nonces: ["n"] }, NOW);
+      ledger().keys.set("bad", unreadable());
+      expect(await foldedFloor()).toEqual(both({ key: Number.POSITIVE_INFINITY, nonce: 5 }));
+    });
+
+    it("fold: an unreadable key record before a readable one is lost evidence for keys; the nonces are still folded", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 9, { nonces: ["n"] }, NOW);
+      ledger().keys.set("bad", unreadable());
+      ledger().keys.set("a", record(50));
+      expect(await foldedFloor()).toEqual(both({ key: Number.POSITIVE_INFINITY, nonce: 9 }));
+    });
+
+    it("fold: an unreadable nonce record is lost evidence for nonces only; the keys keep their newest epoch", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["a"] }, NOW);
+      noteReloadServed("agent_x", "conn-a", 7, { keys: ["b"] }, NOW);
+      ledger().nonces.set("bad", unreadable());
+      expect(await foldedFloor()).toEqual(both({ key: 7, nonce: Number.POSITIVE_INFINITY }));
+    });
+
+    it("fold: a dropped-evidence mark whose key read throws is lost evidence for keys; the nonces are still folded", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 4, { nonces: ["n"] }, NOW);
+      ledger().forgotten = throwing({ key: 2 }, "key");
+      expect(await foldedFloor()).toEqual(both({ key: Number.POSITIVE_INFINITY, nonce: 4 }));
+    });
+
+    it("fold control: a ledger whose records all read cleanly folds to the newest finite epoch of each kind", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["a"], nonces: ["n1"] }, NOW);
+      noteReloadServed("agent_x", "conn-a", 8, { keys: ["b"] }, NOW);
+      noteReloadServed("agent_x", "conn-a", 6, { nonces: ["n2"] }, NOW);
+      ledger().forgotten = { key: 5, nonce: 11 };
+      expect(await foldedFloor()).toEqual(both({ key: 8, nonce: 11 }));
+    });
+
+    it("fold control: a readable record whose epoch is NaN is skipped beside a finite one", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 4, { keys: ["a"] }, NOW);
+      ledger().keys.set("nan", record(Number.NaN));
+      expect(await foldedFloor()).toEqual(both({ key: 4, nonce: undefined }));
+    });
+
+    it("fold control: both marks are read before either kind's records, keys first", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["a"], nonces: ["n"] }, NOW);
+      const reads: string[] = [];
+      const logged = (name: string, value: unknown) => ({ enumerable: true, get: () => (reads.push(name), value) });
+      const { keys, nonces } = ledger();
+      ledger().forgotten = Object.defineProperties({}, { key: logged("key mark", 2), nonce: logged("nonce mark", 5) });
+      Object.defineProperties(ledger(), { keys: logged("key records", keys), nonces: logged("nonce records", nonces) });
+      expect(await foldedFloor()).toEqual(both({ key: 3, nonce: 5 }));
+      expect(reads).toEqual(["key mark", "nonce mark", "key records", "nonce records"]);
+    });
   });
 });

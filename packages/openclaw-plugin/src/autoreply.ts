@@ -2617,6 +2617,9 @@ export function startAutoReply(opts: {
     const nowMs = Date.now();
     // Served ledger (#111): the newest generation that took ownership of a
     // message or accepted a signature. Without one, only this loop's own sets.
+    // Design note (#198): the ledger is optional in this interface. Leaving a
+    // candidate's own nonce out of the guard further down relies on the ledger
+    // to answer for that signature; connection.ts always wires one.
     const ledger = typeof handoff.servedBy === "function";
     // One ledger read (#192): a loop epoch, undefined when nothing is
     // remembered, or null when the read threw or answered anything else. A
