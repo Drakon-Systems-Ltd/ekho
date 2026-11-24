@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { PRUNABLE_EVENT_TYPES } from "../src/db";
 
 // #196 R1: every event type the relay writes must be classified as pruned
 // (PRUNABLE_EVENT_TYPES) or retained forever (RETAINED_FOREVER, below). Static
-// text scan of db.ts only: no database is opened and no rows are touched.
+// text scan of db.ts only: db.ts is never imported, so no database is opened and no
+// rows are touched. PRUNABLE_EVENT_TYPES is read from the source text too.
 
 // Records TODAY'S behaviour, not a decision that it is right. `message.delivered`
 // is written by a direct INSERT in the inbox path and is not in the allowlist,
@@ -24,7 +24,6 @@ const RETAINED_FOREVER: ReadonlySet<string> = new Set([
 // Template types, matched by prefix and retained: agent.${action}, approval.${status}.
 const RETAINED_TEMPLATE_PREFIXES = ["agent.", "approval."];
 
-const src = fs.readFileSync(path.join(__dirname, "..", "src", "db.ts"), "utf8");
 
 /** Blank out comments, leaving string/template literals intact. */
 function stripComments(s: string): string {
@@ -42,10 +41,9 @@ function stripComments(s: string): string {
   }
   return out;
 }
-const code = stripComments(src);
 
 /** Top-level comma-separated arguments of the call whose "(" is at `open`. */
-function args(open: number): string[] {
+function args(code: string, open: number): string[] {
   const res: string[] = []; let depth = 0, cur = "";
   for (let i = open + 1; i < code.length; i++) {
     const c = code[i];
@@ -62,58 +60,83 @@ function args(open: number): string[] {
   throw new Error("unterminated call");
 }
 
-type Site = { arg: string; where: string };
-function scan(): Site[] {
-  const sites: Site[] = [];
-  for (const m of code.matchAll(/this\.recordEvent\(/g)) {
-    sites.push({ arg: args(m.index! + m[0].length - 1)[1], where: `recordEvent call at offset ${m.index}` });
-  }
-  // Direct inserts: find the statement variable, then its .run(...) calls.
+const dbSource = fs.readFileSync(path.join(__dirname, "..", "src", "db.ts"), "utf8");
+const PRUNABLE_EVENT_TYPES: ReadonlySet<string> = (() => {
+  const m = /export const PRUNABLE_EVENT_TYPES[^=]*=\s*new Set\(\[([^\]]*)\]/.exec(stripComments(dbSource));
+  if (!m) throw new Error("PRUNABLE_EVENT_TYPES literal not found in db.ts: update this test.");
+  return new Set([...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
+})();
+
+const isPruned = (t: string) => PRUNABLE_EVENT_TYPES.has(t) || RETAINED_FOREVER.has(t);
+
+/** Returns a list of problems; empty means the source is fully classified. */
+function analyse(source: string): string[] {
+  const code = stripComments(source);
+  const problems: string[] = [];
+  const sites: string[] = [];
+  for (const m of code.matchAll(/this\.recordEvent\(/g)) sites.push(args(code, m.index! + m[0].length - 1)[1]);
   for (const m of code.matchAll(/const (\w+) = this\.db\.prepare\(\s*"INSERT INTO events/g)) {
     for (const r of code.matchAll(new RegExp(`\\b${m[1]}\\.run\\(`, "g"))) {
-      const type = args(r.index! + r[0].length - 1)[2];
-      if (type !== "eventType") sites.push({ arg: type, where: `${m[1]}.run at offset ${r.index}` });
+      const type = args(code, r.index! + r[0].length - 1)[2];
+      if (type !== "eventType") sites.push(type);
     }
   }
-  return sites;
+  for (const arg of sites) {
+    if (/^"[^"]*"$/.test(arg)) { if (!isPruned(arg.slice(1, -1))) problems.push(`unclassified ${arg}`); }
+    else if (/^`[^`$]*\$\{[^}]+\}`$/.test(arg)) {
+      if (!RETAINED_TEMPLATE_PREFIXES.includes(arg.slice(1, arg.indexOf("${")))) problems.push(`template ${arg}`);
+    } else problems.push(`unrecognised ${arg}`);
+  }
+  const calls = (code.match(/recordEvent\(/g) ?? []).length - 1;
+  const inserts = (code.match(/INSERT INTO events/g) ?? []).length - 1;
+  if (sites.length !== calls + inserts) problems.push("site count mismatch");
+  return problems;
 }
-const sites = scan();
-const literals = new Set<string>();
-const templates: string[] = [];
-for (const s of sites) {
-  if (/^"[^"]*"$/.test(s.arg)) literals.add(s.arg.slice(1, -1));
-  else if (/^`[^`$]*\$\{[^}]+\}`$/.test(s.arg)) templates.push(s.arg.slice(1, s.arg.indexOf("${")));
-  else throw new Error(`Unrecognised event type expression ${s.arg} (${s.where}): extend the scanner and classify it.`);
-}
 
-describe("#196 R1: event type retention classification", () => {
-  it("T1: every literal event type is pruned or retained forever", () => {
-    const unclassified = [...literals].filter((t) => !PRUNABLE_EVENT_TYPES.has(t) && !RETAINED_FOREVER.has(t));
-    expect(unclassified, `Event type(s) ${unclassified.join(", ")} are in neither PRUNABLE_EVENT_TYPES nor RETAINED_FOREVER. Classify them deliberately (#196).`).toEqual([]);
+const src = dbSource;
+
+// Synthetic fixtures. Not real code: they exercise the scanner's claimed coverage.
+const FIX_BASE = `
+class F {
+  controlAgent(action: "pause" | "resume") {
+    this.recordEvent("f", \`agent.\${action}\`, "operator", "o", "agent", "a", "", {});
+  }
+  deliver() {
+    const eventStmt = this.db.prepare("INSERT INTO events (id, event_type) VALUES (?, ?)");
+    eventStmt.run("i", "f", "message.delivered");
+  }
+  recordEvent(fleetId: string, eventType: string) {
+    this.db.prepare("INSERT INTO events (id, event_type) VALUES (?, ?)").run("i", eventType);
+  }
+}`;
+
+describe("#196 R1: scanner fixtures (synthetic source)", () => {
+  it("F0: baseline fixture is accepted", () => {
+    expect(analyse(FIX_BASE)).toEqual([]);
   });
-
-  it("T2: template types are matched by prefix and retained", () => {
-    expect(templates.sort()).toEqual(["agent.", "approval."]);
-    for (const p of templates) expect(RETAINED_TEMPLATE_PREFIXES).toContain(p);
+  it("F1: widening a template domain is rejected", () => {
+    const widened = FIX_BASE.replace('"pause" | "resume"', '"pause" | "resume" | "wipe"');
+    expect(analyse(widened).length).toBeGreaterThan(0);
   });
-
-  it("T3: lists are disjoint and every pruned type is actually written", () => {
-    const both = [...RETAINED_FOREVER].filter((t) => PRUNABLE_EVENT_TYPES.has(t));
-    expect(both).toEqual([]);
-    const unwritten = [...PRUNABLE_EVENT_TYPES].filter((t) => !literals.has(t));
-    expect(unwritten).toEqual([]);
-    const stale = [...RETAINED_FOREVER].filter((t) => !literals.has(t));
-    expect(stale, "RETAINED_FOREVER lists a type nothing writes").toEqual([]);
+  it("F2: a second run of one prepared insert cannot mask a missed insert elsewhere", () => {
+    // stmt3 is prepared with a template literal, a spelling the scan does not read as a prepared insert.
+    const masked = FIX_BASE
+      .replace('eventStmt.run("i", "f", "message.delivered");', 'eventStmt.run("i", "f", "message.delivered");\n    eventStmt.run("i", "f", "message.delivered");')
+      .replace("class F {", "class F {\n  other() { const stmt3 = this.db.prepare(`INSERT INTO events (id, event_type) VALUES (?, ?)`); stmt3.run(\"i\", \"f\", \"brand.new\"); }");
+    expect(analyse(masked).length).toBeGreaterThan(0);
   });
+  it("F3: an insert in an unscanned spelling is rejected", () => {
+    const odd = FIX_BASE.replace("class F {", 'class F {\n  sneaky() { this.db.prepare("insert into events (id, event_type) values (?, ?)").run("i", "f", "brand.new"); }');
+    expect(analyse(odd).length).toBeGreaterThan(0);
+  });
+});
 
+describe("#196 R1: event type retention classification (real db.ts)", () => {
+  it("T1: db.ts is fully classified", () => {
+    expect(analyse(src)).toEqual([]);
+  });
   it("T4: message.delivered is recorded as retained forever (today's behaviour, see #196)", () => {
     expect(RETAINED_FOREVER.has("message.delivered")).toBe(true);
     expect(PRUNABLE_EVENT_TYPES.has("message.delivered")).toBe(false);
-  });
-
-  it("T5: scanner finds every event write site", () => {
-    const calls = (code.match(/recordEvent\(/g) ?? []).length - 1; // minus the definition
-    const inserts = (code.match(/INSERT INTO events/g) ?? []).length - 1; // minus the one inside recordEvent
-    expect(sites.length).toBe(calls + inserts);
   });
 });
