@@ -12,13 +12,21 @@ Refs #196. Based on `origin/main` at `6c852b1`. Marks: **[read]** = confirmed by
 - **[read]** Index: `idx_events_type_created_at` on `events(event_type, created_at)` (`schema.ts` 260), which fits the `event_type IN (...) AND created_at < ?` predicate.
 - **[read]** No `VACUUM` runs (`db.ts` batching comment): deleted rows free pages for reuse but the file does not shrink.
 
-## 2. Per-tick drain argument
+## 2. What the reported deletion counts show, and what they do not
 
 The issue (#196) reports sweep ticks deleting 12 to 37 rows and about 914k events.
 
-- **[read]** A tick that deletes fewer than 5,000 rows in its first batch has drained everything eligible. A backlog would show 50,000 per tick.
-- **[arith]** 12 rows per tick x 2,880 ticks per day (30 s) is about 34,560 a day; x 30 days is about 1.04 million. The issue's 914k is the same order.
-- **[infer]** So 914k reads as the designed bound (30 days of prunable inflow), not a leak, and a working sweep cannot shrink it without a policy change. This relies on two numbers quoted in the issue; the real tick and retention settings on that relay are not known.
+- **[read]** 50,000 per table is the **cap** of one tick, not the signature of a backlog. A tick can start with 6,000 eligible rows and drain them in two batches (5,000, then 1,000). The loop stops after the first batch that deletes fewer than 5,000.
+- **[read]** What a low count does show: little was eligible at that sweep. A tick that deletes 12 rows found about 12 rows older than the cutoff. It does not say how fast rows arrive over a day, or how many rows are retained.
+- **[infer]** So the counts support only "no large eligible backlog at those sweeps". They do not show that the table is bounded or that it cannot grow without limit.
+
+### Scenario (assumption, not a finding)
+
+Assumptions: stable prunable inflow of about 12 rows per 30 s tick, default retention (30 days), default tick (30 s), sweep keeping up.
+
+- **[arith]** 12 x 2,880 ticks per day = 34,560 prunable rows a day; x 30 days = 1,036,800 rows. Under these assumptions the prunable part would settle near 1.04 million.
+- **[infer]** The reported 914k is the same order of magnitude. That is consistent with the scenario but is not evidence for it: the 914k includes an unknown share of retained types (section 3, notably `message.delivered`), the real inflow rate is unknown, and 12 to 37 rows per tick is a handful of samples, not a measured steady state.
+- **[infer]** Two different questions follow. Today's eligible backlog looks small (low counts). Longer-term growth is a separate question: the retained-forever types have no upper bound at all, and `message.delivered` grows with message volume (section 4). Neither can be settled without the real type mix and age profile (section 6).
 
 ## 3. Every event type the relay writes
 
@@ -42,8 +50,8 @@ Written through `recordEvent` (`db.ts` 4828) or the one direct `INSERT INTO even
 | `message.dead_lettered` | retained (named deliberate) | 4368 | S per dead letter |
 | `attachment.uploaded` | retained | 4563 | per upload |
 | `approval.requested`, `approval.result` | retained | 3072, 3094 | per approval |
-| `approval.${status}` (template) | retained | 3123 | O |
-| `agent.${action}` (template) | retained | 3157 | O |
+| `approval.approved`, `approval.rejected` (from `approval.${status}`) | retained | 3123 | O |
+| `agent.pause`, `agent.resume`, `agent.quarantine` (from `agent.${action}`) | retained | 3157 | O |
 | `agent.trust_changed`, `agent.peer_autoreply_changed` | retained | 3176, 3206 | O, rare |
 | `agent.auto_quarantined`, `agent.auto_unquarantined` | retained | 4482, 4512, 3037 | S, rare |
 | `room.created`, `room.deleted` | retained | 1993, 2113 | O, rare |
@@ -51,7 +59,14 @@ Written through `recordEvent` (`db.ts` 4828) or the one direct `INSERT INTO even
 | `policy.created`, `policy.updated`, `policy.deleted` | retained | 4258, 4283, 4290 | O, rare |
 | `operator_key.registered`, `.endorsed`, `.revoked`, `.recovery_grant_armed`, `.recovery_grant_cancelled`, `.recovery_grant_consumed`, `agent_key.endorsed` | retained | 771, 863, 1070, 601, 622, 876, 1180 | O, rare |
 
-The classification test (`packages/relay/tests/event-retention-classification.test.ts`) pins this table: a type in neither list fails.
+The two template types are resolved to concrete names **[read]**: `approval.${status}` is built from `status: "approved" | "rejected"` and `agent.${action}` from `action: "pause" | "resume" | "quarantine"`, both finite unions in the method signatures.
+
+The classification test (`packages/relay/tests/event-retention-classification.test.ts`) pins this table. What it does and does not guarantee, for the current forms in `packages/relay/src`:
+
+- It reads `db.ts` as text (it does not import it or open a database). A literal event type in neither `PRUNABLE_EVENT_TYPES` nor the test's retained list fails.
+- It resolves each template's union and requires an exact match with the five concrete names above. Widening or narrowing either union fails until the new name is classified and the expected list is updated.
+- It treats every `INSERT INTO events` spelling (any case, any `OR ...` form) as a statement site and verifies each one separately: the inline one in `recordEvent`, and the prepared one in the inbox path with each of its executions. A spelling it cannot read, an execution with a non-literal type, a prepared insert never run, any `recordEvent` reference other than `this.recordEvent(...)`, or any event write in another `src` file fails.
+- It does not cover writes made through a new helper whose type argument is built some other way (that fails as unrecognised and needs the scanner extended), nor events written by anything outside `packages/relay/src`. Synthetic fixtures F1 to F3 passed under the earlier scan and fail it now; four temporary mutations of `db.ts` (widened `action`, widened `status`, a second insert spelling, a masked duplicate insert) each made the fixed test fail and were reverted. Evidence is in the PR comment.
 
 ## 4. Finding: `message.delivered` is never pruned
 
