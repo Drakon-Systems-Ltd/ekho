@@ -495,5 +495,17 @@ describe("accessor isolation (#192)", () => {
       ledger().keys.set("nan", record(Number.NaN));
       expect(await foldedFloor()).toEqual(both({ key: 4, nonce: undefined }));
     });
+
+    it("fold control: both marks are read before either kind's records, keys first", async () => {
+      const { noteReloadServed } = await import("../src/runtime-registry");
+      noteReloadServed("agent_x", "conn-a", 3, { keys: ["a"], nonces: ["n"] }, NOW);
+      const reads: string[] = [];
+      const logged = (name: string, value: unknown) => ({ enumerable: true, get: () => (reads.push(name), value) });
+      const { keys, nonces } = ledger();
+      ledger().forgotten = Object.defineProperties({}, { key: logged("key mark", 2), nonce: logged("nonce mark", 5) });
+      Object.defineProperties(ledger(), { keys: logged("key records", keys), nonces: logged("nonce records", nonces) });
+      expect(await foldedFloor()).toEqual(both({ key: 3, nonce: 5 }));
+      expect(reads).toEqual(["key mark", "nonce mark", "key records", "nonce records"]);
+    });
   });
 });
