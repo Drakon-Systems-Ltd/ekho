@@ -186,38 +186,77 @@ const src = dbSource;
 
 // Synthetic fixtures. Not real code: they exercise the scanner's claimed coverage.
 const FIX_DOMAINS = { "agent.${action}": ["agent.pause", "agent.resume"] };
+const SQL3 = "INSERT INTO events (id, fleet_id, event_type) VALUES (?, ?, ?)";
 const FIX_BASE = `
 class F {
   controlAgent(action: "pause" | "resume") {
     this.recordEvent("f", \`agent.\${action}\`, "operator", "o", "agent", "a", "", {});
   }
   deliver() {
-    const eventStmt = this.db.prepare("INSERT INTO events (id, event_type) VALUES (?, ?)");
+    const eventStmt = this.db.prepare("${SQL3}");
     eventStmt.run("i", "f", "message.delivered");
   }
   recordEvent(fleetId: string, eventType: string) {
-    this.db.prepare("INSERT INTO events (id, event_type) VALUES (?, ?)").run("i", "f", eventType);
+    this.db.prepare("${SQL3}").run("i", fleetId, eventType);
   }
 }`;
+const bad = (src: string) => analyse(src, FIX_DOMAINS).problems.length > 0;
 
 describe("#196 R1: scanner fixtures (synthetic source)", () => {
   it("F0: baseline fixture is accepted", () => {
     expect(analyse(FIX_BASE, FIX_DOMAINS).problems).toEqual([]);
   });
   it("F1: widening a template domain is rejected", () => {
-    const widened = FIX_BASE.replace('"pause" | "resume"', '"pause" | "resume" | "wipe"');
-    expect(analyse(widened, FIX_DOMAINS).problems.length).toBeGreaterThan(0);
+    expect(bad(FIX_BASE.replace('"pause" | "resume"', '"pause" | "resume" | "wipe"'))).toBe(true);
   });
   it("F2: a second run of one prepared insert cannot mask a missed insert elsewhere", () => {
     // stmt3 is prepared with a template literal, a spelling the scan does not read as a prepared insert.
     const masked = FIX_BASE
       .replace('eventStmt.run("i", "f", "message.delivered");', 'eventStmt.run("i", "f", "message.delivered");\n    eventStmt.run("i", "f", "message.delivered");')
-      .replace("class F {", "class F {\n  other() { const stmt3 = this.db.prepare(`INSERT INTO events (id, event_type) VALUES (?, ?)`); stmt3.run(\"i\", \"f\", \"brand.new\"); }");
-    expect(analyse(masked, FIX_DOMAINS).problems.length).toBeGreaterThan(0);
+      .replace("class F {", "class F {\n  other() { const stmt3 = this.db.prepare(`" + SQL3 + "`); stmt3.run(\"i\", \"f\", \"brand.new\"); }");
+    expect(bad(masked)).toBe(true);
   });
   it("F3: an insert in an unscanned spelling is rejected", () => {
-    const odd = FIX_BASE.replace("class F {", 'class F {\n  sneaky() { this.db.prepare("insert into events (id, event_type) values (?, ?)").run("i", "f", "brand.new"); }');
-    expect(analyse(odd, FIX_DOMAINS).problems.length).toBeGreaterThan(0);
+    expect(bad(FIX_BASE.replace("class F {", 'class F {\n  sneaky() { this.db.prepare("insert into events (id, fleet_id, event_type) values (?, ?, ?)").run("i", "f", "brand.new"); }'))).toBe(true);
+  });
+
+  // Item A: the template parameter's WHOLE type, from the calling method's own signature.
+  it.each([
+    ["A1: trailing non-literal member", 'action: "pause" | "resume" | string'],
+    ["A2: leading non-literal member", 'action: string | "pause" | "resume"'],
+    ["A3: optional parameter", 'action?: "pause" | "resume"'],
+    ["A4: default value", 'action: "pause" | "resume" = "pause"'],
+    ["A5: type alias", "action: ActionName"],
+  ])("%s is rejected", (_n, param) => {
+    expect(bad(FIX_BASE.replace('action: "pause" | "resume"', param))).toBe(true);
+  });
+  it("A6: a literal union of the same name in an earlier unrelated method does not count", () => {
+    const s = FIX_BASE.replace("class F {", 'class F {\n  unrelated(action: "pause" | "resume") { return 1; }').replace('controlAgent(action: "pause" | "resume")', "controlAgent(action: string)");
+    expect(bad(s)).toBe(true);
+  });
+  it("A7: a name that is not a parameter of the calling method is rejected", () => {
+    expect(bad(FIX_BASE.replace('controlAgent(action: "pause" | "resume")', 'controlAgent(other: "pause" | "resume")'))).toBe(true);
+  });
+
+  // Item B: SQL column list, VALUES list and .run arguments must agree.
+  it("B1: event_type moved in the column list with the argument count unchanged is rejected", () => {
+    expect(bad(FIX_BASE.replaceAll("(id, fleet_id, event_type)", "(id, event_type, fleet_id)"))).toBe(true);
+  });
+  it.each([
+    ["B2: placeholder count differs from column count", (s: string) => s.replace("VALUES (?, ?, ?)", "VALUES (?, ?)")],
+    ["B3: .run argument count differs", (s: string) => s.replace('"message.delivered")', '"message.delivered", "extra")')],
+    ["B4: no column list", (s: string) => s.replace("(id, fleet_id, event_type) VALUES", "VALUES")],
+    ["B5: event_type listed twice", (s: string) => s.replace("(id, fleet_id, event_type)", "(id, event_type, event_type)")],
+    ["B6: a value that is not a bare placeholder", (s: string) => s.replace("VALUES (?, ?, ?)", "VALUES (?, ?, 'x')")],
+  ])("%s is rejected (prepared insert)", (_n, edit) => {
+    expect(bad(edit(FIX_BASE))).toBe(true);
+  });
+  it("B7: the inline insert must bind recordEvent's second parameter", () => {
+    expect(bad(FIX_BASE.replace("recordEvent(fleetId: string, eventType: string)", "recordEvent(fleetId: string, kind: string, eventType: string)"))).toBe(true);
+  });
+  it("B8: a .run on the same variable name in a later method is not attributed to this site", () => {
+    const later = FIX_BASE.replace(/\}$/, '  later() { eventStmt.run("i", "f", "brand.new"); }\n}');
+    expect(analyse(later, FIX_DOMAINS).problems).toEqual([]);
   });
 });
 
