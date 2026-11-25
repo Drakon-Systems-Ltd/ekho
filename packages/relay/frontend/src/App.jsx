@@ -29,6 +29,7 @@ import {
 } from "./components";
 import SecurityScreen from "./SecurityScreen.jsx";
 import { budgetInputValue, budgetLabel, parseBudgetInput, savedBudget } from "./budget.js";
+import { inboxStatus } from "./inboxStatus.js";
 import { AgentVersion, BuildLine, StaleBuildBanner, useRelayBuild } from "./versionUi.jsx";
 // The console's entire state/logic layer lives in consoleState.js (useConsoleState),
 // shared with the Wire renderer. This file is the classic render layer only.
@@ -1434,6 +1435,7 @@ function HealthTab({ agents, initialized }) {
         const turnHealth = a.metrics?.turn_health;
         const errs = Number(a.metrics?.model_errors_1h ?? 0) || 0;
         const active = a.active_conversations?.length || 0;
+        const inbox = inboxStatus(a, Date.now());
         return (
           <article className={`rcard health-row health-row--${tone}`} key={a.id}>
             <div className="access-row__head">
@@ -1463,6 +1465,12 @@ function HealthTab({ agents, initialized }) {
               <span className="health-stat">{active} active</span>
               <span className="muted">beat {relativeTime(a.last_heartbeat_at)}</span>
             </div>
+            {inbox ? (
+              <div className="health-row__stats">
+                <span title={inbox.title || undefined}><Badge tone={inbox.tone === "neutral" ? "" : inbox.tone}>{inbox.label}</Badge></span>
+                {inbox.detail ? <span className="muted">{inbox.detail}</span> : null}
+              </div>
+            ) : null}
             <div className="health-row__flags">
               {turnHealth && turnHealth !== "unknown" ? (
                 <Badge tone={turnHealth === "down" ? "danger" : turnHealth === "degraded" ? "warn" : "ok"}>
