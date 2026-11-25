@@ -2343,8 +2343,9 @@ export function startAutoReply(opts: {
   // the verification rejects above: acked work always leaves a record.
   onDeadLetter?: (records: DeadLetterRecord[]) => void;
   // #111 S2b-1: told (message id, coarse reason) when a message is dead-lettered
-  // or withheld, after its disk record. Nothing wires it yet: absent, it is never
-  // called and nothing is posted. Synchronous; a throw is swallowed.
+  // or withheld, only after its disk record was written: a throwing dead-letter sink
+  // means no call. Nothing wires it yet: absent, it is never called and nothing is
+  // posted. Synchronous; a throw is swallowed and does not stop the rest of a batch.
   onDisposition?: (messageId: string, reason: DeadLetterReason) => void;
   // #5: peer wake strictness — see RequireSignedMode. Default "warn".
   requireSigned?: RequireSignedMode;
@@ -2429,6 +2430,7 @@ export function startAutoReply(opts: {
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${String(err)}`);
+      return; // no record was written: no disposition (#111 S2b-1)
     }
     for (const i of items) noteDisposition(i.message, i.reason);
   };
@@ -2493,6 +2495,7 @@ export function startAutoReply(opts: {
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
+      return; // no record was written: no disposition (#111 S2b-1)
     }
     for (const m of messages) noteDisposition(m, reason);
   };

@@ -244,18 +244,60 @@ describe("startAutoReply onDisposition", () => {
     expect(seen).toEqual([["m0", "deferred_overflow_per_conv"]]); // nothing added by the stop
   });
 
-  it("L6: a callback that throws neither breaks the tick, the record, nor stop()", async () => {
-    const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
-    let invoked = 0;
-    const { records, stop } = run(heldClient(msgs), {
-      onDisposition: () => { invoked++; throw new Error("callback failure"); }
+  it("L6: a callback that throws on the first of a batch does not stop the second, the records, or stop()", async () => {
+    const a = entry(peer(10, "c10"), { owner: "own" });
+    const b = entry(peer(11, "c11"), { owner: "own" });
+    const handoff = handoffWith([], [{ entry: a, why: "overflow" }, { entry: b, why: "overflow" }]);
+    const calls: string[] = [];
+    const { seen, records, stop } = run(heldClient([]), {
+      reloadHandoff: handoff,
+      cacheContext: () => "own.gen1",
+      onDisposition: (id: string, reason: string) => {
+        calls.push(id);
+        if (id === "m10") throw new Error("callback failure");
+        seen.push([id, reason]);
+      }
     });
     try {
-      await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
+      await waitFor(() => records.length >= 2);
     } finally {
       await expect(stop()).resolves.toBeUndefined();
     }
-    expect(invoked).toBe(1);
-    expect(records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON)).toBe(true);
+    expect(calls).toEqual(["m10", "m11"]);
+    expect(seen).toEqual([["m11", "handoff_unclaimed"]]);
+    expect(records).toHaveLength(2);
+  });
+
+  it("L7: a throwing dead-letter sink means no disposition on the deferred path, and the tick survives", async () => {
+    const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
+    let attempts = 0;
+    const { seen, stop } = run(heldClient(msgs), {
+      onDeadLetter: () => { attempts++; throw new Error("disk full"); }
+    });
+    try {
+      await waitFor(() => attempts > 0);
+      await new Promise((r) => setTimeout(r, 40));
+    } finally {
+      await expect(stop()).resolves.toBeUndefined();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("L8: a throwing dead-letter sink means no disposition on the hand-off path", async () => {
+    const mine = entry(peer(12, "c12"), { owner: "own" });
+    const handoff = handoffWith([], [{ entry: mine, why: "overflow" }]);
+    let attempts = 0;
+    const { seen, stop } = run(heldClient([]), {
+      reloadHandoff: handoff,
+      cacheContext: () => "own.gen1",
+      onDeadLetter: () => { attempts++; throw new Error("disk full"); }
+    });
+    try {
+      await waitFor(() => attempts > 0);
+      await new Promise((r) => setTimeout(r, 40));
+    } finally {
+      await expect(stop()).resolves.toBeUndefined();
+    }
+    expect(seen).toEqual([]);
   });
 });
