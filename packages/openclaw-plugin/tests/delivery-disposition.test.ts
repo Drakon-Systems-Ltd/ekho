@@ -111,14 +111,17 @@ async function waitFor(pred: () => boolean, timeoutMs = 4000): Promise<void> {
 const quiet = { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} };
 
 /** A client whose floor is always held, serving `first` once and then nothing. */
-function heldClient(first: unknown[], peerAutoreply = true) {
+function heldClient(first: unknown[], peerAutoreply = true, ack: (n: number) => Promise<void> = async () => {}, second: unknown[] = []) {
   let served = 0;
+  let acks = 0;
   return {
-    getInbox: async () =>
-      served++ === 0
-        ? { messages: first, operator_trusted: false, peer_autoreply: peerAutoreply, roster: [] }
-        : { messages: [] },
-    ackMessages: async () => {},
+    getInbox: async () => {
+      const n = served++;
+      if (n === 0) return { messages: first, operator_trusted: false, peer_autoreply: peerAutoreply, roster: [] };
+      if (n === 1 && second.length > 0) return { messages: second, operator_trusted: false, peer_autoreply: peerAutoreply, roster: [] };
+      return { messages: [] };
+    },
+    ackMessages: async () => ack(++acks),
     acquireFloor: async () => ({ granted: false, holder_agent_id: "agent_holder" }),
     releaseFloor: async () => {},
     raiseNotice: async () => {}
@@ -164,7 +167,7 @@ function run(client: any, extra: Record<string, unknown>) {
     pollIntervalMs: 5,
     peerEnabled: true,
     log: quiet as any,
-    onDeadLetter: (r: any) => records.push(...r),
+    onDeadLetter: (r: any) => { records.push(...r); return true; },
     onDisposition: (id: string, reason: string) => { seen.push([id, reason]); },
     ...extra
   } as any);
@@ -174,7 +177,7 @@ function run(client: any, extra: Record<string, unknown>) {
 const hourAhead = () => new Date(Date.now() + 3_600_000).toISOString();
 
 describe("startAutoReply onDisposition", () => {
-  it("L1: a per-conversation stash overflow reports one call per dropped message", async () => {
+  it("C1: sink true and ack resolved: a per-conversation overflow reports one call per dropped message", async () => {
     const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
     const { seen, records, stop } = run(heldClient(msgs), {});
     try {
@@ -185,7 +188,7 @@ describe("startAutoReply onDisposition", () => {
     expect(seen).toEqual([["m0", "deferred_overflow_per_conv"]]);
   });
 
-  it("L2: an expired candidate reports deadline_passed, a policy withhold reports withheld_by_recipient, with no precise text", async () => {
+  it("C6a: an expired candidate and a policy withhold are recorded but report nothing (no ack evidence for a hand-off message)", async () => {
     const late = peer(1, "c1", { deadline_at: new Date(Date.now() - 1000).toISOString() });
     const policy = peer(2, "c2", { deadline_at: hourAhead() });
     const handoff = handoffWith([entry(late), entry(policy)]);
@@ -199,11 +202,11 @@ describe("startAutoReply onDisposition", () => {
     } finally {
       await stop();
     }
-    expect(seen).toEqual([["m1", "deadline_passed"], ["m2", "withheld_by_recipient"]]);
-    expect(JSON.stringify(seen)).not.toMatch(/not_admissible|verification|reload_|latch/);
+    expect(records.length).toBeGreaterThanOrEqual(2);
+    expect(seen).toEqual([]);
   });
 
-  it("L3: a same-owner bounds drop reports handoff_unclaimed; another owner's reports nothing", async () => {
+  it("C6b: a same-owner bounds drop is recorded but reports nothing", async () => {
     const mine = entry(peer(3, "c3"), { owner: "own" });
     const theirs = entry(peer(4, "c4"), { owner: "someone-else" });
     const handoff = handoffWith([], [{ entry: mine, why: "overflow" }, { entry: theirs, why: "unclaimed_too_long" }]);
@@ -213,7 +216,7 @@ describe("startAutoReply onDisposition", () => {
     } finally {
       await stop();
     }
-    expect(seen).toEqual([["m3", "handoff_unclaimed"]]);
+    expect(seen).toEqual([]);
   });
 
   it("L4: an already-served duplicate and a re-admitted message report nothing", async () => {
@@ -230,8 +233,8 @@ describe("startAutoReply onDisposition", () => {
     } finally {
       await stop();
     }
-    // Only the expired control reports: the duplicate and the re-admission are silent.
-    expect(seen).toEqual([["m8", "deadline_passed"]]);
+    // The duplicate, the re-admission and the expired control are all silent now.
+    expect(seen).toEqual([]);
   });
 
   it("L5: stop() with a held stash and a hand-off wired reports nothing (an overflow control proves the seam is live)", async () => {
@@ -244,31 +247,27 @@ describe("startAutoReply onDisposition", () => {
     expect(seen).toEqual([["m0", "deferred_overflow_per_conv"]]); // nothing added by the stop
   });
 
-  it("L6: a callback that throws on the first of a batch does not stop the second, the records, or stop()", async () => {
-    const a = entry(peer(10, "c10"), { owner: "own" });
-    const b = entry(peer(11, "c11"), { owner: "own" });
-    const handoff = handoffWith([], [{ entry: a, why: "overflow" }, { entry: b, why: "overflow" }]);
+  it("C8: a callback that throws on the first of a batch does not stop the second, the records, or stop()", async () => {
+    const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 2 }, (_, i) => peer(i, "c-same"));
     const calls: string[] = [];
-    const { seen, records, stop } = run(heldClient([]), {
-      reloadHandoff: handoff,
-      cacheContext: () => "own.gen1",
+    const { seen, records, stop } = run(heldClient(msgs), {
       onDisposition: (id: string, reason: string) => {
         calls.push(id);
-        if (id === "m10") throw new Error("callback failure");
+        if (id === "m0") throw new Error("callback failure");
         seen.push([id, reason]);
       }
     });
     try {
-      await waitFor(() => records.length >= 2);
+      await waitFor(() => calls.length >= 2);
     } finally {
       await expect(stop()).resolves.toBeUndefined();
     }
-    expect(calls).toEqual(["m10", "m11"]);
-    expect(seen).toEqual([["m11", "handoff_unclaimed"]]);
-    expect(records).toHaveLength(2);
+    expect(calls).toEqual(["m0", "m1"]);
+    expect(seen).toEqual([["m1", "deferred_overflow_per_conv"]]);
+    expect(records.filter((r) => r.reason === DEFERRED_OVERFLOW_REASON)).toHaveLength(2);
   });
 
-  it("L7: a throwing dead-letter sink means no disposition on the deferred path, and the tick survives", async () => {
+  it("C5a: a throwing dead-letter sink means no disposition on the deferred path, and the tick survives", async () => {
     const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
     let attempts = 0;
     const { seen, stop } = run(heldClient(msgs), {
@@ -283,7 +282,7 @@ describe("startAutoReply onDisposition", () => {
     expect(seen).toEqual([]);
   });
 
-  it("L8: a throwing dead-letter sink means no disposition on the hand-off path", async () => {
+  it("C5b: a throwing dead-letter sink means no disposition on the hand-off path", async () => {
     const mine = entry(peer(12, "c12"), { owner: "own" });
     const handoff = handoffWith([], [{ entry: mine, why: "overflow" }]);
     let attempts = 0;
@@ -299,5 +298,77 @@ describe("startAutoReply onDisposition", () => {
       await expect(stop()).resolves.toBeUndefined();
     }
     expect(seen).toEqual([]);
+  });
+  it("C2: the same drop with the ack REJECTED reaches the sink but reports nothing", async () => {
+    const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
+    const { seen, records, stop } = run(heldClient(msgs, true, async () => { throw new Error("ack down"); }), {});
+    try {
+      await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
+      await new Promise((r) => setTimeout(r, 40));
+    } finally {
+      await stop();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("C3: ack rejected in tick 1 and resolved for the same id in tick 2: no after-the-fact call for the tick 1 drop", async () => {
+    const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
+    const client = heldClient(msgs, true, async (n) => { if (n === 1) throw new Error("ack down"); }, [peer(0, "c-same")]);
+    const { seen, records, stop } = run(client, {});
+    try {
+      await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
+      await new Promise((r) => setTimeout(r, 80));
+    } finally {
+      await stop();
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("C4a: a sink returning undefined or false means no disposition on the deferred path", async () => {
+    for (const ret of [undefined, false]) {
+      const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
+      let attempts = 0;
+      const { seen, stop } = run(heldClient(msgs), { onDeadLetter: () => { attempts++; return ret; } });
+      try {
+        await waitFor(() => attempts > 0);
+        await new Promise((r) => setTimeout(r, 40));
+      } finally {
+        await stop();
+      }
+      expect(seen, String(ret)).toEqual([]);
+    }
+  });
+
+  it("C4b: a sink returning undefined or false means no disposition on the hand-off path", async () => {
+    for (const ret of [undefined, false]) {
+      const mine = entry(peer(12, "c12"), { owner: "own" });
+      const handoff = handoffWith([], [{ entry: mine, why: "overflow" }]);
+      let attempts = 0;
+      const { seen, stop } = run(heldClient([]), {
+        reloadHandoff: handoff,
+        cacheContext: () => "own.gen1",
+        onDeadLetter: () => { attempts++; return ret; }
+      });
+      try {
+        await waitFor(() => attempts > 0);
+        await new Promise((r) => setTimeout(r, 40));
+      } finally {
+        await stop();
+      }
+      expect(seen, String(ret)).toEqual([]);
+    }
+  });
+
+  it("C7: ids beyond the 2,000 bound evict the oldest: a drop for an evicted id reports nothing", async () => {
+    const head = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
+    const filler = Array.from({ length: 2100 }, (_, i) => peer(1000 + i, `c-f${i}`));
+    const { seen, records, stop } = run(heldClient([...head, ...filler]), {});
+    try {
+      await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
+      await new Promise((r) => setTimeout(r, 40));
+    } finally {
+      await stop();
+    }
+    expect(seen.some(([id]) => id === "m0")).toBe(false);
   });
 });
