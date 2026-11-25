@@ -2341,11 +2341,12 @@ export function startAutoReply(opts: {
   // Sink for deferred stashes that will never get their ordinary turn — cap
   // evictions and turns that failed to spawn (#78). Same dead-letter file as
   // the verification rejects above: acked work always leaves a record.
-  onDeadLetter?: (records: DeadLetterRecord[]) => void;
-  // #111 S2b-1: told (message id, coarse reason) when a message is dead-lettered
-  // or withheld, only after its disk record was written: a throwing dead-letter sink
-  // means no call. Nothing wires it yet: absent, it is never called and nothing is
-  // posted. Synchronous; a throw is swallowed and does not stop the rest of a batch.
+  // Return exactly `true` only once the record is on disk; void, false or a throw
+  // means no onDisposition (#111 S2b-1c).
+  onDeadLetter?: (records: DeadLetterRecord[]) => boolean | void;
+  // #111 S2b-1c: told (message id, coarse reason) only when the dead-letter sink
+  // returned `true` AND this loop saw the ack for that id resolve. Nothing wires it
+  // yet: absent, it is never called and nothing is posted. Synchronous; a throw is swallowed and does not stop the rest of a batch.
   onDisposition?: (messageId: string, reason: DeadLetterReason) => void;
   // #5: peer wake strictness — see RequireSignedMode. Default "warn".
   requireSigned?: RequireSignedMode;
@@ -2405,8 +2406,17 @@ export function startAutoReply(opts: {
   };
 
   // #111 S2b-1: one coarse disposition per message. Never awaited, never throws.
+  const ackedIds = new Set<string>(); // ids whose ack RESOLVED in this loop, oldest first, max 2000
+  const noteAcked = (ids: Array<{ message_id: string }>): void => {
+    for (const { message_id } of ids) {
+      ackedIds.delete(message_id);
+      ackedIds.add(message_id);
+    }
+    while (ackedIds.size > 2000) ackedIds.delete(ackedIds.values().next().value as string);
+  };
   const noteDisposition = (message: unknown, internalReason: string): void => {
     if (!opts.onDisposition) return;
+    if (!ackedIds.has(idOf(message))) return;
     const reason = coarseDeadLetterReason(internalReason);
     if (reason === null) return;
     const id = idOf(message);
@@ -2424,14 +2434,16 @@ export function startAutoReply(opts: {
   ): void => {
     if (items.length === 0 || !opts.onDeadLetter) return;
     const at = new Date().toISOString();
+    let written: unknown;
     try {
-      opts.onDeadLetter(
+      written = opts.onDeadLetter(
         items.map((i) => ({ rejected_at: at, reason: i.reason, kind: "reload_handoff", key_id: i.keyId ?? null, message: recordable(i.message) }))
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${String(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
+    if (written !== true) return;
     for (const i of items) noteDisposition(i.message, i.reason);
   };
 
@@ -2489,14 +2501,16 @@ export function startAutoReply(opts: {
   const deadLetterDeferred = (messages: InboxMessage[], reason: string): void => {
     if (messages.length === 0 || !opts.onDeadLetter) return;
     const at = new Date().toISOString();
+    let written: unknown;
     try {
-      opts.onDeadLetter(
+      written = opts.onDeadLetter(
         messages.map((m) => ({ rejected_at: at, reason, kind: "deferred", key_id: null, message: m }))
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
+    if (written !== true) return;
     for (const m of messages) noteDisposition(m, reason);
   };
 
@@ -3181,6 +3195,7 @@ export function startAutoReply(opts: {
       if (ackAll.length > 0) {
         try {
           await client.ackMessages(ackAll);
+          noteAcked(ackAll);
         } catch (err) {
           log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
         }
@@ -3244,6 +3259,7 @@ export function startAutoReply(opts: {
     if (ackAll.length > 0) {
       try {
         await client.ackMessages(ackAll);
+        noteAcked(ackAll);
       } catch (err) {
         log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
       }
