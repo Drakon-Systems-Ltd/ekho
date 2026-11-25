@@ -66,6 +66,7 @@ describe("console inboxStatus: one row per relay state", () => {
       expect(r.tone).toBe("warn");
       expect(r.tone).not.toBe("danger");
       expect(r.title).toContain("does not report turns");
+      expect(r.detail).toContain("does not report turns"); // visible on touch, where titles are not
       expect(r.detail).toContain("4 queued");
     }
   });

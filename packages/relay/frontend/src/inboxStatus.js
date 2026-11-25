@@ -47,7 +47,7 @@ export function inboxStatus(agent, now = Date.now()) {
     }
     case "unresponsive_inbox": {
       const detail = join(queueText, pollText, unackedText);
-      if (!reported) return out("not fetching", "warn", detail, NOT_REPORTED_NOTE);
+      if (!reported) return out("not fetching", "warn", join(detail, "adapter does not report turns"), NOT_REPORTED_NOTE);
       if (adapterState === "turn_running") return out("turn past deadline", "danger", detail, "The reported turn is past its deadline and work is queued.");
       return out("inbox not fetching", "danger", detail, "Work is queued and the agent has not fetched its inbox recently.");
     }
