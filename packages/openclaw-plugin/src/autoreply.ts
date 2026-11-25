@@ -20,6 +20,8 @@ import {
 } from "./verification.js";
 import type { VerifyResult } from "./verify.js";
 import type { DeadLetterRecord } from "./dead-letter.js";
+import { coarseDeadLetterReason } from "./delivery-disposition.js";
+import type { DeadLetterReason } from "@drakon-systems/ekho-sdk";
 import type { ReloadHandoffDropped, ReloadHandoffEntry } from "./runtime-registry.js";
 
 type Logger = {
@@ -2340,6 +2342,11 @@ export function startAutoReply(opts: {
   // evictions and turns that failed to spawn (#78). Same dead-letter file as
   // the verification rejects above: acked work always leaves a record.
   onDeadLetter?: (records: DeadLetterRecord[]) => void;
+  // #111 S2b-1: told (message id, coarse reason) when a message is dead-lettered
+  // or withheld, only after its disk record was written: a throwing dead-letter sink
+  // means no call. Nothing wires it yet: absent, it is never called and nothing is
+  // posted. Synchronous; a throw is swallowed and does not stop the rest of a batch.
+  onDisposition?: (messageId: string, reason: DeadLetterReason) => void;
   // #5: peer wake strictness — see RequireSignedMode. Default "warn".
   requireSigned?: RequireSignedMode;
   // Upper bound on how long stop()'s promise waits for an in-flight tick.
@@ -2397,6 +2404,20 @@ export function startAutoReply(opts: {
     }
   };
 
+  // #111 S2b-1: one coarse disposition per message. Never awaited, never throws.
+  const noteDisposition = (message: unknown, internalReason: string): void => {
+    if (!opts.onDisposition) return;
+    const reason = coarseDeadLetterReason(internalReason);
+    if (reason === null) return;
+    const id = idOf(message);
+    if (id === "?") return;
+    try {
+      opts.onDisposition(id, reason);
+    } catch {
+      /* the record is already written; a callback must not break the tick */
+    }
+  };
+
   // A record for each hand-off outcome (#111), beside the stop's own record.
   const recordHandoff = (
     items: Array<{ message: unknown; reason: string; keyId?: string | null }>
@@ -2409,7 +2430,9 @@ export function startAutoReply(opts: {
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${String(err)}`);
+      return; // no record was written: no disposition (#111 S2b-1)
     }
+    for (const i of items) noteDisposition(i.message, i.reason);
   };
 
   // Entries the hand-off bounds pushed out. Ours (same owner) get a record and
@@ -2472,7 +2495,9 @@ export function startAutoReply(opts: {
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
+      return; // no record was written: no disposition (#111 S2b-1)
     }
+    for (const m of messages) noteDisposition(m, reason);
   };
 
   // Tick-level re-entrancy guard (#78 r2). `inFlight` only covers a running
