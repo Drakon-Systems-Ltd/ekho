@@ -5,7 +5,7 @@ Refs #196. Based on `origin/main` at `6c852b1`. Marks: **[read]** = confirmed by
 ## 1. How the event sweep works
 
 - **[read]** Allowlist: only types in `PRUNABLE_EVENT_TYPES` (`db.ts` 286-297) are deleted. A type not named there is retained forever (comment, `db.ts` 269-285).
-- **[read]** Cutoff: `now - config.eventRetentionSeconds`, default 30 days (`config.ts` 140). Rows older than that are eligible (`db.ts` 4656).
+- **[read]** Cutoff: `now - config.eventRetentionSeconds`, default 30 days (`config.ts` 140). Rows of prunable types older than that are eligible (`db.ts` 4656).
 - **[read]** Batching: `RETENTION_BATCH_SIZE` 5,000, `RETENTION_MAX_BATCHES_PER_TICK` 10, so at most 50,000 rows per table per tick (`db.ts` 313-316).
 - **[read]** Early stop: the loop breaks when a batch deletes fewer than 5,000 rows, treating that as "backlog drained" (`db.ts` 4667-4671).
 - **[read]** Tick: `EKHO_SWEEP_INTERVAL_MS`, default 30,000 ms (`config.ts` 46); the sweep calls `sweepEventRetention` from `sweep.ts` 76.
@@ -17,7 +17,7 @@ Refs #196. Based on `origin/main` at `6c852b1`. Marks: **[read]** = confirmed by
 The issue (#196) reports sweep ticks deleting 12 to 37 rows and about 914k events.
 
 - **[read]** 50,000 per table is the **cap** of one tick, not the signature of a backlog. A tick can start with 6,000 eligible rows and drain them in two batches (5,000, then 1,000). The loop stops after the first batch that deletes fewer than 5,000.
-- **[read]** What a low count does show: little was eligible at that sweep. A tick that deletes 12 rows found about 12 rows older than the cutoff. It does not say how fast rows arrive over a day, or how many rows are retained.
+- **[read]** What a low count does show: little was eligible at that sweep. A tick that deletes 12 rows found about 12 rows of prunable types older than the cutoff. It does not say how fast rows arrive over a day, or how many rows are retained.
 - **[infer]** So the counts support only "no large eligible backlog at those sweeps". They do not show that the table is bounded or that it cannot grow without limit.
 
 ### Scenario (assumption, not a finding)
@@ -25,7 +25,7 @@ The issue (#196) reports sweep ticks deleting 12 to 37 rows and about 914k event
 Assumptions: stable prunable inflow of about 12 rows per 30 s tick, default retention (30 days), default tick (30 s), sweep keeping up.
 
 - **[arith]** 12 x 2,880 ticks per day = 34,560 prunable rows a day; x 30 days = 1,036,800 rows. Under these assumptions the prunable part would settle near 1.04 million.
-- **[infer]** The reported 914k is the same order of magnitude. That is consistent with the scenario but is not evidence for it: the 914k includes an unknown share of retained types (section 3, notably `message.delivered`), the real inflow rate is unknown, and 12 to 37 rows per tick is a handful of samples, not a measured steady state.
+- **[infer]** The reported 914k is the same order of magnitude, but the comparison illustrates scale only; it is not evidence for the scenario. The 914k total cannot contain the scenario's full steady-state prunable population (1.04 million), it includes an unknown share of retained types (section 3, notably `message.delivered`), the real inflow rate is unknown, and 12 to 37 rows per tick is a handful of samples, not a measured steady state.
 - **[infer]** Two different questions follow. Today's eligible backlog looks small (low counts). Longer-term growth is a separate question: the retained-forever types have no upper bound at all, and `message.delivered` grows with message volume (section 4). Neither can be settled without the real type mix and age profile (section 6).
 
 ## 3. Every event type the relay writes
@@ -61,12 +61,24 @@ Written through `recordEvent` (`db.ts` 4828) or the one direct `INSERT INTO even
 
 The two template types are resolved to concrete names **[read]**: `approval.${status}` is built from `status: "approved" | "rejected"` and `agent.${action}` from `action: "pause" | "resume" | "quarantine"`, both finite unions in the method signatures.
 
-The classification test (`packages/relay/tests/event-retention-classification.test.ts`) pins this table. What it does and does not guarantee, for the current forms in `packages/relay/src`:
+The classification test (`packages/relay/tests/event-retention-classification.test.ts`) pins this table. It is a text scan with fixed patterns, not proof about the relay. For the current forms in `packages/relay/src`:
 
 - It reads `db.ts` as text (it does not import it or open a database). A literal event type in neither `PRUNABLE_EVENT_TYPES` nor the test's retained list fails.
-- It resolves each template's union and requires an exact match with the five concrete names above. Widening or narrowing either union fails until the new name is classified and the expected list is updated.
-- It treats every `INSERT INTO events` spelling (any case, any `OR ...` form) as a statement site and verifies each one separately: the inline one in `recordEvent`, and the prepared one in the inbox path with each of its executions. A spelling it cannot read, an execution with a non-literal type, a prepared insert never run, any `recordEvent` reference other than `this.recordEvent(...)`, or any event write in another `src` file fails.
-- It does not cover writes made through a new helper whose type argument is built some other way (that fails as unrecognised and needs the scanner extended), nor events written by anything outside `packages/relay/src`. Synthetic fixtures F1 to F3 passed under the earlier scan and fail it now; four temporary mutations of `db.ts` (widened `action`, widened `status`, a second insert spelling, a masked duplicate insert) each made the fixed test fail and were reverted. Evidence is in the PR comment.
+- Templates: for each `` this.recordEvent(..., `prefix${name}`, ...) ``, `name` must be a parameter of the method that contains the call, and the whole declared type of that parameter must be a union of string literals. A non-literal member, `?`, a default value, a type alias, a destructured parameter, or a name that is not a parameter of that method fails. The union must equal the five concrete names above; widening or narrowing it fails until the new name is classified and the expected list is updated.
+- Inserts: the only recognised spelling is a double-quoted SQL literal that starts `INSERT [OR x] INTO events` (any case) with a column list and a `VALUES` list. `event_type` must appear once, every value must be a bare `?`, and the placeholder, column and `.run` argument counts must be equal. The event type is read from the `.run` argument at the `event_type` column. Inline form (in `recordEvent`): that argument must be `eventType`, and `eventType` must be `recordEvent`'s second parameter. Prepared form (`const X = this.db.prepare("...")`): every `X.run(...)` from the end of that SQL literal to the end of the enclosing block must carry a classified literal type, and `X` must be run at least once. Any other `INSERT INTO events` text fails as unrecognised.
+- `recordEvent` may only be referenced as `this.recordEvent(...)`; any other reference fails.
+
+Blind spots, in plain words. The test does **not** see:
+
+- an events table name that is quoted, bracketed or schema-qualified (for example `"events"`, `main.events`);
+- `REPLACE INTO events`;
+- SQL assembled from variables or concatenated pieces, or a backtick literal that does not spell `INSERT INTO events` in the pattern above;
+- a statement prepared in one block and run in another;
+- any write made outside `packages/relay/src`.
+
+The check for other source files is the same kind of text pattern (`into events` or `recordEvent`, any case). It is not proof that no other file writes events.
+
+Evidence for this round (synthetic fixtures, no relay or database run): F0 to F3 and new fixtures A1 to A7 (parameter type) and B1 to B8 (SQL binding). Against the previous scanner 11 of the 24 tests failed; A2, A3, A5 and A7 already failed closed for incidental reasons and are guards. Four temporary text mutations of `db.ts` (`| string` appended to `action`; `event_type` moved in the first insert's column list; `recordEvent`'s second parameter renamed; `status` given a default) each made the new test fail and were reverted; the first two passed the previous test (9 of 9). Details are in the PR comment.
 
 ## 4. Finding: `message.delivered` is never pruned
 

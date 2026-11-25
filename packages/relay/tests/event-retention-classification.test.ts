@@ -146,7 +146,7 @@ type Analysis = { problems: string[]; written: Set<string>; insertStatements: nu
  *     literal type; X is run at least once there.
  * Every recordEvent call is `this.recordEvent(...)` with a literal type, or a template
  * `prefix${name}` where `name` is a parameter of the calling method whose WHOLE type is a union
- * of string literals; that union must equal the expectation. Scope: the single source string passed in.
+ * of string literals; that union must equal the expectation. Scope: the single source string passed in. Blind spots (quoted or qualified table names, REPLACE INTO, assembled SQL, a statement run in another block, writes outside src): see the assessment, section 3.
  */
 function analyse(
   source: string,
