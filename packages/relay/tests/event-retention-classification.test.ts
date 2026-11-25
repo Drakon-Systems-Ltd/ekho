@@ -52,9 +52,9 @@ function stripComments(s: string): string {
   return out;
 }
 
-/** Top-level comma-separated arguments of the call whose "(" is at `open`. */
-function args(code: string, open: number): string[] {
-  const res: string[] = []; let depth = 0, cur = "";
+/** Top-level comma-separated items of the list whose "(" is at `open`, and the offset of its ")". */
+function parseList(code: string, open: number): { items: string[]; close: number } {
+  const items: string[] = []; let depth = 0, cur = "";
   for (let i = open + 1; i < code.length; i++) {
     const c = code[i];
     if (c === '"' || c === "'" || c === "`") {
@@ -63,12 +63,14 @@ function args(code: string, open: number): string[] {
       cur += code.slice(i, j + 1); i = j; continue;
     }
     if ("([{".includes(c)) depth++;
-    if (")]}".includes(c)) { if (depth === 0) { res.push(cur.trim()); return res; } depth--; }
-    if (c === "," && depth === 0) { res.push(cur.trim()); cur = ""; continue; }
+    if (")]}".includes(c)) { if (depth === 0) { if (cur.trim() !== "") items.push(cur.trim()); return { items, close: i }; } depth--; }
+    if (c === "," && depth === 0) { items.push(cur.trim()); cur = ""; continue; }
     cur += c;
   }
   throw new Error("unterminated call");
 }
+const args = (code: string, open: number): string[] => parseList(code, open).items;
+
 
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "src", "db.ts"), "utf8");
 const PRUNABLE_EVENT_TYPES: ReadonlySet<string> = (() => {
@@ -98,18 +100,53 @@ function blockEnd(code: string, from: number): number {
   return code.length;
 }
 
+type Method = { name: string; open: number; params: string[]; bodyStart: number; bodyEnd: number };
+const NOT_METHODS = new Set(["if", "for", "while", "switch", "catch", "function", "return", "else", "do", "try"]);
+
+/** Methods: a line-start `name(params)` followed by an optional `: ReturnType` and `{`. Parameter lists are split at top level. */
+function methods(code: string): Method[] {
+  const out: Method[] = [];
+  for (const m of code.matchAll(/(?:^|\n)[ \t]*(?:(?:public|private|protected|static|async|readonly)\s+)*(\w+)\s*\(/g)) {
+    if (NOT_METHODS.has(m[1])) continue;
+    const open = m.index! + m[0].length - 1;
+    const { items, close } = parseList(code, open);
+    const hdr = /^\s*(?::\s*[^{;=]*?)?\s*\{/.exec(code.slice(close + 1));
+    if (!hdr) continue;
+    const bodyStart = close + 1 + hdr[0].length;
+    out.push({ name: m[1], open, params: items, bodyStart, bodyEnd: blockEnd(code, bodyStart) });
+  }
+  return out;
+}
+
+/** Whole declared type text of parameter `name` in method `m`; undefined when `name?:`, destructured or absent. */
+const paramType = (m: Method, name: string): string | undefined =>
+  m.params.map((p) => /^(\w+)\s*:\s*([\s\S]+)$/.exec(p)).find((x) => x && x[1] === name)?.[2].trim();
+const IS_LITERAL_UNION = /^"[^"]*"(?:\s*\|\s*"[^"]*")*$/;
+
+/** Column index of event_type in an `INSERT INTO events (cols) VALUES (?, ...)` text, or an error. */
+function eventTypeColumn(sql: string): { idx: number; cols: number } | string {
+  const b = /^insert\s+(?:or\s+\w+\s+)?into\s+events\s*\(([^)]*)\)\s*values\s*\(([^)]*)\)\s*$/i.exec(sql);
+  if (!b) return "no `(columns) VALUES (...)` list in the recognised shape";
+  const cols = b[1].split(",").map((s) => s.trim()), vals = b[2].split(",").map((s) => s.trim());
+  if (cols.filter((c) => c === "event_type").length !== 1) return "event_type must appear exactly once in the column list";
+  if (!vals.every((v) => v === "?")) return "every VALUES entry must be a bare ?";
+  if (vals.length !== cols.length) return `${vals.length} placeholders for ${cols.length} columns`;
+  return { idx: cols.indexOf("event_type"), cols: cols.length };
+}
+
 type Analysis = { problems: string[]; written: Set<string>; insertStatements: number; executions: Record<string, number> };
 
 /**
- * Identity-based scan. Every `INSERT INTO events` spelling is a statement site;
- * each must be one of two recognised forms, and each is verified on its own:
- *   - inline in recordEvent: `.run(id, fleet, eventType, ...)` inside recordEvent();
- *   - prepared: `const X = this.db.prepare("INSERT INTO events ...")`, then EVERY
- *     `X.run(...)` in the same block carries a classified literal type, and X
- *     is run at least once.
- * Every recordEvent call is `this.recordEvent(...)` with a literal type or a
- * template whose union is resolved to concrete names and matched to the
- * expectation. Scope: the single source string passed in.
+ * Text scan, fail closed. Every `INSERT INTO events` spelling is a statement site;
+ * each must be one of two recognised forms and its column list, VALUES list and
+ * .run argument count must agree, with the event type read at the event_type column:
+ *   - inline in recordEvent: `.run(...)` binding `eventType`, which must be recordEvent's second parameter;
+ *   - prepared: `const X = this.db.prepare("INSERT INTO events ...")`; every `X.run(...)`
+ *     from the end of the SQL literal to the end of the enclosing block carries a classified
+ *     literal type; X is run at least once there.
+ * Every recordEvent call is `this.recordEvent(...)` with a literal type, or a template
+ * `prefix${name}` where `name` is a parameter of the calling method whose WHOLE type is a union
+ * of string literals; that union must equal the expectation. Scope: the single source string passed in.
  */
 function analyse(
   source: string,
@@ -123,37 +160,47 @@ function analyse(
     written.add(name);
     if (!isClassified(name)) problems.push(`${where}: event type ${name} is in neither PRUNABLE_EVENT_TYPES nor RETAINED_FOREVER (classify it deliberately, #196).`);
   };
+  const ms = methods(code);
+  const rm = ms.find((x) => x.name === "recordEvent");
+  const enclosing = (at: number) => ms.filter((x) => at > x.bodyStart && at < x.bodyEnd).sort((a, b) => b.bodyStart - a.bodyStart)[0];
 
   // 1. Insert statements, by site.
   const stmts = [...code.matchAll(INSERT_RE)];
-  const recordEventDef = /(^|\n)\s*recordEvent\(/.exec(code);
-  const defStart = recordEventDef ? recordEventDef.index + recordEventDef[0].length : -1;
-  const defEnd = defStart < 0 ? -1 : blockEnd(code, code.indexOf("{", defStart));
   for (const m of stmts) {
     const at = m.index!;
-    const before = code.slice(Math.max(0, at - 160), at);
-    const prepared = PREPARED_RE.exec(before);
+    const q0 = code.lastIndexOf('"', at), q1 = code.indexOf('"', at);
+    if (q0 < 0 || q1 < 0 || code.slice(q0 + 1, at).trim() !== "") {
+      problems.push(`unrecognised INSERT INTO events spelling at offset ${at}: not a double-quoted SQL literal starting with INSERT. Extend the scanner or use recordEvent.`);
+      continue;
+    }
+    const prepared = PREPARED_RE.exec(code.slice(Math.max(0, q0 - 160), q0 + 1));
+    const inline = !prepared && rm !== undefined && at > rm.bodyStart && at < rm.bodyEnd;
+    if (!prepared && !inline) {
+      problems.push(`unrecognised INSERT INTO events spelling at offset ${at}: the scan cannot see its event type. Extend the scanner or use recordEvent.`);
+      continue;
+    }
+    const col = eventTypeColumn(code.slice(at, q1));
+    if (typeof col === "string") { problems.push(`INSERT INTO events at offset ${at}: ${col}.`); continue; }
     if (prepared) {
-      const v = prepared[1];
-      const scopeEnd = blockEnd(code, at);
-      const scope = code.slice(at, scopeEnd);
+      const v = prepared[1], from = q1 + 1;
+      const scope = code.slice(from, blockEnd(code, from));
       const runs = [...scope.matchAll(new RegExp(`\\b${v}\\.run\\(`, "g"))];
       executions[`${v}@${at}`] = runs.length;
       if (runs.length === 0) problems.push(`prepared insert ${v} at offset ${at} is never run in its block.`);
       for (const r of runs) {
-        const type = args(scope, r.index! + r[0].length - 1)[2];
-        if (type !== undefined && /^"[^"]*"$/.test(type)) note(type.slice(1, -1), `${v}.run at offset ${at + r.index!}`);
-        else problems.push(`${v}.run at offset ${at + r.index!}: event type argument ${type} is not a string literal; extend the scanner and classify it.`);
+        const where = `${v}.run at offset ${from + r.index!}`, ra = args(scope, r.index! + r[0].length - 1);
+        if (ra.length !== col.cols) { problems.push(`${where}: ${ra.length} arguments for ${col.cols} columns.`); continue; }
+        const type = ra[col.idx];
+        if (/^"[^"]*"$/.test(type)) note(type.slice(1, -1), where);
+        else problems.push(`${where}: event type argument ${type} is not a string literal; extend the scanner and classify it.`);
       }
-    } else if (defStart >= 0 && at > defStart && at < defEnd) {
-      const strEnd = code.indexOf('"', at);
-      const tail = code.slice(strEnd + 1);
-      const call = /^\s*\)\s*\.run\(/.exec(tail);
-      const type = call ? args(code, strEnd + 1 + call[0].length - 1)[2] : undefined;
-      if (type === "eventType") executions[`recordEvent@${at}`] = 1;
-      else problems.push(`inline insert in recordEvent at offset ${at}: expected .run(..., eventType, ...) but found ${type}.`);
     } else {
-      problems.push(`unrecognised INSERT INTO events spelling at offset ${at}: the scan cannot see its event type. Extend the scanner or use recordEvent.`);
+      const call = /^\s*\)\s*\.run\(/.exec(code.slice(q1 + 1));
+      const ra = call ? args(code, q1 + call[0].length) : [];
+      const second = /^(\w+)\s*:/.exec(rm!.params[1] ?? "")?.[1];
+      if (!call || ra.length !== col.cols) problems.push(`inline insert in recordEvent at offset ${at}: expected .run(...) with ${col.cols} arguments.`);
+      else if (ra[col.idx] !== "eventType" || second !== "eventType") problems.push(`inline insert in recordEvent at offset ${at}: event_type is bound to ${ra[col.idx]} and recordEvent's second parameter is ${second}; both must be eventType.`);
+      else executions[`recordEvent@${at}`] = 1;
     }
   }
 
@@ -161,18 +208,18 @@ function analyse(
   for (const m of code.matchAll(/\brecordEvent\b/g)) {
     const at = m.index!;
     const isThisCall = code.slice(at - 5, at) === "this." && code[at + m[0].length] === "(";
-    const isDef = recordEventDef !== null && at === defStart - "recordEvent(".length;
-    if (isDef) continue;
+    if (rm !== undefined && code.slice(at, rm.open).trim() === "recordEvent") continue;
     if (!isThisCall) { problems.push(`recordEvent referenced at offset ${at} other than as this.recordEvent(...): the scan cannot follow it.`); continue; }
     const arg = args(code, at + m[0].length)[1];
     if (arg !== undefined && /^"[^"]*"$/.test(arg)) { note(arg.slice(1, -1), `recordEvent at offset ${at}`); continue; }
     const t = arg !== undefined ? /^`([^`$]*)\$\{(\w+)\}`$/.exec(arg) : null;
     if (!t) { problems.push(`recordEvent at offset ${at}: unrecognised event type expression ${arg}.`); continue; }
     const key = `${t[1]}\${${t[2]}}`;
-    const union = [...code.slice(0, at).matchAll(new RegExp(`\\b${t[2]}\\s*:\\s*((?:"[^"]*"\\s*\\|\\s*)*"[^"]*")`, "g"))].pop();
-    const names = union ? [...union[1].matchAll(/"([^"]*)"/g)].map((x) => t[1] + x[1]) : null;
+    const caller = enclosing(at), ty = caller && paramType(caller, t[2]);
+    if (ty === undefined) { problems.push(`recordEvent at offset ${at}: ${t[2]} is not a plain parameter of the method containing this call.`); continue; }
+    if (!IS_LITERAL_UNION.test(ty)) { problems.push(`recordEvent at offset ${at}: the type of ${t[2]} is \`${ty}\`, not purely a union of string literals.`); continue; }
+    const names = [...ty.matchAll(/"([^"]*)"/g)].map((x) => t[1] + x[1]);
     const expected = domains[key];
-    if (!names) { problems.push(`recordEvent at offset ${at}: could not resolve the domain of ${t[2]} for ${key}; the type is no longer a finite string union.`); continue; }
     if (!expected) { problems.push(`recordEvent at offset ${at}: template ${key} is not in EXPECTED_TEMPLATE_DOMAINS.`); continue; }
     if (JSON.stringify([...names].sort()) !== JSON.stringify([...expected].sort())) {
       problems.push(`recordEvent at offset ${at}: ${key} resolves to [${names.join(", ")}] but the test expects [${expected.join(", ")}]. Classify the change, then update EXPECTED_TEMPLATE_DOMAINS and RETAINED_FOREVER.`);
