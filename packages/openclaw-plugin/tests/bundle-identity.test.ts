@@ -40,16 +40,19 @@ function stageBundle(source: string): string {
       name: "openclaw",
       version: "0.0.0-test-stub",
       type: "module",
-      exports: { "./plugin-sdk/tool-plugin": "./plugin-sdk/tool-plugin.js" }
+      exports: { "./plugin-sdk/plugin-entry": "./plugin-sdk/plugin-entry.js" }
     })
   );
   fs.writeFileSync(
-    path.join(sdkDir, "tool-plugin.js"),
-    // Mirrors the host: collect the tool definitions, hand back an entry whose
-    // register() the gateway calls at startup.
-    "export function defineToolPlugin(def) {\n" +
-      "  const tools = def.tools((t) => t);\n" +
-      "  return { ...def, tools, register(api) { api.__registeredTools = tools; } };\n" +
+    path.join(sdkDir, "plugin-entry.js"),
+    // Mirrors the host: hand back an entry whose register() the gateway calls
+    // at startup. Nothing here registers a tool — the bundle does that itself
+    // through api.registerTool, which the fake apis below record.
+    "export function buildJsonPluginConfigSchema(schema) {\n" +
+      "  return { safeParse: (value) => ({ success: true, data: value }), jsonSchema: schema };\n" +
+      "}\n" +
+      "export function definePluginEntry({ id, name, description, configSchema, register }) {\n" +
+      "  return { id, name, description, configSchema, register };\n" +
       "}\n"
   );
   fs.writeFileSync(path.join(dir, "index.mjs"), source);
@@ -74,16 +77,33 @@ async function startPlugin(dir: string) {
     const mod = await import(pathToFileURL(path.join(dir, "index.mjs")).href);
     // No relayBaseUrl: startup must still identify itself, so a box that never
     // connects is still answerable.
-    mod.default.register({ pluginConfig: {}, logger: { info: record, warn: record, error: record, debug: record } });
-    return { lines, plugin: mod.default, home: process.env.HOME };
+    const pluginConfig: Record<string, unknown> = {};
+    // The execute-form tools arrive as tool objects, exactly as a gateway gets
+    // them (ekho_send arrives as a factory and is not needed here).
+    const tools: RegisteredTool[] = [];
+    mod.default.register({
+      pluginConfig,
+      logger: { info: record, warn: record, error: record, debug: record },
+      registerTool: (tool: unknown) => {
+        if (tool && typeof tool === "object") tools.push(tool as RegisteredTool);
+      }
+    });
+    return { lines, plugin: { tools, pluginConfig }, home: process.env.HOME };
   } finally {
     if (home === undefined) delete process.env.HOME;
     else process.env.HOME = home;
   }
 }
 
+/** A tool as the host receives it: called (toolCallId, params), result wrapped. */
+type RegisteredTool = {
+  name: string;
+  execute: (toolCallId: string, params: unknown) => Promise<{ details: unknown }>;
+};
+type StartedPlugin = { tools: RegisteredTool[]; pluginConfig: Record<string, unknown> };
+
 /** Read the build field off ekho_inbox, with the same home isolation. */
-async function inboxBuildField(plugin: { tools: Array<{ name: string; execute: Function }> }, home: string) {
+async function inboxBuildField(plugin: StartedPlugin, home: string) {
   const inbox = plugin.tools.find((t) => t.name === "ekho_inbox");
   expect(inbox, "ekho_inbox not registered").toBeTruthy();
   const prev = process.env.HOME;
@@ -91,9 +111,16 @@ async function inboxBuildField(plugin: { tools: Array<{ name: string; execute: F
   try {
     // Pre-provisioned credentials + an unroutable relay: the tool connects
     // without enrolling and without reaching anything real.
-    const config = { relayBaseUrl: "http://127.0.0.1:9", agentId: "test-agent", agentSecret: "test-secret" };
-    const result = (await inbox!.execute({}, config, {})) as { build: Record<string, unknown> };
-    return result.build;
+    // A registered tool gets the config the host gave register() — the same
+    // object, held by reference — so it is filled in here, after startup has
+    // already run without a relay to connect to.
+    Object.assign(plugin.pluginConfig, {
+      relayBaseUrl: "http://127.0.0.1:9",
+      agentId: "test-agent",
+      agentSecret: "test-secret"
+    });
+    const result = (await inbox!.execute("call_1", {})) as { details: { build: Record<string, unknown> } };
+    return result.details.build;
   } finally {
     if (prev === undefined) delete process.env.HOME;
     else process.env.HOME = prev;
@@ -165,14 +192,14 @@ describe("the built bundle carries its own identity", () => {
     // Asking every box its version is how a security posture gets established,
     // so the answer must not depend on the relay being up.
     const { plugin, home } = await startPlugin(stageBundle(dist));
-    const inbox = plugin.tools.find((t: { name: string }) => t.name === "ekho_inbox");
+    const inbox = plugin.tools.find((t: { name: string }) => t.name === "ekho_inbox")!;
     const prev = process.env.HOME;
     process.env.HOME = home; // empty home: no saved credentials to fall back on
     try {
       // No relayBaseUrl and no credentials — connection cannot succeed.
-      const result = (await inbox.execute({}, {}, {})) as {
-        build: Record<string, unknown>;
-        error?: string;
+      // (startPlugin registered with an empty config, which is what the tool sees.)
+      const { details: result } = (await inbox.execute("call_1", {})) as {
+        details: { build: Record<string, unknown>; error?: string };
       };
       expect(result.error).toMatch(/not connected/);
       expect(result.build).toMatchObject({ artifact: "intact", source: "bundle" });
@@ -287,10 +314,13 @@ function loadInChild(dir: string) {
       "const plugin = mod.default;\n" +
       "const logged = [];\n" +
       'const record = (...a) => logged.push(a.map(String).join(" "));\n' +
-      "plugin.register({ pluginConfig: {}, logger: { info: record, warn: record, error: record, debug: record } });\n" +
+      "const tools = [];\n" +
+      // Object form carries its own name; factory form is named by its options.
+      "const registerTool = (tool, opts) => tools.push(opts?.name ?? tool.name);\n" +
+      "plugin.register({ pluginConfig: {}, logger: { info: record, warn: record, error: record, debug: record }, registerTool });\n" +
       "console.log(JSON.stringify({\n" +
       "  ambientRequire: probe.ambientRequire,\n" +
-      "  tools: plugin.tools.map((t) => t.name),\n" +
+      "  tools,\n" +
       "  logged\n" +
       "}));\n"
   );
@@ -344,6 +374,16 @@ describe("the built bundle imports under a real ESM loader", () => {
   it("registers its tools once that import succeeds", () => {
     expect(load.report.tools).toEqual(["ekho_send", "ekho_open_room", "ekho_inbox"]);
     expect(load.report.logged?.join("\n")).toContain("[ekho-adapter] registered tools:");
+  });
+
+  it("imports its host entry helper from plugin-sdk/plugin-entry, and nothing from the deprecated tool-plugin subpath", () => {
+    // OpenClaw 2026.11.10 records deprecated SDK subpaths as the bundle imports
+    // them, and `openclaw doctor` then reports the plugin as using older APIs.
+    // The specifier is assembled so this file does not itself contain it.
+    const deprecated = "plugin-sdk/" + "tool-plugin";
+    expect(dist).not.toContain(deprecated);
+    const hostImports = [...dist.matchAll(/^import\s[^;]*?from\s+"(openclaw[^"]*)";/gm)].map((m) => m[1]);
+    expect(hostImports).toEqual(["openclaw/plugin-sdk/plugin-entry"]);
   });
 
   it("carries no CommonJS require shim at all", () => {

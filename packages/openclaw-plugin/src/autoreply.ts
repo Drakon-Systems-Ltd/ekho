@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
-import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
+import type { OpenClawPluginApi as PluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { noteModelCallEnded } from "./connection.js";
 import { buildIdentity, formatBuildIdentityShort } from "./build-info.js";
 
