@@ -280,7 +280,8 @@ const plugin: ToolPluginEntry = defineToolEntry({
     heartbeatIntervalMs: Type.Optional(Type.Number({ description: "Heartbeat interval in ms (default 30000)" })),
     peerAutoreply: Type.Optional(Type.Boolean({ description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)" })),
     peerTurnBudget: Type.Optional(Type.Number({ description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence." })),
-    stateDir: Type.Optional(Type.String({ description: "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both." }))
+    stateDir: Type.Optional(Type.String({ description: "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both." })),
+    outboxDir: Type.Optional(Type.String({ description: "The only directory ekho_send may attach files from. Default: ~/ekho-outbox (EKHO_OUTBOX_DIR overrides the default; this setting overrides both). Must not be, contain, or sit inside the plugin state dir, the OpenClaw state dir or the Hermes home; attachments are refused until it is moved." }))
   }),
   tools: (tool) => [
     tool({
