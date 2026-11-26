@@ -111,7 +111,7 @@ async function waitFor(pred: () => boolean, timeoutMs = 4000): Promise<void> {
 const quiet = { warn: () => {}, info: () => {}, debug: () => {}, error: () => {} };
 
 /** A client whose floor is always held, serving `first` once and then nothing. */
-function heldClient(first: unknown[], peerAutoreply = true, ack: (n: number) => Promise<void> = async () => {}, second: unknown[] = []) {
+function heldClient(first: unknown[], peerAutoreply = true, ack: (n: number, ids: Array<{ message_id: string }>) => Promise<void> = async () => {}, second: unknown[] = []) {
   let served = 0;
   let acks = 0;
   return {
@@ -121,7 +121,7 @@ function heldClient(first: unknown[], peerAutoreply = true, ack: (n: number) => 
       if (n === 1 && second.length > 0) return { messages: second, operator_trusted: false, peer_autoreply: peerAutoreply, roster: [] };
       return { messages: [] };
     },
-    ackMessages: async () => ack(++acks),
+    ackMessages: async (ids: Array<{ message_id: string }>) => ack(++acks, ids),
     acquireFloor: async () => ({ granted: false, holder_agent_id: "agent_holder" }),
     releaseFloor: async () => {},
     raiseNotice: async () => {}
@@ -247,6 +247,51 @@ describe("startAutoReply onDisposition", () => {
     expect(seen).toEqual([["m0", "deferred_overflow_per_conv"]]); // nothing added by the stop
   });
 
+  it.each(["take", "deposit"])("keeps an acked ID silent on a %s handoff bounds drop", async (path) => {
+    const messages = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "held"));
+    let overflow = false;
+    const dropped = [{ entry: entry(messages[1]), why: "overflow" }];
+    const handoff = handoffWith([], [], {
+      take: () => ({ taken: [], dropped: path === "take" && overflow ? dropped : [] }),
+      deposit: (_owner: string, entries: Array<{ message: { message_id: string } }>) =>
+        path === "deposit" && entries.some((e) => e.message.message_id === "m1") ? dropped : []
+    });
+    const { stop, records, seen } = run(heldClient(messages), {
+      reloadHandoff: handoff, cacheContext: () => "own.gen1",
+      onDisposition: (id: string, reason: string) => {
+        seen.push([id, reason]);
+        if (id === "m0") overflow = true;
+      }
+    });
+    try {
+      await waitFor(() => overflow);
+      if (path === "take") await waitFor(() => records.some((r) => r.kind === "reload_handoff"));
+    } finally {
+      await stop();
+    }
+    expect(records).toContainEqual(expect.objectContaining({ kind: "reload_handoff", message: expect.objectContaining({ message_id: "m1" }) }));
+    expect(seen).toEqual([["m0", "deferred_overflow_per_conv"]]);
+  });
+
+  it("a synchronous stop during overflow deposits remaining work exactly once", async () => {
+    const messages = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "held"));
+    const deposited: string[] = [];
+    const handoff = handoffWith([], [], {
+      deposit: (_owner: string, entries: Array<{ message: { message_id: string } }>) => {
+        deposited.push(...entries.map((e) => e.message.message_id));
+      }
+    });
+    const { stop } = run(heldClient(messages), {
+      reloadHandoff: handoff, cacheContext: () => "own.gen1", onDisposition: () => { void stop(); }
+    });
+    try {
+      await waitFor(() => deposited.length > 0);
+    } finally {
+      await stop();
+    }
+    expect(deposited.sort()).toEqual(messages.slice(1).map((m) => m.message_id).sort());
+  });
+
   it("C8: a callback that throws on the first of a batch does not stop the second, the records, or stop()", async () => {
     const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 2 }, (_, i) => peer(i, "c-same"));
     const calls: string[] = [];
@@ -313,11 +358,17 @@ describe("startAutoReply onDisposition", () => {
 
   it("C3: ack rejected in tick 1 and resolved for the same id in tick 2: no after-the-fact call for the tick 1 drop", async () => {
     const msgs = Array.from({ length: DEFERRED_MESSAGES_PER_CONV + 1 }, (_, i) => peer(i, "c-same"));
-    const client = heldClient(msgs, true, async (n) => { if (n === 1) throw new Error("ack down"); }, [peer(0, "c-same")]);
+    const acknowledgements: string[][] = [];
+    const client = heldClient(msgs, true, async (n, ids) => {
+      acknowledgements.push(ids.map((item) => item.message_id));
+      if (n === 1) throw new Error("ack down");
+    }, [peer(0, "c-same")]);
     const { seen, records, stop } = run(client, {});
     try {
       await waitFor(() => records.some((r) => r.reason === DEFERRED_OVERFLOW_REASON));
-      await new Promise((r) => setTimeout(r, 80));
+      await waitFor(() => acknowledgements.length === 2);
+      expect(acknowledgements[0]).toContain("m0");
+      expect(acknowledgements[1]).toEqual(["m0"]);
     } finally {
       await stop();
     }
