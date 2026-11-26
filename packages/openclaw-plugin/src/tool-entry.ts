@@ -2,7 +2,6 @@ import type { Static, TSchema } from "typebox";
 import {
   buildJsonPluginConfigSchema,
   definePluginEntry,
-  type DefinedPluginEntry,
   type OpenClawPluginApi,
   type OpenClawPluginToolContext
 } from "openclaw/plugin-sdk/plugin-entry";
@@ -31,11 +30,39 @@ import {
  *     as (toolCallId, params, signal, onUpdate) and whose return value is
  *     wrapped by wrapToolResult below. No options: none of ours is optional.
  *
- * Left out on purpose: the helper's non-enumerable metadata symbol (static tool
- * discovery reads openclaw.plugin.json's contracts.tools instead) and the
- * outputSchema / optional / workspaceAccess pass-throughs, which no tool here
- * sets.
+ *   - the entry carries the helper's non-enumerable authoring metadata, under
+ *     the same global symbol (see TOOL_PLUGIN_METADATA below). The gateway does
+ *     not read it; `openclaw plugins build` / `plugins validate` do.
+ *
+ * Left out on purpose: the outputSchema / optional / workspaceAccess
+ * pass-throughs, which no tool here sets.
  */
+
+/**
+ * The key the host's authoring CLI looks the entry's metadata up by
+ * (getToolPluginMetadata, in the same host file). It is a GLOBAL symbol, so the
+ * key is reproduced here by name and nothing is imported from the deprecated
+ * subpath that used to attach it. Without it `openclaw plugins build` and
+ * `openclaw plugins validate` stop at "plugin entry does not expose tool or
+ * feature authoring metadata".
+ */
+export const TOOL_PLUGIN_METADATA = Symbol.for("openclaw.plugin-sdk.tool-plugin.metadata");
+
+/** What the host's helper stored under that key, field for field. */
+export interface ToolPluginMetadata {
+  id: string;
+  name: string;
+  description: string;
+  activation: Record<string, unknown>;
+  configSchema: Record<string, unknown>;
+  tools: Array<{ name: string; label: string; description: string; parameters: TSchema }>;
+}
+
+/**
+ * The entry as the host's own definePluginEntry types it. The SDK exports no
+ * name for that type, so it is taken from the function.
+ */
+export type ToolPluginEntry = ReturnType<typeof definePluginEntry>;
 
 export type ToolPluginConfig<TConfigSchema extends TSchema | undefined> =
   TConfigSchema extends TSchema ? Static<TConfigSchema> : Record<string, never>;
@@ -91,6 +118,8 @@ export interface ToolEntryOptions<TConfigSchema extends TSchema> {
   name: string;
   description: string;
   configSchema: TConfigSchema;
+  /** Authoring metadata only (the generated manifest's `activation`). Default: `{ onStartup: true }`. */
+  activation?: Record<string, unknown>;
   tools: (tool: ToolBuilder<ToolPluginConfig<TConfigSchema>>) => readonly CollectedTool[];
 }
 
@@ -130,7 +159,7 @@ export function wrapToolResult(result: unknown) {
 
 export function defineToolEntry<TConfigSchema extends TSchema>(
   definition: ToolEntryOptions<TConfigSchema>
-): DefinedPluginEntry {
+): ToolPluginEntry {
   const pluginConfigSchema = buildJsonPluginConfigSchema(definition.configSchema as unknown as Record<string, unknown>);
   const collect = ((d: CollectedTool & { label?: string }) => ({
     name: d.name,
@@ -141,8 +170,21 @@ export function defineToolEntry<TConfigSchema extends TSchema>(
     factory: d.factory
   })) as unknown as ToolBuilder<ToolPluginConfig<TConfigSchema>>;
   const tools = [...definition.tools(collect)];
+  const metadata: ToolPluginMetadata = {
+    id: definition.id,
+    name: definition.name,
+    description: definition.description,
+    activation: definition.activation ?? { onStartup: true },
+    configSchema: pluginConfigSchema.jsonSchema ?? (definition.configSchema as unknown as Record<string, unknown>),
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      label: tool.label,
+      description: tool.description,
+      parameters: tool.parameters
+    }))
+  };
 
-  return definePluginEntry({
+  const entry = definePluginEntry({
     id: definition.id,
     name: definition.name,
     description: definition.description,
@@ -167,4 +209,6 @@ export function defineToolEntry<TConfigSchema extends TSchema>(
       }
     }
   });
+  Object.defineProperty(entry, TOOL_PLUGIN_METADATA, { value: metadata, enumerable: false });
+  return entry;
 }

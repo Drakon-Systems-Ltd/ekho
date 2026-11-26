@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
-import { defineToolEntry, wrapToolResult } from "../src/tool-entry";
+import { defineToolEntry, wrapToolResult, TOOL_PLUGIN_METADATA } from "../src/tool-entry";
 
 /**
  * The plugin left `defineToolPlugin` (the plugin SDK's `tool-plugin` subpath,
@@ -292,5 +292,123 @@ describe("the plugin registers the same three tools it did through defineToolPlu
       if (stateDir === undefined) delete process.env.EKHO_STATE_DIR; else process.env.EKHO_STATE_DIR = stateDir;
       fs.rmSync(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * `openclaw plugins build` and `openclaw plugins validate` do not call
+ * register(): they read the entry's authoring metadata, which the old
+ * defineToolPlugin attached as a non-enumerable property keyed by a GLOBAL
+ * symbol (host getToolPluginMetadata, openclaw 2026.11.10
+ * dist/tool-plugin-Dml-gUYB.mjs). Without it both commands stop at "plugin
+ * entry does not expose tool or feature authoring metadata".
+ *
+ * tests/fixtures/tool-plugin-metadata.golden.json is that metadata as the REAL
+ * host helper produced it for the previous code: the last commit that still
+ * used defineToolPlugin (75f237d) was bundled and imported under OpenClaw
+ * 2026.11.10's own `defineToolPlugin`, and the symbol's value was written out
+ * as JSON. The plugin's default export must carry exactly that.
+ *
+ * Sabotage check (26 Nov 2026): with the Object.defineProperty line removed
+ * from defineToolEntry, five of the six tests below fail (metadata undefined;
+ * only the symbol-identity one survives) and the real host's `openclaw plugins
+ * validate` goes back to refusing the entry; with just `activation` dropped
+ * from the metadata object, four fail, the golden comparison among them.
+ * Restored after.
+ */
+describe("the entry carries the authoring metadata defineToolPlugin attached", () => {
+  // Looked up the way the host does: by the global symbol's name, not through
+  // anything exported from src/.
+  const HOST_KEY = Symbol.for("openclaw.plugin-sdk.tool-plugin.metadata");
+  function getToolPluginMetadata(entry: unknown): Record<string, unknown> | undefined {
+    if (!entry || typeof entry !== "object") return undefined;
+    const metadata = (entry as Record<symbol, unknown>)[HOST_KEY];
+    if (!metadata || typeof metadata !== "object") return undefined;
+    return metadata as Record<string, unknown>;
+  }
+  const golden = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "fixtures", "tool-plugin-metadata.golden.json"), "utf8")
+  ) as {
+    id: string;
+    name: string;
+    description: string;
+    activation: unknown;
+    configSchema: unknown;
+    tools: Array<{ name: string; label: string; description: string; parameters: unknown }>;
+  };
+  const registered = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "fixtures", "registered-tools.golden.json"), "utf8")
+  ) as { configSchema: unknown; tools: Array<{ name: string; label: string; description: string; parameters: unknown }> };
+  const plain = (v: unknown) => JSON.parse(JSON.stringify(v));
+
+  async function loadPlugin() {
+    vi.resetModules();
+    return (await import("../src/index.js")).default;
+  }
+
+  it("uses the host's global symbol as the key", () => {
+    expect(TOOL_PLUGIN_METADATA).toBe(HOST_KEY);
+  });
+
+  it("exposes on the plugin's default export exactly what the real defineToolPlugin produced", async () => {
+    const metadata = getToolPluginMetadata(await loadPlugin());
+    expect(metadata, "plugin entry does not expose tool authoring metadata").toBeDefined();
+    expect(plain(metadata)).toEqual(golden);
+    // Key order too: the host's build writes these straight into the manifest.
+    expect(JSON.stringify(metadata, null, 2)).toBe(JSON.stringify(golden, null, 2));
+  });
+
+  it("keeps it non-enumerable, so it never shows up in the entry the gateway spreads or serialises", async () => {
+    const plugin = await loadPlugin();
+    const descriptor = Object.getOwnPropertyDescriptor(plugin, HOST_KEY);
+    expect(descriptor).toMatchObject({ enumerable: false, writable: false, configurable: false });
+    expect(Object.getOwnPropertySymbols({ ...plugin })).toEqual([]);
+    expect(Object.keys(plugin)).not.toContain(String(HOST_KEY));
+  });
+
+  it("describes the same tools and config schema the plugin actually registers", async () => {
+    const metadata = getToolPluginMetadata(await loadPlugin()) as typeof golden;
+    expect(metadata.activation).toEqual({ onStartup: true });
+    expect(metadata.tools.map((t) => t.name)).toEqual(["ekho_send", "ekho_open_room", "ekho_inbox"]);
+    expect(plain(metadata.configSchema)).toEqual(registered.configSchema);
+    metadata.tools.forEach((tool, i) => {
+      const want = registered.tools[i];
+      expect(Object.keys(tool)).toEqual(["name", "label", "description", "parameters"]);
+      expect(tool.name).toBe(want.name);
+      expect(tool.label).toBe(want.label);
+      expect(tool.description).toBe(want.description);
+      expect(plain(tool.parameters)).toEqual(want.parameters);
+    });
+  });
+
+  it("defaults activation to { onStartup: true } and labels to the tool name, as the helper did", () => {
+    const entry = defineToolEntry({
+      id: "m",
+      name: "M",
+      description: "metadata defaults",
+      configSchema: Type.Object({ a: Type.Optional(Type.String()) }),
+      tools: (tool) => [
+        tool({ name: "one", description: "d1", parameters: Type.Object({}), execute: () => "x" }),
+        tool({ name: "two", label: "Two", description: "d2", parameters: Type.Object({}), factory: () => ({}) })
+      ]
+    });
+    const metadata = getToolPluginMetadata(entry) as typeof golden;
+    expect(Object.keys(metadata)).toEqual(["id", "name", "description", "activation", "configSchema", "tools"]);
+    expect(metadata).toMatchObject({ id: "m", name: "M", description: "metadata defaults", activation: { onStartup: true } });
+    // The wrapped schema's jsonSchema, not the raw typebox object.
+    expect(metadata.configSchema).toBe((entry.configSchema as { jsonSchema?: unknown }).jsonSchema);
+    expect(metadata.tools.map((t) => [t.name, t.label])).toEqual([["one", "one"], ["two", "Two"]]);
+  });
+
+  it("passes an explicit activation through", () => {
+    const entry = defineToolEntry({
+      id: "a",
+      name: "A",
+      description: "explicit activation",
+      activation: { onStartup: false },
+      configSchema: Type.Object({}),
+      tools: () => []
+    });
+    expect(getToolPluginMetadata(entry)?.activation).toEqual({ onStartup: false });
   });
 });

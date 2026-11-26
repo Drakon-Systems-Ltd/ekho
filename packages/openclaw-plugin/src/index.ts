@@ -3,7 +3,7 @@ import fs from "node:fs";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
-import { defineToolEntry, jsonToolResult } from "./tool-entry.js";
+import { defineToolEntry, jsonToolResult, type ToolPluginEntry } from "./tool-entry.js";
 import {
   activateRuntime,
   connectedInboxContext,
@@ -262,10 +262,14 @@ const staleUnloads = new Map<number, Promise<void>>();
 const LISTENER_WARNING =
   "The heartbeat/listener is not running in this process; roster and messages are a stale cache, and sends may be refused if the relay quarantines the agent.";
 
-const plugin = defineToolEntry({
+// Annotated so the published dist/index.d.ts names the entry's type by
+// reference to the host's own definePluginEntry, not as a shape copied from
+// this package's ambient stand-in for the SDK.
+const plugin: ToolPluginEntry = defineToolEntry({
   id: "ekho-adapter",
   name: "Ekho Relay Adapter",
   description: "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
+  activation: { onStartup: true },
   configSchema: Type.Object({
     relayBaseUrl: Type.String({ description: "Ekho relay base URL, e.g. https://relay.example.ts.net" }),
     fleetId: Type.Optional(Type.String({ description: "Fleet ID to enroll into (with enrollmentToken on first run)" })),
@@ -289,9 +293,11 @@ const plugin = defineToolEntry({
       // identity anywhere in it. sessionKey/sessionId live on
       // OpenClawPluginToolContext, which the host only passes to a tool
       // registered as a factory (tool-entry.ts). A factory tool is registered
-      // as-is, so it wraps its own result with the same jsonToolResult the
-      // execute tools get. The other tools keep the simpler `execute` form —
-      // they have nothing to stamp.
+      // as-is, so it wraps its own result: jsonToolResult, JSON text indented
+      // by two, as ekho_send has always answered. (The execute tools are
+      // wrapped for them by tool-entry.ts wrapToolResult, as compact JSON.)
+      // The other tools keep the simpler `execute` form — they have nothing
+      // to stamp.
       factory: ({ config, toolContext }) => ({
         name: "ekho_send",
         label: "ekho_send",

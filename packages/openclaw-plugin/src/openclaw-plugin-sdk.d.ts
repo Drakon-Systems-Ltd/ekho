@@ -112,23 +112,24 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
     options?: { safeParse?: (value: unknown) => unknown; cacheKey?: string; uiHints?: Record<string, unknown> }
   ): OpenClawPluginConfigSchema;
 
-  // The host calls the returned entry's register(api) at load.
-  export interface DefinedPluginEntry {
-    id: string;
-    name: string;
-    description: string;
-    readonly configSchema: OpenClawPluginConfigSchema;
-    register: (api: OpenClawPluginApi) => void;
-    [key: string]: unknown;
-  }
-
+  // The host calls the returned entry's register(api) at load. The return type
+  // is deliberately unnamed: the real SDK exports no name for it, and a name
+  // declared only here would leak into the published dist/*.d.ts as an import
+  // the real module cannot satisfy. Take it as ReturnType<typeof
+  // definePluginEntry> (src/tool-entry.ts ToolPluginEntry).
   export function definePluginEntry(options: {
     id: string;
     name: string;
     description: string;
     configSchema?: OpenClawPluginConfigSchema | (() => OpenClawPluginConfigSchema);
     register: (api: OpenClawPluginApi) => void;
-  }): DefinedPluginEntry;
+  }): {
+    id: string;
+    name: string;
+    description: string;
+    readonly configSchema: OpenClawPluginConfigSchema;
+    register: (api: OpenClawPluginApi) => void;
+  };
 }
 
 // OpenClaw's state-root resolver. Mirrors openclaw/dist/plugin-sdk/state-paths.d.ts
