@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import os from "node:os";
 import { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
-import type { PluginApi } from "openclaw/plugin-sdk/tool-plugin";
+import type { OpenClawPluginApi as PluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import {
   enrollOrLoad,
   loadOrCreateIdentity,

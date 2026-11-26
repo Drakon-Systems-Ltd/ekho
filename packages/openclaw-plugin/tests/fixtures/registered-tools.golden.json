@@ -1,0 +1,130 @@
+{
+  "id": "ekho-adapter",
+  "name": "Ekho Relay Adapter",
+  "description": "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
+  "configSchema": {
+    "type": "object",
+    "required": [
+      "relayBaseUrl"
+    ],
+    "properties": {
+      "relayBaseUrl": {
+        "type": "string",
+        "description": "Ekho relay base URL, e.g. https://relay.example.ts.net"
+      },
+      "fleetId": {
+        "type": "string",
+        "description": "Fleet ID to enroll into (with enrollmentToken on first run)"
+      },
+      "enrollmentToken": {
+        "type": "string",
+        "description": "One-time operator enrollment token (first run only)"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Pre-provisioned agent id (skips enrollment)"
+      },
+      "agentSecret": {
+        "type": "string",
+        "description": "Pre-provisioned agent secret (skips enrollment)"
+      },
+      "displayName": {
+        "type": "string",
+        "description": "Display name shown in the operator console"
+      },
+      "heartbeatIntervalMs": {
+        "type": "number",
+        "description": "Heartbeat interval in ms (default 30000)"
+      },
+      "peerAutoreply": {
+        "type": "boolean",
+        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)"
+      },
+      "peerTurnBudget": {
+        "type": "number",
+        "description": "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence."
+      },
+      "stateDir": {
+        "type": "string",
+        "description": "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both."
+      }
+    }
+  },
+  "tools": [
+    {
+      "form": "factory",
+      "opts": {
+        "name": "ekho_send"
+      },
+      "name": "ekho_send",
+      "label": "ekho_send",
+      "description": "Send a message to another agent in your fleet via the Ekho relay. Use this to delegate a task, ask a question, hand off work, or coordinate. Set recipient_agent_id to 'broadcast' to reach the whole fleet. To post into a topic room (see ekho_open_room), set room_id instead — the message goes to every room member.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "recipient_agent_id": {
+            "type": "string",
+            "description": "Ekho agent_id of the recipient, or 'broadcast' for the whole fleet. Omit when sending to a room (use room_id)."
+          },
+          "room_id": {
+            "type": "string",
+            "description": "Send to a topic room: its members all receive the message. Takes precedence over recipient_agent_id."
+          },
+          "message": {
+            "type": "string",
+            "description": "The message text to send."
+          },
+          "conversation_id": {
+            "type": "string",
+            "description": "Existing conversation id to thread under (optional; ignored when room_id is set — the room is the conversation)."
+          },
+          "attachment_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "File(s) to attach, from the Ekho outbox directory only (plugin config outboxDir, else EKHO_OUTBOX_DIR, else ~/ekho-outbox): copy a file there first, then pass its path or its name relative to the outbox. Anything outside the outbox, hidden files and credential files are refused. Each is read, base64-encoded, and uploaded; must be an allowed type (images png/jpg/gif/webp, or pdf/txt/md/csv/json) under the 25 MiB size cap. Max 10 per message."
+          }
+        }
+      }
+    },
+    {
+      "form": "object",
+      "name": "ekho_open_room",
+      "label": "ekho_open_room",
+      "description": "Open a named topic room for a multi-step collaboration or a handoff you'll iterate on, then continue there instead of repeated direct messages. The room is scoped to the agents you list (you are added automatically) and is visible to the operator, who can follow and chime in. Returns the room id — send into it with ekho_send using room_id.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "topic"
+        ],
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "The room name — a short, specific topic (e.g. 'Invoice sync rollout')."
+          },
+          "member_agent_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ekho agent_ids of the OTHER agents to include (you are added automatically). Must be agents in your fleet."
+          }
+        }
+      }
+    },
+    {
+      "form": "object",
+      "name": "ekho_inbox",
+      "label": "ekho_inbox",
+      "description": "Re-list the Ekho messages you are currently handling. You receive messages automatically — new fleet messages are delivered to you as turns, so you do not need to poll. Use this only to re-read the messages from your most recent inbound batch (e.g. to recall sender ids or conversation ids while replying via ekho_send).",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}
