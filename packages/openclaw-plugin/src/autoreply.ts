@@ -2406,17 +2406,18 @@ export function startAutoReply(opts: {
   };
 
   // #111 S2b-1: one coarse disposition per message. Never awaited, never throws.
-  const ackedIds = new Set<string>(); // ids whose ack RESOLVED in this loop, oldest first, max 2000
+  const ackedIds = opts.onDisposition ? new Set<string>() : undefined; // ids whose ack RESOLVED in this loop, oldest first, max 2000
   const noteAcked = (ids: Array<{ message_id: string }>): void => {
+    if (!ackedIds) return;
     for (const { message_id } of ids) {
       ackedIds.delete(message_id);
+      if (ackedIds.size === 2000) ackedIds.delete(ackedIds.values().next().value as string);
       ackedIds.add(message_id);
     }
-    while (ackedIds.size > 2000) ackedIds.delete(ackedIds.values().next().value as string);
   };
   const noteDisposition = (message: unknown, internalReason: string): void => {
     if (!opts.onDisposition) return;
-    if (!ackedIds.has(idOf(message))) return;
+    if (!ackedIds?.has(idOf(message))) return;
     const reason = coarseDeadLetterReason(internalReason);
     if (reason === null) return;
     const id = idOf(message);
@@ -2434,17 +2435,15 @@ export function startAutoReply(opts: {
   ): void => {
     if (items.length === 0 || !opts.onDeadLetter) return;
     const at = new Date().toISOString();
-    let written: unknown;
     try {
-      written = opts.onDeadLetter(
+      opts.onDeadLetter(
         items.map((i) => ({ rejected_at: at, reason: i.reason, kind: "reload_handoff", key_id: i.keyId ?? null, message: recordable(i.message) }))
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${String(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
-    if (written !== true) return;
-    for (const i of items) noteDisposition(i.message, i.reason);
+    // A handoff record never proves terminal ownership, even for a locally acked ID.
   };
 
   // Entries the hand-off bounds pushed out. Ours (same owner) get a record and
@@ -2510,7 +2509,7 @@ export function startAutoReply(opts: {
       quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
-    if (written !== true) return;
+    if (!opts.onDisposition || written !== true) return;
     for (const m of messages) noteDisposition(m, reason);
   };
 
@@ -2907,7 +2906,10 @@ export function startAutoReply(opts: {
         // the overrun clock runs from the ORIGINAL deferral, not from the
         // reload — unless something in it never had a floor attempt.
         const pushedOut = new Set<InboxMessage>();
-        for (const drop of stashDeferred(state, conv, group.messages, group.verdicts, nowMs, tickGeneration, group.firstAt, group.inflight)) {
+        // Once stashed, this conversation is no longer owned by the in-flight batch.
+      // Transfer before any synchronous sink or disposition callback can stop us.
+      if (opts.onDisposition) unhanded = unhanded.filter((m) => m.conversation_id !== conv);
+      for (const drop of stashDeferred(state, conv, group.messages, group.verdicts, nowMs, tickGeneration, group.firstAt, group.inflight)) {
           quietly(
             "warn",
             `[ekho-autoreply] re-admitted conversation ${drop.conversationId} hit a stash cap (${drop.reason}) — ` +
@@ -3291,6 +3293,9 @@ export function startAutoReply(opts: {
     for (const [conv, msgs] of Object.entries(plan.deferred)) {
       // Neither cap drops anything silently (#78): whatever a stash cannot keep
       // was acked, so it leaves a dead-letter record and a WARNING behind it.
+      // Once stashed, this conversation is no longer owned by the in-flight batch.
+      // Transfer before any synchronous sink or disposition callback can stop us.
+      if (opts.onDisposition) unhanded = unhanded.filter((m) => m.conversation_id !== conv);
       for (const drop of stashDeferred(state, conv, msgs, batchVerdicts, nowMs, tickGeneration)) {
         log?.warn?.(
           drop.reason === DEFERRED_OVERFLOW_REASON
@@ -3302,6 +3307,12 @@ export function startAutoReply(opts: {
                 `${drop.messages.length} msg(s); it will get no turn`
         );
         deadLetterDeferred(drop.messages, drop.reason);
+      }
+      if (stopped) {
+        for (const floor of plan.toRelease) {
+          try { await client.releaseFloor(floor); } catch { /* best-effort */ }
+        }
+        return;
       }
     }
     // A conversation that gets a turn ABSORBS its stash: the held-back messages
