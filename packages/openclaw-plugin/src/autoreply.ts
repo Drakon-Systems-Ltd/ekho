@@ -2877,6 +2877,22 @@ export function startAutoReply(opts: {
         quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${String(err)}`);
       }
     }
+    // Custody first: every admitted group enters the stash before any sink,
+    // record or disposition callback can run, so a synchronous stop flushes the
+    // not-yet-processed groups to a successor (original clock, or restarted if
+    // never floor-tried) instead of losing them with this closure. Terminal
+    // drops stay out of the stash and are dead-lettered, never re-deposited.
+    const stashed: Array<{ conv: string; group: (typeof admitted extends Map<string, infer G> ? G : never); drops: ReturnType<typeof stashDeferred> }> = [];
+    for (const [conv, group] of admitted) {
+      try {
+        const drops = stashDeferred(state, conv, group.messages, group.verdicts, nowMs, tickGeneration, group.firstAt, group.inflight);
+        stashed.push({ conv, group, drops });
+      } catch (err) {
+        recordHandoff(group.messages.map((m) => ({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}stash_failed` })));
+        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${String(err)}`);
+      }
+    }
+    if (stopped) flushOnStop(); // a take-drop sink stopped us before custody: hand the stash on now
     try {
       recordTerminalRejects(terminal, selfAgentId, cacheContext);
     } catch (err) {
@@ -2900,16 +2916,10 @@ export function startAutoReply(opts: {
           `they will get no turn, and neither the sender nor the operator console is told`
       );
     }
-    for (const [conv, group] of admitted) {
+    for (const { conv, group, drops } of stashed) {
       try {
-        // Into the stash, like any held-back message: the floor is re-tried and
-        // the overrun clock runs from the ORIGINAL deferral, not from the
-        // reload — unless something in it never had a floor attempt.
         const pushedOut = new Set<InboxMessage>();
-        // Once stashed, this conversation is no longer owned by the in-flight batch.
-      // Transfer before any synchronous sink or disposition callback can stop us.
-      if (opts.onDisposition) unhanded = unhanded.filter((m) => m.conversation_id !== conv);
-      for (const drop of stashDeferred(state, conv, group.messages, group.verdicts, nowMs, tickGeneration, group.firstAt, group.inflight)) {
+        for (const drop of drops) {
           quietly(
             "warn",
             `[ekho-autoreply] re-admitted conversation ${drop.conversationId} hit a stash cap (${drop.reason}) — ` +
@@ -2928,8 +2938,8 @@ export function startAutoReply(opts: {
           );
         }
       } catch (err) {
-        recordHandoff(group.messages.map((m) => ({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}stash_failed` })));
-        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${String(err)}`);
+        // Already stashed: the loop (or a stop's flush) owns them; only a callback failed.
+        quietly("warn", `[ekho-autoreply] reload hand-off callback failed for conversation ${conv}: ${String(err)}`);
       }
     }
   };
@@ -3108,7 +3118,9 @@ export function startAutoReply(opts: {
         resetPeerLatch(state, m.conversation_id);
       }
     }
+    if (stopped) return; // the reject hook may have stopped us: no re-admission, no ack
     admitReloadHandoff(batch, verifications, operatorTrusted, eff, durableRejects, cacheContext, tickGeneration);
+    if (stopped) return; // a hand-off sink may have stopped us: ack nothing; the relay redelivers
     const real = batch.messages.filter((m) =>
       isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
@@ -3255,6 +3267,7 @@ export function startAutoReply(opts: {
 
     // From the ack on, `kept` lives only in this tick until a turn or the
     // stash takes it; a stop() in that window dead-letters it (flushOnStop).
+    if (stopped) return;
     unhanded = kept;
     // ACK BEFORE the turn (Part C, rule 2 — at-most-once auto-reply). A slow or
     // crashed turn can never cause a redelivery that re-triggers us.
@@ -3293,10 +3306,10 @@ export function startAutoReply(opts: {
     for (const [conv, msgs] of Object.entries(plan.deferred)) {
       // Neither cap drops anything silently (#78): whatever a stash cannot keep
       // was acked, so it leaves a dead-letter record and a WARNING behind it.
-      // Once stashed, this conversation is no longer owned by the in-flight batch.
-      // Transfer before any synchronous sink or disposition callback can stop us.
-      if (opts.onDisposition) unhanded = unhanded.filter((m) => m.conversation_id !== conv);
-      for (const drop of stashDeferred(state, conv, msgs, batchVerdicts, nowMs, tickGeneration)) {
+      // Ownership moves to the stash (or to `drops`) before any sink or callback runs.
+      const drops = stashDeferred(state, conv, msgs, batchVerdicts, nowMs, tickGeneration);
+      unhanded = unhanded.filter((m) => m.conversation_id !== conv);
+      for (const drop of drops) {
         log?.warn?.(
           drop.reason === DEFERRED_OVERFLOW_REASON
             ? `[ekho-autoreply] deferred conversation ${drop.conversationId} overflowed the ` +
