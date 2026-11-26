@@ -103,24 +103,29 @@ export function textToolResult(text: string, details: unknown) {
 }
 
 /**
- * The host's jsonResult(payload): the payload as JSON text, and the payload
- * itself as `details`.
- *
- * Indented by two, which is what the host's jsonResult did from the supported
- * floor (2026.5.18 dist/common-Co_iMEX5.js: `JSON.stringify(payload, null, 2)`)
- * and what ekho_send has always produced (it wraps its own result). 2026.11.10's
- * jsonResult dropped the indentation (dist/tool-results-BkLNMSCi.mjs:
- * `JSON.stringify(e)`); with the wrapping done here, one bundle now gives the
- * same text on every host instead of following whichever host loaded it.
+ * ekho_send's own result: the payload as JSON text indented by two, and the
+ * payload itself as `details`. ekho_send is a factory tool and has always
+ * wrapped its own result this way; unchanged.
  */
 export function jsonToolResult(payload: unknown) {
   return textToolResult(JSON.stringify(payload, null, 2), payload);
 }
 
-/** The host's wrapToolPluginResult: a string is its own text, anything else is JSON. */
+/**
+ * The host's wrapToolPluginResult for execute tools (ekho_open_room,
+ * ekho_inbox): a string is its own text, anything else is compact JSON text
+ * with the value as `details`.
+ *
+ * Compact matches the current host, OpenClaw 2026.11.10
+ * (dist/tool-results-BkLNMSCi.mjs jsonResult: `JSON.stringify(e)`), which is
+ * what these two tools return on the fleet today. Older hosts indented by two
+ * (2026.5.18 dist/common-Co_iMEX5.js); with the wrapping done here, one bundle
+ * now gives the same text on every host. Compact also keeps ekho_inbox output
+ * smaller in the model's context.
+ */
 export function wrapToolResult(result: unknown) {
   if (typeof result === "string") return textToolResult(result, result);
-  return jsonToolResult(result);
+  return textToolResult(JSON.stringify(result), result);
 }
 
 export function defineToolEntry<TConfigSchema extends TSchema>(

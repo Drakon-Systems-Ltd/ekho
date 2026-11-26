@@ -43,15 +43,16 @@ describe("the deprecated tool-plugin subpath is gone from the source", () => {
 /**
  * What the old helper did with an execute tool's return value, copied from the
  * host so the comparison is against the original rather than against a second
- * reading of our own code — openclaw 2026.5.18 (the supported floor),
- * dist/tool-plugin-BSUfExpZ.js `wrapToolPluginResult` over
- * dist/common-Co_iMEX5.js `textResult` / `jsonResult`.
+ * reading of our own code — openclaw 2026.11.10 (the fleet's current host),
+ * dist/tool-plugin-Dml-gUYB.mjs `wrapToolPluginResult` over
+ * dist/tool-results-BkLNMSCi.mjs `textResult` / `jsonResult` (compact JSON;
+ * 2026.5.18 indented by two, newer hosts do not).
  */
 function hostTextResult(text: string, details: unknown) {
   return { content: [{ type: "text", text }], details };
 }
 function hostJsonResult(payload: unknown) {
-  return hostTextResult(JSON.stringify(payload, null, 2), payload);
+  return hostTextResult(JSON.stringify(payload), payload);
 }
 function hostWrapToolPluginResult(result: unknown) {
   if (typeof result === "string") return hostTextResult(result, result);
@@ -119,15 +120,15 @@ describe("an execute tool's result is wrapped as the old host helper wrapped it"
     expect(result).toEqual(hostWrapToolPluginResult("hi there"));
   });
 
-  it("wraps an object as indented JSON text, with the object itself as details", async () => {
+  it("wraps an object as compact JSON text, with the object itself as details", async () => {
     const { byName } = register();
     const payload = { ok: true, nested: { list: [1, 2], none: null } };
     const result = (await byName("says_object").execute("call_2", {})) as ReturnType<typeof hostJsonResult>;
     expect(result).toEqual(hostWrapToolPluginResult(payload));
     // Spelled out, so this does not rest on the reference above alone.
     expect(Object.keys(result)).toEqual(["content", "details"]);
-    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(payload, null, 2) }]);
-    expect(result.content[0].text).toContain('\n  "ok": true');
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(payload) }]);
+    expect(result.content[0].text).toBe('{"ok":true,"nested":{"list":[1,2],"none":null}}');
     expect(result.details).toEqual(payload);
   });
 
@@ -270,7 +271,7 @@ describe("the plugin registers the same three tools it did through defineToolPlu
     expect(order.filter((o) => o === "tool")).toHaveLength(3);
   });
 
-  it("wraps a real execute tool's result: ekho_inbox answers as indented JSON text plus details", async () => {
+  it("wraps a real execute tool's result: ekho_inbox answers as compact JSON text plus details", async () => {
     const { registered } = await registerPlugin();
     const inbox = registered.map((r) => r.tool).find((t) => typeof t === "object" && t.name === "ekho_inbox") as RegisteredTool;
     const home = process.env.HOME;
@@ -284,7 +285,7 @@ describe("the plugin registers the same three tools it did through defineToolPlu
       expect(Object.keys(result)).toEqual(["content", "details"]);
       expect(result.details).toMatchObject({ listener: "down", count: 0, degraded: true });
       expect(String(result.details.error)).toMatch(/not connected/);
-      expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.details, null, 2) }]);
+      expect(result.content).toEqual([{ type: "text", text: JSON.stringify(result.details) }]);
       expect(result).toEqual(hostWrapToolPluginResult(result.details));
     } finally {
       if (home === undefined) delete process.env.HOME; else process.env.HOME = home;
