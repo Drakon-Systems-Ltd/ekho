@@ -2649,9 +2649,9 @@ export function startAutoReply(opts: {
       log?.warn?.(`[ekho-autoreply] reload hand-off take failed: ${String(err)}`);
       return;
     }
-    reportHandoffDrops(got?.dropped, owner);
+    // Reported only once what was taken is under loop custody (a sink may stop us).
     const taken: unknown[] = Array.isArray(got?.taken) ? got.taken : [];
-    if (taken.length === 0) return;
+    if (taken.length === 0) return reportHandoffDrops(got?.dropped, owner);
     const nowMs = Date.now();
     // Served ledger (#111): the newest generation that took ownership of a
     // message or accepted a signature. Without one, only this loop's own sets.
@@ -2892,7 +2892,7 @@ export function startAutoReply(opts: {
         quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${String(err)}`);
       }
     }
-    if (stopped) flushOnStop(); // a take-drop sink stopped us before custody: hand the stash on now
+    reportHandoffDrops(got?.dropped, owner);
     try {
       recordTerminalRejects(terminal, selfAgentId, cacheContext);
     } catch (err) {

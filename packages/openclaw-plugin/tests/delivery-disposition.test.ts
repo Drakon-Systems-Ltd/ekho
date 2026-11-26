@@ -430,13 +430,14 @@ describe("startAutoReply stop custody (#218 r3)", () => {
   const capture = (taken: unknown[], dropped: unknown[] = []) => {
     const deposits: Dep[] = [];
     let calls = 0;
+    let takes = 0;
     const handoff = handoffWith([], [], {
-      take: () => (++calls === 2 ? { taken, dropped } : { taken: [], dropped: [] }),
+      take: () => (takes++, ++calls === 2 ? { taken, dropped } : { taken: [], dropped: [] }),
       deposit: (_o: string, es: Array<{ message: { message_id: string }; conversationId: string; firstDeferredAtMs: number | null }>) => {
         for (const e of es) deposits.push({ id: e.message.message_id, conv: e.conversationId, at: e.firstDeferredAtMs });
       }
     });
-    return { deposits, handoff };
+    return { deposits, handoff, takes: () => takes };
   };
   const fill = (conv: string, n = DEFERRED_MESSAGES_PER_CONV) => Array.from({ length: n }, (_, i) => peer(i, conv));
   const live = (i: number, conv: string, over: Record<string, unknown> = {}) =>
@@ -450,24 +451,27 @@ describe("startAutoReply stop custody (#218 r3)", () => {
       live(900, "a", { firstDeferredAtMs: stamp }), live(901, "b", { firstDeferredAtMs: stamp })
     ]);
     let stopFn: () => Promise<void> = async () => {};
+    const atStop: string[] = [];
+    const halt = () => { void stopFn(); atStop.push(...deposits.map((d) => d.id)); };
     let acks = 0;
     const client = heldClient(fill("a"), true, async () => { acks++; });
     const extra: Record<string, unknown> = { reloadHandoff: handoff, cacheContext: () => "own.gen1" };
     if (mode === "sink") {
       extra.onDisposition = undefined;
-      extra.onDeadLetter = (r: any[]) => { if (r.some((x) => x.reason === DEFERRED_OVERFLOW_REASON)) void stopFn(); return true; };
+      extra.onDeadLetter = (r: any[]) => { if (r.some((x) => x.reason === DEFERRED_OVERFLOW_REASON)) halt(); return true; };
     } else {
-      extra.onDisposition = () => { void stopFn(); };
+      extra.onDisposition = () => { halt(); };
     }
     const { stop } = run(client, extra);
     stopFn = stop;
     await waitFor(() => deposits.length > 0);
     await stop();
-    return { deposits, acks };
+    return { deposits, acks, atStop };
   };
 
   it.each(["sink", "disposition"] as const)("B1: re-admission overflow stop (%s) hands the pending group on once with its clock", async (mode) => {
-    const { deposits } = await readmission(mode)();
+    const { deposits, atStop } = await readmission(mode)();
+    expect(atStop).toContain("m901"); // already on its way when stop() returned
     const b = deposits.filter((d) => d.id === "m901");
     expect(b).toHaveLength(1);
     expect(b[0].conv).toBe("b");
@@ -479,26 +483,30 @@ describe("startAutoReply stop custody (#218 r3)", () => {
   it("B1: a take-drop record that stops the loop still hands the admitted groups on exactly once", async () => {
     const { deposits, handoff } = capture([live(910, "b")], [{ entry: entry(peer(911, "z"), { owner: "own" }), why: "overflow" }]);
     let stopFn: () => Promise<void> = async () => {};
+    const atStop: string[] = [];
     const { stop } = run(heldClient([]), {
       reloadHandoff: handoff, cacheContext: () => "own.gen1",
-      onDeadLetter: (r: any[]) => { if (r.some((x) => x.kind === "reload_handoff")) void stopFn(); return true; }
+      onDeadLetter: (r: any[]) => { if (r.some((x) => x.kind === "reload_handoff")) { void stopFn(); atStop.push(...deposits.map((d) => d.id)); } return true; }
     });
     stopFn = stop;
     await waitFor(() => deposits.length > 0);
     await stop();
+    expect(atStop).toContain("m910");
     expect(deposits.filter((d) => d.id === "m910")).toHaveLength(1);
   });
 
   it("B1: a readmission record that stops the loop hands the other group on exactly once", async () => {
     const { deposits, handoff } = capture([live(920, "a"), live(921, "b")]);
     let stopFn: () => Promise<void> = async () => {};
+    const atStop: string[] = [];
     const { stop } = run(heldClient([]), {
       reloadHandoff: handoff, cacheContext: () => "own.gen1",
-      onDeadLetter: (r: any[]) => { if (r.some((x) => x.reason === RELOAD_READMITTED_REASON)) void stopFn(); return true; }
+      onDeadLetter: (r: any[]) => { if (r.some((x) => x.reason === RELOAD_READMITTED_REASON)) { if (atStop.length === 0) { void stopFn(); atStop.push(...deposits.map((d) => d.id)); } } return true; }
     });
     stopFn = stop;
     await waitFor(() => deposits.length >= 2);
     await stop();
+    expect(atStop.sort()).toEqual(["m920", "m921"]);
     expect(deposits.map((d) => d.id).sort()).toEqual(["m920", "m921"]);
   });
 
@@ -525,8 +533,9 @@ describe("startAutoReply stop custody (#218 r3)", () => {
     let acks = 0;
     let stopFn: () => Promise<void> = async () => {};
     let rejected = false;
+    const { handoff, takes } = capture([live(941, "r")]);
     const { stop } = run(heldClient([peer(40, "v")], true, async () => { acks++; }), {
-      identity: undefined, requireSigned: "require",
+      identity: undefined, requireSigned: "require", reloadHandoff: handoff, cacheContext: () => "own.gen1",
       onVerificationReject: () => { rejected = true; void stopFn(); }
     });
     stopFn = stop;
@@ -534,6 +543,7 @@ describe("startAutoReply stop custody (#218 r3)", () => {
     await new Promise((r) => setTimeout(r, 40));
     await stop();
     expect(acks).toBe(0);
+    expect(takes()).toBe(0); // a stopped loop does not take work out of the registry
   });
 
   it("B3: a stop from the sink alone (no onDisposition) hands each live message on exactly once", async () => {
