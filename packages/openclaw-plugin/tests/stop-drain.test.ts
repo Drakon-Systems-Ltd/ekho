@@ -514,3 +514,217 @@ describe("stop() with a throwing logger", () => {
     expect(outcome).toBe("resolved");
   });
 });
+
+// #111: stop() re-entered from a sink, disposition callback or deposit while the
+// stop flush is still running (the flush runs synchronously, so `stopping` was
+// not yet assigned and a nested stop() flushed a second time). The outer loop
+// then resumed on its stale snapshot and dead-lettered, deposited and reported
+// the same held message twice. Local lifecycle only; no relay or network.
+describe("stop() re-entered during its own flush (#111)", () => {
+  function reentrant(relay: ReturnType<typeof stubRelay>, reenterOn: string) {
+    const records: any[] = [];
+    const deposits: string[] = [];
+    const depositBatches: string[][] = [];
+    const dispositions: string[] = [];
+    const nested: Array<Promise<void>> = [];
+    let stopRef: () => Promise<void> = () => Promise.resolve();
+    let entered = false;
+    const stop = startAutoReply({
+      client: relay.client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      peerEnabled: true,
+      log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} } as any,
+      cacheContext: () => "own.gen1",
+      onDeadLetter: (r: any[]) => {
+        records.push(...r);
+        if (!entered && r.some((x) => x.reason === reenterOn)) {
+          entered = true;
+          nested.push(stopRef());
+        }
+      },
+      onDisposition: (id: string) => {
+        dispositions.push(id);
+      },
+      reloadHandoff: {
+        deposit: (_owner: string, entries: any[]) => {
+          depositBatches.push(entries.map((e) => e.message.message_id));
+          for (const e of entries) deposits.push(e.message.message_id);
+        },
+        take: () => ({ taken: [], dropped: [] })
+      }
+    } as any);
+    stopRef = stop;
+    return { stop, records, deposits, depositBatches, dispositions, nested };
+  }
+
+  const ids = (xs: any[]) => xs.map((r) => (r.message ? r.message.message_id : r)).sort();
+
+  async function twoHeldGroups(relay: ReturnType<typeof stubRelay>) {
+    relay.client.acquireFloor.mockImplementation((async () => ({ granted: false, holder_agent_id: "other" })) as any);
+    relay.client.getInbox.mockResolvedValueOnce({
+      messages: [peer("a1", "conv-a"), peer("b1", "conv-b")],
+      peer_autoreply: true
+    });
+  }
+
+  it("re-entry from the first stash flush record: each group is dead-lettered, deposited and reported once", async () => {
+    const relay = stubRelay();
+    await twoHeldGroups(relay);
+    const h = reentrant(relay, DEFERRED_LOOP_STOPPED_REASON);
+    await tick(); // both conversations stashed behind another floor holder
+    hoisted.stopped = true;
+    const returned = h.stop();
+    await returned;
+    expect(ids(h.records)).toEqual(["a1", "b1"]);
+    expect(ids(h.deposits)).toEqual(["a1", "b1"]);
+    expect(h.depositBatches).toEqual([["a1", "b1"]]); // one flush, one deposit: no second flush ran
+    expect(new Set(h.dispositions).size).toBe(h.dispositions.length); // at most one each
+    expect(h.nested).toHaveLength(1);
+  });
+
+  it("re-entry from the unhanded (in-flight) flush record: nothing is custodied twice", async () => {
+    const relay = stubRelay();
+    await twoHeldGroups(relay);
+    const ack = deferred<void>();
+    const h = reentrant(relay, INFLIGHT_LOOP_STOPPED_REASON);
+    await tick(); // tick 1 stashes a1 and b1
+    relay.client.getInbox.mockResolvedValueOnce({ messages: [peer("m2", "free-conv")], peer_autoreply: true });
+    relay.client.ackMessages.mockReturnValueOnce(ack.promise.then(() => ({})) as never);
+    await tick(); // tick 2: m2 acked-in-flight, held only in memory
+    hoisted.stopped = true;
+    const returned = h.stop();
+    ack.resolve();
+    await returned;
+    expect(ids(h.records)).toEqual(["a1", "b1", "m2"]);
+    expect(ids(h.deposits)).toEqual(["a1", "b1", "m2"]);
+    expect(new Set(h.dispositions).size).toBe(h.dispositions.length);
+  });
+
+  it("the nested stop() promise settles with the outer drain, never before it", async () => {
+    const relay = stubRelay();
+    const ack = deferred<void>();
+    relay.client.getInbox.mockResolvedValueOnce({ messages: [peer("m1", "free-conv")], peer_autoreply: true });
+    relay.client.ackMessages.mockReturnValueOnce(ack.promise.then(() => ({})) as never);
+    const h = reentrant(relay, INFLIGHT_LOOP_STOPPED_REASON);
+    await tick(); // ack held in flight
+    hoisted.stopped = true;
+    const order: string[] = [];
+    const outer = h.stop();
+    void outer.then(() => order.push("outer"));
+    void h.nested[0]!.then(() => order.push("nested"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order).toEqual([]); // the held tick has not settled: neither may have
+    ack.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(order.sort()).toEqual(["nested", "outer"]);
+    expect(h.records).toHaveLength(1);
+  });
+});
+
+// #111 (PR #222 review): the shutdown drain must always settle, and the poll
+// must always be cancelled, even when a sink, deposit or reporting step throws
+// a value that cannot be stringified, or a flush step escapes synchronously.
+// Internal mocks only; no relay or network.
+describe("stop() settles and cleans up when its own callbacks throw (#111)", () => {
+  // String(x) throws a TypeError for a prototype-less object.
+  const unprintable = () => Object.create(null);
+
+  type Break = "sink" | "deposit" | "escape";
+
+  function harness(kind: Break) {
+    const relay = stubRelay();
+    const records: string[] = [];
+    const deposits: string[] = [];
+    const nested: Array<Promise<void>> = [];
+    const signals: Array<AbortSignal | undefined> = [];
+    let stopRef: () => Promise<void> = () => Promise.resolve();
+    let armed = false;
+    let reentered = false;
+    let depositAccesses = 0;
+    relay.client.acquireFloor.mockImplementation((async () => ({ granted: false, holder_agent_id: "other" })) as any);
+    relay.client.getInbox.mockResolvedValueOnce({
+      messages: [peer("a1", "conv-a"), peer("b1", "conv-b")],
+      peer_autoreply: true
+    });
+    const opts: any = {
+      client: relay.client as any,
+      api: {} as any,
+      selfAgentId: "self",
+      peerEnabled: true,
+      log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} } as any,
+      cacheContext: () => "own.gen1",
+      onDeadLetter: (r: any[]) => {
+        for (const x of r) records.push(x.message.message_id);
+        if (armed && !reentered) {
+          reentered = true;
+          nested.push(stopRef());
+          if (kind === "sink") throw unprintable();
+        }
+      }
+    };
+    const handoff = {
+      deposit: (_o: string, entries: any[]) => {
+        for (const e of entries) deposits.push(e.message.message_id);
+        if (kind === "deposit") throw unprintable();
+      },
+      take: () => ({ taken: [], dropped: [] })
+    };
+    if (kind === "escape") {
+      Object.defineProperty(opts, "reloadHandoff", {
+        get() {
+          // Reads during the stop flush (armed) throw; earlier reads are normal.
+          if (armed) throw unprintable();
+          depositAccesses++;
+          return handoff;
+        }
+      });
+    } else {
+      opts.reloadHandoff = handoff;
+    }
+    const stop = startAutoReply(opts);
+    stopRef = stop;
+    return {
+      relay, records, deposits, nested, signals, stop, arm: () => (armed = true),
+      hang: () => {
+        // Next poll hangs until its signal aborts, as a real fetch would.
+        relay.client.getInbox.mockImplementationOnce(((_l?: number, signal?: AbortSignal) => {
+          signals.push(signal);
+          return new Promise((_res, rej) => signal?.addEventListener("abort", () => rej(signal.reason)));
+        }) as any);
+      }
+    };
+  }
+
+  for (const kind of ["sink", "deposit", "escape"] as Break[]) {
+    it(`${kind} failure: stop() does not throw, settles for outer/nested/repeat callers, cancels the poll`, async () => {
+      const h = harness(kind);
+      await tick(); // a1 and b1 stashed behind another floor holder
+      h.hang();
+      await tick(); // tick 2 is parked on a hanging poll
+      expect(h.signals[0]!.aborted).toBe(false);
+      h.arm();
+      hoisted.stopped = true;
+      let outer!: Promise<void>;
+      expect(() => {
+        outer = h.stop();
+      }).not.toThrow();
+      const repeat = h.stop();
+      expect(repeat).toBe(outer);
+      const settled: string[] = [];
+      void outer.then(() => settled.push("outer"));
+      void repeat.then(() => settled.push("repeat"));
+      for (const n of h.nested) void n.then(() => settled.push("nested"));
+      await vi.advanceTimersByTimeAsync(STOP_DRAIN_MS + 1);
+      expect(h.signals[0]!.aborted).toBe(true); // poll cleanup ran
+      expect(settled).toContain("outer");
+      expect(settled).toContain("repeat");
+      if (kind !== "escape") {
+        expect(h.nested).toHaveLength(1);
+        expect(settled).toContain("nested");
+        // Remaining custody: the failing sink did not stop the second group.
+        expect(h.records.slice().sort()).toEqual(["a1", "b1"]);
+      }
+    });
+  }
+});
