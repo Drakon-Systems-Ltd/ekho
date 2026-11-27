@@ -2559,6 +2559,8 @@ export function startAutoReply(opts: {
     // (before any floor-release await) if it did not.
     for (const [conv, stash] of [...state.deferredByConversation]) {
       if (covering.has(conv)) continue;
+      // A sink may re-enter and take this group already: custody happens once.
+      if (state.deferredByConversation.get(conv) !== stash) continue;
       state.deferredByConversation.delete(conv);
       deadLetterDeferred(stash.messages, DEFERRED_LOOP_STOPPED_REASON);
       for (const e of stash.entries) {
@@ -3412,6 +3414,12 @@ export function startAutoReply(opts: {
   // (bounded by stopDrainMs), so a host that awaits it exits on a quiet loop.
   return () => {
     if (stopping) return stopping;
+    // Marked before any sink, disposition or deposit callback can run, so a
+    // nested stop() joins this drain instead of flushing a second time.
+    let settleStop!: (drain: Promise<void>) => void;
+    stopping = new Promise<void>((resolve) => {
+      settleStop = resolve;
+    });
     stopped = true;
     clearInterval(timer);
     flushOnStop();
@@ -3427,7 +3435,8 @@ export function startAutoReply(opts: {
     pollAbort = null;
     quietly("info", `[ekho-autoreply] stopped listening as ${selfAgentId}`);
     const inFlight = currentTick;
-    stopping = inFlight
+    settleStop(
+      inFlight
       ? settleWithin(inFlight, opts.stopDrainMs ?? STOP_DRAIN_MS).then((settled) => {
           if (!settled) {
             quietly(
@@ -3437,7 +3446,8 @@ export function startAutoReply(opts: {
             );
           }
         })
-      : Promise.resolve();
+      : Promise.resolve()
+    );
     return stopping;
   };
 }

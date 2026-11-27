@@ -524,6 +524,7 @@ describe("stop() re-entered during its own flush (#111)", () => {
   function reentrant(relay: ReturnType<typeof stubRelay>, reenterOn: string) {
     const records: any[] = [];
     const deposits: string[] = [];
+    const depositBatches: string[][] = [];
     const dispositions: string[] = [];
     const nested: Array<Promise<void>> = [];
     let stopRef: () => Promise<void> = () => Promise.resolve();
@@ -547,13 +548,14 @@ describe("stop() re-entered during its own flush (#111)", () => {
       },
       reloadHandoff: {
         deposit: (_owner: string, entries: any[]) => {
+          depositBatches.push(entries.map((e) => e.message.message_id));
           for (const e of entries) deposits.push(e.message.message_id);
         },
         take: () => ({ taken: [], dropped: [] })
       }
     } as any);
     stopRef = stop;
-    return { stop, records, deposits, dispositions, nested };
+    return { stop, records, deposits, depositBatches, dispositions, nested };
   }
 
   const ids = (xs: any[]) => xs.map((r) => (r.message ? r.message.message_id : r)).sort();
@@ -576,6 +578,7 @@ describe("stop() re-entered during its own flush (#111)", () => {
     await returned;
     expect(ids(h.records)).toEqual(["a1", "b1"]);
     expect(ids(h.deposits)).toEqual(["a1", "b1"]);
+    expect(h.depositBatches).toEqual([["a1", "b1"]]); // one flush, one deposit: no second flush ran
     expect(new Set(h.dispositions).size).toBe(h.dispositions.length); // at most one each
     expect(h.nested).toHaveLength(1);
   });
