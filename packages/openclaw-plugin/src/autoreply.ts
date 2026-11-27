@@ -2056,7 +2056,7 @@ export async function planFloorTurn(
       }
     } catch (err) {
       // Older relay without floor support — respond without a floor (no release).
-      log?.debug?.(`[ekho-autoreply] floor acquire failed for ${conv} (${String(err)}); proceeding without floor`);
+      log?.debug?.(`[ekho-autoreply] floor acquire failed for ${conv} (${describeError(err)}); proceeding without floor`);
       granted = true;
     }
     if (granted) floored.push(...msgs);
@@ -2120,7 +2120,7 @@ async function runExpiredDeferredTurn(opts: ServiceDeferredOptions): Promise<num
       deferred: { conversationId: conv, heldMs, overrun: true }
     });
   } catch (err) {
-    log?.warn?.(`[ekho-autoreply] deferred conversation ${conv} overrun turn threw: ${String(err)}`);
+    log?.warn?.(`[ekho-autoreply] deferred conversation ${conv} overrun turn threw: ${describeError(err)}`);
     started = false;
   } finally {
     // Nothing to release: an overrun turn never took a floor.
@@ -2147,7 +2147,7 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
     try {
       res = await opts.acquireFloor(conv);
     } catch (err) {
-      log?.debug?.(`[ekho-autoreply] deferred-retry acquire failed for ${conv}: ${String(err)}`);
+      log?.debug?.(`[ekho-autoreply] deferred-retry acquire failed for ${conv}: ${describeError(err)}`);
       continue; // relay hiccup — keep the stash, try again next tick
     }
     if (opts.isStopped?.()) {
@@ -2188,7 +2188,7 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
         deferred: { conversationId: conv, heldMs: Math.max(0, nowMs - stash.firstDeferredAtMs) }
       });
     } catch (err) {
-      log?.warn?.(`[ekho-autoreply] deferred-retry turn threw: ${String(err)}`);
+      log?.warn?.(`[ekho-autoreply] deferred-retry turn threw: ${describeError(err)}`);
       started = false;
     } finally {
       state.inFlight = false;
@@ -2208,7 +2208,7 @@ async function runRetryDeferredTurn(opts: ServiceDeferredOptions): Promise<numbe
     try {
       await opts.releaseFloor(conv);
     } catch (err) {
-      log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+      log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${describeError(err)}`);
     }
     return started ? 1 : 0; // at most one retry-turn per tick
   }
@@ -2299,13 +2299,13 @@ async function triggerTurn(
         clearTimeout(timer);
         started = false;
         noteOnce("error", "spawn_error");
-        log?.warn?.(`[ekho-autoreply] turn failed to start: ${String(err)}`);
+        log?.warn?.(`[ekho-autoreply] turn failed to start: ${describeError(err)}`);
         done();
       });
     } catch (err) {
       started = false;
       noteOnce("error", "spawn_error");
-      log?.warn?.(`[ekho-autoreply] turn spawn threw: ${String(err)}`);
+      log?.warn?.(`[ekho-autoreply] turn spawn threw: ${describeError(err)}`);
       done();
     }
   });
@@ -2429,7 +2429,7 @@ export function startAutoReply(opts: {
         items.map((i) => ({ rejected_at: at, reason: i.reason, kind: "reload_handoff", key_id: i.keyId ?? null, message: recordable(i.message) }))
       );
     } catch (err) {
-      quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${String(err)}`);
+      quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${describeError(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
     for (const i of items) noteDisposition(i.message, i.reason);
@@ -2464,20 +2464,20 @@ export function startAutoReply(opts: {
       }
       opts.reloadHandoff.noteServed(owner, { keys, nonces });
     } catch (err) {
-      quietly("warn", `[ekho-autoreply] reload hand-off served note failed: ${String(err)}`);
+      quietly("warn", `[ekho-autoreply] reload hand-off served note failed: ${describeError(err)}`);
     }
   };
 
   // Leave what stop() let go of for a same-process successor. Never throws:
   // stop() has already put every message on disk.
   const depositHandoff = (entries: ReloadHandoffDeposit[]): void => {
-    if (entries.length === 0 || !opts.reloadHandoff) return;
-    const owner = handoffOwner();
-    if (!owner) return;
     try {
+      if (entries.length === 0 || !opts.reloadHandoff) return;
+      const owner = handoffOwner();
+      if (!owner) return;
       reportHandoffDrops(opts.reloadHandoff.deposit(owner, entries), owner);
     } catch (err) {
-      quietly("warn", `[ekho-autoreply] reload hand-off deposit failed: ${String(err)}`);
+      quietly("warn", `[ekho-autoreply] reload hand-off deposit failed: ${describeError(err)}`);
     }
   };
   const stopSuffix = opts.reloadHandoff
@@ -2494,7 +2494,7 @@ export function startAutoReply(opts: {
         messages.map((m) => ({ rejected_at: at, reason, kind: "deferred", key_id: null, message: m }))
       );
     } catch (err) {
-      quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${String(err)}`);
+      quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${describeError(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
     for (const m of messages) noteDisposition(m, reason);
@@ -2539,7 +2539,12 @@ export function startAutoReply(opts: {
     if (unhanded.length > 0) {
       const msgs = unhanded;
       unhanded = [];
-      deadLetterDeferred(msgs, INFLIGHT_LOOP_STOPPED_REASON);
+      try {
+        deadLetterDeferred(msgs, INFLIGHT_LOOP_STOPPED_REASON);
+      } catch (err) {
+        // Custody continues: the hand-off and the remaining stashes still run.
+        quietly("warn", `[ekho-autoreply] in-flight dead-letter step failed at stop: ${describeError(err)}`);
+      }
       for (const m of msgs) {
         handoff.push({
           reason: INFLIGHT_LOOP_STOPPED_REASON,
@@ -2562,7 +2567,11 @@ export function startAutoReply(opts: {
       // A sink may re-enter and take this group already: custody happens once.
       if (state.deferredByConversation.get(conv) !== stash) continue;
       state.deferredByConversation.delete(conv);
-      deadLetterDeferred(stash.messages, DEFERRED_LOOP_STOPPED_REASON);
+      try {
+        deadLetterDeferred(stash.messages, DEFERRED_LOOP_STOPPED_REASON);
+      } catch (err) {
+        quietly("warn", `[ekho-autoreply] stash dead-letter step failed at stop (${conv}): ${describeError(err)}`);
+      }
       for (const e of stash.entries) {
         handoff.push({
           reason: DEFERRED_LOOP_STOPPED_REASON,
@@ -2635,7 +2644,7 @@ export function startAutoReply(opts: {
     try {
       got = handoff.take(owner);
     } catch (err) {
-      log?.warn?.(`[ekho-autoreply] reload hand-off take failed: ${String(err)}`);
+      log?.warn?.(`[ekho-autoreply] reload hand-off take failed: ${describeError(err)}`);
       return;
     }
     reportHandoffDrops(got?.dropped, owner);
@@ -2737,7 +2746,7 @@ export function startAutoReply(opts: {
         if (!prior || from > prior.from) groups.set(key, { entry, m, from });
       } catch (err) {
         order.push({ malformed: messageOf(entry) });
-        quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${String(err)}`);
+        quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${describeError(err)}`);
       }
     }
     for (const slot of order) {
@@ -2863,13 +2872,13 @@ export function startAutoReply(opts: {
         admitted.set(m.conversation_id, group);
       } catch (err) {
         withheld.push({ message: messageOf(entry), reason: `${RELOAD_WITHHELD_PREFIX}malformed` });
-        quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${String(err)}`);
+        quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${describeError(err)}`);
       }
     }
     try {
       recordTerminalRejects(terminal, selfAgentId, cacheContext);
     } catch (err) {
-      log?.warn?.(`[ekho-autoreply] reload hand-off reject publish failed: ${String(err)}`);
+      log?.warn?.(`[ekho-autoreply] reload hand-off reject publish failed: ${describeError(err)}`);
     }
     noteServed(served, (m) => servedVerdicts.get(m));
     if (duplicates.length > 0) {
@@ -2915,7 +2924,7 @@ export function startAutoReply(opts: {
         }
       } catch (err) {
         recordHandoff(group.messages.map((m) => ({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}stash_failed` })));
-        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${String(err)}`);
+        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${describeError(err)}`);
       }
     }
   };
@@ -2946,7 +2955,7 @@ export function startAutoReply(opts: {
         }
         return;
       }
-      log?.warn?.(`[ekho-autoreply] poll failed: ${String(err)}`);
+      log?.warn?.(`[ekho-autoreply] poll failed: ${describeError(err)}`);
       return;
     } finally {
       if (pollAbort === poll) pollAbort = null;
@@ -2982,7 +2991,7 @@ export function startAutoReply(opts: {
           opts.onIdentityChanged(opts.identity);
         }
       } catch (err) {
-        log?.warn?.(`[ekho-autoreply] operator-key sync failed: ${String(err)}`);
+        log?.warn?.(`[ekho-autoreply] operator-key sync failed: ${describeError(err)}`);
       }
       verifications = verifyBatch(batch.messages, {
         identity: opts.identity,
@@ -3060,7 +3069,7 @@ export function startAutoReply(opts: {
       try {
         opts.onVerificationReject(rejects);
       } catch (err) {
-        log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${String(err)}`);
+        log?.warn?.(`[ekho-autoreply] dead-letter sink failed: ${describeError(err)}`);
       }
     }
 
@@ -3184,7 +3193,7 @@ export function startAutoReply(opts: {
         try {
           await client.ackMessages(ackAll);
         } catch (err) {
-          log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
+          log?.warn?.(`[ekho-autoreply] ack failed: ${describeError(err)}`);
         }
       }
       if (stopped) return;
@@ -3211,7 +3220,7 @@ export function startAutoReply(opts: {
           budget: effectiveConversationBudget(batch, conv, eff.peerTurnBudget)
         });
       } catch (err) {
-        log?.debug?.(`[ekho-autoreply] stall escalation failed for ${conv}: ${String(err)}`);
+        log?.debug?.(`[ekho-autoreply] stall escalation failed for ${conv}: ${describeError(err)}`);
       }
       // Nothing is acked yet: the relay redelivers the batch to the next loop.
       if (stopped) return;
@@ -3247,7 +3256,7 @@ export function startAutoReply(opts: {
       try {
         await client.ackMessages(ackAll);
       } catch (err) {
-        log?.warn?.(`[ekho-autoreply] ack failed: ${String(err)}`);
+        log?.warn?.(`[ekho-autoreply] ack failed: ${describeError(err)}`);
       }
     }
     if (stopped) return; // stop() has dead-lettered `kept`
@@ -3327,7 +3336,7 @@ export function startAutoReply(opts: {
           snapshotVerifier, state.turn
         );
       } catch (err) {
-        log?.warn?.(`[ekho-autoreply] turn trigger threw: ${String(err)}`);
+        log?.warn?.(`[ekho-autoreply] turn trigger threw: ${describeError(err)}`);
         started = false;
       } finally {
         state.inFlight = false;
@@ -3362,7 +3371,7 @@ export function startAutoReply(opts: {
           try {
             await client.releaseFloor(conv);
           } catch (err) {
-            log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${String(err)}`);
+            log?.debug?.(`[ekho-autoreply] floor release failed for ${conv}: ${describeError(err)}`);
           }
         }
       }
@@ -3381,14 +3390,21 @@ export function startAutoReply(opts: {
     } catch (err) {
       // Nothing above may take the process down: the interval discards this
       // promise, so a rejection here would be unhandled.
-      quietly("warn", `[ekho-autoreply] tick failed: ${String(err)}`);
+      quietly("warn", `[ekho-autoreply] tick failed: ${describeError(err)}`);
     } finally {
       tickRunning = false;
       unhanded = [];
       covering = new Set();
       // Safety net: stop() already flushed, and a stopped tick adds nothing,
       // so this is normally a no-op.
-      if (stopped) flushOnStop();
+      if (stopped) {
+        try {
+          flushOnStop();
+        } catch (err) {
+          // The interval discards this promise: a throw here is unhandled.
+          quietly("warn", `[ekho-autoreply] post-stop flush failed: ${describeError(err)}`);
+        }
+      }
     }
   };
 
@@ -3421,35 +3437,66 @@ export function startAutoReply(opts: {
       settleStop = resolve;
     });
     stopped = true;
-    clearInterval(timer);
-    flushOnStop();
-    // After the flush, so acked work is on disk before anything else happens.
-    // With the poll cancelled the tick settles as soon as the rejection is
-    // delivered, and no inbox request from this loop stays outstanding for a
-    // later loop's poll to overlap (#164).
+    // Every step below is independent: one that throws is reported and the
+    // rest still run, and the drain promise is settled in the finally no
+    // matter what, so a host awaiting stop() before it rebinds or releases the
+    // runtime is never left on a promise nothing will settle.
+    let drain: Promise<void> = Promise.resolve();
     try {
-      pollAbort?.abort();
-    } catch {
-      /* stop() never throws */
+      try {
+        clearInterval(timer);
+      } catch {
+        /* stop() never throws */
+      }
+      try {
+        flushOnStop();
+      } catch (err) {
+        quietly("warn", `[ekho-autoreply] stop flush failed part-way: ${describeError(err)}`);
+      }
+    } finally {
+      // After the flush, so acked work is on disk before anything else happens.
+      // With the poll cancelled the tick settles as soon as the rejection is
+      // delivered, and no inbox request from this loop stays outstanding for a
+      // later loop's poll to overlap (#164).
+      try {
+        pollAbort?.abort();
+      } catch {
+        /* stop() never throws */
+      }
+      pollAbort = null;
+      try {
+        quietly("info", `[ekho-autoreply] stopped listening as ${selfAgentId}`);
+        const inFlight = currentTick;
+        const bound = opts.stopDrainMs ?? STOP_DRAIN_MS;
+        if (inFlight) {
+          drain = settleWithin(inFlight, bound).then((settled) => {
+            if (!settled) {
+              quietly(
+                "warn",
+                `[ekho-autoreply] in-flight tick still running ${bound}ms after stop; ` +
+                  `not waiting longer (it acks and starts nothing more)`
+              );
+            }
+          });
+        }
+      } catch {
+        drain = Promise.resolve();
+      }
+      settleStop(drain);
     }
-    pollAbort = null;
-    quietly("info", `[ekho-autoreply] stopped listening as ${selfAgentId}`);
-    const inFlight = currentTick;
-    settleStop(
-      inFlight
-      ? settleWithin(inFlight, opts.stopDrainMs ?? STOP_DRAIN_MS).then((settled) => {
-          if (!settled) {
-            quietly(
-              "warn",
-              `[ekho-autoreply] in-flight tick still running ${opts.stopDrainMs ?? STOP_DRAIN_MS}ms after stop; ` +
-                `not waiting longer (it acks and starts nothing more)`
-            );
-          }
-        })
-      : Promise.resolve()
-    );
     return stopping;
   };
+}
+
+/** Error text for a log line that can never throw: a thrown value with no
+ * usable toString (a prototype-less object, a throwing getter) must not turn a
+ * reporting step into a second failure. */
+function describeError(err: unknown): string {
+  try {
+    return String(err);
+  } catch {
+    return "[unprintable error]";
+  }
 }
 
 /** True if `p` settles (either way) within `ms`, false if the wait ran out. */
