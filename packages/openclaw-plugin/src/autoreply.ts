@@ -2341,11 +2341,12 @@ export function startAutoReply(opts: {
   // Sink for deferred stashes that will never get their ordinary turn — cap
   // evictions and turns that failed to spawn (#78). Same dead-letter file as
   // the verification rejects above: acked work always leaves a record.
-  onDeadLetter?: (records: DeadLetterRecord[]) => void;
-  // #111 S2b-1: told (message id, coarse reason) when a message is dead-lettered
-  // or withheld, only after its disk record was written: a throwing dead-letter sink
-  // means no call. Nothing wires it yet: absent, it is never called and nothing is
-  // posted. Synchronous; a throw is swallowed and does not stop the rest of a batch.
+  // Return exactly `true` only once the record is on disk; void, false or a throw
+  // means no onDisposition (#111 S2b-1c).
+  onDeadLetter?: (records: DeadLetterRecord[]) => boolean | void;
+  // #111 S2b-1c: told (message id, coarse reason) only when the dead-letter sink
+  // returned `true` AND this loop saw the ack for that id resolve. Nothing wires it
+  // yet: absent, it is never called and nothing is posted. Synchronous; a throw is swallowed and does not stop the rest of a batch.
   onDisposition?: (messageId: string, reason: DeadLetterReason) => void;
   // #5: peer wake strictness — see RequireSignedMode. Default "warn".
   requireSigned?: RequireSignedMode;
@@ -2405,8 +2406,18 @@ export function startAutoReply(opts: {
   };
 
   // #111 S2b-1: one coarse disposition per message. Never awaited, never throws.
+  const ackedIds = opts.onDisposition ? new Set<string>() : undefined; // ids whose ack RESOLVED in this loop, oldest first, max 2000
+  const noteAcked = (ids: Array<{ message_id: string }>): void => {
+    if (!ackedIds) return;
+    for (const { message_id } of ids) {
+      ackedIds.delete(message_id);
+      if (ackedIds.size === 2000) ackedIds.delete(ackedIds.values().next().value as string);
+      ackedIds.add(message_id);
+    }
+  };
   const noteDisposition = (message: unknown, internalReason: string): void => {
     if (!opts.onDisposition) return;
+    if (!ackedIds?.has(idOf(message))) return;
     const reason = coarseDeadLetterReason(internalReason);
     if (reason === null) return;
     const id = idOf(message);
@@ -2432,7 +2443,7 @@ export function startAutoReply(opts: {
       quietly("warn", `[ekho-autoreply] reload hand-off record failed: ${describeError(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
-    for (const i of items) noteDisposition(i.message, i.reason);
+    // A handoff record never proves terminal ownership, even for a locally acked ID.
   };
 
   // Entries the hand-off bounds pushed out. Ours (same owner) get a record and
@@ -2489,14 +2500,16 @@ export function startAutoReply(opts: {
   const deadLetterDeferred = (messages: InboxMessage[], reason: string): void => {
     if (messages.length === 0 || !opts.onDeadLetter) return;
     const at = new Date().toISOString();
+    let written: unknown;
     try {
-      opts.onDeadLetter(
+      written = opts.onDeadLetter(
         messages.map((m) => ({ rejected_at: at, reason, kind: "deferred", key_id: null, message: m }))
       );
     } catch (err) {
       quietly("warn", `[ekho-autoreply] deferred dead-letter sink failed (${reason}): ${describeError(err)}`);
       return; // no record was written: no disposition (#111 S2b-1)
     }
+    if (!opts.onDisposition || written !== true) return;
     for (const m of messages) noteDisposition(m, reason);
   };
 
@@ -2647,9 +2660,9 @@ export function startAutoReply(opts: {
       log?.warn?.(`[ekho-autoreply] reload hand-off take failed: ${describeError(err)}`);
       return;
     }
-    reportHandoffDrops(got?.dropped, owner);
+    // Reported only once what was taken is under loop custody (a sink may stop us).
     const taken: unknown[] = Array.isArray(got?.taken) ? got.taken : [];
-    if (taken.length === 0) return;
+    if (taken.length === 0) return reportHandoffDrops(got?.dropped, owner);
     const nowMs = Date.now();
     // Served ledger (#111): the newest generation that took ownership of a
     // message or accepted a signature. Without one, only this loop's own sets.
@@ -2875,6 +2888,22 @@ export function startAutoReply(opts: {
         quietly("warn", `[ekho-autoreply] reload hand-off candidate could not be processed: ${describeError(err)}`);
       }
     }
+    // Custody first: every admitted group enters the stash before any sink,
+    // record or disposition callback can run, so a synchronous stop flushes the
+    // not-yet-processed groups to a successor (original clock, or restarted if
+    // never floor-tried) instead of losing them with this closure. Terminal
+    // drops stay out of the stash and are dead-lettered, never re-deposited.
+    const stashed: Array<{ conv: string; group: (typeof admitted extends Map<string, infer G> ? G : never); drops: ReturnType<typeof stashDeferred> }> = [];
+    for (const [conv, group] of admitted) {
+      try {
+        const drops = stashDeferred(state, conv, group.messages, group.verdicts, nowMs, tickGeneration, group.firstAt, group.inflight);
+        stashed.push({ conv, group, drops });
+      } catch (err) {
+        recordHandoff(group.messages.map((m) => ({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}stash_failed` })));
+        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${describeError(err)}`);
+      }
+    }
+    reportHandoffDrops(got?.dropped, owner);
     try {
       recordTerminalRejects(terminal, selfAgentId, cacheContext);
     } catch (err) {
@@ -2898,13 +2927,10 @@ export function startAutoReply(opts: {
           `they will get no turn, and neither the sender nor the operator console is told`
       );
     }
-    for (const [conv, group] of admitted) {
+    for (const { conv, group, drops } of stashed) {
       try {
-        // Into the stash, like any held-back message: the floor is re-tried and
-        // the overrun clock runs from the ORIGINAL deferral, not from the
-        // reload — unless something in it never had a floor attempt.
         const pushedOut = new Set<InboxMessage>();
-        for (const drop of stashDeferred(state, conv, group.messages, group.verdicts, nowMs, tickGeneration, group.firstAt, group.inflight)) {
+        for (const drop of drops) {
           quietly(
             "warn",
             `[ekho-autoreply] re-admitted conversation ${drop.conversationId} hit a stash cap (${drop.reason}) — ` +
@@ -2923,8 +2949,8 @@ export function startAutoReply(opts: {
           );
         }
       } catch (err) {
-        recordHandoff(group.messages.map((m) => ({ message: m, reason: `${RELOAD_WITHHELD_PREFIX}stash_failed` })));
-        quietly("warn", `[ekho-autoreply] reload hand-off could not stash conversation ${conv}: ${describeError(err)}`);
+        // Already stashed: the loop (or a stop's flush) owns them; only a callback failed.
+        quietly("warn", `[ekho-autoreply] reload hand-off callback failed for conversation ${conv}: ${describeError(err)}`);
       }
     }
   };
@@ -3103,7 +3129,9 @@ export function startAutoReply(opts: {
         resetPeerLatch(state, m.conversation_id);
       }
     }
+    if (stopped) return; // the reject hook may have stopped us: no re-admission, no ack
     admitReloadHandoff(batch, verifications, operatorTrusted, eff, durableRejects, cacheContext, tickGeneration);
+    if (stopped) return; // a hand-off sink may have stopped us: ack nothing; the relay redelivers
     const real = batch.messages.filter((m) =>
       isRealInbound(m, selfAgentId, state, operatorTrusted, eff.peerEnabled, verifications[m.message_id], requireSigned)
     );
@@ -3192,6 +3220,7 @@ export function startAutoReply(opts: {
       if (ackAll.length > 0) {
         try {
           await client.ackMessages(ackAll);
+          noteAcked(ackAll);
         } catch (err) {
           log?.warn?.(`[ekho-autoreply] ack failed: ${describeError(err)}`);
         }
@@ -3249,12 +3278,14 @@ export function startAutoReply(opts: {
 
     // From the ack on, `kept` lives only in this tick until a turn or the
     // stash takes it; a stop() in that window dead-letters it (flushOnStop).
+    if (stopped) return;
     unhanded = kept;
     // ACK BEFORE the turn (Part C, rule 2 — at-most-once auto-reply). A slow or
     // crashed turn can never cause a redelivery that re-triggers us.
     if (ackAll.length > 0) {
       try {
         await client.ackMessages(ackAll);
+        noteAcked(ackAll);
       } catch (err) {
         log?.warn?.(`[ekho-autoreply] ack failed: ${describeError(err)}`);
       }
@@ -3286,7 +3317,10 @@ export function startAutoReply(opts: {
     for (const [conv, msgs] of Object.entries(plan.deferred)) {
       // Neither cap drops anything silently (#78): whatever a stash cannot keep
       // was acked, so it leaves a dead-letter record and a WARNING behind it.
-      for (const drop of stashDeferred(state, conv, msgs, batchVerdicts, nowMs, tickGeneration)) {
+      // Ownership moves to the stash (or to `drops`) before any sink or callback runs.
+      const drops = stashDeferred(state, conv, msgs, batchVerdicts, nowMs, tickGeneration);
+      unhanded = unhanded.filter((m) => m.conversation_id !== conv);
+      for (const drop of drops) {
         log?.warn?.(
           drop.reason === DEFERRED_OVERFLOW_REASON
             ? `[ekho-autoreply] deferred conversation ${drop.conversationId} overflowed the ` +
@@ -3297,6 +3331,12 @@ export function startAutoReply(opts: {
                 `${drop.messages.length} msg(s); it will get no turn`
         );
         deadLetterDeferred(drop.messages, drop.reason);
+      }
+      if (stopped) {
+        for (const floor of plan.toRelease) {
+          try { await client.releaseFloor(floor); } catch { /* best-effort */ }
+        }
+        return;
       }
     }
     // A conversation that gets a turn ABSORBS its stash: the held-back messages
