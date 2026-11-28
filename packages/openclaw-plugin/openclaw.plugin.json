@@ -39,7 +39,7 @@
       },
       "peerAutoreply": {
         "type": "boolean",
-        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true)"
+        "description": "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)"
       },
       "peerTurnBudget": {
         "type": "number",

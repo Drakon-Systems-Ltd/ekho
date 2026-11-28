@@ -510,6 +510,30 @@ describe("startAutoReply stop custody (#218 r3)", () => {
     expect(deposits.map((d) => d.id).sort()).toEqual(["m920", "m921"]);
   });
 
+  it("B1: a callback failure after re-admission records no stash_failed and keeps the group stashed", async () => {
+    const { deposits, handoff } = capture([live(900, "a")]);
+    const records: Array<{ reason: string }> = [];
+    const warns: string[] = [];
+    let armed = false;
+    // Callback bodies are isolated, so the failure is the callback lookup itself, once, mid re-admission.
+    const opts = {
+      client: heldClient(fill("a")), api: {} as any, selfAgentId: "self", pollIntervalMs: 5, peerEnabled: true,
+      log: { ...quiet, warn: (m: string) => { warns.push(m); } } as any, reloadHandoff: handoff, cacheContext: () => "own.gen1",
+      onDeadLetter: (r: any[]) => { records.push(...r); armed ||= r.some((x) => x.reason === DEFERRED_OVERFLOW_REASON); return true; },
+      get onDisposition() {
+        if (!armed) return () => {};
+        armed = false;
+        throw new Error("callback boom");
+      }
+    };
+    const stop = startAutoReply(opts as any);
+    await waitFor(() => warns.some((m) => m.includes("callback failed for conversation a")));
+    expect(deposits).toHaveLength(0);
+    await stop();
+    expect(records.filter((r) => r.reason === `${RELOAD_WITHHELD_PREFIX}stash_failed`)).toEqual([]);
+    expect(deposits.filter((d) => d.id === "m900")).toHaveLength(1); // flushed by stop(): it was still stashed
+  });
+
   it.each(["quiet", "triggerable"] as const)("B2: a stop inside re-admission (%s fresh batch) starts no ACK and no turn", async (kind) => {
     const { deposits, handoff } = capture([live(930, "a")]);
     let stopFn: () => Promise<void> = async () => {};

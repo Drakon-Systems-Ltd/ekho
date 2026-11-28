@@ -5,12 +5,14 @@ export default defineConfig({
   resolve: {
     alias: {
       // `openclaw` is an optional peer supplied by the host gateway, so it is not
-      // installed here. Alias the one module src/index.ts imports at runtime to a
-      // stub that mirrors the host's registration behaviour, so the plugin's tool
-      // wiring (#17: ekho_send's factory/toolContext) is testable without a live
-      // gateway. Nothing else in the package imports openclaw at runtime.
-      "openclaw/plugin-sdk/tool-plugin": fileURLToPath(
-        new URL("./tests/stubs/openclaw-tool-plugin.ts", import.meta.url)
+      // installed here. Alias the one module src/ imports at runtime to a stub
+      // that mirrors the host's definePluginEntry / buildJsonPluginConfigSchema,
+      // so the plugin's tool wiring (#17: ekho_send's factory/toolContext) is
+      // testable without a live gateway. Nothing else in the package imports
+      // openclaw at runtime (state-dir.ts loads state-paths with a guarded
+      // require and falls back).
+      "openclaw/plugin-sdk/plugin-entry": fileURLToPath(
+        new URL("./tests/stubs/openclaw-plugin-entry.ts", import.meta.url)
       )
     }
   },

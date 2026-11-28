@@ -8,10 +8,10 @@ import { EKHO_ORIGIN_STAMP } from "../src/autoreply";
  *
  * The relay is never touched: connection.js is mocked, so ekho_send runs against
  * a fake client that records the wire payload. The host is stood in for by
- * tests/stubs/openclaw-tool-plugin.ts (aliased in vitest.config.ts), which
- * mirrors openclaw 2026.7.1-2's registration: factory tools are registered as a
- * function of the toolContext, which is the only place sessionKey/sessionId
- * exist.
+ * tests/stubs/openclaw-plugin-entry.ts (aliased in vitest.config.ts) plus this
+ * file's fake api.registerTool: the plugin registers factory tools as a
+ * function of the toolContext (src/tool-entry.ts), which is the only place
+ * sessionKey/sessionId exist.
  */
 
 const sentPayloads: Array<Record<string, unknown>> = [];

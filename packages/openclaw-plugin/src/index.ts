@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import type { EkhoAgentClient } from "@drakon-systems/ekho-sdk";
 import { Type } from "typebox";
-import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import { defineToolEntry, jsonToolResult, type ToolPluginEntry } from "./tool-entry.js";
 import {
   activateRuntime,
   connectedInboxContext,
@@ -146,18 +147,6 @@ interface EkhoSendParams {
 }
 
 /**
- * A tool built by `factory` is registered with the host as-is, so — unlike the
- * `execute` form — it wraps its own return value. Mirrors the host's
- * wrapToolPluginResult/jsonResult (openclaw dist/tool-plugin-*.js) so the model
- * sees exactly the same JSON text it saw before ekho#17 moved this tool to a
- * factory. Inlined rather than imported from openclaw/plugin-sdk/tool-results so
- * the plugin gains no new runtime dependency on a host module path.
- */
-function jsonToolResult(payload: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }], details: payload };
-}
-
-/**
  * The ekho_send body. Lives outside the tool definition because ekho#17 needs the
  * factory form (below) to see the host's session identity; `originSessionId` is
  * whatever the host actually supplied, or undefined.
@@ -268,12 +257,15 @@ async function executeEkhoSend(
 // then dispose the old one; the old instance's unload hooks must not stop the
 // runtime the newer registration now owns.
 let registrationEpoch = 0;
-let currentRegistration: { epoch: number; api: Parameters<typeof plugin.register>[0] } | null = null;
+let currentRegistration: { epoch: number; api: OpenClawPluginApi } | null = null;
 const staleUnloads = new Map<number, Promise<void>>();
 const LISTENER_WARNING =
   "The heartbeat/listener is not running in this process; roster and messages are a stale cache, and sends may be refused if the relay quarantines the agent.";
 
-const plugin = defineToolPlugin({
+// Annotated so the published dist/index.d.ts names the entry's type by
+// reference to the host's own definePluginEntry, not as a shape copied from
+// this package's ambient stand-in for the SDK.
+const plugin: ToolPluginEntry = defineToolEntry({
   id: "ekho-adapter",
   name: "Ekho Relay Adapter",
   description: "Connect this agent to an Ekho relay to message and coordinate with other agents in the fleet.",
@@ -288,7 +280,8 @@ const plugin = defineToolPlugin({
     heartbeatIntervalMs: Type.Optional(Type.Number({ description: "Heartbeat interval in ms (default 30000)" })),
     peerAutoreply: Type.Optional(Type.Boolean({ description: "Enable bounded agent-to-agent delegation — let teammates wake this agent (default true; set false to opt out)" })),
     peerTurnBudget: Type.Optional(Type.Number({ description: "Optional local turn limit: max times a teammate may wake this agent per conversation before the latch closes. 0 or unset = no limit (default). A positive limit set by the operator on the relay console takes precedence." })),
-    stateDir: Type.Optional(Type.String({ description: "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both." }))
+    stateDir: Type.Optional(Type.String({ description: "Directory for the plugin's credentials, identity key and downloads. Default: <OpenClaw state dir>/ekho-adapter (outside the install dir, so plugin updates never delete it). EKHO_STATE_DIR overrides the default; this setting overrides both." })),
+    outboxDir: Type.Optional(Type.String({ description: "The only directory ekho_send may attach files from. Default: ~/ekho-outbox (EKHO_OUTBOX_DIR overrides the default; this setting overrides both). Must not be, contain, or sit inside the plugin state dir, the OpenClaw state dir or the Hermes home; attachments are refused until it is moved." }))
   }),
   tools: (tool) => [
     tool({
@@ -296,13 +289,16 @@ const plugin = defineToolPlugin({
       description: EKHO_SEND_DESCRIPTION,
       parameters: EKHO_SEND_PARAMETERS,
       // #17: built via `factory`, not `execute`, purely to see the session that
-      // is sending. The host's execute wrapper is called with
+      // is sending. An execute tool is called with
       // (params, config, { api, signal, toolCallId, onUpdate }) — no session
       // identity anywhere in it. sessionKey/sessionId live on
-      // OpenClawPluginToolContext, which the host only passes to
-      // `tool.factory({ api, config, toolContext })`
-      // (openclaw 2026.7.1-2, dist/tool-plugin-SyJ7vXLf.js). The other tools keep
-      // the simpler `execute` form — they have nothing to stamp.
+      // OpenClawPluginToolContext, which the host only passes to a tool
+      // registered as a factory (tool-entry.ts). A factory tool is registered
+      // as-is, so it wraps its own result: jsonToolResult, JSON text indented
+      // by two, as ekho_send has always answered. (The execute tools are
+      // wrapped for them by tool-entry.ts wrapToolResult, as compact JSON.)
+      // The other tools keep the simpler `execute` form — they have nothing
+      // to stamp.
       factory: ({ config, toolContext }) => ({
         name: "ekho_send",
         label: "ekho_send",
@@ -483,7 +479,7 @@ const plugin = defineToolPlugin({
   ]
 });
 
-// Extend the tool plugin's register() so the agent connects on gateway startup —
+// Extend the tool entry's register() so the agent connects on gateway startup —
 // enroll/load credentials, begin heartbeating, and start the background auto-reply
 // loop immediately, so it shows healthy in the operator console and reacts to
 // inbound fleet messages without waiting for the first tool call. We thread `api`
@@ -576,7 +572,7 @@ plugin.register = (api) => {
  * gateway_stop handlers via awaitHook (src/plugins/hooks.ts:636, budget :103).
  * The drain is bounded below that (autoreply.ts STOP_DRAIN_MS).
  */
-function wireUnload(api: Parameters<typeof plugin.register>[0], epoch: number): void {
+function wireUnload(api: OpenClawPluginApi, epoch: number): void {
   const unload = (reason: string): Promise<void> => {
     const current = currentRegistration;
     if (current && current.epoch !== epoch) {
